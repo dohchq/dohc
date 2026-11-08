@@ -7,6 +7,33 @@ import { KindGlyph } from "./KindGlyph";
 afterEach(cleanup);
 
 describe("KindGlyph", () => {
+  it("draws code, data, text and documents each with its own glyph", () => {
+    const glyphs = ["app.ts", "index.html", "package.json", "compose.yaml", "notes.txt", "server.log", "plan.md"].map((path) => {
+      const { container, unmount } = render(<KindGlyph kind={fileKindForPath(path)} size={15} />);
+      const name = [...container.querySelector("svg")!.classList].find((name) => name.startsWith("lucide-file"));
+      unmount();
+      return name;
+    });
+    expect(glyphs).toEqual([
+      "lucide-file-code", "lucide-file-code",
+      "lucide-file-braces", "lucide-file-braces",
+      "lucide-file-type", "lucide-file-type",
+      "lucide-file-text",
+    ]);
+  });
+
+  it("distinguishes audio from PDF and binary files", () => {
+    const { container } = render(<>
+      <KindGlyph kind={FILE_KIND_RECORDS.audio} size={15} />
+      <KindGlyph kind={FILE_KIND_RECORDS.pdf} size={15} />
+      <KindGlyph kind={FILE_KIND_RECORDS.binary} size={15} />
+    </>);
+    const glyphs = container.querySelectorAll("svg");
+    expect(glyphs[0]?.classList.contains("lucide-file-headphone")).toBe(true);
+    expect(glyphs[1]?.classList.contains("lucide-file")).toBe(true);
+    expect(glyphs[2]?.classList.contains("lucide-file")).toBe(true);
+  });
+
   it("draws every kind's registry glyph without naming it", () => {
     for (const kind of Object.values(FILE_KIND_RECORDS)) {
       const { container, unmount } = render(<KindGlyph kind={kind} size={15} />);

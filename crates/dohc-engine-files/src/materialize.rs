@@ -2585,16 +2585,12 @@ fn pending_respelled_delete(
     if deletes.is_empty() {
         return Ok(None);
     }
-    let Some(file) = crate::reconcile::disk_spelling_in(root, target) else {
-        return Ok(None);
-    };
     Ok(deletes.into_iter().find(|delete| {
         delete.target_path != job.target_path
             && resolve_target(root, &delete.target_path)
                 .ok()
                 .filter(|path| ensure_target_symlink_free(root, path).is_ok())
-                .and_then(|path| crate::reconcile::disk_spelling_in(root, &path))
-                .is_some_and(|path| path == file)
+                .is_some_and(|path| crate::reconcile::may_share_entry_in(root, target, &path))
     }))
 }
 
@@ -3124,13 +3120,6 @@ fn checked_staging_dir(
     } else {
         ensure_target_symlink_free(&base, &dir)?;
     }
-    // Check access without walking other jobs' entries.
-    #[cfg(windows)]
-    if let Err(err) = std::fs::read_dir(&dir)
-        && err.kind() != ErrorKind::NotFound
-    {
-        return Err(MaterializeError::io(&dir, &err));
-    }
     Ok(dir)
 }
 
@@ -3172,7 +3161,7 @@ fn staged_name_key(name: &str) -> Option<&str> {
     let lower_hex = |s: &str| s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     let key_ok = match key.strip_prefix('h') {
         Some(hash) => hash.len() == 64 && lower_hex(hash),
-        None => !key.is_empty() && key.len() % 2 == 0 && lower_hex(key),
+        None => key.len() % 2 == 0 && lower_hex(key),
     };
     (n_ok && key_ok).then_some(key)
 }
@@ -4125,17 +4114,11 @@ fn recover_job_displacements(
     let mut rows = store.list_displacements_for_job(&job.job_id)?;
     let mut taken: Vec<String> = rows.iter().map(|row| row.displaced_name.clone()).collect();
     taken.extend(store.retained_names_for_job(&job.job_id)?);
-    // Names are bounded per job. Do not scan other saves' retained originals.
-    let mut rowless = Vec::new();
-    for n in 0..MAX_DISPLACED_NAMES {
-        let name = staged_name(&job.job_id, n);
-        #[cfg(windows)]
-        readonly_link::recover_one(&dir.join(&name), _target)
-            .map_err(|err| MaterializeError::io(&dir, &err))?;
-        if !taken.contains(&name) && entry_exists(&dir.join(&name))? {
-            rowless.push(name);
+    let rowless = job_staged_names(&dir, &job.job_id, _target, &taken).inspect_err(|error| {
+        if matches!(error, MaterializeError::RecoveryUnavailable) {
+            set_recovery_unavailable(root, true);
         }
-    }
+    })?;
     for row in path_rows {
         if !rows
             .iter()
@@ -4182,6 +4165,63 @@ fn recover_job_displacements(
         kept,
     ))
 }
+
+fn job_staged_names(
+    dir: &Path,
+    job_id: &str,
+    _target: &Path,
+    taken: &[String],
+) -> Result<Vec<String>, MaterializeError> {
+    #[cfg(feature = "fault-injection")]
+    dohc_engine_storage::capture_phase::count("publication_recovery_fs_calls", 1);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(if cfg!(windows) {
+                MaterializeError::RecoveryUnavailable
+            } else {
+                MaterializeError::io(dir, &err)
+            });
+        }
+    };
+    let key = staged_key(job_id);
+    let mut found = std::collections::BTreeMap::new();
+    for entry in entries {
+        #[cfg(feature = "fault-injection")]
+        dohc_engine_storage::capture_phase::count("publication_staging_entries", 1);
+        let entry = entry.map_err(|err| MaterializeError::io(dir, &err))?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        #[cfg(windows)]
+        let incoming = readonly_link::incoming_name(&name).unwrap_or(&name);
+        #[cfg(not(windows))]
+        let incoming = name.as_str();
+        if staged_name_key(incoming) != Some(key.as_str()) {
+            continue;
+        }
+        let sequence = incoming.rsplit_once('.').unwrap().1.parse::<u32>().unwrap();
+        let entry = found
+            .entry(sequence)
+            .or_insert_with(|| (incoming.to_owned(), false));
+        entry.1 |= incoming == name.as_str();
+    }
+    // Finish enumeration before recovery removes journals from this directory.
+    let mut rowless = Vec::new();
+    for (name, exists) in found.into_values() {
+        #[cfg(windows)]
+        readonly_link::recover_one(&dir.join(&name), _target)
+            .map_err(|err| MaterializeError::io(dir, &err))?;
+        if exists && !taken.contains(&name) {
+            rowless.push(name);
+        }
+    }
+    Ok(rowless)
+}
+
+#[cfg(test)]
+mod staging_scan_tests;
 
 /// Settle a staged file no row names, for the job its name spells. A write
 /// whose temp is still beside an empty target never placed its content, so
@@ -7784,6 +7824,67 @@ mod tests {
             projection_target_stamp(&scratch.root, path),
             ProjectionTargetStamp::Absent
         );
+    }
+
+    #[test]
+    fn pending_respelled_delete_matches_only_the_targets_entry_and_preimage() {
+        let scratch = Scratch::new("pending-respelled-delete");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        std::fs::write(root.join("notes.md"), b"notes").unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"notes").unwrap();
+        enqueue_write_job(&mut store, "write", "Notes.md", b"notes", 2);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "merge-mat_notes".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes.md".into(),
+                        content_sha256: sha.clone(),
+                        preimage: Preimage::Present(sha.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let write = store.load_materialization_job("write").unwrap().unwrap();
+        let target = root.join("Notes.md");
+        let ignores_case = target.exists();
+        if !ignores_case {
+            std::fs::hard_link(root.join("notes.md"), &target).unwrap();
+        }
+        assert_eq!(
+            pending_respelled_delete(&store, &root, &target, &write, &sha)
+                .unwrap()
+                .is_some(),
+            ignores_case,
+            "known separate directory entries do not order each other's deletes"
+        );
+        assert!(
+            pending_respelled_delete(&store, &root, &target, &write, &hex_sha256(b"other"))
+                .unwrap()
+                .is_none()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(&root).unwrap().permissions();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o311)).unwrap();
+            let unlistable = std::fs::read_dir(&root).is_err();
+            let pending = pending_respelled_delete(&store, &root, &target, &write, &sha);
+            std::fs::set_permissions(&root, permissions).unwrap();
+            if !unlistable {
+                eprintln!("SKIP: this user can list the folder");
+                return;
+            }
+            assert_eq!(
+                pending.unwrap().is_some(),
+                ignores_case || !cfg!(target_os = "macos")
+            );
+        }
     }
 
     /// A merge's pending delete through a link reaches the file a create

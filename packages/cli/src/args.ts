@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -44,8 +44,9 @@ type CliCommandBody =
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
   | { verb: "groups" }
   | { verb: "threads"; group: string }
+  | { verb: "watch"; cursor?: string; group?: string; thread?: string; timeoutMs: number; once: boolean }
   | { verb: "inbox" }
-  | { verb: "show"; target: string; peek: boolean }
+  | { verb: "show"; target: string; peek: boolean; before?: CliStreamPosition; limit?: number }
   | {
       verb: "post";
       group: string;
@@ -54,6 +55,7 @@ type CliCommandBody =
       needsDecision: boolean;
       options?: string[];
       body: string;
+      agent?: string;
     }
   | {
       verb: "reply";
@@ -65,6 +67,7 @@ type CliCommandBody =
       resolve?: string;
       choose?: string;
       body: string;
+      agent?: string;
     }
   | { verb: "react"; message: string; emoji: string }
   | {
@@ -83,6 +86,12 @@ type CliCommandBody =
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
+  | { verb: "versionList" }
+  | { verb: "versionCompare"; version: string; afterPath?: string }
+  | { verb: "versionConflicts"; afterConflictId?: string }
+  | { verb: "versionCreate"; name: string }
+  | { verb: "versionSwitch" | "versionMerge"; version: string }
+  | { verb: "versionResolve"; conflictId: string; keep: "current" | "incoming" | "combined"; text: string; stdin: boolean }
   | { verb: "historyUndo"; operationId: string }
   | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
@@ -176,6 +185,13 @@ function integerFlag(value: string, flag: string, options: { allowZero: boolean 
   return parsed;
 }
 
+// A stream position prints as <ms>:<lane>:<id>.
+function streamPosition(value: string): CliStreamPosition {
+  const match = /^(\d+):(posts|chat):(.+)$/u.exec(value);
+  if (!match) fail("--before requires a position such as 1730000000000:posts:th_1");
+  return { createdAtMs: Number(match[1]), lane: match[2] as CliStreamPosition["lane"], id: match[3]! };
+}
+
 function noExtraArgs(tokens: readonly string[], verb: string): void {
   if (tokens.length > 0) fail(`${verb} does not accept '${tokens[0]}'`);
 }
@@ -217,6 +233,12 @@ const attachFlag: CliFlag = {
   value: "path",
   text: "Attach a workspace file. Repeat for more files.",
 };
+const chatAgentFlag: CliFlag = { name: "--agent", value: "name", text: "Record this agent name when --as-agent is set." };
+function chatAgent(input: VerbInput): { agent?: string } {
+  const agent = lastValue(input, "--agent");
+  if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name");
+  return agent === undefined ? {} : { agent };
+}
 const decisionFlags: readonly CliFlag[] = [
   { name: "--needs-decision", text: "Ask readers for a decision." },
   {
@@ -232,6 +254,13 @@ const documentTextFlags: readonly CliFlag[] = [
   { name: "--text", value: "markdown", text: "Use this Markdown as the body. An empty string is allowed." },
   { name: "--agent", value: "name", text: "Record this agent name with the change." },
 ];
+
+function versionOperand({ operands }: VerbInput, name: string): string {
+  const [version, ...extra] = operands;
+  if (!version) fail(`${name} requires a version name or id`);
+  noExtraArgs(extra, name);
+  return version;
+}
 
 function parsePath({ operands }: VerbInput, name: string): string {
   const [path, ...extra] = operands;
@@ -276,7 +305,7 @@ const DOCUMENT_VERBS = {
     ],
     notes: [stdinNote, "Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8.",
       "Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind.",
-      "Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
+      "A pending warning means the edit is saved locally and the shared file update is pending. Do not repeat it. Read again after other warnings or an unexplained failure. Retry keys have the same limits as dohc_edit_document."],
     parse: (input) => documentWrite(input, "documentEdit"),
   },
   create: {
@@ -334,6 +363,7 @@ const DOCUMENT_VERBS = {
     operands: "",
     notes: ["storedOn is this-computer, or server for a document the server hosts.",
       "A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.",
+      "When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again.",
       "A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it.",
       "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
       "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
@@ -423,9 +453,29 @@ const CHAT_VERBS = {
       return { verb: "threads", group };
     },
   },
+  watch: {
+    capabilityId: "chat.inbox.read",
+    summary: "Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.",
+    operands: "",
+    flags: [
+      { name: "--cursor", value: "cursor", text: "Continue from the cursor returned by watch." },
+      { name: "--group", value: "group", text: "Wait only for messages in this Group." },
+      { name: "--thread", value: "thread", text: "Wait only for messages in this thread." },
+      { name: "--timeout", value: "seconds", text: "Wait up to this many seconds per batch. The default and maximum are 25." },
+      { name: "--once", text: "Return after one batch, including an empty batch at the timeout." },
+    ],
+    parse: input => {
+      noExtraArgs(input.operands, "watch");
+      const timeout = lastValue(input, "--timeout");
+      const timeoutMs = timeout === undefined ? CHAT_WATCH_TIMEOUT_MS : integerFlag(timeout, "--timeout", { allowZero: true }) * 1_000;
+      if (timeoutMs > CHAT_WATCH_MAX_TIMEOUT_MS) fail("--timeout must be at most 25 seconds");
+      if (timeoutMs === 0 && !input.flags.has("--once")) fail("--timeout 0 requires --once");
+      return { verb: "watch", cursor: lastValue(input, "--cursor"), group: lastValue(input, "--group"), thread: lastValue(input, "--thread"), timeoutMs, once: input.flags.has("--once") };
+    },
+  },
   inbox: {
     capabilityId: "chat.inbox.read",
-    summary: "List unread threads. For an agent, also list its unread mentions.",
+    summary: "List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.",
     operands: "",
     parse: ({ operands }) => {
       noExtraArgs(operands, "inbox");
@@ -434,23 +484,33 @@ const CHAT_VERBS = {
   },
   show: {
     capabilityId: "chat.show",
-    summary: "Show a thread or message and mark the thread read.",
-    operands: "<thread-or-message>",
+    summary: "Show a thread or message and mark the thread read, or show a group's posts and conversation.",
+    operands: "<thread-message-or-group>",
     flags: [
       { name: "--peek", text: "Show it without changing what is marked read. A read-only shared view requires it." },
+      { name: "--before", value: "position", text: "For a group, show the page older than this position, as printed after older:." },
+      { name: "--limit", value: "count", text: "For a group, show at most this many items. The default is 50, the most 100." },
     ],
     parse: (input) => {
       const [target, ...extra] = input.operands;
-      if (!target) fail("show requires a thread or message id");
+      if (!target) fail("show requires a thread, message or group");
       noExtraArgs(extra, "show");
-      return { verb: "show", target, peek: input.flags.has("--peek") };
+      const before = lastValue(input, "--before");
+      const limit = lastValue(input, "--limit");
+      return {
+        verb: "show",
+        target,
+        peek: input.flags.has("--peek"),
+        ...(before === undefined ? {} : { before: streamPosition(before) }),
+        ...(limit === undefined ? {} : { limit: Math.min(integerFlag(limit, "--limit", { allowZero: false }), 100) }),
+      };
     },
   },
   post: {
     capabilityId: "chat.post",
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
-    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
+    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags, chatAgentFlag],
     freeText: true,
     notes: [stdinNote, "In a direct message, use reply instead."],
     parse: (input) => {
@@ -466,6 +526,7 @@ const CHAT_VERBS = {
         attachments: allValues(input, "--attach"),
         ...decisionFields(input),
         body,
+        ...chatAgent(input),
       };
     },
   },
@@ -479,6 +540,7 @@ const CHAT_VERBS = {
       ...decisionFlags,
       { name: "--resolve", value: "message", text: "Resolve this open decision with the reply." },
       { name: "--choose", value: "choice", text: "Pick this choice of the decision. Needs --resolve." },
+      chatAgentFlag,
     ],
     freeText: true,
     notes: [stdinNote],
@@ -500,6 +562,7 @@ const CHAT_VERBS = {
         ...(resolve ? { resolve } : {}),
         ...(choose ? { choose } : {}),
         body,
+        ...chatAgent(input),
       };
     },
   },
@@ -885,7 +948,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   permissions: { summary: "List app bindings and explicit data grants." },
   setGrant: {
     summary: "Add or change an explicit data grant.",
-    notes: ["grant names revision, revisionSha256, operationIds, and discover."],
+    notes: ["grant names revision, revisionSha256, operationIds, and discover.", "A Collection only on this computer moves to the workspace's server first, for good. permissions shows its place. Send moveToServer: true to agree."],
   },
   removeGrant: {
     summary: "Remove an explicit data grant.",
@@ -905,6 +968,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
       { field: "reviewToken", from: "deletePreview", path: "reviewToken" },
     ],
     notes: [
+      "Archive the Collection first with dohc dataset archive. Then run deletePreview, since archiving makes an earlier preview stale.",
       "This removes the Collection's private data and history.",
       "Set acknowledge to true.",
       "Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.",
@@ -969,6 +1033,14 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     summary: "Prepare new source and migration SQL for review.",
     notes: ["Read more changed records with migrationPreviewPage.", migrationApproval],
   },
+  askToApply: {
+    summary: "Write a prepared change to a file a person can apply from a chat.",
+    notes: [
+      "Edit the Collection's source files and write the migration SQL first. askToApply prepares that change, records what it does in a new file beside dataset.json, and discards the preparation.",
+      "Post the returned path in a chat reply with --attach and --needs-decision. The Collection's owner applies the change from that message.",
+      "note is one sentence the person reads beside the change to the code.",
+    ],
+  },
   migrationPreviewPage: { summary: "Read more records a prepared migration changes." },
   prepareSchemaChange: {
     summary: "Prepare one field, table, or name change.",
@@ -1007,15 +1079,22 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
     ],
   },
   listLocal: { summary: "List an app's publications on this computer." },
+  checkLocal: {
+    summary: "Read an app's current source revision on this computer.",
+    notes: ["Compare sourceRevision with the one listLocal returns. They differ once the app's source changed since its approval."],
+  },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
-    notes: ["Review the source and the Collection access it asks for, then approve."],
+    notes: ["Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link."],
   },
   launchLocal: {
     summary: "Get a local URL for an approved app.",
     notes: ["The URL works on this computer while dohc is open. It is not a share link."],
   },
-  list: { summary: "List an app's shared publications." },
+  list: {
+    summary: "List an app's shared publications.",
+    notes: ["listUnavailable means the server does not publish apps for this workspace."],
+  },
   prepare: {
     summary: "Prepare an app for a share link.",
     take: [
@@ -1245,6 +1324,82 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },
+  version: {
+    summary: "Read and change the workspace's versions and their open conflicts.",
+    notes: [
+      "Versions belong to the owning workspace.",
+      "A change first saves the edits open in dohc, or refuses when dohc can't.",
+    ],
+    verbs: {
+      list: {
+        capabilityId: "version.list", summary: "List the versions and which one is active.", operands: "",
+        notes: ["A version's madeFromVersionId is the id of the version it was made from."],
+        parse: input => { noExtraArgs(input.operands, "version list"); return { verb: "versionList" }; },
+      },
+      compare: {
+        capabilityId: "version.compare", summary: "List the files that differ between Main and a version.", operands: "<version>",
+        flags: [{ name: "--after", value: "path", text: "Continue after this path from the previous page." }],
+        notes: ["Name a version by its name or ID, as version list prints them. With --json, print both sides' text."],
+        parse: input => {
+          const version = versionOperand(input, "version compare");
+          const afterPath = lastValue(input, "--after");
+          return { verb: "versionCompare", version, ...(afterPath ? { afterPath } : {}) };
+        },
+      },
+      conflicts: {
+        capabilityId: "version.conflicts.list", summary: "List open conflicts from merges and from sync.", operands: "",
+        flags: [{ name: "--after", value: "conflict", text: "Continue after this conflict ID from the previous page." }],
+        notes: ["With --json, print each conflict's sides."],
+        parse: input => {
+          noExtraArgs(input.operands, "version conflicts");
+          const afterConflictId = lastValue(input, "--after");
+          return { verb: "versionConflicts", ...(afterConflictId ? { afterConflictId } : {}) };
+        },
+      },
+      create: {
+        capabilityId: "version.create", summary: "Create a version from the active one and switch to it.", operands: "<name>",
+        parse: input => {
+          const [name, ...extra] = input.operands;
+          if (!name?.trim()) fail("version create requires a name");
+          noExtraArgs(extra, "version create");
+          if (name.trim().length > MAX_VERSION_NAME_LENGTH) fail(`a version name has at most ${MAX_VERSION_NAME_LENGTH} characters`);
+          return { verb: "versionCreate", name: name.trim() };
+        },
+      },
+      switch: {
+        capabilityId: "version.switch", summary: "Switch the workspace folder to a version.", operands: "<version>",
+        notes: ["Name a version by its name or ID, as version list prints them."],
+        parse: input => ({ verb: "versionSwitch", version: versionOperand(input, "version switch") }),
+      },
+      merge: {
+        capabilityId: "version.merge", summary: "Merge a version into Main.", operands: "<version>",
+        notes: ["Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves."],
+        parse: input => ({ verb: "versionMerge", version: versionOperand(input, "version merge") }),
+      },
+      resolve: {
+        capabilityId: "version.conflict.resolve", summary: "Resolve an open conflict.", operands: "<conflict> [-]",
+        flags: [
+          { name: "--keep", value: "side", text: "Keep current or incoming, as version conflicts names the sides." },
+          { name: "--text", value: "text", text: "Replace both sides with this combined text." },
+        ],
+        notes: [
+          "Use - to read the combined text from stdin. Give exactly one of --keep, --text or -.",
+          "In a merge, current is Main and incoming is the version. In sync, current is this computer.",
+        ],
+        parse: input => {
+          const [conflictId, body, ...extra] = input.operands;
+          if (!conflictId) fail("version resolve requires a conflict ID");
+          noExtraArgs(extra, "version resolve");
+          if (body !== undefined && body !== "-") fail("version resolve takes - to read combined text from stdin");
+          const keep = lastValue(input, "--keep");
+          const text = lastValue(input, "--text");
+          if ([keep, text, body].filter(value => value !== undefined).length !== 1) fail("use exactly one of --keep <side>, --text <text> or -");
+          if (keep !== undefined && keep !== "current" && keep !== "incoming") fail("--keep takes current or incoming");
+          return { verb: "versionResolve", conflictId, keep: keep ?? "combined", text: text ?? "", stdin: body === "-" };
+        },
+      },
+    },
+  },
   automation: {
     summary: "Press Button fields, read an automation's runs, and try a failed run again.",
     notes: [
@@ -1325,7 +1480,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

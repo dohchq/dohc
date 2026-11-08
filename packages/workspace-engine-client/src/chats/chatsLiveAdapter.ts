@@ -6,7 +6,13 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
-import type { ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type {
+  LinkedChatStore,
+  ChatChannelType,
+  ChatMessageAutomationInput,
+  ChatReportedAgent,
+  ChatThreadLane,
+} from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -25,6 +31,7 @@ import {
   type ChatFeedReadState,
   type ChatFollow,
   type ChatLocalAttachmentParams,
+  type ChatAgentRequest,
   type ChatMention,
   type ChatMessage,
   type ChatProjection,
@@ -32,6 +39,8 @@ import {
   type ChatReaction,
   type ChatReactionAuthor,
   type ChatRun,
+  type ChatStreamPage,
+  type ChatStreamPosition,
   type ChatsMethod,
   type ChatsMethodParamsMap,
   type ChatsMethodResultMap,
@@ -139,10 +148,14 @@ export class ChatsLiveAdapter {
 
   async ensureAgentChannel(input: {
     workspaceId: string;
+    agentId: string;
+    name: string;
   }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.channelEnsureAgent, {
       channelId: this.createId("channel"),
+      agentId: input.agentId,
+      name: input.name,
     });
   }
 
@@ -190,6 +203,28 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async getThread(input: {
+    workspaceId: string;
+    threadId: string;
+  }): Promise<ChatsMethodResultMap[typeof CHATS_METHOD.threadGet]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.threadGet, { threadId: input.threadId });
+  }
+
+  async listGroupStream(input: {
+    workspaceId: string;
+    channelId: string;
+    before?: ChatStreamPosition;
+    limit?: number;
+  }): Promise<ChatStreamPage> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.streamList, {
+      channelId: input.channelId,
+      ...(input.before !== undefined ? { before: { ...input.before } } : {}),
+      ...(input.limit !== undefined ? { pageLimit: input.limit } : {}),
+    });
+  }
+
   async getThreadRevision(input: {
     workspaceId: string;
     threadId: string;
@@ -209,8 +244,12 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    authorAgentId?: string;
+    authorReported?: ChatReportedAgent;
+    namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
+    ownThread?: boolean;
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -232,6 +271,7 @@ export class ChatsLiveAdapter {
         messageId,
         ...(input.title !== undefined ? { title: input.title } : {}),
         ...(input.lane !== undefined ? { lane: input.lane } : {}),
+        ...(input.ownThread ? { ownThread: true } : {}),
         authorKind: input.author.kind,
         authorDisplayName: input.author.displayName,
         ...(input.author.kind !== "human" && input.authorOwnerDisplayName !== undefined
@@ -252,6 +292,11 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.automation !== undefined
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          : {}),
+        ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
+        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
+          ? { namedAgentIds: input.namedAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
@@ -343,6 +388,9 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    authorAgentId?: string;
+    authorReported?: ChatReportedAgent;
+    namedAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -385,6 +433,11 @@ export class ChatsLiveAdapter {
         ...(input.automation !== undefined
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
+        ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
+        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
+          ? { namedAgentIds: input.namedAgentIds }
+          : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? messageId },
     );
@@ -407,6 +460,21 @@ export class ChatsLiveAdapter {
       afterMessageOrder = page.nextAfterMessageOrder ?? undefined;
     } while (afterMessageOrder !== undefined);
     return rows;
+  }
+
+  /** One page of a thread's messages, after the message at `afterMessageOrder`. */
+  async listMessagesPage(input: {
+    workspaceId: string;
+    threadId: string;
+    afterMessageOrder?: number;
+    limit: number;
+  }): Promise<ChatsMethodResultMap[typeof CHATS_METHOD.messagesList]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.messagesList, {
+      threadId: input.threadId,
+      limit: input.limit,
+      ...(input.afterMessageOrder !== undefined ? { afterMessageOrder: input.afterMessageOrder } : {}),
+    });
   }
 
   /** One message, whole. A Group automation reads a body its claim carried truncated. */
@@ -492,12 +560,14 @@ export class ChatsLiveAdapter {
 
   async markThreadReadByAgent(input: {
     workspaceId: string;
+    runId?: string;
     threadId: string;
     upTo: { createdAtMs: number; messageId: string };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.agentReadMarkThreadRead, {
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
       threadId: input.threadId,
       upTo: input.upTo,
       ...(input.expectedRevision !== undefined
@@ -506,14 +576,15 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string): Promise<ChatThread[]> {
+  async listAgentUnreadThreads(workspaceId: string, runId?: string): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
     this.assertWorkspace(workspaceId);
-    const rows: ChatThread[] = [];
+    const rows: Awaited<ReturnType<LinkedChatStore["listAgentUnreadThreads"]>> = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(
         CHATS_METHOD.agentReadListUnreadThreads,
         {
+          ...(runId !== undefined ? { runId } : {}),
           pageLimit: 500,
           ...(cursor !== undefined ? { cursor } : {}),
         },
@@ -524,10 +595,26 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
+  // Unread requests for a run's agent, or the shared outside-run reader.
+  async listAgentUnreadRequests(workspaceId: string, runId?: string): Promise<ChatAgentRequest[]> {
+    this.assertWorkspace(workspaceId);
+    const rows: ChatAgentRequest[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
+        ...(runId !== undefined ? { runId } : {}),
+        pageLimit: 500,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      rows.push(...page.requests);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    return rows;
+  }
+
   async listMentionsForHandle(
     workspaceId: string,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMention[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatMention[] = [];
@@ -535,9 +622,6 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.mentionsListForHandle, {
         handle,
-        ...(options?.unreadByAgentOnly !== undefined
-          ? { unreadByAgentOnly: options.unreadByAgentOnly }
-          : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -813,6 +897,20 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async retryFailedBookmark(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+  }): Promise<ChatBookmarkTransition> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.bookmarkRetryFailed, {
+      ownerUserId: input.ownerUserId,
+      bookmarkId: input.bookmarkId,
+      generation: input.generation,
+    });
+  }
+
   async markBookmarkStale(input: {
     workspaceId: string;
     ownerUserId: string;
@@ -845,27 +943,17 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async recordEligibleTriggers(input: {
-    workspaceId: string;
-    verifiedUserId?: string;
-  }): Promise<number> {
-    this.assertWorkspace(input.workspaceId);
-    return this.request(CHATS_METHOD.dispatchRecordEligibleTriggers, {
-      ...(input.verifiedUserId !== undefined
-        ? { verifiedUserId: input.verifiedUserId }
-        : {}),
-    });
-  }
-
   async recordTrigger(input: {
     workspaceId: string;
     triggerMessageId: string;
+    agentId: string;
     threadId: string;
   }): Promise<boolean> {
     this.assertWorkspace(input.workspaceId);
     return (
       await this.request(CHATS_METHOD.dispatchEnqueue, {
         triggerMessageId: input.triggerMessageId,
+        agentId: input.agentId,
         threadId: input.threadId,
       })
     ).enqueued;
@@ -886,11 +974,13 @@ export class ChatsLiveAdapter {
   async failPendingForThread(input: {
     workspaceId: string;
     threadId: string;
+    agentId: string;
     reason: string;
   }): Promise<number> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.dispatchFailPendingForThread, {
       threadId: input.threadId,
+      agentId: input.agentId,
       reason: input.reason,
     });
   }
@@ -1021,9 +1111,12 @@ export class ChatsLiveAdapter {
     return result;
   }
 
-  async latestRunForThread(workspaceId: string, threadId: string): Promise<ChatRun | null> {
+  async latestRunForThread(workspaceId: string, threadId: string, agentId?: string): Promise<ChatRun | null> {
     this.assertWorkspace(workspaceId);
-    return this.request(CHATS_METHOD.dispatchLatestRunForThread, { threadId });
+    return this.request(CHATS_METHOD.dispatchLatestRunForThread, {
+      threadId,
+      ...(agentId !== undefined ? { agentId } : {}),
+    });
   }
 
   async getRunRecord(runId: string): Promise<ChatRun | null> {

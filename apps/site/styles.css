@@ -217,18 +217,28 @@ body {
 }
 
 .nav-github {
-  padding: 4px 2px;
-  border-bottom: 1px solid transparent;
-  color: var(--subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 12px;
   text-decoration: none;
   transition: color 0.14s ease-out, border-color 0.14s ease-out;
 }
 
-.nav-github:hover {
-  color: var(--ink);
-  border-bottom-color: var(--ink);
+.nav-github:hover { color: var(--ink); border-color: var(--ink); }
+.nav-github:focus-visible { border-radius: 10px; }
+.nav-github svg { width: 15px; height: 15px; flex: none; fill: currentColor; }
+
+/* A narrower header has room for only the mark. */
+@media (max-width: 840px) {
+  .nav-github { padding: 0 10px; }
+  .nav-github-label { display: none; }
 }
 
 @media (max-width: 640px) {
@@ -236,7 +246,6 @@ body {
   .nav-links { display: flex; gap: 10px; margin-left: auto; }
   .nav-links a { font-size: 11px; }
   .nav-end { padding-left: 0; border-left: 0; gap: 8px; }
-  .nav-github { font-size: 11px; }
 }
 
 /* Below 380px the logo and the alpha tag leave no room for the wordmark. */
@@ -1558,9 +1567,6 @@ main::before {
 .waitlist-field input::placeholder { color: var(--subtle); }
 .waitlist-field .btn { flex: none; padding: 10px 16px; font-size: 13px; }
 .waitlist-field .btn[aria-disabled='true'] { cursor: progress; }
-.waitlist-note { margin-top: 2px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
-.waitlist-note a { color: inherit; text-underline-offset: 3px; }
-.waitlist[data-state='joined'] .waitlist-note { display: none; }
 .waitlist-status:focus { outline: none; }
 .waitlist-status { min-height: 1.5em; margin-top: 10px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }
@@ -2211,3 +2217,48 @@ p { text-wrap: pretty; }
 .privacy p { margin-top: 10px; }
 .privacy a { color: inherit; text-underline-offset: 3px; }
 .privacy-updated { margin-top: 48px; color: var(--subtle); font-size: 14px; }
+
+/* ---------- not found ---------- */
+
+.not-found {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100svh - 61px);
+  padding: clamp(40px, 8vh, 96px) 24px clamp(64px, 12vh, 128px);
+  text-align: center;
+}
+.not-found-code {
+  font: 500 clamp(150px, 30vw, 340px)/0.9 var(--font-serif);
+  letter-spacing: -0.03em;
+  font-variant-numeric: lining-nums;
+  user-select: none;
+}
+/* The wheel fills the 0 once it renders; until then the 0 is type. */
+.not-found-zero { position: relative; display: inline-block; width: 0.72em; margin-inline: 0.06em; text-align: center; }
+.not-found-zero-glyph { transition: opacity 0.4s ease-out; }
+.not-found-zero canvas {
+  position: absolute;
+  left: calc(50% + 0.03em);
+  top: calc(50% + 0.026em);
+  width: 1.3em;
+  height: 1.3em;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 0.4s ease-out;
+  pointer-events: none;
+}
+.not-found-zero.is-loaded canvas { opacity: 1; }
+.not-found-zero.is-loaded .not-found-zero-glyph { opacity: 0; }
+.not-found h1 {
+  margin-top: clamp(20px, 4vh, 40px);
+  font: 500 clamp(30px, 4.4vw, 46px)/1.1 var(--font-serif);
+  letter-spacing: -0.02em;
+}
+.not-found-lede { max-width: 46ch; margin-top: 14px; color: var(--muted); font-size: 18px; }
+.not-found-path { color: var(--ink); font-family: var(--font-mono); overflow-wrap: anywhere; }
+.not-found .btn { margin-top: 30px; }
+@media (prefers-reduced-motion: reduce) {
+  .not-found-zero-glyph, .not-found-zero canvas { transition: none; }
+}

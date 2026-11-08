@@ -10,9 +10,10 @@ import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler, type ServerCollections } from "./datasetIpc";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import { ServerCollectionsUnavailableError, type OwnerDatasetData } from "../workspaces/remoteDataset";
+import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 
 const datasetId = "00000000-0000-4000-8000-000000000001";
@@ -20,7 +21,8 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   automationName?: (workspace: { workspaceId: string }, automationId: string) => Promise<string | null>,
   // Main's own host, which export opens first as main's does.
   localHost?: () => Promise<LocalDatasetHost>,
-  serverCollectionsFor?: () => Promise<ServerCollections | null>) {
+  serverCollectionsFor?: () => Promise<ServerCollections | null>,
+  moves?: { collectionPlace(): Promise<DatasetPlace>; moveToServer(): Promise<void> }) {
   const abort = new AbortController();
   const workspace = { workspaceId: "workspace", shareView: undefined as unknown };
   let current = true;
@@ -59,7 +61,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     ...(remote ? { dataForWorkspace: async () => remote } : {}),
     ...(named ? { namedDataForWorkspace: async () => named } : {}),
     ...(serverCollectionsFor ? { serverCollectionsFor } : {}),
-    withAdapter, createSources, ...(automationName ? { automationName } : {}),
+    withAdapter, createSources, ...(automationName ? { automationName } : {}), ...moves,
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetPath: "data/dataset.json", revision: 1, revisionSha256: revision.revisionSha256,
     tableId: definition.tables[0]!.tableId, createOperationId: definition.operations[0]!.operationId, appRoot: "apps/form", fieldIds: definition.operations[0]!.fieldIds };
@@ -71,6 +73,20 @@ it("uses owner authority before disclosing standalone Collections", async () => 
   await expect(f.handler("window", { action: "list", workspaceId: "elsewhere" })).rejects.toThrow("wrong workspace");
   expect(f.host.list).not.toHaveBeenCalled();
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
+});
+
+it("lists an owner's Collection only while its dataset.json is there, and names the file to fix when it can't be read", async () => {
+  const f = fixture();
+  f.host.list.mockReturnValue({ datasets: [describeApprovedDataset(f.revision, f.revision.definition.operations)] as never[], nextCursor: null });
+  const list = () => { invalidateDatasetAddresses({ workspaceId: "workspace" }); return f.handler("window", { action: "list", workspaceId: "workspace" }); };
+  expect(await list()).toMatchObject({ kind: "list", datasets: [{ datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }] });
+  const descriptor = f.sources.get("data/dataset.json")!;
+  f.sources.delete("data/dataset.json");
+  expect(await list()).toEqual({ kind: "list", datasets: [], nextCursor: null });
+  f.sources.set("data/dataset.json", "{");
+  expect(await list()).toMatchObject({ datasets: [{ datasetId, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["data/dataset.json"] }] });
+  f.sources.set("data/dataset.json", descriptor);
+  expect(await list()).toMatchObject({ datasets: [{ datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }] });
 });
 
 it("resolves request paths through the engine and sends only the ID to the current host", async () => {
@@ -451,6 +467,21 @@ it.each(["approve","approveMigration"])("refuses automation and received-share %
   await expect(f.handler("agent",input,{depth:0})).rejects.toThrow("original workspace");
 });
 
+it("moves a Collection on this computer to the server only when its owner agrees, never for an automation", async () => {
+  const setGrant = vi.fn(async () => undefined), moveToServer = vi.fn(async () => undefined);
+  let server: Extract<DatasetPlace, { kind: "here" }>["server"] = null;
+  const f = fixture({ setGrant } as unknown as OwnerDatasetData, undefined, undefined, undefined, undefined, { collectionPlace: async () => ({ kind: "here", server }), moveToServer });
+  const grant = { action: "setGrant", workspaceId: "workspace", datasetPath: "data/dataset.json", grantId: "grant",
+    grant: { revision: 1, revisionSha256: f.revision.revisionSha256, operationIds: ["00000000-0000-4000-8000-000000000005"], discover: true } };
+  await expect(f.handler("agent", { ...grant, moveToServer: true }, { depth: 0 })).rejects.toThrow("Sync this workspace with a server before giving a person access.");
+  server = { host: "sync.example.test", runs: null, automations: 0, scheduledAutomations: 0 };
+  await expect(f.handler("agent", grant, { depth: 0 })).rejects.toThrow("Giving a person access moves this Collection to sync.example.test.");
+  await expect(f.handler("agent", { ...grant, moveToServer: true }, { depth: 1 })).rejects.toThrow("Automations cannot move a Collection to the server.");
+  expect(moveToServer).not.toHaveBeenCalled(); expect(setGrant).not.toHaveBeenCalled();
+  await expect(f.handler("agent", { ...grant, moveToServer: true }, { depth: 0 })).resolves.toEqual({ kind: "grant-updated" });
+  expect(moveToServer).toHaveBeenCalledOnce(); expect(setGrant).toHaveBeenCalledOnce();
+});
+
 it.each([2, 3])("recovers revision %s to the base address", async number => {
   const f = fixture();
   f.sources.clear();
@@ -468,15 +499,45 @@ it.each([2, 3])("recovers revision %s to the base address", async number => {
 });
 
 const unclaimed = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+
+it("returns an unclaimed Collections list refusal as data on every refresh (#3016)", async () => {
+  const root = await createTestScratch("dohc-dataset-ipc-unclaimed-");
+  await mkdir(join(root, ".dohc"));
+  const localHost = vi.fn(() => createLocalDatasetHost({ workspaceId: "workspace", workspaceRoot: root, localPersonId: () => "person-local",
+    holder: { here: () => ({ installId: "install-here", label: "Studio" }), required: () => true } }));
+  const f = fixture(undefined, undefined, undefined, localHost);
+  const refusal = { kind: "collections-refused", refusal: { kind: "unclaimed", words: unclaimed } };
+
+  // main registers this handler directly for desktop:dataset. A rejection
+  // reaches Electron's handler error log before the renderer can read it.
+  for (let refresh = 0; refresh < 2; refresh++) {
+    const result = f.handler("window", { action: "list", workspaceId: "workspace", limit: 50 });
+    await expect(result).resolves.toEqual(refusal);
+    expect(DatasetResult.parse(await result)).toEqual(refusal);
+  }
+  expect(await readdir(join(root, ".dohc"))).toEqual([]);
+  expect(f.host.list).not.toHaveBeenCalled();
+  expect(f.withAdapter).not.toHaveBeenCalled();
+});
+
 const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
+const holderRecord = (installId: string, label: string, storeId: string | null) => (root: string) => writeFile(join(root, ".dohc", "collections.json"),
+  JSON.stringify({ version: 1, workspaceId: "workspace", installId, label, storeId }));
+// A name the record takes: 64 characters outside the BMP, 128 UTF-16 units.
+const turtles = "🐢".repeat(64);
 it.each([
-  ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
-    (root: string) => writeFile(join(root, ".dohc", "collections.json"),
-      JSON.stringify({ version: 1, workspaceId: "workspace", installId: "install-laptop", label: "Laptop", storeId: null })), ["collections.json"], null],
-  ["no record names a computer for a store already here", unclaimed, storeIn(".dohc", "local", "datasets"), ["local"], [".dohc", "local", "datasets"]],
+  ["another computer keeps them", { kind: "elsewhere", computer: "Laptop",
+    words: "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server." },
+  holderRecord("install-laptop", "Laptop", null), ["collections.json"], null],
+  ["no record names a computer for a store already here", { kind: "unclaimed", words: unclaimed }, storeIn(".dohc", "local", "datasets"), ["local"], [".dohc", "local", "datasets"]],
   // A copy iCloud Drive has not removed from where stores were before .dohc/local.
-  ["no record names a computer for an old copy of a store", unclaimed, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
-] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, words, arrange, left, folder) => {
+  ["no record names a computer for an old copy of a store", { kind: "unclaimed", words: unclaimed }, storeIn(".dohc", "datasets"), ["datasets"], [".dohc", "datasets"]],
+  ["this computer keeps them but their store is not there", { kind: "missing", words: new CollectionsRefusalError({ kind: "missing" }).message },
+    holderRecord("install-here", "Studio", "00000000-0000-4000-8000-0000000000aa"), ["collections.json"], null],
+  ["another computer whose name is outside the BMP keeps them", { kind: "elsewhere", computer: turtles,
+    words: new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-turtles", label: turtles }, sameName: false }).message },
+  holderRecord("install-turtles", turtles, null), ["collections.json"], null],
+] as const)("refuses every local Collection action, from a window or the CLI, when %s, and opens no store", async (_case, refusal, arrange, left, folder) => {
   const root = await createTestScratch("dohc-dataset-ipc-holder-");
   await mkdir(join(root, ".dohc"));
   await arrange(root);
@@ -500,7 +561,12 @@ it.each([
     { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" },
     { workspaceId: "workspace", action: "approve", preparationId: datasetId, revisionSha256: f.revision.revisionSha256 },
   ]) {
-    for (const caller of ["window", "cli"]) await expect(f.handler(caller, request), request.action).rejects.toThrow(words);
+    for (const caller of ["window", "cli"]) {
+      const answer = f.handler(caller, request);
+      // A list returns its refusal (#3016), as the CLI reads it.
+      if (request.action === "list") expect(DatasetResult.parse(await answer)).toEqual({ kind: "collections-refused", refusal });
+      else await expect(answer, request.action).rejects.toThrow(refusal.words);
+    }
   }
   expect(await readdir(join(root, ".dohc"))).toEqual(left);
   if (folder) expect(await readdir(join(root, ...folder)), "not opened").toEqual(["state.sqlite"]);
@@ -556,12 +622,23 @@ describe("a computer that doesn't keep the workspace's Collections", () => {
     expect(data.list).not.toHaveBeenCalled();
   });
 
-  it("refuses as before without a server to ask, and never asks one for a received share", async () => {
+  it("refuses without a server to ask, and never asks one for a received share", async () => {
     const f = serverFixture(null);
-    await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toBe(refusal);
+    expect(await f.handler("window", { workspaceId: "workspace", action: "list" }))
+      .toEqual({ kind: "collections-refused", refusal: { kind: "elsewhere", words: refusal.message, computer: "Laptop" } });
     expect(f.serverCollectionsFor).toHaveBeenCalledOnce();
     f.workspace.shareView = { shareId: "s" };
     await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toThrow("Open the original workspace to manage this Collection.");
     expect(f.serverCollectionsFor).toHaveBeenCalledOnce();
+  });
+
+  it("returns where the Collections are and the server's error when the server didn't answer a list, and throws any other error", async () => {
+    const list = vi.fn(async (): Promise<{ datasets: []; nextCursor: null }> => { throw new ServerCollectionsUnavailableError(refusal, new TypeError("fetch failed")); });
+    const f = serverFixture({ data: { list } as unknown as OwnerDatasetData, elsewhere });
+    expect(await f.handler("window", { workspaceId: "workspace", action: "list" })).toEqual({ kind: "collections-refused",
+      refusal: { kind: "server-unavailable", words: refusal.message, computer: "Laptop", failure: "TypeError: fetch failed" } });
+    list.mockRejectedValueOnce(new Error("Collection storage is full."));
+    await expect(f.handler("window", { workspaceId: "workspace", action: "list" })).rejects.toThrow("Collection storage is full.");
+    expect(f.localHost).not.toHaveBeenCalled();
   });
 });

@@ -103,7 +103,7 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
   };
 
   try {
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
 
     // --- The owner's synced workspace holds a Collection -----------------
     await seedWorkspaceManifest(ownerTemp, ownerWorkspaceId);

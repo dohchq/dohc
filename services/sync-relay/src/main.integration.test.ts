@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+import { realDaemonReaderConfig } from "../../../apps/desktop/src/testing/realDaemonWorkspaceSessions";
 const projectionEngine = requireEngineBinaryOrSkip();
 import { buildRelay } from "../scripts/build.mjs";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
@@ -1056,7 +1057,7 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.require(), DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1", DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
       DOHC_RELAY_SHARE_WEB_URL: "http://share-web:1790", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
-      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32), DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig()});
     expect(relay.stderr()).toContain("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1");
     // The empty deployment must complete its engine handshake and first pass.
     await vi.waitFor(async () => {
@@ -1080,6 +1081,18 @@ describe("sync relay startup guards", () => {
     const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_SELF_HOST_LIVE: value});
     expect(code).toBe(1); expect(stderr).toContain("DOHC_SELF_HOST_LIVE must be 0 or 1.");
+    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
+  // readerConfig.test.ts covers each reason. These prove a live host stops on it.
+  it.each([
+    {host: {DOHC_SELF_HOST_LIVE: "1"}, reader: undefined, reason: "DOHC_ENGINE_READER_CONFIG is not set"},
+    {host: {DOHC_RELAY_SERVICE_HOST_CONFIG: "/missing/host.json"}, reader: undefined, reason: "DOHC_ENGINE_READER_CONFIG is not set"},
+    {host: {DOHC_SELF_HOST_LIVE: "1"}, reader: "{}", reason: "DOHC_ENGINE_READER_CONFIG is not a JSON object"},
+  ])("refuses a live host without the Markdown reader before opening storage: %j", async ({host, reader, reason}) => {
+    const dbPath = join(await tempRoot("live-host-no-reader"), "relay.sqlite");
+    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, ...host, DOHC_ENGINE_READER_CONFIG: reader});
+    expect(code).toBe(1); expect(stderr).toContain(`Edit shares need the Markdown reader, but ${reason}`);
     await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
   });
   it.each([

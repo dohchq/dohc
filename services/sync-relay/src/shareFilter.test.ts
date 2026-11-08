@@ -53,6 +53,35 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
 
 const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
+it("serves a kept text effect and its later edit without exposing the conflict parent", () => {
+  const keptSha = "b".repeat(64);
+  const laterSha = "c".repeat(64);
+  const kept = momentPayload({
+    conflictId: "private-conflict", conflictEffectIndex: 0,
+    momentId: "kept-moment", payloadBeforeBlobSha256: keptSha,
+    payloadBeforePath: "docs/a.md", payloadAfterBlobSha256: keptSha,
+  });
+  expect(filterOpForShare(pathShare, "conflict.resolve", JSON.stringify({
+    conflictId: "private-conflict", effects: [JSON.parse(kept)],
+  }))).toEqual({ allowed: false });
+  const first = filterOpForShare(pathShare, "moment.append", kept);
+  const later = filterOpForShare(pathShare, "moment.append", momentPayload({
+    momentId: "later-moment", payloadBeforeBlobSha256: keptSha,
+    payloadBeforePath: "docs/a.md", payloadAfterBlobSha256: laterSha,
+    beforePresent: "present", beforeLatestMomentId: "kept-moment",
+  }));
+  expect(first.allowed && later.allowed).toBe(true);
+  if (!first.allowed || !later.allowed) return;
+  expect(first.payload).toMatchObject({ payloadAfterBlobSha256: keptSha });
+  expect(later.payload).toMatchObject({ payloadBeforeBlobSha256: keptSha, payloadAfterBlobSha256: laterSha });
+  expect(first.blobSha256s).toContain(keptSha);
+  expect(later.blobSha256s).toContain(laterSha);
+  for (const op of [first, later]) {
+    expect(op.payload).not.toHaveProperty("conflictId");
+    expect(op.payload).not.toHaveProperty("momentId");
+  }
+});
+
 it.each(["live.audit.base","live.audit.application","live.audit.settlement"])("keeps %s out of every file-share level", (kind) => {
   const payload = JSON.stringify({formatVersion: 1,record: {checkpoint: {binding: {currentPath: "docs/a.md"},stateDigest: "a".repeat(64)}}});
   for (const access of ["view","comment","edit"] as const) {
@@ -855,6 +884,18 @@ describe("chat share op filter", () => {
     if (!result.allowed) return;
     expect(result.payload).toMatchObject({ authorKind: "automation", chainDepth: 2 });
     expect(JSON.stringify(result.payload)).not.toContain("PRIVATE-");
+  });
+
+  it("serves what an agent reported about itself", () => {
+    const authorReported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const result = decide("chat.message.append", {
+      messageId: "m-reported", threadId: "thread-in", authorKind: "agent",
+      authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "u1",
+      body: "Opened a PR", createdAtMs: 2, authorReported,
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.payload).toMatchObject({ authorReported });
   });
 
   it("shares the agent owner while stripping local runner configuration", () => {

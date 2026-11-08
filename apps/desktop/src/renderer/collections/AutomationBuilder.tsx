@@ -3043,13 +3043,13 @@ export function AutomationBuilder(props: {
             aria-labelledby="automation-unsaved-title"
             className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
           >
-            <h3 id="automation-unsaved-title" className="m-0 text-sm font-semibold text-ink">Save your changes?</h3>
+            <h3 id="automation-unsaved-title" className="m-0 text-base font-semibold text-ink">Save your changes?</h3>
             <p className="m-0 mt-2 text-[13px] text-muted">
               {automation.name.trim() || "This automation"} has changes you have not saved.
             </p>
             <div className="mt-4 flex justify-end gap-2">
-              <SecondaryButton onClick={props.onStay} className="h-8 py-0">Keep editing</SecondaryButton>
-              <DangerButton onClick={props.onLeave} className="h-8 py-0 text-xs">Discard</DangerButton>
+              <SecondaryButton onClick={props.onStay}>Keep editing</SecondaryButton>
+              <DangerButton onClick={props.onLeave}>Discard</DangerButton>
               <PrimaryButton
                 onClick={() => {
                   setSaveChosen(true);
@@ -3057,7 +3057,6 @@ export function AutomationBuilder(props: {
                     if (!saved) props.onStay();
                   });
                 }}
-                className="h-8 py-0 text-xs"
                 disabled={props.readOnly}
               >
                 Save

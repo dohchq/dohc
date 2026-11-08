@@ -8,8 +8,9 @@ import {isOwnerDeliveryBackoff} from "./ownerDeliveryBackoff";
 
 export {OwnerKnownRefusals} from "./ownerYDocOutbox";
 
-/** The authority lease and engine session must remain held until this pass settles. */
-export async function runNativeOwnerDeliveryPass(options: {
+type DrainResult = Awaited<ReturnType<OwnerYDocOutboxDrainer["drainOnce"]>>;
+
+interface NativeOwnerDeliveryPassOptions {
   client: EngineClient;
   workspaceHandle: string;
   document: DesktopOwnerDeliveryDocument;
@@ -21,7 +22,16 @@ export async function runNativeOwnerDeliveryPass(options: {
   bearer: string;
   accountId: string;
   assertCurrent(): void;
-}) {
+  /** Enrollment can set aside an older queue even when this pass sends nothing. */
+  onEnrolled?(): Promise<void>;
+  /** Never enrolls: an unbound document returns "unbound", and an answer counts only after an opening sync installed. */
+  observedOnly?: boolean;
+}
+
+/** The authority lease and engine session must remain held until this pass settles. */
+export function runNativeOwnerDeliveryPass(options: NativeOwnerDeliveryPassOptions & {observedOnly: true}): Promise<DrainResult | "unbound">;
+export function runNativeOwnerDeliveryPass(options: NativeOwnerDeliveryPassOptions & {observedOnly?: false}): Promise<DrainResult>;
+export async function runNativeOwnerDeliveryPass(options: NativeOwnerDeliveryPassOptions): Promise<DrainResult | "unbound"> {
   const {client, document, config, signal} = options;
   const pending = new Set<Promise<unknown>>();
   const check = () => {signal.throwIfAborted(); options.assertCurrent();};
@@ -60,6 +70,7 @@ export async function runNativeOwnerDeliveryPass(options: {
         const draft = await guarded(signal => client.ownerYDocEnroll(request(), {...target, captured,
           journalCursor: input.appliedThroughJournalCursor, hostVector: input.hostVector, checkpoint: input.missingStateUpdate}, signal), attemptSignal);
         preparation = {status: "observed", draft}; position = draft;
+        await options.onEnrolled?.();
         return "applied";
       }
       position = await guarded(signal => client.ownerYDocApplyInitialSync(request(), {...target, ...prior(),
@@ -85,9 +96,13 @@ export async function runNativeOwnerDeliveryPass(options: {
     freshBearer: async () => {check(); return options.bearer;},
     authenticatedAccountId: async () => {check(); return options.accountId;}});
   let drainer: OwnerYDocOutboxDrainer | undefined;
+  const answered = (result: "acknowledged" | "empty") => options.observedOnly && !delivery.synchronized ? "retry" : result;
   try {
     let synchronized = false;
     preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
+    if (options.observedOnly && preparation.status === "capture") return "unbound";
+    // This computer closed this generation when its page was retired; its edits wait in a recovery copy.
+    if (preparation.status === "retired") return "empty";
     if (preparation.status === "capture" || preparation.draft.outboxId === null) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();
@@ -96,8 +111,9 @@ export async function runNativeOwnerDeliveryPass(options: {
       // Re-read durable discovery after uncertain commits and concurrent draft writes.
       preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
     }
+    if (preparation.status === "retired") return "empty";
     if (preparation.status !== "observed") return "retry";
-    if (preparation.draft.outboxId === null) return "empty";
+    if (preparation.draft.outboxId === null) return answered("empty");
     drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery, options.refusals);
     const result = await drainer.drainOnce();
     if (result === "empty" && !synchronized) {
@@ -110,7 +126,7 @@ export async function runNativeOwnerDeliveryPass(options: {
       }
       if (authority.kind !== "authority") return "retry";
     }
-    return result;
+    return result === "acknowledged" || result === "empty" ? answered(result) : result;
   } catch (error) {
     if (isOwnerDeliveryBackoff(error)) return "retry";
     throw error;

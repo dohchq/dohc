@@ -1,7 +1,7 @@
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
-import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { WorkspaceDaemonRequester, type HistoryCursor, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -19,7 +19,7 @@ import {
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
-import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import { engineMomentDetailForIpc, listEngineMomentsForIpc, momentPersonName, type EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
@@ -42,6 +42,10 @@ import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { readSyncHistory } from "../workspaces/syncHistory";
+
+// How far the Versions page reads back for each version's newest change.
+const LAST_CHANGE_PAGE_ROWS = 50;
+const LAST_CHANGE_PAGES_MAX = 4;
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -67,12 +71,13 @@ export function createWorkspaceEngineIpc<
     work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery" | "retryHeldCapture">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
-    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
+    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment" | "retryHistoryCapture" | "listVersions">;
   }>;
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
   historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
-  localAgentDisplayName(): string;
+  /** The name Settings gives one of this computer's agents, while Settings lists it. */
+  agentName(agentId: string): string | undefined;
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
@@ -121,7 +126,7 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, agentName, localPersonId, localPersonName, localPerson,
     localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy, readSyncHistory,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, assertWritableWorkspace, syncStatusWithOwnedProjection,
@@ -130,6 +135,8 @@ export function createWorkspaceEngineIpc<
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   } = dependencies;
   const timeline = createHistoryTimeline();
+  // This computer's agent by its name now, or by its id once Settings no longer lists it.
+  const localAgentName = (agentId: string) => agentId === "dohc-mcp" ? "Agent" : agentName(agentId) ?? agentId;
   const runLocator = createRunLocator({
     onThisComputer: automationRunOnThisComputer,
     onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
@@ -260,7 +267,7 @@ export function createWorkspaceEngineIpc<
           const authors: RecordHistoryAuthors = {
             prepare: userIds => dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
             person: userId => dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
-            agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
+            agent: (agentId, onBehalfOf) => onBehalfOf === localPersonId() ? localAgentName(agentId) : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
           };
@@ -289,10 +296,11 @@ export function createWorkspaceEngineIpc<
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
-    // Runs dohc started use the Settings name. Other agents use their handshake label.
+    // Your agents use the Settings name of their id, as record History does, with or without a run.
+    // Another person's runs show as "Agent". Their other agents use their handshake label.
     function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         presentations,
@@ -399,6 +407,50 @@ export function createWorkspaceEngineIpc<
             remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };
         return timeline(input, { ...collections, get scope() { return collections.scope; }, engine, signal: operation.signal, assertCurrent,
           names: authorNames(workspace.workspaceId, event.sender, presentations), ...(policy ? { admitted: historyPathAdmission(policy) } : {}) });
+      },
+      // Each version's newest change of its own, for the Versions page. A version's history
+      // also holds what it was made from, so its own changes are the moments it recorded.
+      // A received share keeps no versions.
+      listVersionLastChanges: async (input, { event, operation }) => {
+        const { entry: workspace, shared, assertCurrent } = historyIdentity(operation);
+        if (shared) return { versions: [] };
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        assertCurrent();
+        if (policy.errors.length) throw new Error("History can't read this folder's settings.");
+        const admitted = historyPathAdmission(policy);
+        const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
+        assertCurrent();
+        const { versions } = await capture.listVersions();
+        assertCurrent();
+        // A page also holds version markers and hidden paths, so reading goes on
+        // until an own shown moment, the end, or a page older than the version:
+        // a version records nothing before it was made. Past the last page read,
+        // the version shows no change of its own.
+        const latest = await Promise.all(versions.map(async (version) => {
+          let cursor: HistoryCursor | undefined;
+          for (let read = 0; read < LAST_CHANGE_PAGES_MAX; read += 1) {
+            const page = await capture.listMoments({ versionId: version.id, limit: LAST_CHANGE_PAGE_ROWS, ...(cursor ? { cursor } : {}) });
+            assertCurrent();
+            const own = page.moments.find(moment => moment.versionId === version.id && (moment.protected || admitted(moment.path)));
+            if (own !== undefined) return own;
+            const oldest = Math.min(...page.moments.map(moment => moment.recordedAtMs), ...page.versionMarkers.map(marker => marker.createdAtMs));
+            if (page.nextCursor === null || oldest < version.createdAtMs) return undefined;
+            cursor = page.nextCursor;
+          }
+          return undefined;
+        }));
+        assertCurrent();
+        // Only person names are read here, so no presentations are drawn.
+        const names = authorNames(input.workspaceId, event.sender, () => []);
+        names.prepare?.(latest.flatMap(moment => moment?.authors ?? []));
+        return {
+          versions: versions.map((version, index) => {
+            const moment = latest[index];
+            if (moment === undefined) return { versionId: version.id, lastChange: null };
+            const personName = momentPersonName(moment, names);
+            return { versionId: version.id, lastChange: { atMs: moment.recordedAtMs, ...(personName !== undefined ? { personName } : {}) } };
+          }),
+        };
       },
     });
 
@@ -516,6 +568,23 @@ export function createWorkspaceEngineIpc<
           });
           if (result === null) throw new Error("The workspace engine is not running.");
         });
+      },
+      // The restart starts inside the workspace operation and is awaited
+      // outside it, so its folder scan does not hold the workspace open.
+      retryHistoryCapture: async (input, { event }) => {
+        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+          assertWritableWorkspace(operation.workspace);
+          const { capture } = await requireEngineCapture(operation.workspace.workspaceId, "Engine history");
+          const retry = capture.retryHistoryCapture();
+          // Observe rejection while the workspace operation is still completing.
+          void retry.catch(() => {});
+          return { workspaceId: operation.workspace.workspaceId, retry };
+        });
+        try {
+          await started.retry;
+        } finally {
+          notifyRenderer({ workspaceId: started.workspaceId });
+        }
       },
     });
     registerOperations<typeof fileObservationOperations, Event, Operation>({

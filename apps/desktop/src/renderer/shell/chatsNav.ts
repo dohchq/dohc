@@ -1,5 +1,6 @@
 import { chatTabPath } from "../workbench/workbenchState";
 import type { ChatsNav } from "../workbench/ChatsView";
+import { agentChatIdentity, type SettingsAgent } from "../workbench/agentChat";
 
 function chatsDestinationKey(nav: ChatsNav | null): string {
   if (!nav) return "channels";
@@ -26,17 +27,18 @@ export function chatsNavigationRequiresRemount(
   // when the destination thread is already live, remount it with the new
   // focus target so ChatsView gets another chance to scroll (and so clicking
   // the same backlink twice remains useful after the user has scrolled away).
-  return (
-    (next.level === "thread" || next.level === "dm") &&
-    Boolean(next.focusMessageId)
-  );
+  // Naming a channel's chat lane is a command too.
+  if (next.level === "channel") return Boolean(next.focusMessageId || next.lane);
+  return (next.level === "thread" || next.level === "dm") && Boolean(next.focusMessageId);
 }
 
 // Thread navigation stays within its channel, so the tab keeps that name.
-export function chatEditorTitle(nav: ChatsNav | null, agentName?: string): string {
+// An agent's chat takes its own agent's name. A group's tab draws its "#",
+// so the name goes without one.
+export function chatEditorTitle(nav: ChatsNav | null, agents: readonly SettingsAgent[]): string {
   if (!nav || nav.level === "feed") return "Home";
   if (nav.level === "channel" || nav.level === "thread") {
-    return nav.channel.kind === "agent" ? agentName ?? "My agent" : `#${nav.channel.name}`;
+    return nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, agents).label : nav.channel.name;
   }
   if (nav.level === "dm") return nav.dm.peerLabel;
   return nav.level === "dm-new" ? "New message" : "Chats";

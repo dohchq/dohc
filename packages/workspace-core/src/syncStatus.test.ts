@@ -5,8 +5,7 @@ const base: Parameters<typeof deriveSyncStatus>[0] = {
   pendingChangeCount: 0,
   inFlight: false,
   hasConflict: false,
-  cloudEnabled: false,
-  cloudConnected: false,
+  syncBlocked: null,
   syncFailed: false,
   lastSyncedAtMs: null,
 };
@@ -31,7 +30,7 @@ describe("deriveSyncStatus", () => {
   // A retry in flight does not undo a failure: the pass that is running is
   // the one that has not worked yet.
   it("shows a failed sync over a pass in flight, and a conflict over both", () => {
-    const failing = { ...base, cloudEnabled: true, cloudConnected: true, inFlight: true, syncFailed: true };
+    const failing = { ...base, inFlight: true, syncFailed: true };
     expect(deriveSyncStatus(failing).state).toBe("sync-failed");
     expect(deriveSyncStatus({ ...failing, hasConflict: true }).state).toBe("conflict");
   });
@@ -47,28 +46,17 @@ describe("deriveSyncStatus", () => {
     ).toBe("conflict");
   });
 
-  it("never reports disconnected for a local-only workspace", () => {
-    expect(
-      deriveSyncStatus({ ...base, cloudEnabled: false, cloudConnected: false })
-        .state,
-    ).toBe("synced");
+  it.each(["not-connected", "account-unconfirmed", "sign-in-expired", "update-required"] as const)("reports a blocked sync as %s", (syncBlocked) => {
+    expect(deriveSyncStatus({ ...base, syncBlocked }).state).toBe(syncBlocked);
   });
 
-  it("reports cloud-disconnected only when cloud is enabled but offline", () => {
-    expect(
-      deriveSyncStatus({ ...base, cloudEnabled: true, cloudConnected: false })
-        .state,
-    ).toBe("cloud-disconnected");
-  });
-
-  it("keeps cloud-disconnected ahead of local-changes when offline edits are pending", () => {
+  it("keeps a blocked sync ahead of local-changes when edits are pending", () => {
     const status = deriveSyncStatus({
       ...base,
-      cloudEnabled: true,
-      cloudConnected: false,
+      syncBlocked: "account-unconfirmed",
       pendingChangeCount: 2,
     });
-    expect(status.state).toBe("cloud-disconnected");
+    expect(status.state).toBe("account-unconfirmed");
     expect(status.pendingChangeCount).toBe(2);
   });
 

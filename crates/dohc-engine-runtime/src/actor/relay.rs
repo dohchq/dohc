@@ -53,8 +53,13 @@ pub enum RelayOperation {
         now_ms: i64,
         max_read_bytes: usize,
     },
-    Pull {
+    FetchPull {
         workspace_id: String,
+        settle_repairs: bool,
+    },
+    ApplyPull {
+        workspace_id: String,
+        page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
         now_ms: i64,
     },
     CommitCursor {
@@ -165,10 +170,12 @@ pub enum RelayOperation {
     /// One pass of the hosted feed. Its cursor commits with
     /// `CommitHostedCursor` once its changed paths are materialized. A pass
     /// that adopts a new scope, and every commit, then park the documents
-    /// that left the scope, as `root` holds them.
+    /// that left the scope, as `root` holds them. `relay_namespace` is the
+    /// feed's, as the configured host names it.
     PullHosted {
         workspace_id: String,
         root: std::path::PathBuf,
+        relay_namespace: String,
         now_ms: i64,
     },
     CommitHostedCursor {
@@ -183,7 +190,8 @@ impl RelayOperation {
     fn workspace_id(&self) -> &str {
         match self {
             Self::Push { workspace_id, .. }
-            | Self::Pull { workspace_id, .. }
+            | Self::FetchPull { workspace_id, .. }
+            | Self::ApplyPull { workspace_id, .. }
             | Self::CommitCursor { workspace_id, .. }
             | Self::Probe { workspace_id }
             | Self::Claim { workspace_id, .. }
@@ -212,7 +220,8 @@ impl RelayOperation {
             Self::CreateHostedReplica { .. }
             | Self::PullHosted { .. }
             | Self::CommitHostedCursor { .. } => Replicas::Hosted,
-            Self::Pull { .. }
+            Self::FetchPull { .. }
+            | Self::ApplyPull { .. }
             | Self::CommitCursor { .. }
             | Self::Probe { .. }
             | Self::Claim { .. }
@@ -320,11 +329,44 @@ struct DeferredRelayState {
     share_log_pushed: usize,
 }
 
+/// One pull request at a time on a store, held from its fetch through every
+/// wait for released-tail validation to its outcome: another pull's drain
+/// would reclaim the owner settlements this one's report already owns.
+#[derive(Clone, Default)]
+pub(super) struct PullPermit {
+    held: Arc<tokio::sync::Mutex<()>>,
+    /// Woken each time a pull finds the permit held.
+    #[cfg(feature = "test-support")]
+    pub(super) waited: Arc<tokio::sync::Notify>,
+}
+
+impl PullPermit {
+    /// The permit once no other pull holds it, or none if `token` is
+    /// cancelled first. Dropping it releases it.
+    async fn acquire(
+        &self,
+        token: &CancellationToken,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, RuntimeError> {
+        if let Ok(held) = Arc::clone(&self.held).try_lock_owned() {
+            return Ok(held);
+        }
+        #[cfg(feature = "test-support")]
+        self.waited.notify_one();
+        tokio::select! {
+            biased;
+            () = token.cancelled() => Err(RuntimeError::Cancelled),
+            held = Arc::clone(&self.held).lock_owned() => Ok(held),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct DeferredRelayTransport {
     native_settlements: bool,
     state: Arc<Mutex<DeferredRelayState>>,
     push_progress: Arc<Mutex<PushWorkspaceProgress>>,
+    /// The pull pass this request stopped for released-tail validation.
+    continuation: dohc_engine_sync::PullContinuation,
 }
 
 impl DeferredRelayTransport {
@@ -512,6 +554,13 @@ macro_rules! relay_transport_method {
 }
 
 impl RelayTransport for DeferredRelayTransport {
+    fn request_pending(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .is_some()
+    }
     fn publishes_native_settlements(&self) -> bool {
         self.native_settlements
     }
@@ -739,6 +788,151 @@ mod relay_hosted_origin_tests;
 mod deferred_relay_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_push_write_runs_to_its_answer_after_a_cancel() {
+        let (_scratch, path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .unwrap();
+        adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1_000, &NoFaults,
+        )
+        .unwrap();
+        drop(store);
+
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&path, 1_100).unwrap().actor;
+        let token = CancellationToken::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let io_started = Arc::clone(&started);
+        let io_release = Arc::clone(&release);
+        let push = actor.relay_with_io(
+            false,
+            RelayOperation::Push {
+                workspace_id: "ws".into(),
+                now_ms: 1_200,
+                max_read_bytes: 0,
+            },
+            LeaseRegistry::default(),
+            token.clone(),
+            None,
+            move |request, _token| {
+                let started = Arc::clone(&io_started);
+                let release = Arc::clone(&io_release);
+                async move {
+                    let RelayIoRequest::Push(request) = request else {
+                        panic!("unexpected request: {request:?}");
+                    };
+                    assert!(
+                        request.ops.is_empty(),
+                        "the first push enrolls the workspace"
+                    );
+                    assert_eq!(request.after_seq, -1);
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(RelayIoResponse::Push(PushResponse {
+                        registered_references: Vec::new(),
+                        settlement_refusals: Vec::new(),
+                        hosted_refusals: Vec::new(),
+                        redundant_recoveries: Vec::new(),
+                        accepted: 0,
+                        inserted: 0,
+                        skipped: 0,
+                        current_max_origin_seq: -1,
+                    }))
+                }
+            },
+        );
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(push, async {
+                started.notified().await;
+                token.cancel();
+                release.notify_one();
+            })
+        })
+        .await
+        .expect("the push must start and finish after its answer is released");
+        supervisor.close(&path).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                    pushed: 0,
+                    has_more: false,
+                    ..
+                }))
+            ),
+            "the push must consume its answer after cancellation: {outcome:?}"
+        );
+        let store = EngineStore::open(&path, 1_300).unwrap();
+        let pushed_seq = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT pushed_seq FROM sync_relay_push_state \
+                     WHERE workspace_id='ws' AND origin_id='local'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("the probe answer must record enrollment");
+        assert_eq!(pushed_seq, -1);
+    }
+
+    #[test]
+    fn a_fetch_keeps_one_token_across_io_and_restores_earlier_progress_on_failure() {
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1, &NoFaults,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE sync_identity SET ordinary_pull_token='earlier' WHERE workspace_id='ws'",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let token = |store: &EngineStore| -> Option<String> {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap()
+        };
+        let transport = DeferredRelayTransport::default();
+        let client = RelaySyncClient::resuming(transport.clone(), transport.continuation.clone());
+        assert!(matches!(
+            client.fetch_pull(&mut store, "ws", &NoFaults),
+            Err(RelayError::Local(reason)) if reason == RELAY_IO_PENDING
+        ));
+        let fetching = token(&store).expect("fetch token");
+        assert_ne!(fetching, "earlier");
+        assert!(matches!(
+            client.fetch_pull(&mut store, "ws", &NoFaults),
+            Err(RelayError::Local(reason)) if reason == RELAY_IO_PENDING
+        ));
+        assert_eq!(token(&store).as_deref(), Some(fetching.as_str()));
+        let request = transport.take_pending().unwrap();
+        transport.complete(request, Err(RelayError::ServerInternal));
+        assert!(matches!(
+            client.fetch_pull(&mut store, "ws", &NoFaults),
+            Err(RelayError::ServerInternal)
+        ));
+        assert_eq!(token(&store).as_deref(), Some("earlier"));
+        assert!(
+            dohc_engine_sync::read_relay_cursor(&store, "ws")
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn a_lane_drain_is_not_repeated_when_a_push_resumes_after_blob_io() {
         use dohc_engine_domain::{VersionedTextStore, WriteText};
@@ -836,8 +1030,10 @@ mod deferred_relay_tests {
                     missing: Vec::new(),
                 }),
                 RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                    registered_references: Vec::new(),
                     settlement_refusals: Vec::new(),
                     hosted_refusals: Vec::new(),
+                    redundant_recoveries: Vec::new(),
                     accepted: request.ops.len(),
                     inserted: request.ops.len(),
                     skipped: 0,
@@ -962,9 +1158,9 @@ mod deferred_relay_tests {
         };
         let transport = DeferredRelayTransport::default();
         let mut cache = WriterDocCache::new();
-        let operation = RelayOperation::Pull {
+        let operation = RelayOperation::FetchPull {
             workspace_id: "ws".into(),
-            now_ms: 1200,
+            settle_repairs: false,
         };
         let mut probes = 0;
         let mut lookups = 0;
@@ -985,12 +1181,47 @@ mod deferred_relay_tests {
                 &mut crate::actor::live_application::Registry::default(),
             ) {
                 Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
+                Ok(RelayOperationOutcome::PullFetched(page)) => {
+                    let state: (Option<i64>, Option<String>) = store.read_with(|conn| {
+                        conn.query_row("SELECT base_relay_seq,ordinary_pull_token FROM ydoc_docs JOIN sync_identity USING (workspace_id) WHERE object_id='doc'", [],
+                            |row| Ok((row.get(0)?, row.get(1)?)))
+                    }).unwrap();
+                    assert_eq!(state, (None, Some(page.pull_token().to_owned())));
+                    let offline = DeferredRelayTransport::default();
+                    let applied = execute_relay_operation(
+                        &mut store,
+                        &mut cache,
+                        offline.clone(),
+                        RelayOperation::ApplyPull {
+                            workspace_id: "ws".into(),
+                            page,
+                            now_ms: 1200,
+                        },
+                        &LeaseRegistry::default(),
+                        &ClaimAnnouncer::default(),
+                        &mut crate::actor::live_application::Registry::default(),
+                    );
+                    assert!(
+                        matches!(
+                            applied,
+                            Ok(RelayOperationOutcome::Sync(
+                                SyncPassOutcome::Complete { .. }
+                            ))
+                        ),
+                        "{applied:?}"
+                    );
+                    assert!(offline.take_pending().is_none());
+                    break;
+                }
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
                     if reason == RELAY_IO_PENDING =>
                 {
                     let request = transport.take_pending().unwrap();
                     let response = match &request {
                         RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
+                            reference_has_more: false,
                             ops: Vec::new(),
                             next_cursor: 0,
                             has_more: false,
@@ -999,8 +1230,10 @@ mod deferred_relay_tests {
                             assert!(push.ops.is_empty());
                             probes += 1;
                             RelayIoResponse::Push(PushResponse {
+                                registered_references: Vec::new(),
                                 settlement_refusals: Vec::new(),
                                 hosted_refusals: Vec::new(),
+                                redundant_recoveries: Vec::new(),
                                 accepted: 0,
                                 inserted: 0,
                                 skipped: 0,
@@ -1062,8 +1295,10 @@ mod deferred_relay_tests {
                                         RelayIoRequest::Push(push) => {
                                             assert_eq!(push.ops.len(), 2);
                                             RelayIoResponse::Push(PushResponse {
+                                                registered_references: Vec::new(),
                                                 settlement_refusals: Vec::new(),
                                                 hosted_refusals: Vec::new(),
+                                                redundant_recoveries: Vec::new(),
                                                 accepted: 2,
                                                 inserted: 1,
                                                 skipped: 1,
@@ -1253,6 +1488,8 @@ mod deferred_relay_tests {
     fn completed_pull_page_remains_available_for_replay() {
         let transport = DeferredRelayTransport::default();
         let request = PullRequest {
+            include_work_references: true,
+            reference_after: None,
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1260,6 +1497,9 @@ mod deferred_relay_tests {
             limit: 10,
         };
         let response = PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: Vec::new(),
             next_cursor: 1,
             has_more: false,
@@ -1281,6 +1521,7 @@ mod deferred_relay_tests {
     fn completed_push_batches_release_consumed_request_payloads() {
         let transport = DeferredRelayTransport::default();
         let request = PushRequest {
+            work_references: Vec::new(),
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1303,8 +1544,10 @@ mod deferred_relay_tests {
         transport.complete(
             RelayIoRequest::Push(request.clone()),
             Ok(RelayIoResponse::Push(PushResponse {
+                registered_references: Vec::new(),
                 settlement_refusals: Vec::new(),
                 hosted_refusals: Vec::new(),
+                redundant_recoveries: Vec::new(),
                 accepted: request.ops.len(),
                 inserted: request.ops.len(),
                 skipped: 0,
@@ -1315,8 +1558,10 @@ mod deferred_relay_tests {
         assert_eq!(
             transport.push(request).expect("consume completed push"),
             PushResponse {
+                registered_references: Vec::new(),
                 settlement_refusals: Vec::new(),
                 hosted_refusals: Vec::new(),
+                redundant_recoveries: Vec::new(),
                 accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 skipped: 0,
@@ -1495,6 +1740,8 @@ mod deferred_relay_tests {
     fn deferred_multi_page_pull_schedules_each_http_request_once() {
         let transport = DeferredRelayTransport::default();
         let request = |cursor| PullRequest {
+            include_work_references: true,
+            reference_after: None,
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1513,6 +1760,9 @@ mod deferred_relay_tests {
                     transport.complete(
                         pending,
                         Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
+                            reference_has_more: false,
                             ops: Vec::new(),
                             next_cursor: cursor + 1,
                             has_more: cursor < 3,
@@ -1753,6 +2003,8 @@ mod deferred_relay_tests {
 #[derive(Debug)]
 pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
+    PullFetched(Arc<dohc_engine_sync::PreparedOrdinaryPull>),
+    PullRetry,
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
         writer_cache_changed: bool,
@@ -1869,6 +2121,133 @@ impl ActorHandle {
         .await
     }
 
+    /// A page of the documents the hosted replica holds for released
+    /// retained work; none for a workspace that is not hosted.
+    pub async fn held_documents(
+        &self,
+        workspace_id: String,
+        after_object_id: Option<String>,
+        limit: usize,
+    ) -> Result<Option<dohc_engine_sync::HeldDocumentsPage>, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::list_held_documents(
+                store,
+                &workspace_id,
+                after_object_id.as_deref(),
+                limit,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    /// One held document and what its binding preserves. The actor only
+    /// admits the proof and, once it is done, compares what it read with
+    /// bounded reads; the proof runs on a blocking thread of its own, and
+    /// nothing on the actor waits for it. An answer whose evidence moved
+    /// meanwhile is stale, with nothing preserved, and nothing proves again.
+    ///
+    /// A caller that asks what the workspace's running proof asks, of the
+    /// same state, shares it; any other is busy while that proof's reader is
+    /// open, and so is a new proof past the daemon's limit or while the
+    /// store's WAL presses on held readers. A request busy whatever it asks
+    /// is refused before the actor reads anything. `token`, the caller's own
+    /// cancellation or deadline, ends only its wait. The last caller to leave
+    /// stops the proof, and answers once the proof ended, its reader closed,
+    /// or after twice SQLite's busy timeout. A proof that gave way to
+    /// writes, reached its deadline or found no room in the daemon's proof
+    /// memory answers busy, and one whose answer would never fit answers too
+    /// large. The answer keeps the proof's result charged until the last
+    /// caller drops it.
+    pub async fn held_document(
+        &self,
+        workspace_id: String,
+        object_id: String,
+        token: CancellationToken,
+    ) -> Result<Option<dohc_engine_sync::HeldAnswer>, RuntimeError> {
+        use dohc_engine_collab::live_update_application::HeldProofError;
+        use dohc_engine_sync::HeldProofAdmission;
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if self.held_proofs.refuses(&workspace_id) {
+            return Err(RuntimeError::HeldReadBusy);
+        }
+        let proofs = self.held_proofs.clone();
+        let (admitted_workspace, admitted_object) = (workspace_id.clone(), object_id.clone());
+        let admission = self
+            .run(move |store, _cache| {
+                dohc_engine_sync::admit_held_proof(
+                    store,
+                    &proofs,
+                    &admitted_workspace,
+                    &admitted_object,
+                )
+                .map_err(RuntimeError::from)
+            })
+            .await?;
+        let mut wait = match admission {
+            HeldProofAdmission::Started(run, wait) => {
+                // Nothing awaits the thread: the proof answers its callers,
+                // and an unrun one ends as closed. Its reader opens by the
+                // store's path, so the thread keeps the store's location
+                // until the proof returns, after the actor and every handle.
+                let location = self.location();
+                drop(tokio::task::spawn_blocking(move || {
+                    run.prove(|job| {
+                        let proved =
+                            dohc_engine_sync::prove_held_document(job, &workspace_id, &object_id)
+                                .map_err(Arc::new);
+                        let retained = proved
+                            .as_ref()
+                            .map_or(0, dohc_engine_sync::HeldProof::retained_bytes);
+                        (proved, retained)
+                    });
+                    drop(location);
+                }));
+                wait
+            }
+            HeldProofAdmission::Joined(wait) => wait,
+            HeldProofAdmission::Busy => return Err(RuntimeError::HeldReadBusy),
+            HeldProofAdmission::Closed => return Err(RuntimeError::ActorUnavailable),
+        };
+        let proved = tokio::select! {
+            biased;
+            () = token.cancelled() => None,
+            proved = &mut wait => Some(proved),
+        };
+        let Some(proved) = proved else {
+            let _ = tokio::time::timeout(
+                dohc_engine_collab::live_update_application::HELD_PROOF_CLOSE_BOUND,
+                wait.leave(),
+            )
+            .await;
+            return Err(RuntimeError::Cancelled);
+        };
+        let proved = proved.map_err(|error| match error {
+            HeldProofError::Closed => RuntimeError::ActorUnavailable,
+            HeldProofError::Busy => RuntimeError::HeldReadBusy,
+            HeldProofError::TooLarge => RuntimeError::HeldReadTooLarge,
+            HeldProofError::Panicked => RuntimeError::WorkerPanicked,
+        })?;
+        let proof = match &**proved {
+            Ok(proof) => proof,
+            Err(failure) => return Err(dohc_engine_sync::shared_proof_failure(failure).into()),
+        };
+        // Only the bounded freshness goes to the actor: the proof, however
+        // large, is dropped here, never there.
+        let freshness = proof.freshness().clone();
+        let release = self
+            .run(move |store, _cache| {
+                dohc_engine_sync::check_held_freshness(store, &freshness)
+                    .map_err(RuntimeError::from)
+            })
+            .await?;
+        let released = proof.released(release);
+        Ok(released
+            .map(|inspection| dohc_engine_sync::HeldAnswer::new(inspection, Arc::clone(&proved))))
+    }
+
     pub async fn dismiss_sync_refusal(
         &self,
         workspace_id: String,
@@ -1917,6 +2296,30 @@ impl ActorHandle {
     pub async fn abandon_ordinary_pull(&self, workspace_id: String) -> Result<bool, RuntimeError> {
         self.run(move |store, _cache| {
             match dohc_engine_sync::abandon_ordinary_pull(store, &workspace_id, &NoFaults)? {
+                TxnOutcome::Committed(abandoned) => Ok(abandoned),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
+    pub async fn abandon_prepared_pull(
+        &self,
+        workspace_id: String,
+        page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            if page.apply_began() {
+                return Ok(false);
+            }
+            match store.write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE sync_identity SET ordinary_pull_token=?3 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
+                    rusqlite::params![workspace_id, page.pull_token(), page.previous_pull_token()],
+                )
+                .map(|changed| changed > 0)
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })? {
                 TxnOutcome::Committed(abandoned) => Ok(abandoned),
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
@@ -1988,6 +2391,89 @@ impl ActorHandle {
         .await
     }
 
+    /// [`Self::relay`], answered by `transport` instead of a relay over HTTP.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn relay_through<T>(
+        &self,
+        transport: Arc<T>,
+        operation: RelayOperation,
+        token: CancellationToken,
+    ) -> Result<RelayOperationOutcome, RuntimeError>
+    where
+        T: RelayTransport + Send + Sync + 'static,
+    {
+        Box::pin(self.relay_with_io(
+            transport.publishes_native_settlements(),
+            operation,
+            LeaseRegistry::new(),
+            token,
+            None,
+            move |request, _token| {
+                let transport = Arc::clone(&transport);
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        execute_blocking_request(&*transport, request)
+                    })
+                    .await
+                    .map_err(|_| relay_io_aborted())?
+                }
+            },
+        ))
+        .await
+    }
+
+    #[cfg(test)]
+    async fn pull_with_io_for_test<F, Fut>(
+        &self,
+        native_settlements: bool,
+        (workspace_id, now_ms): (String, i64),
+        leases: LeaseRegistry,
+        token: CancellationToken,
+        reservation: Option<Arc<dyn Send + Sync>>,
+        execute_io: F,
+    ) -> Result<RelayOperationOutcome, RuntimeError>
+    where
+        F: Fn(RelayIoRequest, CancellationToken) -> Fut,
+        Fut: std::future::Future<Output = Result<RelayIoResponse, RelayError>>,
+    {
+        loop {
+            let fetched = self
+                .relay_with_io(
+                    native_settlements,
+                    RelayOperation::FetchPull {
+                        workspace_id: workspace_id.clone(),
+                        settle_repairs: false,
+                    },
+                    leases.clone(),
+                    token.clone(),
+                    reservation.clone(),
+                    &execute_io,
+                )
+                .await?;
+            let RelayOperationOutcome::PullFetched(page) = fetched else {
+                return Err(RuntimeError::Relay(RelayError::InvalidResponse));
+            };
+            let result = self
+                .relay_with_io(
+                    native_settlements,
+                    RelayOperation::ApplyPull {
+                        workspace_id: workspace_id.clone(),
+                        page,
+                        now_ms,
+                    },
+                    leases.clone(),
+                    token.clone(),
+                    reservation.clone(),
+                    &execute_io,
+                )
+                .await?;
+            if !matches!(result, RelayOperationOutcome::PullRetry) {
+                return Ok(result);
+            }
+        }
+    }
+
     async fn relay_with_io<F, Fut>(
         &self,
         native_settlements: bool,
@@ -2005,98 +2491,168 @@ impl ActorHandle {
             native_settlements,
             ..DeferredRelayTransport::default()
         };
-        // Once the relay may have stored something, the operation runs to its
-        // end so the request answers with what landed. Until then each step
-        // and each effect-free read stops on cancellation.
-        loop {
-            if token.is_cancelled() {
-                return Err(RuntimeError::Cancelled);
-            }
-            let queued_transport = transport.clone();
-            let queued_operation = operation.clone();
-            let queued_leases = leases.clone();
-            let queued_token = token.clone();
-            let queued_reservation = reservation.clone();
-            let queued_claims = self.claims.clone();
-            let outcome = self
-                .run_with_registrations(move |store, cache, registrations| {
-                    let _reservation = queued_reservation;
-                    let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
-                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
-                    let outcome = if queued_token.is_cancelled() {
-                        Err(RuntimeError::Cancelled)
-                    } else {
-                        execute_relay_operation(
-                            store,
-                            cache,
-                            queued_transport,
-                            queued_operation,
-                            &queued_leases,
-                            &queued_claims,
-                            registrations,
-                        )
-                    };
-                    // Push handles enrollment resets below. A pull that only
-                    // redelivers durable echoes leaves the writer cache valid;
-                    // applied or materialized work still invalidates it.
-                    let pull_changed = match &outcome {
-                        Ok(RelayOperationOutcome::Sync(
-                            SyncPassOutcome::Complete {
-                                applied,
-                                changed_paths,
+        let _pull = match &operation {
+            RelayOperation::FetchPull { .. }
+            | RelayOperation::ApplyPull { .. }
+            | RelayOperation::PullHosted { .. } => Some(self.pulls.acquire(&token).await?),
+            _ => None,
+        };
+        let fetching_workspace = match &operation {
+            RelayOperation::FetchPull { workspace_id, .. } => Some(workspace_id.clone()),
+            _ => None,
+        };
+        let answer = async {
+            // Each step and each effect-free read stops on cancellation until a
+            // request that may change the relay goes out. From then on the operation
+            // runs to its end so it answers with what landed. A fetch's only such
+            // request is its repair probe, which stores nothing, so only the probe
+            // runs to its answer and the fetch stays cancellable.
+            let mut preparation_attempt = 0;
+            loop {
+                if token.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
+                let queued_transport = transport.clone();
+                let queued_operation = operation.clone();
+                let queued_leases = leases.clone();
+                let queued_token = token.clone();
+                let queued_reservation = reservation.clone();
+                let queued_claims = self.claims.clone();
+                let outcome = self
+                    .run_with_registrations(move |store, cache, registrations| {
+                        let _reservation = queued_reservation;
+                        let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                        let is_pull = matches!(&queued_operation, RelayOperation::ApplyPull { .. });
+                        let is_fetch = matches!(
+                            &queued_operation,
+                            RelayOperation::FetchPull {
+                                settle_repairs: false,
                                 ..
                             }
-                            | SyncPassOutcome::CrashedAfterApply {
-                                applied,
-                                changed_paths,
+                        );
+                        let outcome = if queued_token.is_cancelled() {
+                            Err(RuntimeError::Cancelled)
+                        } else {
+                            execute_relay_operation(
+                                store,
+                                cache,
+                                queued_transport,
+                                queued_operation,
+                                &queued_leases,
+                                &queued_claims,
+                                registrations,
+                            )
+                        };
+                        // Push handles enrollment resets below. A pull that only
+                        // redelivers durable echoes leaves the writer cache valid;
+                        // applied or materialized work still invalidates it.
+                        let pull_changed = match &outcome {
+                            Ok(RelayOperationOutcome::Sync(
+                                SyncPassOutcome::Complete {
+                                    applied,
+                                    changed_paths,
+                                    ..
+                                }
+                                | SyncPassOutcome::CrashedAfterApply {
+                                    applied,
+                                    changed_paths,
+                                    ..
+                                },
+                            )) => *applied > 0 || !changed_paths.is_empty(),
+                            Err(RuntimeError::Relay(RelayError::Local(reason)))
+                                if reason == RELAY_IO_PENDING =>
+                            {
+                                false
+                            }
+                            _ => true,
+                        };
+                        let unchanged_commit = matches!(
+                            &outcome,
+                            Ok(RelayOperationOutcome::CursorCommitted {
+                                writer_cache_changed: false,
                                 ..
-                            },
-                        )) => *applied > 0 || !changed_paths.is_empty(),
-                        Err(RuntimeError::Relay(RelayError::Local(reason)))
-                            if reason == RELAY_IO_PENDING =>
+                            })
+                        );
+                        if !is_fetch && !is_push && !unchanged_commit && (!is_pull || pull_changed)
                         {
-                            false
+                            cache.clear();
                         }
-                        _ => true,
-                    };
-                    let unchanged_commit = matches!(
-                        &outcome,
-                        Ok(RelayOperationOutcome::CursorCommitted {
-                            writer_cache_changed: false,
-                            ..
-                        })
-                    );
-                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
-                        cache.clear();
+                        outcome
+                    })
+                    .await;
+                match outcome {
+                    Err(RuntimeError::Relay(RelayError::Local(reason)))
+                        if reason == RELAY_IO_PENDING =>
+                    {
+                        if matches!(&operation, RelayOperation::ApplyPull { .. }) {
+                            return Err(RuntimeError::Relay(RelayError::InvalidResponse));
+                        }
+                        let request = transport
+                            .take_pending()
+                            .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
+                        let io_token = if request.changes_relay() {
+                            let uncancellable = CancellationToken::new();
+                            if fetching_workspace.is_none() {
+                                token = uncancellable.clone();
+                            }
+                            uncancellable
+                        } else {
+                            token.clone()
+                        };
+                        let io_request = request.clone();
+                        let result = tokio::select! {
+                            biased;
+                            () = io_token.cancelled() => return Err(RuntimeError::Cancelled),
+                            result = execute_io(io_request, io_token.clone()) => result,
+                        };
+                        transport.complete(request, result);
                     }
-                    outcome
-                })
-                .await;
-            match outcome {
-                Err(RuntimeError::Relay(RelayError::Local(reason)))
-                    if reason == RELAY_IO_PENDING =>
-                {
-                    let request = transport
-                        .take_pending()
-                        .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
-                    if request.changes_relay() {
-                        token = CancellationToken::new();
+                    // The attempt's transaction ended and the actor is free. The
+                    // store's worker validates; once it completes, a fresh
+                    // attempt rereads every fact and goes on from the progress
+                    // the transport kept.
+                    Err(RuntimeError::Relay(RelayError::ValidationPending(pending))) => {
+                        tokio::select! {
+                            biased;
+                            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                            validated = pending.validate() => validated.map_err(validation_failed)?,
+                        }
                     }
-                    let io_request = request.clone();
-                    let result = tokio::select! {
-                        biased;
-                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                        result = execute_io(io_request, token.clone()) => result,
-                    };
-                    transport.complete(request, result);
+                    Ok(mut outcome) => {
+                        transport.apply_progress(&mut outcome);
+                        return Ok(outcome);
+                    }
+                    Err(error) => {
+                        let result: Result<(), RuntimeError> = Err(error);
+                        if super::wait_for_reader(
+                            &result,
+                            preparation_attempt,
+                            self.markdown_recovery.clone(),
+                        )
+                        .await
+                        {
+                            preparation_attempt += 1;
+                            continue;
+                        }
+                        return result.map(|()| unreachable!());
+                    }
                 }
-                Ok(mut outcome) => {
-                    transport.apply_progress(&mut outcome);
-                    return Ok(outcome);
-                }
-                Err(error) => return Err(error),
             }
         }
+        .await;
+        if answer.is_err()
+            && let Some(workspace_id) = fetching_workspace
+        {
+            self.run(move |store, _cache| {
+                let continuation = transport.continuation.clone();
+                RelaySyncClient::resuming(transport, continuation)
+                    .abandon_fetch_pull(store, &workspace_id, &NoFaults)
+                    .map(|_| ())
+                    .map_err(RuntimeError::from)
+            })
+            .await?;
+        }
+        answer
     }
 }
 
@@ -2171,6 +2727,23 @@ fn build_debug_http_transport(
     }
 }
 
+/// A validation that ended without a result fails its request, which never
+/// validates any other way. A store that closed is unavailable.
+pub(super) fn validation_failed(
+    error: dohc_engine_collab::live_update_application::ValidationError,
+) -> RuntimeError {
+    use dohc_engine_collab::live_update_application::ValidationError;
+    match error {
+        ValidationError::Closed => RuntimeError::ActorUnavailable,
+        ValidationError::Failed => {
+            RuntimeError::Relay(RelayError::Local("released-tails-unvalidated".to_owned()))
+        }
+        ValidationError::Uncommitted => {
+            RuntimeError::Relay(RelayError::Local("released-tails-uncommitted".to_owned()))
+        }
+    }
+}
+
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
 const MAX_CONCURRENT_COORDINATE_LOOKUPS: usize = 8;
 const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
@@ -2204,7 +2777,7 @@ async fn execute_http_request(
         .map(RelayIoResponse::DownloadBlobs);
     }
 
-    tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
+    tokio::task::spawn_blocking(move || execute_blocking_request(&*transport, request))
         .await
         .map_err(|_| relay_io_aborted())?
 }
@@ -2350,8 +2923,8 @@ where
     Ok(BlobDownloadBatchResponse { results })
 }
 
-fn execute_blocking_http_request(
-    transport: &HttpRelayTransport,
+fn execute_blocking_request<T: RelayTransport + ?Sized>(
+    transport: &T,
     request: RelayIoRequest,
 ) -> Result<RelayIoResponse, RelayError> {
     match request {
@@ -2363,7 +2936,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::PullHosted(request) => transport
             .pull_hosted(request)
             .map(RelayIoResponse::PullHosted),
-        RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
+        RelayIoRequest::LookupCoordinates(requests) => transport
+            .lookup_log_coordinates(requests)
+            .map(RelayIoResponse::LookupCoordinates),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
             .claim_workspace(request)
@@ -2380,7 +2955,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),
-        RelayIoRequest::DownloadBlobs(_) => Err(RelayError::InvalidResponse),
+        RelayIoRequest::DownloadBlobs(request) => transport
+            .download_blobs(request)
+            .map(RelayIoResponse::DownloadBlobs),
         RelayIoRequest::UploadKeyEnvelope(request) => transport
             .upload_key_envelope(request)
             .map(RelayIoResponse::UploadKeyEnvelope),
@@ -2423,9 +3000,21 @@ fn execute_relay_operation(
     claims: &ClaimAnnouncer,
     registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
-    let client = RelaySyncClient::new(transport);
+    let continuation = transport.continuation.clone();
+    let client = RelaySyncClient::resuming(transport, continuation);
     let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
+    if outcome.is_err()
+        && let Some(pending) = client.take_pending_preparation()
+    {
+        use dohc_engine_collab::markdown_write_safety::PendingPreparation;
+        return Err(match pending {
+            PendingPreparation::Reader(pending) => SyncError::MarkdownReaderPending(pending).into(),
+            PendingPreparation::Witness { key, path, pending } => {
+                SyncError::MarkdownWitnessCheckPending { key, path, pending }.into()
+            }
+        });
+    }
     outcome
 }
 
@@ -2441,7 +3030,8 @@ fn run_relay_operation(
     if store.is_passive()
         && !matches!(
             &operation,
-            RelayOperation::Pull { .. }
+            RelayOperation::FetchPull { .. }
+                | RelayOperation::ApplyPull { .. }
                 | RelayOperation::CommitCursor { .. }
                 | RelayOperation::AdoptJoinIdentity { .. }
         )
@@ -2488,13 +3078,33 @@ fn run_relay_operation(
                 .map(RelayOperationOutcome::Sync)
                 .map_err(RuntimeError::from)
         }
-        RelayOperation::Pull {
+        RelayOperation::FetchPull {
             workspace_id,
+            settle_repairs,
+        } => (if settle_repairs {
+            client.fetch_pull_settling_repairs(store, &workspace_id, &NoFaults)
+        } else {
+            client.fetch_pull(store, &workspace_id, &NoFaults)
+        })
+        .map(|page| RelayOperationOutcome::PullFetched(Arc::new(page)))
+        .map_err(RuntimeError::from),
+        RelayOperation::ApplyPull {
+            workspace_id,
+            page,
             now_ms,
-        } => client
-            .pull_chat_workspace(store, doc_cache, &workspace_id, &NoFaults, leases, now_ms)
-            .map(RelayOperationOutcome::Sync)
-            .map_err(RuntimeError::from),
+        } => match client.apply_pull(
+            store,
+            doc_cache,
+            &workspace_id,
+            &page,
+            &NoFaults,
+            leases,
+            now_ms,
+        ) {
+            Ok(outcome) => Ok(RelayOperationOutcome::Sync(outcome)),
+            Err(RelayError::RepairPending) => Ok(RelayOperationOutcome::PullRetry),
+            Err(error) => Err(RuntimeError::from(error)),
+        },
         RelayOperation::CommitCursor {
             workspace_id,
             cursor,
@@ -2767,10 +3377,17 @@ fn run_relay_operation(
         RelayOperation::PullHosted {
             workspace_id,
             root,
+            relay_namespace,
             now_ms,
         } => {
-            let pass =
-                client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
+            let pass = client.pull_hosted_workspace(
+                store,
+                doc_cache,
+                &workspace_id,
+                &relay_namespace,
+                &NoFaults,
+                leases,
+            )?;
             // A pass without a cursor adopted a new scope.
             if pass.pending_cursor.is_none() {
                 park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
@@ -2786,7 +3403,13 @@ fn run_relay_operation(
             cursor,
             root,
             now_ms,
-        } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+        } => match client.commit_hosted_cursor(
+            store,
+            &workspace_id,
+            &cursor,
+            &doc_cache.released_tails(store),
+            &NoFaults,
+        )? {
             TxnOutcome::Committed(commit) => {
                 let retirement =
                     park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
@@ -3399,9 +4022,9 @@ mod hosted_refusal_tests {
             access: ShareAccess::Edit,
         };
         let operations = [
-            RelayOperation::Pull {
+            RelayOperation::FetchPull {
                 workspace_id: ws(),
-                now_ms: 2_000,
+                settle_repairs: false,
             },
             RelayOperation::CommitCursor {
                 workspace_id: ws(),

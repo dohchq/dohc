@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLayoutEffect, useState } from "react";
@@ -13,6 +13,7 @@ import {
   setFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter-map";
 import { PropertiesPanel } from "./PropertiesPanel";
+import { parseFrontmatter, PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import {
   EDGE_DISPLAY,
   EDGE_FRONTMATTER,
@@ -21,13 +22,8 @@ import {
   recordedYDoc,
 } from "./markdown/frontmatter.edge-fixture";
 
-// A text input shows its value on one line.
 function propertyValue(key: string): string {
   return (screen.getByLabelText(`Property ${key} value`) as HTMLInputElement).value;
-}
-
-function oneLine(text: string): string {
-  return text.replaceAll("\n", "");
 }
 
 // The properties each change touches. A change inside a shared value reports
@@ -78,11 +74,11 @@ function ForwardsOnCommit(props: { from: Y.Doc; to: Y.Doc }) {
   return null;
 }
 
-function ControlledPropertiesPanel(props: { initialBody: string }) {
+function ControlledPropertiesPanel(props: { initialBody: string; onShowSource?: () => void }) {
   const [body, setBody] = useState(props.initialBody);
   return (
     <>
-      <PropertiesPanel body={body} onChange={setBody} />
+      <PropertiesPanel body={body} onChange={setBody} onShowSource={props.onShowSource} />
       <output data-testid="current-body">{body}</output>
     </>
   );
@@ -102,10 +98,180 @@ describe("PropertiesPanel", () => {
     try {
       render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={onChange} />);
       await user.click(screen.getByLabelText("Remove property a"));
-      expect(screen.getByTestId("properties-locked").getAttribute("title")).toContain("without rewriting the others");
+      expect(screen.getByText("Properties are read-only").title).toBe(PROPERTIES_READ_ONLY_REASON);
       expect(onChange).not.toHaveBeenCalled();
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(yDocToMarkdown(doc)).toBe(initialBody);
+    } finally { doc.destroy(); }
+  });
+
+  it.each([false, true])("keeps a held name on its pill when removing a pill above it is refused (shared: %s)", async (shared) => {
+    const user = userEvent.setup();
+    const initialBody = "---\na: &v .nan\nb: {nested: [*v]}\nc: x\nowner: y\n---\n\nBody";
+    const doc = markdownToYDoc(initialBody);
+    try {
+      render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={vi.fn()} />);
+      await user.clear(screen.getByLabelText("Property 3 name"));
+      await user.type(screen.getByLabelText("Property 3 name"), "owner");
+      await user.click(screen.getByLabelText("Remove property a"));
+
+      expect(screen.getByTestId("properties-locked")).toBeTruthy();
+      expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "owner");
+      expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    } finally { doc.destroy(); }
+  });
+
+  it.each([false, true])("keeps a new property in its place when the one after it saves (shared: %s)", async (shared) => {
+    const user = userEvent.setup();
+    const initialBody = "---\nowner: Sam\nstatus: draft\n---\n\nBody\n";
+    const doc = markdownToYDoc(initialBody);
+    try {
+      render(shared ? <PropertiesPanel ydoc={doc} /> : <ControlledPropertiesPanel initialBody={initialBody} />);
+      await user.click(screen.getByTestId("property-add"));
+      await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+      await user.click(screen.getByTestId("property-add"));
+      await user.keyboard("lead");
+
+      const saved = shared
+        ? frontmatterMapValues(doc.getMap("frontmatter"))
+        : parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta;
+      expect(saved).toEqual({ owner: "Sam", status: "draft", lead: "" });
+      expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
+    } finally { doc.destroy(); }
+  });
+
+  it("keeps focus on the edited property when another device removes a row above it", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\nowner: Sam\nstatus: draft\npriority: low\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.click(screen.getByLabelText("Property status value"));
+
+      act(() => patchFrontmatter(doc, new Map(), ["owner"]));
+
+      expect(document.activeElement).toBe(screen.getByLabelText("Property status value"));
+      await user.keyboard("!");
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "draft!", priority: "low" });
+    } finally { doc.destroy(); }
+  });
+
+  it("keeps a remotely added property when an edit lands before the rows refresh", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody\n");
+    // Edit after the panel reads the new source, before its effect refreshes
+    // the rows the person was editing. No timer or scheduler race is needed.
+    function EditsOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property status value"), { target: { value: "ready" } });
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<><PropertiesPanel ydoc={doc} /></>);
+
+      act(() => {
+        setFrontmatterValue(doc, "priority", "high");
+        rerender(<><PropertiesPanel ydoc={doc} /><EditsOnCommit /></>);
+      });
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "ready", priority: "high" });
+    } finally { doc.destroy(); }
+  });
+
+  it.each([true, false])("keeps another device's new value when a rename lands before the rows refresh (live: %s)", (live) => {
+    const markdown = "---\nstatus: draft\n---\n\nBody\n";
+    const doc = markdownToYDoc(markdown);
+    const onChange = vi.fn();
+    const panel = (body: string) => (live ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={onChange} />);
+    // Rename after the panel reads the new value, before its effect refreshes
+    // the rows, which still hold the value they read.
+    function RenamesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "phase" } });
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<>{panel(markdown)}</>);
+
+      act(() => {
+        setFrontmatterValue(doc, "status", "ready");
+        rerender(<>{panel(markdown.replace("draft", "ready"))}<RenamesOnCommit /></>);
+      });
+
+      const saved = live ? frontmatterMapValues(doc.getMap("frontmatter")) : parseFrontmatter(onChange.mock.lastCall?.[0] ?? "").meta;
+      expect(saved).toEqual({ phase: "ready" });
+    } finally { doc.destroy(); }
+  });
+
+  it("preserves an empty-named property when another local property is edited", () => {
+    render(<ControlledPropertiesPanel initialBody={'---\n"": draft\nstatus: pending\n---\n\nBody\n'} />);
+
+    fireEvent.change(screen.getByLabelText("Property status value"), { target: { value: "ready" } });
+
+    expect(parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta).toEqual({ "": "draft", status: "ready" });
+  });
+
+  it("keeps a deferred property rename when the note changes from outside", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <PropertiesPanel body={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onChange={onChange} />,
+    );
+    const name = screen.getByLabelText("Property 1 name");
+    fireEvent.change(name, { target: { value: "own" } });
+    expect(name).toHaveProperty("value", "own");
+    expect(onChange).not.toHaveBeenCalled();
+
+    rerender(<PropertiesPanel body={"---\nstatus: draft\nowner: Ada\n---\n\nBody\n"} onChange={onChange} />);
+
+    expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "own");
+    expect(propertyValue("owner")).toBe("Ada");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps a property rename and its focus when the next letter lands before the rows read an outside change", () => {
+    const onChange = vi.fn();
+    const panel = (body: string) => <PropertiesPanel body={body} onChange={onChange} />;
+    // Type after the panel reads the changed note, before its effect refreshes
+    // the rows. The note doesn't come back with the save yet.
+    function TypesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "ownx" } });
+      }, []);
+      return null;
+    }
+    const { rerender } = render(<>{panel("---\nstatus: draft\nowner: Sam\n---\n\nBody\n")}</>);
+    const name = screen.getByLabelText("Property 1 name");
+    name.focus();
+    // A prefix of owner waits instead of saving.
+    fireEvent.change(name, { target: { value: "own" } });
+
+    act(() => {
+      rerender(<>{panel("---\nstatus: draft\nowner: Ada\n---\n\nBody\n")}<TypesOnCommit /></>);
+    });
+
+    expect(parseFrontmatter(onChange.mock.lastCall?.[0] ?? "").meta).toEqual({ ownx: "draft", owner: "Ada" });
+    expect(screen.getByLabelText("Property 1 name")).toBe(name);
+    expect(name).toHaveProperty("value", "ownx");
+    expect(document.activeElement).toBe(name);
+  });
+
+  it("keeps a new property's value when another device adds the same name", () => {
+    const doc = markdownToYDoc("---\nowner: Sam\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      fireEvent.click(screen.getByTestId("property-add"));
+      fireEvent.change(screen.getByLabelText("Property 2 value"), { target: { value: "Ada" } });
+      // A prefix of owner waits instead of saving the new property.
+      fireEvent.change(screen.getByLabelText("Property 2 name"), { target: { value: "own" } });
+      expect(propertyValue("own")).toBe("Ada");
+      expect(doc.getMap("frontmatter").has("own")).toBe(false);
+
+      act(() => setFrontmatterValue(doc, "own", "remote"));
+      // Resolve the clash by giving the draft a free name. Its typed value
+      // must still be available, even if a duplicate flag hid the value field.
+      fireEvent.change(screen.getByLabelText("Property 2 name"), { target: { value: "lead" } });
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", own: "remote", lead: "Ada" });
     } finally { doc.destroy(); }
   });
 
@@ -335,11 +501,33 @@ describe("PropertiesPanel", () => {
       const doc = markdownToYDoc(body);
       try {
         render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={vi.fn()} />);
-        expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+        expect(screen.getByTestId("properties-locked").textContent).toBe("Properties are read-only");
         expect(screen.getAllByTestId("property-row")).toHaveLength(2);
         expect(screen.queryByTestId("property-add")).toBeNull();
         expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
       } finally { doc.destroy(); }
+    });
+
+    it("says read-only properties in the warning tone and offers to open the file externally", () => {
+      render(
+        <PropertiesPanel
+          body={"---\n{status: draft, owner: Sam}\n---\n\nBody"}
+          onChange={vi.fn()}
+          file={{ workspaceId: "ws", path: "plan.md" }}
+        />,
+      );
+      const row = screen.getByTestId("properties-locked");
+      const label = screen.getByText("Properties are read-only");
+      expect(label.title).toBe(PROPERTIES_READ_ONLY_REASON);
+      expect(label.className).toContain("text-warning");
+      expect(label.className).not.toContain("text-danger");
+      const lock = row.querySelector("svg.lucide-lock");
+      expect(lock?.getAttribute("aria-hidden")).toBe("true");
+      expect(lock?.getAttribute("width")).toBe("12");
+      const open = screen.getByRole("button", { name: "Open externally" });
+      expect(row.contains(open)).toBe(true);
+      expect(open.className).toContain("text-muted");
+      expect(screen.queryByText("Show in Explorer")).toBeNull();
     });
 
     it("keeps a long value whole in its tooltip", () => {
@@ -366,9 +554,11 @@ describe("PropertiesPanel", () => {
 
       await user.clear(screen.getByLabelText("Property 2 name"));
       await user.type(screen.getByLabelText("Property 2 name"), "owner");
-      const rows = screen.getAllByTestId("property-row");
-      expect(screen.getAllByTestId("property-duplicate").map((flag) => flag.closest('[data-testid="property-row"]'))).toEqual(rows);
-      expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+      const flag = screen.getByTestId("property-duplicate");
+      expect(flag.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+      expect(flag.title).toBe("This name isn't saved. Another property has it.");
+      expect(screen.getByLabelText("Property 2 name")).toHaveProperty("value", "owner");
+      expect(propertyValue("owner")).toBe("Sam");
       expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: Draft\n---\n");
 
       await user.clear(screen.getByLabelText("Property 2 name"));
@@ -460,7 +650,7 @@ describe("PropertiesPanel", () => {
     await user.clear(screen.getByDisplayValue("status"));
     await user.type(screen.getByLabelText("Property 1 name"), "owner");
 
-    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(1);
     expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
 
     await user.clear(screen.getAllByTestId("property-key")[0]);
@@ -470,6 +660,155 @@ describe("PropertiesPanel", () => {
     expect(screen.getByTestId("current-body").textContent).toBe(
       "---\nid: note-1\ntitle: Plan\nphase: draft\nowner: ice\n---\n\n# Plan\n",
     );
+  });
+
+  it("keeps saving other properties while a name another property has is held", async () => {
+    const user = userEvent.setup();
+    const initialBody = "---\nstatus: draft\nowner: Sam\ntags: [kyoto]\n---\n\nBody\n";
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    await user.type(screen.getByLabelText("Property owner value"), "a");
+    await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+    expect(screen.getByTestId("current-body").textContent).toBe(
+      "---\nstatus: draft\nowner: Sama\ntags:\n  - kyoto\n  - osaka\n---\n\nBody\n",
+    );
+    expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "owner");
+    expect(screen.getAllByTestId("property-duplicate")).toHaveLength(1);
+
+    await user.type(screen.getByLabelText("Property 1 name"), "2");
+
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.getByTestId("current-body").textContent).toBe(
+      "---\nowner2: draft\nowner: Sama\ntags:\n  - kyoto\n  - osaka\n---\n\nBody\n",
+    );
+  });
+
+  it("shows a held name's property as saved once no other property has the name", async () => {
+    const user = userEvent.setup();
+    const initialBody = "---\nstatus: draft\nowner: Sam\n---\n\nBody\n";
+    render(<ControlledPropertiesPanel initialBody={initialBody} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    await user.clear(screen.getByLabelText("Property 2 name"));
+    await user.type(screen.getByLabelText("Property 2 name"), "lead");
+
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "status");
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nlead: Sam\n---\n\nBody\n");
+  });
+
+  it("flags both names and keeps saving other properties when the file holds a name in two cases", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nOwner: Ada\nstatus: draft\n---\n\nBody\n"} />);
+
+    expect(screen.getAllByTestId("property-duplicate").map((flag) => flag.title)).toEqual([
+      "Use a unique property name.",
+      "Use a unique property name.",
+    ]);
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nOwner: Ada\nstatus: draft!\n---\n\nBody\n");
+  });
+
+  it("keeps both of two names that differ only by spaces inside quotes", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={'---\nowner: Sam\n" owner ": Ada\nstatus: draft\n---\n\nBody\n'} />);
+
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByTestId("current-body").textContent).toBe('---\nowner: Sam\n" owner ": Ada\nstatus: draft!\n---\n\nBody\n');
+  });
+
+  it("holds a name a property with a cleared name still saves under, so neither value is lost", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\na: one\nb: two\n---\n\nBody\n"} onChange={onChange} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.clear(screen.getByLabelText("Property 2 name"));
+    await user.type(screen.getByLabelText("Property 2 name"), "a");
+
+    const flag = screen.getByTestId("property-duplicate");
+    expect(flag.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+    expect(onChange.mock.calls.filter(([written]) => !String(written).includes("a: one\nb: two\n"))).toEqual([]);
+  });
+
+  it("keeps a held name on its own pill when a pill before it is removed", async () => {
+    const user = userEvent.setup();
+    render(<PropertiesPanel body={"---\nowner: Sam\n---\n\nBody\n"} onChange={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "owner");
+    await user.click(screen.getByTestId("property-add"));
+    await user.click(screen.getByLabelText("Remove property 2"));
+
+    expect(screen.getAllByTestId("property-key").map((input) => (input as HTMLInputElement).value)).toEqual(["owner", "owner", ""]);
+    const flag = screen.getByTestId("property-duplicate");
+    expect(flag.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+  });
+
+  it("drops a held name with its pill, so it doesn't move to the next new pill", async () => {
+    const user = userEvent.setup();
+    render(<PropertiesPanel body={"---\nowner: Sam\n---\n\nBody\n"} onChange={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 2 name"), "owner");
+    await user.click(screen.getByTestId("property-add"));
+    await user.click(screen.getByLabelText("Remove property 2"));
+
+    expect(screen.getAllByTestId("property-key").map((input) => (input as HTMLInputElement).value)).toEqual(["owner", ""]);
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+  });
+
+  it("keeps a new property held for its name, with its value, when another property saves", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: draft\n---\n\nBody\n"} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+    await user.type(screen.getByLabelText("Property 3 name"), "owner");
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: draft!\n---\n\nBody\n");
+    expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+
+    await user.clear(screen.getByLabelText("Property 3 name"));
+    await user.type(screen.getByLabelText("Property 3 name"), "lead");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: draft!\nlead: Ada\n---\n\nBody\n");
+  });
+
+  it("keeps a new property with no name, with its value, until it has one", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: draft\n---\n\nBody\n"} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
+
+    await user.type(screen.getByLabelText("Property 3 name"), "lead");
+
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: draft!\nlead: Ada\n---\n\nBody\n");
+  });
+
+  it("keeps a new property's name still being typed when another property saves", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: draft\n---\n\nBody\n"} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "own");
+    await user.type(screen.getByLabelText("Property status value"), "!");
+
+    expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "own");
+    expect(parseFrontmatter(screen.getByTestId("current-body").textContent ?? "").meta).toEqual({ owner: "Sam", status: "draft!", own: "" });
   });
 
   it.each([
@@ -482,7 +821,7 @@ describe("PropertiesPanel", () => {
     const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
     render(<ControlledPropertiesPanel initialBody={initialBody} />);
 
-    expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+    expect(screen.getByTestId("properties-locked").textContent).toBe("Properties are read-only");
     await user.type(screen.getByLabelText("Property status value"), "x");
     // A locked block offers no + and no ×, which could do nothing.
     expect(screen.queryByTestId("property-add")).toBeNull();
@@ -596,7 +935,7 @@ describe("PropertiesPanel", () => {
       try {
         render(<PropertiesPanel ydoc={doc} />);
         await rename(user, "budget", "wifi");
-        expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(2);
+        expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(1);
         await user.clear(screen.getByLabelText("Property 1 name"));
         await user.type(screen.getByLabelText("Property 1 name"), "title");
         expect(screen.getByTestId("property-reserved")).toBeTruthy();
@@ -787,7 +1126,7 @@ describe("PropertiesPanel", () => {
     }
   });
 
-  it("shows shared-type frontmatter as YAML and edits only the changed property", async () => {
+  it("shows shared-type frontmatter as one line of YAML and edits only the changed property", async () => {
     const user = userEvent.setup();
     const doc = receivedYDoc(EDGE_MARKDOWN);
     const frontmatter = doc.getMap("frontmatter");
@@ -802,7 +1141,7 @@ describe("PropertiesPanel", () => {
     try {
       render(<PropertiesPanel ydoc={doc} />);
       for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
-        expect(propertyValue(key), key).toBe(oneLine(text));
+        expect(propertyValue(key), key).toBe(text);
       }
 
       await user.clear(screen.getByLabelText("Property status value"));
@@ -837,7 +1176,7 @@ describe("PropertiesPanel", () => {
           <ForwardsOnCommit from={replica} to={doc} />
         </>,
       );
-      expect(propertyValue("settings")).toBe(oneLine("constructor: kept\npinned: true"));
+      expect(propertyValue("settings")).toBe("{constructor: kept, pinned: true}");
 
       replicaSettings.set("note", "later");
       act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
@@ -883,13 +1222,268 @@ describe("PropertiesPanel", () => {
     render(<PropertiesPanel body={body} onChange={onChange} />);
     expect(propertyValue("__proto__")).toBe("top-proto");
     for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
-      expect(propertyValue(key), key).toBe(oneLine(text));
+      expect(propertyValue(key), key).toBe(text);
     }
 
     await user.clear(screen.getByLabelText("Property status value"));
     await user.type(screen.getByLabelText("Property status value"), "ready");
 
     expect(onChange).toHaveBeenLastCalledWith(body.replace("status: draft", "status: ready"));
+  });
+
+  it("saves a list's items as you type, and shows the text as typed until you leave it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags:\n  - kyoto\n  - food\nstatus: draft\n---\n\nBody\n";
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+    expect(propertyValue("tags")).toBe("kyoto, food");
+
+    await user.type(input, ", ");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(propertyValue("tags")).toBe("kyoto, food, ");
+
+    await user.type(input, "ramen ,");
+    expect(onChange).toHaveBeenLastCalledWith(body.replace("  - food\n", "  - food\n  - ramen\n"));
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen ,");
+    await user.tab();
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen");
+  });
+
+  it("keeps the typed list text when the window loses focus with the field still focused", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.type(input, ", ");
+    fireEvent.blur(input);
+    expect(document.activeElement).toBe(input);
+    expect(propertyValue("tags")).toBe("kyoto, food, ");
+    await user.type(input, "nara");
+
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - nara\n---\n\nBody\n");
+  });
+
+  it("writes each list item as text, trimmed and without blank items", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags:\n  - kyoto\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.clear(input);
+    await user.type(input, " 2026,yes , null,, ~, 1.0, ramen ,");
+
+    const written = onChange.mock.lastCall?.[0] as string;
+    expect(written).toBe(
+      "---\ntags:\n  - '2026'\n  - yes\n  - 'null'\n  - '~'\n  - '1.0'\n  - ramen\n---\n\nBody\n",
+    );
+    expect(parseFrontmatter(written).meta.tags).toEqual(["2026", "yes", "null", "~", "1.0", "ramen"]);
+  });
+
+  it("writes nothing when a list edit leaves the same items, so the list stays as written", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
+
+    await user.type(screen.getByLabelText("Property tags value"), " ,, ");
+    await user.tab();
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(propertyValue("tags")).toBe("kyoto, food");
+  });
+
+  it("saves an empty list when an edit leaves no items", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags:\n  - kyoto\nstatus: draft\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.clear(input);
+    await user.type(input, " , ");
+
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("---\ntags: []\nstatus: draft\n---\n\nBody\n");
+  });
+
+  it("saves a live document's list as you type, and writes nothing when the items stay the same", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags:\n  - kyoto\n  - food\nstatus: draft\n---\n\nBody\n");
+    const frontmatter = doc.getMap("frontmatter");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      const input = screen.getByLabelText("Property tags value");
+      const before = Y.encodeStateAsUpdate(doc);
+
+      await user.type(input, " ,,");
+      await user.tab();
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+      expect(propertyValue("tags")).toBe("kyoto, food");
+
+      const changed = trackChangedProperties(frontmatter);
+      await user.type(input, ", 2026");
+
+      expect(changed).toEqual(new Set(["tags"]));
+      expect(frontmatterMapValues(frontmatter).tags).toEqual(["kyoto", "food", "2026"]);
+      expect(yDocToMarkdown(doc)).toBe("---\ntags:\n  - kyoto\n  - food\n  - '2026'\nstatus: draft\n---\n\nBody");
+      expect(propertyValue("tags")).toBe("kyoto, food, 2026");
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps a live document's typed list text when another device changes another property", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.type(screen.getByLabelText("Property tags value"), ", ramen,");
+
+      setFrontmatterValue(replica, "status", "ready");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+
+      expect(propertyValue("status")).toBe("ready");
+      expect(propertyValue("tags")).toBe("kyoto, food, ramen,");
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food", "ramen"], status: "ready" });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("shows another device's newer list in place of the typed text, and writes nothing over it", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\ntags: [kyoto, food]\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.type(screen.getByLabelText("Property tags value"), ", osaka,");
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+
+      setFrontmatterValue(replica, "tags", ["paris"]);
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+      expect(propertyValue("tags")).toBe("paris");
+      await user.tab();
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["paris"] });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("keeps typed list items saved when another device moves their row", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nowner: Sam\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.type(screen.getByLabelText("Property tags value"), ", osaka");
+
+      replica.getMap("frontmatter").delete("owner");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+
+      expect(propertyValue("tags")).toBe("kyoto, food, osaka");
+      expect(propertyValue("status")).toBe("draft");
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ tags: ["kyoto", "food", "osaka"], status: "draft" });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("keeps a local file's typed list text when the file changes another property", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(<PropertiesPanel body={"---\ntags: [kyoto, food]\nstatus: draft\n---\n\nBody\n"} onChange={onChange} />);
+    await user.type(screen.getByLabelText("Property tags value"), ", ramen,");
+    const saved = onChange.mock.lastCall?.[0] as string;
+    expect(saved).toBe("---\ntags:\n  - kyoto\n  - food\n  - ramen\nstatus: draft\n---\n\nBody\n");
+
+    rerender(<PropertiesPanel body={saved.replace("draft", "ready")} onChange={onChange} />);
+    expect(propertyValue("status")).toBe("ready");
+    expect(propertyValue("tags")).toBe("kyoto, food, ramen,");
+    await user.type(screen.getByLabelText("Property tags value"), " osaka");
+
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - ramen\n  - osaka\nstatus: ready\n---\n\nBody\n");
+  });
+
+  it("edits a local list from what it saved, before the file catches up", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<PropertiesPanel body={"---\ntags: [kyoto, food]\n---\n\nBody\n"} onChange={onChange} />);
+    const input = screen.getByLabelText("Property tags value");
+
+    await user.type(input, ", osaka");
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - osaka\n---\n\nBody\n");
+    await user.type(input, ", rome");
+    expect(onChange).toHaveBeenLastCalledWith("---\ntags:\n  - kyoto\n  - food\n  - osaka\n  - rome\n---\n\nBody\n");
+  });
+
+  it("shows a local file's newer list in place of the typed text, and writes nothing over it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\ntags: [kyoto, food]\n---\n\nBody\n";
+    const { rerender } = render(<PropertiesPanel body={body} onChange={onChange} />);
+    await user.type(screen.getByLabelText("Property tags value"), ", osaka,");
+    const writes = onChange.mock.calls.length;
+
+    rerender(<PropertiesPanel body={body.replace("[kyoto, food]", "[paris]")} onChange={onChange} />);
+    expect(propertyValue("tags")).toBe("paris");
+    await user.tab();
+
+    expect(onChange).toHaveBeenCalledTimes(writes);
+  });
+
+  it("shows why a list or map can't be edited, with its whole value, to the keyboard as well as the pointer", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = "---\nplaces: [\"Kyoto, Japan\", Osaka]\nwhere: {lat: 35.5}\n---\n\nBody\n";
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    const places = screen.getByLabelText("Property places value") as HTMLInputElement;
+    const words = document.getElementById(places.getAttribute("aria-describedby") ?? "");
+
+    expect(places.value).toBe("['Kyoto, Japan', Osaka]");
+    expect(places.readOnly).toBe(true);
+    expect(places.parentElement?.querySelector("svg[class*='lucide-lock']")).not.toBeNull();
+    // A screen reader reads the reason with the value even while it is hidden.
+    expect(words?.getAttribute("role")).toBe("tooltip");
+    expect(words?.hidden).toBe(true);
+    expect(words?.textContent).toBe(
+      "['Kyoto, Japan', Osaka]dohc can't edit this list here because an item has a comma.",
+    );
+
+    await user.tab();
+    await user.tab();
+    expect(document.activeElement).toBe(places);
+    expect(words?.hidden).toBe(false);
+    await user.keyboard("x");
+    expect(places.value).toBe("['Kyoto, Japan', Osaka]");
+    await user.keyboard("{Escape}");
+    expect(words?.hidden).toBe(true);
+
+    const where = screen.getByLabelText("Property where value") as HTMLInputElement;
+    await user.hover(where);
+    expect(document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent).toBe(
+      "{lat: 35.5}dohc can't edit a value with named fields here.",
+    );
+    // Leaving a name saves the rows, which leaves the file as it was.
+    for (const [written] of onChange.mock.calls) expect(written).toBe(body);
+  });
+
+  it("points a value the pills can't edit to Source to view, unless the page is read-only", () => {
+    const body = "---\nwhere: {lat: 35.5}\n---\n\nBody\n";
+    const reason = () => {
+      const where = screen.getByLabelText("Property where value");
+      return document.getElementById(where.getAttribute("aria-describedby") ?? "")?.textContent;
+    };
+    const { rerender } = render(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here. View it in Source.");
+
+    rerender(<PropertiesPanel body={body} onChange={vi.fn()} onShowSource={vi.fn()} readOnly />);
+    expect(reason()).toBe("{lat: 35.5}dohc can't edit a value with named fields here.");
   });
 
   it("does not collapse duplicate shared frontmatter keys", async () => {
@@ -905,8 +1499,397 @@ describe("PropertiesPanel", () => {
     await user.clear(screen.getByDisplayValue("status"));
     await user.type(screen.getByLabelText("Property 1 name"), "owner");
 
-    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-duplicate")).toHaveLength(1);
     expect(frontmatter.get("status")).toBe("draft");
     expect(frontmatter.get("owner")).toBe("ice");
+  });
+
+  it("keeps saving a live document's other properties while a name another property has is held", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    const frontmatter = doc.getMap("frontmatter");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.type(screen.getByLabelText("Property 1 name"), "Owner");
+      await user.type(screen.getByLabelText("Property owner value"), "a");
+
+      expect(frontmatterMapValues(frontmatter)).toEqual({ status: "draft", owner: "Sama" });
+      expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "Owner");
+      expect(screen.getAllByTestId("property-duplicate")).toHaveLength(1);
+
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.type(screen.getByLabelText("Property 1 name"), "lead");
+
+      expect(frontmatterMapValues(frontmatter)).toEqual({ lead: "draft", owner: "Sama" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("drops a held name when another device renames its property", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    const replica = new Y.Doc();
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.type(screen.getByLabelText("Property 1 name"), "owner");
+
+      replica.getMap("frontmatter").delete("status");
+      setFrontmatterValue(replica, "phase", "draft");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+
+      expect(screen.queryByTestId("property-duplicate")).toBeNull();
+      expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "phase");
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", phase: "draft" });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("holds a name another device added before the rows read it", () => {
+    const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody\n");
+    // Rename after the panel reads the new source, before its effect refreshes
+    // the rows, so the rows don't show the other device's property yet.
+    function RenamesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "state" } });
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<><PropertiesPanel ydoc={doc} /></>);
+
+      act(() => {
+        setFrontmatterValue(doc, "state", "remote");
+        rerender(<><PropertiesPanel ydoc={doc} /><RenamesOnCommit /></>);
+      });
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "draft", state: "remote" });
+      expect(screen.getByLabelText("Property 1 name")).toHaveProperty("value", "state");
+      expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+    } finally { doc.destroy(); }
+  });
+
+  it.each([
+    { shared: true, added: false },
+    { shared: false, added: false },
+    { shared: true, added: true },
+    { shared: false, added: true },
+  ])("keeps another device's property and the pill's typed name and value when leaving a name it just took (shared: $shared, new pill: $added)", ({ shared, added }) => {
+    const markdown = added ? "---\nowner: Sam\n---\n\nBody\n" : "---\nstatus: draft\nowner: Sam\n---\n\nBody\n";
+    const remote = markdown.replace("owner: Sam\n", "owner: Sam\nown: remote\n");
+    const doc = markdownToYDoc(markdown);
+    const onChange = vi.fn();
+    const row = added ? 2 : 1;
+    const name = () => screen.getByLabelText(`Property ${row} name`);
+    const saved = () => shared
+      ? frontmatterMapValues(doc.getMap("frontmatter"))
+      : parseFrontmatter(onChange.mock.lastCall?.[0] ?? remote).meta;
+    const panel = (body: string) => (shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={onChange} />);
+    // Leave the name after the panel reads the other device's property,
+    // before its effect refreshes the rows.
+    function LeavesOnCommit() {
+      useLayoutEffect(() => {
+        fireEvent.focusOut(name());
+      }, []);
+      return null;
+    }
+    try {
+      const { rerender } = render(<>{panel(markdown)}</>);
+      if (added) {
+        fireEvent.click(screen.getByTestId("property-add"));
+        fireEvent.change(screen.getByLabelText("Property 2 value"), { target: { value: "Ada" } });
+      }
+      // A prefix of owner waits instead of saving.
+      fireEvent.change(name(), { target: { value: "own" } });
+
+      act(() => {
+        setFrontmatterValue(doc, "own", "remote");
+        rerender(<>{panel(remote)}<LeavesOnCommit /></>);
+      });
+
+      const kept = added ? { owner: "Sam" } : { status: "draft", owner: "Sam" };
+      expect(saved()).toEqual({ ...kept, own: "remote" });
+      expect(name()).toHaveProperty("value", "own");
+      expect(screen.getAllByTestId("property-row")[row - 1]!.querySelector('[data-testid="property-duplicate"]')).not.toBeNull();
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+
+      fireEvent.change(name(), { target: { value: "lead" } });
+
+      expect(saved()).toEqual(added ? { owner: "Sam", own: "remote", lead: "Ada" } : { lead: "draft", owner: "Sam", own: "remote" });
+    } finally { doc.destroy(); }
+  });
+
+  it("holds a live document's name that a property with a cleared name still saves under", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\na: one\nb: two\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByLabelText("Property 1 name"));
+      await user.clear(screen.getByLabelText("Property 2 name"));
+      await user.type(screen.getByLabelText("Property 2 name"), "a");
+
+      expect(screen.getAllByTestId("property-duplicate")).toHaveLength(1);
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ a: "one", b: "two" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps both of a live document's names that differ only by spaces inside quotes", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc('---\nowner: Sam\n" owner ": Ada\nstatus: draft\n---\n\nBody\n');
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.type(screen.getByLabelText("Property status value"), "!");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", " owner ": "Ada", status: "draft!" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps a live document's new property held for its name, with its value, when another property saves", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nowner: Sam\nstatus: draft\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.click(screen.getByTestId("property-add"));
+      await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+      await user.type(screen.getByLabelText("Property 3 name"), "owner");
+      await user.type(screen.getByLabelText("Property status value"), "!");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", status: "draft!" });
+      expect(screen.getByLabelText("Property 3 name")).toHaveProperty("value", "owner");
+      expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+
+      await user.clear(screen.getByLabelText("Property 3 name"));
+      await user.type(screen.getByLabelText("Property 3 name"), "lead");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ owner: "Sam", status: "draft!", lead: "Ada" });
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps typing in the same property when another device renames one while a new property waits", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\nowner: Sam\nstatus: draft\n---\n\nBody\n");
+    const peer = new Y.Doc();
+    try {
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.click(screen.getByTestId("property-add"));
+      await user.type(screen.getByLabelText("Property 3 value"), "Ada");
+      await user.type(screen.getByLabelText("Property status value"), "!");
+      patchFrontmatter(peer, new Map([["lead", "Sam"]]), ["owner"], new Map([["owner", "lead"]]));
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer)));
+      await user.keyboard("?");
+
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ lead: "Sam", status: "draft!?" });
+      expect(screen.getByLabelText("Property 3 value")).toHaveProperty("value", "Ada");
+    } finally { doc.destroy(); peer.destroy(); }
+  });
+});
+
+describe("PropertiesPanel's Source button", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it.each([
+    ["names and values", "---\nstatus: Draft\nowner: Sam\n---\n"],
+    ["quoted values", "---\nstatus: \"Draft\"\nstart: '12:30'\n---\n"],
+    ["a title and an icon", "---\ntitle: Plan\nicon: 🎒\nowner: Sam\n---\n"],
+    ["an empty value", "---\nowner:\n---\n"],
+    ["a list as its items", "---\ntags:\n  - kyoto\n  - 'food'\n---\n"],
+    ["a list on one line", "---\ntags: [kyoto, food]\n---\n"],
+    ["a list on one line in quotes", "---\ntags: [\"kyoto\", \"food\"]\n---\n"],
+    ["a list on one line with no spaces", "---\ntags: [kyoto,food]\n---\n"],
+    ["a name in quotes", "---\n\"owner\": Sam\n---\n"],
+    ["a name with a colon", "---\nhttp:host: Sam\n---\n"],
+    ["a space after an empty value", "---\nowner: \n---\n"],
+  ])("offers no Source button when the pills show every line: %s", (_, body) => {
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it.each([
+    ["a comment", "---\n# Times are local\nstatus: Draft\n---\n"],
+    ["a comment after a value", "---\nstatus: Draft # until Friday\n---\n"],
+    ["an ID", "---\nid: 01JD8K2V7QX4\nstatus: Draft\n---\n"],
+    ["named fields", "---\ntrip:\n  city: Kyoto\n---\n"],
+    ["a value over several lines", "---\nnote: |\n  one\n  two\n---\n"],
+    ["a comment between list items", "---\ntags:\n  - kyoto\n  # later\n  - food\n---\n"],
+    ["a list it can't edit", "---\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"],
+    ["a line break in a value", "---\nnote: \"one\\ntwo\"\n---\n"],
+    ["a line break in a list item", "---\ntags: [\"one\\ntwo\"]\n---\n"],
+    ["an anchor", "---\nowner: &who Sam\n---\n"],
+    ["a tag", "---\nowner: !!str Sam\n---\n"],
+    ["a block that doesn't read", "---\nowner: [Sam\n---\n"],
+  ])("opens Source from the properties when the block holds %s", async (_, body) => {
+    const user = userEvent.setup();
+    const onShowSource = vi.fn();
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} onShowSource={onShowSource} />);
+
+    const button = screen.getByTestId("properties-source");
+    expect(button.getAttribute("aria-label")).toBe("Show all properties in Source");
+    expect(button.getAttribute("title")).toBe("Show all properties in Source (Ctrl+/)");
+    await user.click(button);
+    expect(onShowSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no Source button for a record whose own ID is its only hidden line", () => {
+    render(<PropertiesPanel body={"---\nid: rec-12\nstatus: Draft\n---\n\nBody\n"} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
+    expect(screen.getAllByTestId("property-row")).toHaveLength(1);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it.each([
+    ["an ID the engine didn't give it", "---\nid: rec-13\nstatus: Draft\n---\n"],
+    ["its own ID and a comment", "---\nid: rec-12\n# Paid in cash\nstatus: Draft\n---\n"],
+  ])("opens Source from a record's properties when the block holds %s", (_, body) => {
+    render(<PropertiesPanel body={`${body}\nBody\n`} onChange={vi.fn()} recordId="rec-12" onShowSource={vi.fn()} />);
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("opens Source when a duplicate name's flag hides a saved value", () => {
+    render(<PropertiesPanel body={"---\nowner: Sam\nOwner: Ada\n---\n\nBody\n"} onChange={vi.fn()} onShowSource={vi.fn()} />);
+    expect(screen.getAllByTestId("property-duplicate")).toHaveLength(2);
+    expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("opens Source while a held name's flag hides its saved value", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "stage");
+    expect(screen.queryByTestId("property-duplicate")).toBeNull();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("opens Source while a reserved name's flag hides a saved value, but not on a new pill", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "title");
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Property 1 name"));
+    await user.type(screen.getByLabelText("Property 1 name"), "stage");
+    expect(screen.queryByTestId("property-reserved")).toBeNull();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 3 name"), "title");
+    expect(screen.getByTestId("property-reserved")).toBeTruthy();
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("opens Source when a live document gains a value no pill shows beside its kept text", () => {
+    const doc = markdownToYDoc('---\nstatus: "Draft"\n---\n\nBody\n');
+    render(<PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+
+    act(() => setFrontmatterValue(doc, "place", { city: "Lisbon" }));
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("offers no Source button when a held name is on a new pill, since nothing saved is hidden", async () => {
+    const user = userEvent.setup();
+    render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+
+    await user.click(screen.getByTestId("property-add"));
+    await user.type(screen.getByLabelText("Property 2 name"), "owner");
+    expect(screen.getByTestId("property-duplicate").title).toBe("This name isn't saved. Another property has it.");
+    expect(screen.getByLabelText("Property owner value")).toHaveProperty("value", "Sam");
+    expect(screen.queryByTestId("properties-source")).toBeNull();
+  });
+
+  it("shows a note you can only view as pills with no +, no × and no edits", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <PropertiesPanel
+        body={"---\nid: 01JD8K2V7QX4\nstatus: Draft\nowner: Sam\n---\n\nBody\n"}
+        onChange={onChange}
+        readOnly
+        onShowSource={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    expect(screen.queryByTestId("property-remove")).toBeNull();
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+    await user.type(screen.getByLabelText("Property status value"), "x");
+    await user.type(screen.getByLabelText("Property 1 name"), "x");
+    await user.tab();
+    expect(propertyValue("status")).toBe("Draft");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing for a note you can only view with no properties", () => {
+    render(<PropertiesPanel body={"Body\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-panel")).toBeNull();
+  });
+
+  it("offers Source, not an edit, for a block you can only view that doesn't read", () => {
+    render(<PropertiesPanel body={"---\nowner: [Sam\n---\n\nBody\n"} onChange={vi.fn()} readOnly onShowSource={vi.fn()} />);
+    expect(screen.queryByTestId("properties-locked")).toBeNull();
+    expect(screen.getByTestId("properties-source")).toBeTruthy();
+  });
+
+  it("follows a live document's kept text", () => {
+    const doc = receivedYDoc("---\nstatus: Draft # until Friday\n---\n\nBody\n");
+    try {
+      render(<PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />);
+      expect(screen.getByTestId("properties-source")).toBeTruthy();
+
+      // The engine read the file again, and the comment is gone.
+      act(() => doc.getMap("meta").delete("dohcFrontmatterSource"));
+      expect(screen.queryByTestId("properties-source")).toBeNull();
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("reads a live document's kept text that changes before the panel listens", () => {
+    const doc = receivedYDoc("---\nstatus: Draft # until Friday\n---\n\nBody\n");
+    // A layout effect runs after the panel renders and before it subscribes.
+    function Reread() {
+      useLayoutEffect(() => {
+        doc.getMap("meta").delete("dohcFrontmatterSource");
+      }, []);
+      return null;
+    }
+    try {
+      render(
+        <>
+          <PropertiesPanel ydoc={doc} onShowSource={vi.fn()} />
+          <Reread />
+        </>,
+      );
+      expect(screen.queryByTestId("properties-source")).toBeNull();
+    } finally {
+      doc.destroy();
+    }
   });
 });

@@ -35,8 +35,8 @@ The release includes the isolated app runtime. The release build checks its comp
 
 ## Prepare the host
 
-The amd64 image includes the Markdown reader runtime. Other architectures leave the reader unavailable.
-To override `DOHC_ENGINE_READER_CONFIG`, point its runtime, bundle and manifest paths at root-owned regular files.
+The amd64 and arm64 images include the Markdown reader. The relay refuses to start without it, because Edit shares need it.
+To override `DOHC_ENGINE_READER_CONFIG`, point its `node`, `bundle` and `manifest` fields at the absolute paths of root-owned regular files.
 Keep those files and their parent directories unwritable by the service user and other accounts.
 
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
@@ -558,3 +558,4 @@ node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
 
 The upgrade preserves volumes and secrets and saves the previous configuration privately.
 It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
+On a large relay log, the first start after an upgrade can take several minutes.

@@ -259,5 +259,15 @@
   "chat.dispatch.pause.switch",
   "share.live.document.retry",
   "share.live.document.recovery.save",
-  "workspace.name.suggest"
+  "workspace.name.suggest",
+  "agent.run.retry",
+  "settings.agents.order",
+  "device.update.download",
+  "app.view",
+  "app.local.check",
+  "capture.history.retry",
+  "dataset.change.ask",
+  "window.old.read",
+  "window.old.go",
+  "history.rules.file.open"
 ]

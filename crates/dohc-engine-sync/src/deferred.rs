@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dohc_engine_domain::WaitingVersion;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -200,6 +201,113 @@ pub(crate) fn release_hosted_in_tx(
     Ok(first)
 }
 
+/// The relay namespace a hosted replica recorded when it retained `op`, or
+/// none when it recorded none; `None` when nothing hosted retains `op`. A
+/// replay decides under the feed the op arrived on, never the current one.
+pub(crate) fn retained_namespace(
+    store: &EngineStore,
+    op: &ReplicationEnvelope,
+) -> Result<Option<Option<String>>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT relay_namespace FROM relay_deferred_ops WHERE workspace_id=?1 \
+                 AND origin_id=?2 AND origin_seq=?3 AND ingress_kind<>'local'",
+                params![op.workspace_id, op.origin_id, op.origin_seq],
+                |row| row.get(0),
+            )
+            .optional()
+        })
+        .map_err(local)
+}
+
+/// The stable code of a version that waits behind its conflict.
+pub const WAITING_VERSION_CODE: &str = crate::moment_apply::RESOLVE_EXISTING_CONFLICT;
+
+/// The newer version that waits behind each of `conflict_ids` still open
+/// from sync, by conflict id. Only an origin's first retained op still to
+/// apply can wait on a conflict, because the rest of that origin waits
+/// behind it. So this reads one index entry per retained op and decodes one
+/// envelope per held origin. A hosted replica reads none here: its journal,
+/// not an origin's acknowledgement, says what applied.
+pub fn waiting_versions(
+    store: &EngineStore,
+    workspace: &str,
+    conflict_ids: &[&str],
+) -> Result<BTreeMap<String, WaitingVersion>, SyncError> {
+    store.read_with(|conn| {
+        let mut waiting = BTreeMap::new();
+        if conflict_ids.is_empty() || crate::hosted::is_hosted(conn, workspace)? {
+            return Ok(waiting);
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT target_version_id,incoming_object_id,incoming_latest_moment_id FROM conflicts \
+                 WHERE workspace_id=?1 AND conflict_id=?2 AND status='open' AND metadata_origin='sync' \
+                   AND incoming_object_id IS NOT NULL",
+            )
+            .map_err(SyncError::corrupt)?;
+        let mut open = Vec::new();
+        for id in conflict_ids {
+            let row: Option<(String, String, Option<String>)> = stmt
+                .query_row(params![workspace, id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            open.extend(row.map(|row| (*id, row)));
+        }
+        if open.is_empty() {
+            return Ok(waiting);
+        }
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT d.origin_id,MIN(d.origin_seq) FROM relay_deferred_ops d
+                 WHERE d.workspace_id=?1 AND {UNAPPLIED} GROUP BY d.origin_id"
+            ))
+            .map_err(SyncError::corrupt)?;
+        let heads = stmt
+            .query_map([workspace], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT envelope_json FROM relay_deferred_ops
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            )
+            .map_err(SyncError::corrupt)?;
+        for (origin, seq) in heads {
+            let encoded: String = stmt
+                .query_row(params![workspace, origin, seq], |r| r.get(0))
+                .map_err(SyncError::corrupt)?;
+            let op: ReplicationEnvelope =
+                serde_json::from_str(&encoded).map_err(SyncError::corrupt)?;
+            if op.op_kind != "moment.append" {
+                continue;
+            }
+            let field = |name: &str| op.payload[name].as_str();
+            let (Some(object), Some(version)) = (field("objectId"), field("versionId")) else {
+                continue;
+            };
+            let before = field("beforeLatestMomentId");
+            // The open-conflict hold in moment_apply.rs (RESOLVE_EXISTING_CONFLICT):
+            // the same object and version, on another branch than the
+            // conflict's incoming side.
+            for (id, (target, incoming, incoming_latest)) in &open {
+                if target == version && incoming == object && incoming_latest.as_deref() != before {
+                    waiting.entry((*id).to_owned()).or_insert_with(|| WaitingVersion {
+                        object_id: object.to_owned(),
+                        origin_id: op.origin_id.clone(),
+                        origin_seq: op.origin_seq,
+                    });
+                }
+            }
+        }
+        Ok(waiting)
+    })
+}
+
 pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {
     store
         .read_with(|conn| {
@@ -233,16 +341,47 @@ pub(crate) fn check_redelivery(
     }).map_err(local)
 }
 
-/// Retain `ops` within the workspace's limit. Past it, an ordinary replica
-/// fails and retains nothing. A hosted replica never fails: a document whose
-/// next op would pass it retains no more, and is answered so its read can
-/// stop at that op instead.
+/// [`retain_waiting`] with no origin held by a conflict.
+#[cfg(test)]
 pub(crate) fn retain(
     store: &mut EngineStore,
     identity: &SyncIdentity,
+    relay_namespace: Option<&str>,
     ops: &[&ReplicationEnvelope],
     faults: &dyn FaultInjector,
 ) -> Result<BTreeSet<String>, RelayError> {
+    retain_waiting(
+        store,
+        identity,
+        relay_namespace,
+        ops,
+        &BTreeMap::new(),
+        faults,
+    )
+}
+
+/// The stable code of an ordinary origin that passed the retention limit
+/// while it waits on a conflict.
+pub(crate) const CONFLICT_WAIT_LIMIT: &str = "conflict-wait-limit";
+
+/// Retain `ops` within the workspace's limit. Past it, an ordinary replica
+/// fails and retains nothing. A hosted replica never fails: a document whose
+/// next op would pass it retains no more, and is answered so its read can
+/// stop at that op instead. Each hosted op records the feed it arrived on,
+/// `relay_namespace` as the pull's trusted configuration names it; a hosted
+/// pull it names none for retains nothing and fails. `conflict_waits` names
+/// each origin held by a conflict with the conflict's path, so passing the
+/// limit says what to resolve.
+pub(crate) fn retain_waiting(
+    store: &mut EngineStore,
+    identity: &SyncIdentity,
+    relay_namespace: Option<&str>,
+    ops: &[&ReplicationEnvelope],
+    conflict_waits: &BTreeMap<String, Option<String>>,
+    faults: &dyn FaultInjector,
+) -> Result<BTreeSet<String>, RelayError> {
+    let mut limit_detail = None;
+    let relay_namespace = relay_namespace.filter(|namespace| !namespace.is_empty());
     if ops.is_empty() {
         return Ok(BTreeSet::new());
     }
@@ -274,7 +413,7 @@ pub(crate) fn retain(
                 let object_id = crate::hosted::hosted_document(op).ok_or(SyncError::InvalidInput {
                     reason: "a hosted replica retains only its documents' work",
                 })?;
-                let relay_seq = op.relay_seq.ok_or(SyncError::InvalidInput {
+                let relay_seq = op.relay_seq.filter(|seq| *seq > 0).ok_or(SyncError::InvalidInput {
                     reason: "retained hosted work has no relay position",
                 })?;
                 Some((object_id, relay_seq))
@@ -301,13 +440,34 @@ pub(crate) fn retain(
                 }
             }
             let cost = json.len() as i64 + charged.iter().map(|(_, _, bytes)| bytes).sum::<i64>();
+            // A hosted pull no configured host names a feed for fails
+            // rather than stop at the same op on every pass.
+            if hosted && relay_namespace.is_none() {
+                return Err(SyncError::RetryableState {
+                    reason: crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED,
+                });
+            }
             if count >= MAX_PENDING_OPS || bytes + cost > MAX_PENDING_BYTES {
                 match placed {
                     Some((object_id, _)) => {
                         unretained.insert(object_id.to_owned());
                         continue;
                     }
-                    None => return Err(SyncError::RetryableState { reason: "deferred relay work limit reached; close the conflicting editor to resume sync" }),
+                    None => {
+                        let Some(path) = conflict_waits.get(&op.origin_id) else {
+                            return Err(SyncError::RetryableState { reason: "deferred relay work limit reached; close the conflicting editor to resume sync" });
+                        };
+                        let sentence = match path {
+                            Some(path) => format!("Changes from another computer are waiting on the conflict in {path}. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again."),
+                            None => "Changes from another computer are waiting on a conflict. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.".to_owned(),
+                        };
+                        let path = path.as_ref().map(|path| format!("path {path}, ")).unwrap_or_default();
+                        limit_detail = Some(format!(
+                            "{CONFLICT_WAIT_LIMIT}: {sentence} ({path}origin {} seq {}, retained ops {count}, retained bytes {bytes})",
+                            op.origin_id, op.origin_seq,
+                        ));
+                        return Err(SyncError::RetryableState { reason: CONFLICT_WAIT_LIMIT });
+                    }
                 }
             }
             // It waits its turn with the rest of its document's work or, on an
@@ -323,11 +483,14 @@ pub(crate) fn retain(
                     params![op.workspace_id,op.origin_id], |r| r.get(0)),
             }.map_err(SyncError::corrupt)?;
             let inserted = tx.execute(
-                "INSERT OR IGNORE INTO relay_deferred_ops
-                 (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence)
+                "INSERT INTO relay_deferred_ops
+                 (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence,
+                  ingress_kind,relay_namespace)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,
-                    COALESCE(?8,(SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0))",
-                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,cost,turn])
+                    COALESCE(?8,(SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0),?9,?10)
+                 ON CONFLICT DO NOTHING",
+                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,cost,turn,
+                    if hosted { "hosted" } else { "local" }, relay_namespace.filter(|_| hosted)])
                 .map_err(SyncError::persist)?;
             if inserted == 0 { continue; }
             if let Some((object_id, relay_seq)) = placed {
@@ -349,7 +512,7 @@ pub(crate) fn retain(
             bytes += cost;
         }
         Ok::<_,SyncError>(unretained)
-    }).map_err(local)?;
+    }).map_err(|error| limit_detail.take().map_or_else(|| local(error), RelayError::Local))?;
     match outcome {
         TxnOutcome::Committed(unretained) => Ok(unretained),
         TxnOutcome::Crashed { .. } => Err(local("injected-crash")),

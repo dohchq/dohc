@@ -23,10 +23,12 @@ const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid dataset capability." }); return z.NEVER; }
 });
 // approved: this device's authority still names the app. active: it can run now. pendingCreates: responses not yet confirmed saved or refused.
+// A row with neither capability is an app that reaches no workspace data.
 const localPublication = { publicationId: hash, authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash, approved: z.boolean(), active: z.boolean() };
 const LocalPublication = z.union([
   z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),
   z.object({ ...localPublication, collectionCapability: OwnerAppCollectionCapability, pendingCreates: z.number().int().nonnegative().max(1000) }).strict(),
+  z.object(localPublication).strict(),
 ]);
 const publication = { operatorTakedown: z.object({ actor: z.literal("operator"), disabledAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), reason: z.string().min(1).max(1024) }).strict().optional(), approvalProvenance: z.object({ agent: PublicationAgent.nullable(), selector: z.unknown(), access, committedCandidateDigest: hash, sourceRevision: hash, capabilities: z.array(OwnerAppCapability).max(1) }).strict().optional(), publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), datasetCapability: z.union([OwnerAppDatasetCapability, z.literal("unavailable")]).nullable() };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
@@ -36,6 +38,7 @@ const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
 export const OwnerAppPublicationRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("createLink"), workspaceId: id, appRoot: z.string().min(1).max(1024), paths: selector.shape.paths.optional(), access: access.default("view"), operationId: z.string().uuid(), agentLabel: z.string().min(1).max(160).optional() }).strict(),
   z.object({ action: z.literal("listLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
+  z.object({ action: z.literal("checkLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
   z.object({ action: z.literal("prepareLocal"), workspaceId: id, appRoot: z.string().min(1).max(1024) }).strict(),
   z.object({ action: z.literal("launchLocal"), workspaceId: id, publicationId: hash }).strict(),
   z.object({ action: z.literal("list"), workspaceId: id, appRoot: z.string().min(1).max(1024), cursor: hash.optional() }).strict(),
@@ -52,7 +55,11 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("urlUnavailable"), ...linkFacts }).strict(),
   z.object({ kind: z.literal("localLaunched"), publicationId: hash, url: z.string().url().max(4096) }).strict(),
   z.object({ kind: z.literal("localListed"), publications: z.array(LocalPublication).max(64) }).strict(),
+  // The source revision prepareLocal would capture now. It differs from an approval's sourceRevision once the app's source changed.
+  z.object({ kind: z.literal("localChecked"), appRoot: z.string().min(1).max(1024), sourceRevision: hash, sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512) }).strict(),
   z.object({ kind: z.literal("listed"), publications: z.array(OwnerAppPublicationListRow).max(25), nextCursor: hash.nullable() }).strict(),
+  // The relay answered not found: it does not publish apps for this workspace and account.
+  z.object({ kind: z.literal("listUnavailable") }).strict(),
   z.object({ kind: z.literal("prepared"), approvalId: z.string().uuid(), candidateDigest: hash,
     appRoot: z.string().min(1).max(1024), versionId: id, sourceRevision: hash,
     audience: z.object({shareId:id,grantId:id,selector:z.object({paths:z.array(z.string()),versionId:id.nullable()}).strict(),access}).strict().optional(),

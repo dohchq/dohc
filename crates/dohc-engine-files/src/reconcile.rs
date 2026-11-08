@@ -15,7 +15,7 @@
 //!   pending rescan, but the flag is cleared only by a completed apply/ack, so
 //!   evidence of a change is never lost (`plan §Workspace actor model`).
 
-use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
+use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans, gone_untracked};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
 use std::collections::{BTreeMap, BTreeSet};
@@ -317,7 +317,7 @@ fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
 }
 
 pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> {
-    let spelling = disk_spelling_in(root, &root.join(relative))?;
+    let spelling = disk_spelling_in(root, &root.join(relative)).ok()??;
     let stored: Vec<&str> = spelling.split('/').collect();
     let tracked: Vec<&str> = relative.split('/').collect();
     if stored.len() != tracked.len() {
@@ -341,10 +341,13 @@ pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> 
 }
 
 /// The path below `root` that `relative` reaches, spelled as the disk stores
-/// each name, with links resolved. `None` when nothing is there, the path
-/// leaves `root`, or the disk can't say which name it stores.
-pub fn disk_spelling(root: &Path, relative: &str) -> Option<String> {
-    let root = root.canonicalize().ok()?;
+/// each name, with links resolved. `None` when nothing can be reached there or
+/// the path leaves `root`. An error when the entry is there but the disk can't
+/// say which name it stores.
+pub fn disk_spelling(root: &Path, relative: &str) -> std::io::Result<Option<String>> {
+    let Ok(root) = root.canonicalize() else {
+        return Ok(None);
+    };
     disk_spelling_in(&root, &root.join(relative))
 }
 
@@ -353,9 +356,13 @@ pub fn disk_spelling(root: &Path, relative: &str) -> Option<String> {
 /// tell it, and Linux keeps the spelling it was given, so on a folder that
 /// ignores case, such as a Windows drive under WSL, `Notes.md` reaches `notes.md`
 /// and keeps its own spelling. There each name comes from its folder.
-pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> Option<String> {
-    let file = path.canonicalize().ok()?;
-    let below = file.strip_prefix(root).ok()?;
+pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> std::io::Result<Option<String>> {
+    let Ok(file) = path.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(below) = file.strip_prefix(root) else {
+        return Ok(None);
+    };
     #[cfg(unix)]
     let mut lookup = root.to_path_buf();
     let mut names = Vec::new();
@@ -363,27 +370,59 @@ pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> Option<String> {
         #[cfg(unix)]
         let name = {
             lookup.push(name);
-            stored_leaf_name(&lookup).ok()?
+            match stored_leaf_name(&lookup) {
+                Ok(name) => name,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
         };
         #[cfg(not(unix))]
         let name = name.as_os_str().to_owned();
-        names.push(name.into_string().ok()?);
+        names.push(name.into_string().map_err(|_| {
+            std::io::Error::new(ErrorKind::InvalidData, "stored name is not UTF-8")
+        })?);
     }
     // Query the leaf's directory entry on Windows: a file handle's final path
     // need not name the hard link we looked up. Folders cannot be hard-linked.
     #[cfg(windows)]
     if let Some(leaf) = names.last_mut() {
-        *leaf = dohc_windows_files::stored_leaf_name(path)
-            .ok()?
+        let name = match dohc_windows_files::stored_leaf_name(path) {
+            Ok(name) => name,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        *leaf = name
             .into_string()
-            .ok()?;
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "stored name is not UTF-8"))?;
     }
-    Some(names.join("/"))
+    Ok(Some(names.join("/")))
+}
+
+/// Whether `a` and `b` below `root` may reach one directory entry, as two
+/// spellings do on a disk that ignores case. When the disk can't say which
+/// name one of them is stored under, they may, unless they reach different
+/// files.
+pub fn may_share_entry(root: &Path, a: &str, b: &str) -> bool {
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    may_share_entry_in(&root, &root.join(a), &root.join(b))
+}
+
+pub(crate) fn may_share_entry_in(root: &Path, a: &Path, b: &Path) -> bool {
+    match (disk_spelling_in(root, a), disk_spelling_in(root, b)) {
+        (Ok(None), _) | (_, Ok(None)) => false,
+        (Ok(Some(a)), Ok(Some(b))) => a == b,
+        _ => match (file_id::get_file_id(a), file_id::get_file_id(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => true,
+        },
+    }
 }
 
 /// The name `path`'s folder stores its entry under. A folder that can be
-/// searched but not listed keeps the name `canonicalize` gave, which macOS
-/// already reports as stored.
+/// searched but not listed gives an error, except on macOS, where
+/// `canonicalize` already gave the stored name.
 #[cfg(unix)]
 fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
     use std::os::unix::fs::MetadataExt;
@@ -391,12 +430,15 @@ fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
         return Err(ErrorKind::InvalidInput.into());
     };
     let file = std::fs::symlink_metadata(path)?;
-    let Ok(names) = std::fs::read_dir(folder).and_then(|entries| {
+    let names = std::fs::read_dir(folder).and_then(|entries| {
         entries
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<std::io::Result<Vec<_>>>()
-    }) else {
-        return Ok(leaf.to_owned());
+    });
+    let names = match names {
+        Ok(names) => names,
+        Err(_) if cfg!(target_os = "macos") => return Ok(leaf.to_owned()),
+        Err(error) => return Err(error),
     };
     let folded = leaf.to_str().map(crate::floor::fold_segment);
     stored_name_among(
@@ -455,6 +497,9 @@ pub struct ReconcileController {
     identical_degraded_count: usize,
     quarantined_paths: Vec<String>,
     deferred_paths: Vec<String>,
+    /// Paths whose record may exist, tracked by the manifest or not. A scan
+    /// that finds an untracked one's file gone plans its retire.
+    retire_candidates: BTreeSet<String>,
 }
 
 impl Default for ReconcileController {
@@ -478,6 +523,7 @@ impl ReconcileController {
             identical_degraded_count: 0,
             quarantined_paths: Vec::new(),
             deferred_paths: Vec::new(),
+            retire_candidates: BTreeSet::new(),
         }
     }
 
@@ -517,6 +563,7 @@ impl ReconcileController {
             identical_degraded_count: 0,
             quarantined_paths: Vec::new(),
             deferred_paths: Vec::new(),
+            retire_candidates: BTreeSet::new(),
         }
     }
 
@@ -557,6 +604,28 @@ impl ReconcileController {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.dirty_epoch = self.dirty_epoch.saturating_add(1);
+    }
+
+    /// Offer paths whose record may exist, such as a document a session
+    /// settled before any scan saw its file. A path the manifest tracks stays
+    /// a candidate in case capture later stops tracking it, as for a document
+    /// grown past the size cap. A scan that finds an untracked candidate's file
+    /// gone plans its retire; a file still there keeps its ordinary handling.
+    /// Asks for that scan when an untracked path is new.
+    pub fn offer_retire_candidates(&mut self, paths: impl IntoIterator<Item = String>) {
+        let mut offered = false;
+        for path in paths {
+            if crate::floor::is_excluded_file(&path) {
+                continue;
+            }
+            let untracked = self.manifest.get(&path).is_none();
+            if self.retire_candidates.insert(path) && untracked {
+                offered = true;
+            }
+        }
+        if offered {
+            self.mark_dirty();
+        }
     }
 
     /// Prepare a full reconcile: scan `root` and diff against the last
@@ -633,6 +702,13 @@ impl ReconcileController {
                 confirmed_removed.push(path);
             } else {
                 lstat_unconfirmed.push(path);
+            }
+        }
+        // A record the manifest never tracked retires the same way. One the
+        // probe can't confirm gone waits for a later scan without degrading.
+        for path in gone_untracked(&self.manifest, &listing, &self.retire_candidates) {
+            if absence_probe.confirms_absent(root, &path) {
+                confirmed_removed.push(path);
             }
         }
         diff.removed = confirmed_removed;
@@ -717,6 +793,7 @@ impl ReconcileController {
             .map(|c| (c.path.as_str(), (c.size, c.sha256.as_str())))
             .collect();
         let mut next = self.manifest.clone();
+        let mut retire_candidates = self.retire_candidates.clone();
         let held: std::collections::BTreeMap<_, _> = result
             .held_observations
             .iter()
@@ -760,7 +837,13 @@ impl ReconcileController {
                 // unchanged whenever the bytes match that file, and capture
                 // would never check them. Deferred retires and outside writes
                 // keep their entries, so release retries the original change.
-                if !deferred_retires.contains(op.path()) && !deferred_writes.contains(op.path()) {
+                // A deferred retire with no entry, as for a file deleted
+                // before capture recorded it, waits as a retire candidate.
+                if deferred_retires.contains(op.path()) {
+                    if next.get(op.path()).is_none() {
+                        retire_candidates.insert(op.path().to_owned());
+                    }
+                } else if !deferred_writes.contains(op.path()) {
                     next.remove(op.path());
                 }
                 continue;
@@ -805,7 +888,10 @@ impl ReconcileController {
                         },
                     );
                 }
-                CaptureOp::Retire { path } => next.remove(path),
+                CaptureOp::Retire { path } => {
+                    next.remove(path);
+                    retire_candidates.remove(path);
+                }
             }
         }
         // NotOwned paths are dropped even when they never appeared in
@@ -817,6 +903,7 @@ impl ReconcileController {
         for path in &result.not_owned_paths {
             next.remove(path);
         }
+        self.retire_candidates = retire_candidates;
         self.manifest = next;
         self.generation = plan.to_generation;
         self.outstanding = false;

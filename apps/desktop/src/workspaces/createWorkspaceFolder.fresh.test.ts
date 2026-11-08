@@ -29,7 +29,8 @@ const linkType = process.platform === "win32" ? "junction" : "dir";
 
 async function create(rootPath: string) {
   const homeDir = await createTestScratch("dohc-fresh-home-");
-  return createWorkspaceFolderWithFreshness({ rootPath, homeDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } });
+  const stateDir = await createTestScratch("dohc-fresh-state-");
+  return createWorkspaceFolderWithFreshness({ rootPath, homeDir, stateDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } });
 }
 
 describe("New workspace's claim that it made a folder from nothing", () => {
@@ -49,6 +50,26 @@ describe("New workspace's claim that it made a folder from nothing", () => {
     const root = join(await createTestScratch("dohc-fresh-"), "Trip");
     await mkdir(root);
     await writeFile(join(root, "package.json"), "{}");
+    expect((await create(root)).fresh).toBeNull();
+  });
+
+  it("names a folder whose only other files are the AppleDouble files macOS writes for its records on exFAT", async () => {
+    const root = join(await createTestScratch("dohc-fresh-"), "Trip");
+    meanwhile = async (rootPath) => {
+      await mkdir(join(rootPath, ".dohc"));
+      for (const name of ["._.dohc", ".dohc/._manifest.json", ".dohc/._sync-history.json", ".dohc/._collections.json"]) {
+        await writeFile(join(rootPath, name), "");
+      }
+    };
+    expect((await create(root)).fresh).not.toBeNull();
+  });
+
+  it.each(["._package.json", "._", "._._.dohc", ".dohc/._settings.json", ".dohc/._engine"])("names no folder that also holds %s", async (name) => {
+    const root = join(await createTestScratch("dohc-fresh-"), "Trip");
+    meanwhile = async (rootPath) => {
+      await mkdir(join(rootPath, ".dohc"));
+      await writeFile(join(rootPath, name), "");
+    };
     expect((await create(root)).fresh).toBeNull();
   });
 

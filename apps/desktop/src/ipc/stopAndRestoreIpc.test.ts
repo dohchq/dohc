@@ -1,3 +1,4 @@
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -16,7 +17,7 @@ import { CHANNELS } from "./channels";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
-import { createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
+import { AutomationStoreNotOpenedError, createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
 import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import {
   LiveDocumentMutationError,
@@ -875,6 +876,12 @@ describe("stop and restore in main", () => {
     await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Access stopped. dohc could not read unfinished Stop and restore progress.");
     expect(f.calls.some(call => call.method === "POST" && call.path.endsWith("/revoke"))).toBe(true);
   });
+  it("shows no unfinished progress while the workspace is still opening, and still reports a broken run store", async () => {
+    const opening = fixture({runStoreError: new AutomationStoreNotOpenedError("dohc has not finished opening this workspace. Try again when it opens.")});
+    expect(await opening.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
+    const broken = fixture({runStoreError: new Error("Unreadable progress")});
+    await expect(broken.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).rejects.toThrow("Unreadable progress");
+  });
   it("starts fresh when new access exists after an unfinished restore's files were undone", async () => {
     const root = await createTestScratch("dohc-restore-new-access-");
     const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
@@ -922,6 +929,29 @@ describe("stop and restore in main", () => {
       });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
       expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it("continues mixed-file Stop and Undo past a synced deletion refusal", async () => {
+    const f = await capturedFiles(["docs/a.md", "notes/guarded.md", "docs/z.md"]);
+    const restore = f.engineCapture.restoreFileToBeforeMoment.bind(f.engineCapture);
+    const refusal = new SyncedDeletionRevivalError();
+    let blocked = f.files[1]!.momentId;
+    vi.spyOn(f.engineCapture, "restoreFileToBeforeMoment").mockImplementation(async (id, ...args) => {
+      if (id === blocked) throw refusal;
+      return restore(id, ...args);
+    });
+    try {
+      const target = {kind: "person", userId: "user_ana"};
+      const result = await f.call(CHANNELS.stopAndRestore, {target}) as {restored: {path: string; restoredMomentId: string}[]};
+      expect(result).toMatchObject({restored: [{path: "docs/a.md"}, {path: "docs/z.md"}],
+        review: [{path: "notes/guarded.md", reason: "restore-refused", detail: refusal.message, refusal: "synced-deletion"}], unfinished: null});
+      blocked = result.restored[1]!.restoredMomentId;
+      expect(await f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: result.restored.map(file => file.restoredMomentId)}))
+        .toMatchObject({files: [{kind: "refused", momentId: blocked, detail: refusal.message, refusal: "synced-deletion"}, {kind: "restored"}], errorMessage: null});
+      expect(await readFile(join(f.rootPath, "docs/a.md"), "utf8")).toBe("shared edit");
+      expect(await readFile(join(f.rootPath, "docs/z.md"), "utf8")).toBe("owner original");
+      expect(await readFile(join(f.rootPath, "notes/guarded.md"), "utf8")).toBe("shared edit");
     } finally { await f.engineCapture.stop(); }
   });
 

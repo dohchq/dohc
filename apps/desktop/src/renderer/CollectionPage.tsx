@@ -45,6 +45,7 @@ import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/colle
 import {
   AUTOMATIONS_FILE,
   automationCount,
+  automationsFileMade,
   AutomationsButton,
   AutomationsPanel,
   useCollectionAutomations,
@@ -618,7 +619,8 @@ export function CollectionPage({
   const customizeDialog = customizing ? (
     <CollectionCustomizeDialog
       name={schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath}
-      files={documentCollectionFiles(collectionPath)}
+      files={documentCollectionFiles(collectionPath, automationsFileMade(automations.file))}
+      onOpenFile={onOpenFile}
       onClose={() => setCustomizing(false)}
     />
   ) : null;

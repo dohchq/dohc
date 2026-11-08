@@ -5,6 +5,7 @@ import {
   displayFrontmatterValue,
   frontmatterEntries,
   frontmatterEntriesFromPairs,
+  listItems,
   orderFrontmatter,
   parseFrontmatter,
 } from "./frontmatter";
@@ -72,17 +73,71 @@ describe("markdown frontmatter helpers", () => {
     ).toBe("---\nid: note-1\ntitle: Plan\nstatus: active\n---\n\n# Plan\n");
   });
 
-  it("keeps a structured value separate from its editable display text", () => {
+  it("shows a list of text as its items, apart from the list it holds", () => {
     const entries = frontmatterEntries(
-      "---\ntags:\n  - a\n  - b\n---\n\n# Plan\n",
+      "---\ntags:\n  - a\n  - b\nyears: ['2026', 'yes', 'null']\nnone: []\n---\n\n# Plan\n",
     );
 
-    expect(entries[0]).toMatchObject({
-      key: "tags",
-      value: "- a\n- b",
-      rawValue: ["a", "b"],
-    });
+    expect(entries).toEqual([
+      { key: "tags", value: "a, b", list: true, sourceKey: "tags", sourceValue: "a, b", rawValue: ["a", "b"] },
+      {
+        key: "years",
+        value: "2026, yes, null",
+        list: true,
+        sourceKey: "years",
+        sourceValue: "2026, yes, null",
+        rawValue: ["2026", "yes", "null"],
+      },
+      { key: "none", value: "", list: true, sourceKey: "none", sourceValue: "", rawValue: [] },
+    ]);
     expect(displayFrontmatterValue({ pinned: true })).toBe("pinned: true");
+  });
+
+  it("shows any other list or map on one line, with why it can't be edited", () => {
+    const entries = frontmatterEntries([
+      "---",
+      "places: [\"Kyoto, Japan\", Osaka]",
+      "days: [1, 2]",
+      "spaced: [' a', b]",
+      "blank: ['', b]",
+      "broken: [\"a\\nb\"]",
+      "where: {lat: 35.5, lng: 135.7}",
+      "---",
+      "",
+    ].join("\n"));
+    const reason = (problem: string) => `dohc can't edit this list here because ${problem}.`;
+
+    expect(entries.map(({ key, value, list, readOnly }) => ({ key, value, list, readOnly }))).toEqual([
+      { key: "places", value: "['Kyoto, Japan', Osaka]", list: undefined, readOnly: reason("an item has a comma") },
+      { key: "days", value: "[1, 2]", list: undefined, readOnly: reason("some items aren't text") },
+      {
+        key: "spaced",
+        value: "[' a', b]",
+        list: undefined,
+        readOnly: reason("an item is blank or starts or ends with a space"),
+      },
+      {
+        key: "blank",
+        value: "['', b]",
+        list: undefined,
+        readOnly: reason("an item is blank or starts or ends with a space"),
+      },
+      { key: "broken", value: "[\"a\\nb\"]", list: undefined, readOnly: reason("an item has a line break") },
+      {
+        key: "where",
+        value: "{lat: 35.5, lng: 135.7}",
+        list: undefined,
+        readOnly: "dohc can't edit a value with named fields here.",
+      },
+    ]);
+  });
+
+  it("reads a list's text as its items, trimmed, with blank items dropped", () => {
+    expect(listItems("kyoto, food")).toEqual(["kyoto", "food"]);
+    expect(listItems("kyoto,food, ")).toEqual(["kyoto", "food"]);
+    expect(listItems("  kyoto  ,, food ,")).toEqual(["kyoto", "food"]);
+    expect(listItems(" , ,")).toEqual([]);
+    expect(listItems("")).toEqual([]);
   });
 
   it("shows exact integers and hostile keys as the YAML the file holds", () => {

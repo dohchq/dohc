@@ -22,6 +22,7 @@ import {
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
   HISTORY_TAB_PATH,
+  VERSIONS_TAB_PATH,
   CHATS_TAB_PATH,
   chatTabPath,
   momentDiffTabPath,
@@ -31,6 +32,7 @@ import {
   newPageTabPath,
   openMomentDiff,
   openTab,
+  openTabOnce,
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
@@ -53,6 +55,7 @@ import {
   MAX_EXPANDED_FOLDERS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
+  mergeSavedTabs,
   recordRecentFile,
   setCollectionActiveView,
   remapWorkbenchPaths,
@@ -346,6 +349,20 @@ describe("tabs", () => {
     const restored = parseUiState(serializeUiState(state));
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(allTabs(state).map((tab) => tab.path));
     expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace", state: serializeUiState(state) }).success).toBe(true);
+  });
+
+  it("goes to the open Versions tab from another group instead of opening a second", () => {
+    let state = withTabs(VERSIONS_TAB_PATH, "a.md");
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    expect(state.activeEditorGroup).toBe("right");
+    state = openTabOnce(state, VERSIONS_TAB_PATH);
+    expect(allTabs(state).filter((tab) => tab.path === VERSIONS_TAB_PATH)).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(state.editorGroups[0].activeTab).toBe(VERSIONS_TAB_PATH);
+    // With none open, it opens in the focused group.
+    state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, VERSIONS_TAB_PATH);
+    state = openTabOnce(state, VERSIONS_TAB_PATH, "right");
+    expect(state.editorGroups.find((group) => group.id === "right")?.activeTab).toBe(VERSIONS_TAB_PATH);
   });
 
   it("keeps Chats in its existing editor group", () => {
@@ -684,8 +701,8 @@ describe("tabs", () => {
     expect(replaceTab(state, "tab://new-page/gone/", "Untitled.md")).toBe(state);
   });
 
-  // The shell does not load the Apps view's list, so the tab names an app by
-  // its folder, as typed, never by its encoded tab address.
+  // A tab names an app by its folder, as typed, never by its encoded tab
+  // address.
   it.each([
     ["apps/trip", "trip"],
     ["clients/acme/portal", "portal"],
@@ -768,6 +785,83 @@ describe("tabs", () => {
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 5, 0)).toBe(state);
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 1, 1)).toBe(state);
     expect(moveTab(state, DEFAULT_EDITOR_GROUP_ID, 0.5, 1)).toBe(state);
+  });
+});
+
+describe("mergeSavedTabs (Restore tabs)", () => {
+  // A full saved layout: b.md shown on its own on the left, and beside 98
+  // other files on the right.
+  const saved: WorkbenchState = {
+    ...defaultWorkbenchState(),
+    editorGroups: [
+      { id: DEFAULT_EDITOR_GROUP_ID, tabs: [{ path: "b.md" }], activeTab: "b.md", size: 0.5 },
+      {
+        id: "right",
+        tabs: [...Array.from({ length: 98 }, (_, i) => ({ path: `saved-${i}.md` })), { path: "b.md" }],
+        activeTab: "b.md",
+        size: 0.5,
+      },
+    ],
+    activeEditorGroup: "right",
+  };
+  const paths = (state: WorkbenchState) => allTabs(state).map((tab) => tab.path);
+
+  it("keeps every tab open now when they fill the limit", () => {
+    const shown = withTabs(...Array.from({ length: MAX_OPEN_TABS }, (_, i) => newPageTabPath(`typed-${i}`, "")));
+    const merged = mergeSavedTabs(saved, shown);
+    expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
+    expect(activeTabPath(merged)).toBe(activeTabPath(shown));
+  });
+
+  it("closes a second copy of a saved file before a tab open now", () => {
+    const shown = withTabs(...Array.from({ length: 98 }, (_, i) => `saved-${i}.md`), "b.md", newPageTabPath("typed", ""));
+    const merged = mergeSavedTabs(saved, shown);
+    expect(paths(merged)).toHaveLength(MAX_OPEN_TABS);
+    expect(new Set(paths(merged))).toEqual(new Set(paths(shown)));
+    // b.md stays in the right group, where it was saved beside the others.
+    expect(merged.editorGroups[1].tabs.map((tab) => tab.path)).toContain("b.md");
+  });
+
+  it("closes saved tabs nobody has open before the ones a group shows", () => {
+    const shown = withTabs("a.md", "c.md");
+    const merged = mergeSavedTabs(saved, shown);
+    expect(paths(merged)).toHaveLength(MAX_OPEN_TABS);
+    expect(paths(merged)).toEqual(expect.arrayContaining(["a.md", "b.md", "c.md", "saved-97.md"]));
+    expect(paths(merged)).not.toContain("saved-0.md");
+    expect(paths(merged).filter((path) => path === "b.md")).toHaveLength(2);
+  });
+
+  it("keeps an app open now in its group, so it doesn't reload", () => {
+    const app = siteTabPath("trip");
+    const savedApp: WorkbenchState = {
+      ...saved,
+      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+    };
+    const merged = mergeSavedTabs(savedApp, withTabs(app));
+    expect(merged.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([["b.md", app], ["b.md"]]);
+    expect(merged.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+  });
+
+  it("keeps what each group shows when an app stays in a group out of focus", () => {
+    const app = siteTabPath("trip");
+    const savedApp: WorkbenchState = {
+      ...saved,
+      editorGroups: [saved.editorGroups[0], { ...saved.editorGroups[1], tabs: [{ path: "b.md" }, { path: app }], activeTab: app }],
+    };
+    const shown: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        { id: DEFAULT_EDITOR_GROUP_ID, tabs: [{ path: app }, { path: "c.md" }], activeTab: "c.md", size: 0.5 },
+        { id: "right", tabs: [{ path: "d.md" }], activeTab: "d.md", size: 0.5 },
+      ],
+      activeEditorGroup: "right",
+    };
+    const merged = mergeSavedTabs(savedApp, shown);
+    expect(merged.editorGroups.map((group) => [group.tabs.map((tab) => tab.path), group.activeTab])).toEqual([
+      [["b.md", app], "b.md"],
+      [["b.md", "c.md", "d.md"], "d.md"],
+    ]);
+    expect(merged.activeEditorGroup).toBe("right");
   });
 });
 
@@ -900,13 +994,13 @@ describe("ui-state persistence round-trip", () => {
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(["notes/a.md"]);
   });
 
-  it("restores the built-in Apps view", () => {
+  it("opens the Explorer for a layout saved on the Apps view, which the rail no longer has", () => {
     expect(
       parseUiState({
         ...serializeUiState(defaultWorkbenchState()),
         activeView: "sites",
       }).activeView,
-    ).toBe("sites");
+    ).toBe("explorer");
   });
 
   it("serialize → parse restores the workbench state", () => {

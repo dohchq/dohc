@@ -18,6 +18,8 @@ describe("owner publication review contract", () => {
     expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [local] })).toEqual({ kind: "localListed", publications: [local] });
     const shared = { ...publication, shareId: "share", grantId: "grant", linkCurrent: true, manifestUnavailable: false, collectionCapability: null };
     expect(OwnerAppPublicationResult.parse({ kind: "listed", publications: [shared], nextCursor: null })).toEqual({ kind: "listed", publications: [shared], nextCursor: null });
+    expect(OwnerAppPublicationResult.parse({ kind: "listUnavailable" })).toEqual({ kind: "listUnavailable" });
+    expect(OwnerAppPublicationResult.safeParse({ kind: "listUnavailable", publications: [] }).success).toBe(false);
     expect(OwnerAppPublicationResult.safeParse({ ...prepared, capabilities: [{ ...datasetCapability, source: "replace rules" }] }).success).toBe(false);
   });
   it("supports local preparation and approved bundle launch without share identities", () => {
@@ -46,6 +48,10 @@ describe("owner publication review contract", () => {
     expect(OwnerAppPublicationResult.safeParse({ kind: "localListed", publications: [{ ...local, datasetCapability: null }] }).success).toBe(false);
     const { pendingCreates: _, ...withoutPending } = local;
     expect(OwnerAppPublicationResult.safeParse({ kind: "localListed", publications: [withoutPending] }).success).toBe(false);
+    // An app that reaches no workspace data lists with neither capability.
+    const { collectionCapability: _capability, pendingCreates: _pending, ...unconnected } = local;
+    expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: [unconnected] })).toEqual({ kind: "localListed", publications: [unconnected] });
+    expect(OwnerAppPublicationResult.safeParse({ kind: "localListed", publications: [{ ...unconnected, pendingCreates: 0 }] }).success).toBe(false);
     const unconfirmed = { kind: "withdrawalUnconfirmed", publicationId: "b".repeat(64), authorityRevision: 3, unresolvedCreates: 2 };
     expect(OwnerAppPublicationResult.parse(unconfirmed)).toEqual(unconfirmed);
     expect(OwnerAppPublicationResult.safeParse({ ...unconfirmed, unresolvedCreates: 0 }).success).toBe(false);

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IncrementalMarkdownDocument } from "./IncrementalMarkdownDocument";
 import { MARKDOWN_COMPONENTS } from "./markdownComponents";
@@ -8,6 +9,7 @@ vi.mock("../bridge", () => ({ bridge: vi.fn() }));
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 const TABLE = [
@@ -90,5 +92,152 @@ describe("MARKDOWN_COMPONENTS tables", () => {
     expect(view.container.querySelectorAll("table")).toHaveLength(1);
     expect(view.container.querySelectorAll("th")).toHaveLength(2);
     expect(view.container.textContent).not.toContain("| Field |");
+  });
+});
+
+// The editor keeps a resized row's height in a comment above the table and
+// sets it on the row: `<tr style="height: 84px">`.
+const annotated = (pairs: string) => `<!-- dohc:table row-heights=${pairs} -->\n${TABLE}`;
+
+function rowHeights(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll("tr"), (row) => row.style.height);
+}
+
+describe("read table row heights", () => {
+  it("sets each stored row height on its row and hides the comment", () => {
+    const view = renderMarkdown(`${annotated("1:84,2:120")}\n\nBelow the table.`);
+
+    expect(rowHeights(view.container), "The read body draws every row at its natural height, so rows grow when the editor replaces it.").toEqual(["", "84px", "120px"]);
+    expect(view.container.textContent).not.toContain("dohc:table");
+    expect(view.container.textContent).toContain("Below the table.");
+  });
+
+  it("reads the comment where the editor does", () => {
+    const quoted = `> <!-- dohc:table row-heights=1:84 -->\n${TABLE.replaceAll(/^/gmu, "> ")}`;
+    const listed = `- <!-- dohc:table row-heights=1:84 -->\n${TABLE.replaceAll(/^/gmu, "  ")}`;
+    const spaced = `<!-- dohc:table row-heights=1:84 -->\n\n${TABLE}`;
+    for (const body of [spaced, quoted, listed]) {
+      const view = renderMarkdown(body);
+      expect(rowHeights(view.container), body).toEqual(["", "84px", ""]);
+      expect(view.container.textContent, body).not.toContain("dohc:table");
+      view.unmount();
+    }
+  });
+
+  it("skips a row the table does not have and a height that is not positive", () => {
+    for (const [pairs, heights] of [
+      ["9:84,1:0,2:5", ["", "", "5px"]],
+      ["1:99999999999999999999,2:120", ["", "", "120px"]],
+    ] as const) {
+      const view = renderMarkdown(annotated(pairs));
+      expect(rowHeights(view.container), pairs).toEqual(heights);
+      expect(view.container.textContent, pairs).not.toContain("dohc:table");
+      view.unmount();
+    }
+  });
+
+  it("leaves a malformed comment, or one with no table under it, as text", () => {
+    for (const body of [
+      annotated("1:84px"),
+      annotated("1:8.5"),
+      annotated("1:84,"),
+      `  ${annotated("1:84")}`,
+      "<!-- dohc:table row-heights=1:84 -->\nNot a table.",
+      `<!-- note -->\n${TABLE}`,
+    ]) {
+      const view = renderMarkdown(body);
+      expect(rowHeights(view.container).join(""), body).toBe("");
+      expect(view.container.textContent, body).toContain(body.trim().split("\n")[0]);
+      view.unmount();
+    }
+    const fenced = renderMarkdown("```\n<!-- dohc:table row-heights=1:84 -->\n| A |\n| --- |\n| a |\n```");
+    expect(fenced.container.querySelector("table")).toBeNull();
+    expect(fenced.container.querySelector("pre")?.textContent).toContain("row-heights=1:84");
+  });
+
+  it("draws the height the document holds now, not one an earlier render parsed", () => {
+    const view = renderMarkdown(annotated("1:84"));
+    expect(rowHeights(view.container)).toEqual(["", "84px", ""]);
+
+    view.rerender(<IncrementalMarkdownDocument body={annotated("1:120")} components={MARKDOWN_COMPONENTS} />);
+    expect(rowHeights(view.container)).toEqual(["", "120px", ""]);
+    view.rerender(<IncrementalMarkdownDocument body={TABLE} components={MARKDOWN_COMPONENTS} />);
+    expect(rowHeights(view.container)).toEqual(["", "", ""]);
+  });
+
+  it("keeps a comment with its table when a split document's chunk fills up on it", () => {
+    // Over the incremental threshold. The first chunk fills up on the comment,
+    // so a split at the blank line under it would leave the table in the next
+    // chunk without its heights.
+    const filler = `${"padding paragraph ".repeat(60)}\n\n`.repeat(40);
+    const body = (pairs: string) =>
+      `${"x".repeat(4060)}\n\n<!-- dohc:table row-heights=${pairs} -->\n\n${TABLE}\n\n${filler}`;
+
+    const view = renderMarkdown(body("1:84"));
+    expect(rowHeights(view.container)).toEqual(["", "84px", ""]);
+    expect(view.container.textContent).not.toContain("dohc:table");
+    view.rerender(<IncrementalMarkdownDocument body={body("2:120")} components={MARKDOWN_COMPONENTS} />);
+    expect(rowHeights(view.container)).toEqual(["", "", "120px"]);
+  });
+});
+
+describe("MARKDOWN_COMPONENTS code blocks", () => {
+  const TS_BLOCK = "```typescript\nconst a = 1;\nconst b = `two`;\n```";
+
+  it("names a known language and offers Copy code", () => {
+    const view = renderMarkdown(TS_BLOCK);
+
+    const toolbar = view.container.querySelector(".dohc-code-block-toolbar")!;
+    expect(toolbar.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("TypeScript");
+    expect(within(toolbar as HTMLElement).getByRole("button", { name: "Copy code" })).toBeTruthy();
+  });
+
+  it("shows no language for a plain block", () => {
+    const view = renderMarkdown("```\nplain words\n```");
+
+    expect(view.container.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("");
+    expect(view.getByRole("button", { name: "Copy code" })).toBeTruthy();
+  });
+
+  it("shows an unknown language by its own name", () => {
+    const view = renderMarkdown("```elixir\nIO.puts(1)\n```");
+
+    expect(view.container.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("elixir");
+  });
+
+  it("puts the toolbar just before its pre, where the editor's widget sits", async () => {
+    // Over the incremental threshold, so the blocks render in several chunks.
+    const filler = `${"padding paragraph ".repeat(60)}\n\n`.repeat(40);
+    const view = renderMarkdown(`${TS_BLOCK}\n\n${filler}${"```\nlast\n```"}`);
+
+    // The last block arrives with the idle backfill, in a later chunk.
+    await waitFor(() => expect(view.container.querySelectorAll("pre")).toHaveLength(2));
+    const pres = [...view.container.querySelectorAll("pre")];
+    for (const pre of pres) {
+      expect(pre.parentElement).toBe(view.container);
+      expect(pre.previousElementSibling?.className).toBe("dohc-code-block-toolbar");
+    }
+  });
+
+  it("copies the block's text", async () => {
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const view = renderMarkdown(TS_BLOCK);
+
+    await act(async () => view.getByRole("button", { name: "Copy code" }).click());
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("const a = 1;\nconst b = `two`;");
+  });
+
+  it("reaches Copy code with Tab and copies with Enter or Space", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const view = renderMarkdown(TS_BLOCK);
+
+    await user.tab();
+    expect(document.activeElement).toBe(view.getByRole("button", { name: "Copy code" }));
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(writeText).toHaveBeenLastCalledWith("const a = 1;\nconst b = `two`;");
   });
 });

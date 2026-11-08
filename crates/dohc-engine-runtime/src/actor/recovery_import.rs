@@ -62,6 +62,7 @@ impl ActorHandle {
             let receipt_id = format!("import-recovery-{digest}");
             let mut record_facts = Vec::new();
             let mut automation_claims = Vec::new();
+            let preparations = cache.retirement_preparations();
             let result = store.write_with(faults.as_ref(), |tx| -> Result<_, RuntimeError> {
                 dohc_engine_domain::validate_addressable_plaintext_path(&input.path)?;
                 if input.admitted_base.len() > 32 * 1024 * 1024 || input.updates.len() > 4096 || input.text.len() > 16 * 1024 * 1024 ||
@@ -147,7 +148,12 @@ impl ActorHandle {
                 }
                 let same_lineage = same_claim && projection.is_some_and(|p| p.source_state_vector_sha256 == hex_sha256(&base.encode_state_vector()));
                 let same_disk = match probe_projection_target(&root, &snapshot.path, ProjectionTargetKind::Plaintext) {
-                    ProjectionTargetState::Text { sha256 } => input.expected_disk_sha256.as_deref() == Some(sha256.as_str()),
+                    // dohc's own settlement of the base's text is not an outside change. A settled
+                    // deletion keeps the state vector, so the base must also project to that text.
+                    ProjectionTargetState::Text { sha256 } => input.expected_disk_sha256.as_deref() == Some(sha256.as_str()) ||
+                        (same_lineage && projection.is_some_and(|p| sha256 == hex_sha256(p.content.as_bytes()) &&
+                            dohc_engine_sync::project_ydoc_with_store(tx, key, &base, p.content_kind)
+                                .is_ok_and(|settled| settled.content == p.content))),
                     ProjectionTargetState::Absent => input.expected_disk_sha256.is_none(),
                     _ => false,
                 };
@@ -165,7 +171,7 @@ impl ActorHandle {
                             update.actor_origin_id.as_deref(), update.attribution.as_ref(), now_ms)?;
                         let local_append = super::ydoc::journal_recovery_append_in_tx(tx, key, &snapshot.path,
                             marker.content_kind, &update.update, update.actor_origin_id.as_deref(),
-                            update.attribution.as_ref(), &mut append, now_ms)?;
+                            update.attribution.as_ref(), &preparations, &mut append, now_ms)?;
                         if !append.deduped && let Some(facts) = append.record_facts.take() {
                             if local_append {
                                 automation_claims.extend(dohc_engine_domain::claim_automation_triggers_in_tx(tx, &key.workspace_id, &facts, now_ms)

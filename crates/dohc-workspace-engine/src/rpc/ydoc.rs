@@ -23,6 +23,7 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::Lease;
 use dohc_engine_collab::Regime;
+use dohc_engine_collab::markdown_write_safety::MarkdownConversionConsent;
 use dohc_engine_collab::owner_outbox::draft::{OwnerDraftDescriptor, OwnerDraftSnapshot};
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -33,6 +34,7 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RuntimeError;
+use dohc_engine_runtime::actor::YdocCloseMaterialization;
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use serde::Deserialize;
 use serde::Serialize;
@@ -46,12 +48,14 @@ const AUTHOR_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(5);
 #[derive(Default)]
 struct AuthorSettlementQueue {
     queued: bool,
+    held: bool,
     retry_after: Option<Instant>,
 }
 
 impl AuthorSettlementQueue {
     fn try_queue(&mut self, now: Instant) -> bool {
         if self.queued
+            || self.held
             || self
                 .retry_after
                 .is_some_and(|retry_after| now < retry_after)
@@ -66,11 +70,37 @@ impl AuthorSettlementQueue {
         self.queued = false;
         self.retry_after = failed.then(|| now + AUTHOR_SETTLEMENT_RETRY_DELAY);
     }
+
+    fn changed_inputs(&mut self) {
+        self.held = false;
+    }
+
+    fn hold(&mut self) {
+        self.queued = false;
+        self.held = true;
+        self.retry_after = None;
+    }
 }
 
 type EditorDraftRead = (Option<OwnerDraftSnapshot>, Option<Arc<dyn Send + Sync>>);
 
+fn validate_conversion_source(source: Option<&str>) -> Result<(), WireError> {
+    if source.is_some_and(|source| {
+        source.len() != 64
+            || !source
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-source-digest",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct YdocSession {
+    pub(super) conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) workspace: WorkspaceHandle,
     pub(super) key: DocKey,
@@ -79,6 +109,8 @@ pub(crate) struct YdocSession {
     pub(super) regime: Regime,
     pub(super) lineage_claim_id: Option<String>,
     pub(super) restore_generation: Option<i64>,
+    /// The owner activation an imported session serves.
+    pub(super) activation_id: Option<String>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
     author_settlement: AuthorSettlementQueue,
@@ -109,6 +141,7 @@ impl YdocSession {
     ) -> Result<Self, CollabError> {
         lease.bind_claim(Some(&captured.source.lineage_claim_id))?;
         Ok(Self {
+            conversion_consent: None,
             owner_draft: None,
             workspace,
             key,
@@ -117,6 +150,7 @@ impl YdocSession {
             regime: Regime::Replicated,
             lineage_claim_id: Some(captured.source.lineage_claim_id.clone()),
             restore_generation: captured.restore_generation,
+            activation_id: Some(captured.activation_id.clone()),
             lineage_absent: false,
             first_update_pending: false,
             author_settlement: AuthorSettlementQueue::default(),
@@ -130,6 +164,7 @@ impl YdocSession {
 
 #[derive(Clone)]
 pub(super) struct YdocSessionView {
+    pub(super) conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     pub(super) owner_draft: Option<OwnerDraftDescriptor>,
     pub(super) key: DocKey,
     pub(super) path: String,
@@ -137,6 +172,7 @@ pub(super) struct YdocSessionView {
     pub(super) regime: Regime,
     pub(super) lineage_claim_id: Option<String>,
     pub(super) restore_generation: Option<i64>,
+    pub(super) activation_id: Option<String>,
     pub(super) lineage_absent: bool,
     pub(super) first_update_pending: bool,
     pub(super) last_settled_sha: Option<String>,
@@ -259,6 +295,8 @@ struct OwnerYDocOutboxRetryParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocOpenParams {
+    #[serde(default)]
+    allow_lossy_source_sha256: Option<String>,
     version_id: String,
     path: String,
     /// The document this open continues. The open refuses when the path
@@ -280,6 +318,7 @@ struct YdocOpenParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocOpenResult {
+    head_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_draft: Option<OwnerDraftDescriptor>,
     session_id: String,
@@ -386,6 +425,8 @@ struct YdocRecordUpdateResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocSettleParams {
+    #[serde(default)]
+    allow_lossy_source_sha256: Option<String>,
     session_id: String,
     #[serde(default)]
     summary: Option<String>,
@@ -453,6 +494,7 @@ struct YdocResyncParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocResyncResult {
+    head_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_draft: Option<OwnerDraftDescriptor>,
     lineage_claim_id: Option<String>,
@@ -496,6 +538,43 @@ fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
         ));
     }
     Ok(bytes)
+}
+
+fn restore_fenced_page(
+    rows: Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>,
+    limit: usize,
+    max_frame_bytes: usize,
+) -> Result<Value, WireError> {
+    let corrupt = |_| WireError::new(ErrorCode::Internal, "owner-outbox-state-corrupt");
+    let too_large = || {
+        WireError::new(
+            ErrorCode::LimitExceeded,
+            "owner-outbox-page-exceeds-wire-limit",
+        )
+    };
+    let mut bytes = 256usize;
+    let fetched = rows.len();
+    let mut queues = Vec::new();
+    let mut next = None;
+    let mut truncated = false;
+    for row in rows {
+        let row_bytes = serde_json::to_vec(&row).map_err(corrupt)?.len();
+        let cursor_bytes = serde_json::to_vec(&row.outbox_id).map_err(corrupt)?.len();
+        if bytes.saturating_add(row_bytes).saturating_add(cursor_bytes) > max_frame_bytes {
+            truncated = true;
+            break;
+        }
+        bytes += row_bytes + 1;
+        next = Some(row.outbox_id.clone());
+        queues.push(row);
+    }
+    if truncated && queues.is_empty() {
+        return Err(too_large());
+    }
+    if !truncated && fetched < limit {
+        next = None;
+    }
+    Ok(json!({"queues": queues, "next": next}))
 }
 
 fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
@@ -684,6 +763,7 @@ impl EngineService {
         // A released row says whether its settlement wrote the file, so the
         // desktop claims recovered edits only when they reached it.
         let mut materialized = vec![false; rows.len()];
+        let mut settlement_reasons = vec![None; rows.len()];
         if action == "release" {
             for (index, row) in rows.iter().enumerate() {
                 if row.deferred.is_some() {
@@ -739,10 +819,17 @@ impl EngineService {
                         Arc::new(NoFaults),
                         cancellation.token(),
                         None,
+                        None,
                     )
-                    .await
-                    .map_err(map_runtime)?
-                    .settled();
+                    .await;
+                let settled = match settled {
+                    Ok(outcome) => outcome.settled(),
+                    Err(RuntimeError::MarkdownWriteHeld { .. }) => {
+                        settlement_reasons[index] = Some("markdown-write-held");
+                        continue;
+                    }
+                    Err(error) => return Err(map_runtime(error)),
+                };
                 if settled
                     .as_ref()
                     .is_some_and(|s| s.collection_reconcile_required)
@@ -756,8 +843,13 @@ impl EngineService {
         if action == "release"
             && let Some(values) = stops.as_array_mut()
         {
-            for (value, materialized) in values.iter_mut().zip(materialized) {
+            for ((value, materialized), reason) in
+                values.iter_mut().zip(materialized).zip(settlement_reasons)
+            {
                 value["materialized"] = json!(materialized);
+                if let Some(reason) = reason {
+                    value["settlementReason"] = json!(reason);
+                }
             }
         }
         Ok(json!({"stops":stops}))
@@ -821,6 +913,35 @@ impl EngineService {
             "oldestEntryAtMs": result.oldest_entry_at_ms,
             "state": result.state.as_str(),
         }))
+    }
+
+    pub(super) async fn owner_ydoc_outbox_list_restore_fenced(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            after: Option<String>,
+            limit: usize,
+        }
+        let params: Params = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = open
+            .actor
+            .owner_ydoc_list_restore_fenced(
+                open.workspace_id.clone(),
+                params.after,
+                params.limit,
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        restore_fenced_page(rows, params.limit, ctx.max_frame_bytes as usize)
     }
 
     pub(super) async fn owner_ydoc_outbox_read_pending(
@@ -1149,6 +1270,7 @@ impl EngineService {
         request_id: u64,
     ) -> Result<(Value, BlobEgress), WireError> {
         let params: YdocOpenParams = parse(params)?;
+        validate_conversion_source(params.allow_lossy_source_sha256.as_deref())?;
         validate_ydoc_path(&params.path)?;
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
@@ -1383,6 +1505,24 @@ impl EngineService {
             state.initial_update = draft.initial_update;
             draft.descriptor
         });
+        let conversion_consent = if let Some(source) = params.allow_lossy_source_sha256 {
+            Some(
+                open.actor
+                    .ydoc_conversion_consent(
+                        state.key.clone(),
+                        params.path.clone(),
+                        session_id.clone(),
+                        state.lineage_claim_id.clone(),
+                        state.restore_generation,
+                        source,
+                        cancellation.token(),
+                    )
+                    .await
+                    .map_err(map_runtime)?,
+            )
+        } else {
+            None
+        };
         let initial_update = state.initial_update;
         let byte_permit = self
             .blob_egress_budget
@@ -1412,6 +1552,7 @@ impl EngineService {
             seed => (seed, None),
         };
         let result = YdocOpenResult {
+            head_sha256: state.head_blob_sha256.clone(),
             owner_draft: owner_draft.clone(),
             session_id: session_id.clone(),
             object_id: state.key.object_id.clone(),
@@ -1453,8 +1594,9 @@ impl EngineService {
             .bind_claim(state.lineage_claim_id.as_deref())
             .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
         lock(&self.sessions).insert(
-            session_id,
+            session_id.clone(),
             YdocSession {
+                conversion_consent,
                 owner_draft,
                 workspace: handle,
                 key: state.key,
@@ -1463,6 +1605,7 @@ impl EngineService {
                 regime: state.regime,
                 lineage_claim_id: state.lineage_claim_id,
                 restore_generation: state.restore_generation,
+                activation_id: None,
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
                 author_settlement: AuthorSettlementQueue::default(),
@@ -1651,6 +1794,20 @@ impl EngineService {
                 if let Ok(append) = &outcome
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
+                    if !append.outcome.deduped {
+                        session.author_settlement.changed_inputs();
+                    }
+                    if session.first_update_pending
+                        && require_empty
+                        && append.lineage_originated_here
+                        && let Some(claim) = append.lineage_claim_id.clone()
+                        && let Some(consent) = session
+                            .conversion_consent
+                            .as_ref()
+                            .and_then(|consent| consent.for_originated_claim(claim))
+                    {
+                        session.conversion_consent = Some(Arc::new(consent));
+                    }
                     session.first_update_pending = false;
                     session
                         .set_lineage_claim(append.lineage_claim_id.clone())
@@ -1676,9 +1833,11 @@ impl EngineService {
                                 session.lineage_claim_id.clone(),
                                 session.open_head_sha.clone(),
                                 session.restore_generation,
+                                session.conversion_consent.clone(),
                             )
                         });
-                        let Some((key, path, kind, lineage, head, restore)) = pending else {
+                        let Some((key, path, kind, lineage, head, restore, consent)) = pending
+                        else {
                             return;
                         };
                         let settle_now = match now_ms() {
@@ -1708,6 +1867,7 @@ impl EngineService {
                                 Arc::new(NoFaults),
                                 CancellationToken::new(),
                                 restore,
+                                consent,
                             )
                             .await
                         {
@@ -1731,6 +1891,15 @@ impl EngineService {
                                     );
                                 }
                                 true
+                            }
+                            Err(error @ RuntimeError::MarkdownWriteHeld { .. }) => {
+                                eprintln!(
+                                    "engine: queued author coverage settlement held: {error}"
+                                );
+                                if let Some(session) = lock(&sessions).get_mut(&session_id) {
+                                    session.author_settlement.hold();
+                                }
+                                return;
                             }
                             Err(error) => {
                                 eprintln!(
@@ -1865,6 +2034,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: YdocSettleParams = parse(params)?;
+        validate_conversion_source(params.allow_lossy_source_sha256.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
         let _serial = tokio::select! {
@@ -1874,6 +2044,30 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
+        if let Some(source) = params.allow_lossy_source_sha256 {
+            let (_, view) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+            let consent = open
+                .actor
+                .ydoc_conversion_consent(
+                    view.key,
+                    view.path,
+                    params.session_id.clone(),
+                    view.lineage_claim_id,
+                    view.restore_generation,
+                    source,
+                    cancellation.token(),
+                )
+                .await
+                .map_err(map_runtime)?;
+            let mut sessions = lock(&self.sessions);
+            let session = sessions.get_mut(&params.session_id).ok_or_else(|| {
+                WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found")
+            })?;
+            session.conversion_consent = Some(consent);
+        }
+        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
+            session.author_settlement.changed_inputs();
+        }
         let settled = self
             .ydoc_settle_inner(
                 &cancellation,
@@ -1909,6 +2103,7 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
                 session.restore_generation,
+                session.conversion_consent,
             )
             .await
             .map_err(map_runtime)?;
@@ -2051,38 +2246,57 @@ impl EngineService {
         let close_workspace_id = open.workspace_id.clone();
         let close_task = tokio::spawn(async move {
             let _serial = serial;
-            let close_result = actor
-                .ydoc_close_session_materialized(
-                    close_root,
-                    session_key,
-                    close_self_writes,
+            let committed = actor
+                .ydoc_close_commit(
+                    session_key.clone(),
+                    Some(close_root.clone()),
                     now,
                     Arc::new(NoFaults),
                     CancellationToken::new(),
                 )
                 .await;
+            let drains = match committed {
+                Ok((_, drains)) => drains,
+                // Reinsert only on a genuine close refusal (UnsettledClose
+                // and friends), which committed nothing — an
+                // ActorUnavailable/WorkerPanicked error means the workspace
+                // was torn down while this task ran, and resurrecting the
+                // entry would keep its embedded lease alive past the
+                // eviction, leaving the doc ydoc-session-busy for the next
+                // workspace open.
+                Err(error) => {
+                    if matches!(error, RuntimeError::Collab(_) | RuntimeError::Domain(_))
+                        && let Some(entry) = taken
+                    {
+                        lock(&sessions).insert(session_id, entry);
+                    }
+                    return Err(error);
+                }
+            };
+            if !drains {
+                return Ok(());
+            }
+            // The close committed, so the session stays closed whatever its
+            // drain answers; a retried close finds no session to close.
+            let record_facts = actor
+                .ydoc_close_drain(
+                    session_key,
+                    Some(YdocCloseMaterialization {
+                        root_dir: close_root,
+                        self_writes: close_self_writes,
+                    }),
+                    now,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await?;
             // Post-commit, inside the spawned task — it runs to completion
             // even when the RPC future is dropped, and the close's drain
             // committed these history rows.
-            if let Ok(closed) = &close_result {
-                for facts in &closed.record_facts {
-                    emit_record_events(&close_events, &close_workspace_id, facts);
-                }
+            for facts in &record_facts {
+                emit_record_events(&close_events, &close_workspace_id, facts);
             }
-            // Reinsert only on a genuine close refusal (UnsettledClose and
-            // friends) — an ActorUnavailable/WorkerPanicked error means the
-            // workspace was torn down while this task ran, and resurrecting
-            // the entry would keep its embedded lease alive past the
-            // eviction, leaving the doc ydoc-session-busy for the next
-            // workspace open.
-            if matches!(
-                close_result,
-                Err(RuntimeError::Collab(_)) | Err(RuntimeError::Domain(_))
-            ) && let Some(entry) = taken
-            {
-                lock(&sessions).insert(session_id, entry);
-            }
-            close_result
+            Ok(())
         });
         let close_result = close_task
             .await
@@ -2164,11 +2378,27 @@ impl EngineService {
         let (state, owner_draft) = match draft {
             Some(draft) => (
                 dohc_engine_runtime::actor::YdocResyncState {
+                    head_blob_sha256: open
+                        .actor
+                        .ydoc_open_state(
+                            open.workspace_id.clone(),
+                            now_ms()?,
+                            false,
+                            Some(session.key.clone()),
+                            session.key.version_id.clone(),
+                            session.path.clone(),
+                            Some(session.content_kind),
+                            cancellation.token(),
+                        )
+                        .await
+                        .map_err(map_runtime)?
+                        .head_blob_sha256,
                     initial_update: draft.initial_update,
                     lineage_claim_id: Some(draft.descriptor.binding.lineage_claim_id.clone()),
                     lineage_originated_here: false,
                     recovered_paths: Vec::new(),
                     artifact_assets: Vec::new(),
+                    record_facts: Vec::new(),
                 },
                 Some(draft.descriptor),
             ),
@@ -2190,6 +2420,13 @@ impl EngineService {
                 None,
             ),
         };
+        // Post-commit: the resync's drain committed these history rows, and no
+        // other path fires a parked update's events. Never claims —
+        // drained updates are synced, and only the origin device claims its
+        // automation triggers (ADR 0008).
+        for facts in &state.record_facts {
+            emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session
                 .set_lineage_claim(state.lineage_claim_id.clone())
@@ -2211,6 +2448,7 @@ impl EngineService {
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = serde_json::to_value(YdocResyncResult {
+            head_sha256: state.head_blob_sha256,
             owner_draft,
             lineage_claim_id: state.lineage_claim_id,
             lineage_originated_here: state.lineage_originated_here,
@@ -2258,6 +2496,7 @@ impl EngineService {
         Ok((
             open,
             YdocSessionView {
+                conversion_consent: session.conversion_consent.clone(),
                 owner_draft: session.owner_draft.clone(),
                 key: session.key.clone(),
                 path: session.path.clone(),
@@ -2265,6 +2504,7 @@ impl EngineService {
                 regime: session.regime,
                 lineage_claim_id: session.lineage_claim_id.clone(),
                 restore_generation: session.restore_generation,
+                activation_id: session.activation_id.clone(),
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
                 last_settled_sha: session.last_settled_sha.clone(),
@@ -2307,6 +2547,10 @@ impl EngineService {
 #[cfg(test)]
 #[path = "owner_draft_editor_tests.rs"]
 mod owner_draft_editor_tests;
+
+#[cfg(test)]
+#[path = "markdown_resync_tests.rs"]
+mod markdown_resync_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2432,6 +2676,18 @@ mod tests {
             queue.try_queue(now + AUTHOR_SETTLEMENT_RETRY_DELAY),
             "success clears backoff"
         );
+    }
+
+    #[test]
+    fn held_author_settlement_waits_for_changed_inputs_or_explicit_retry() {
+        let mut queue = AuthorSettlementQueue::default();
+        let now = Instant::now();
+        assert!(queue.try_queue(now));
+        queue.hold();
+        assert!(!queue.try_queue(now + Duration::from_secs(600)));
+        assert!(queue.retry_after.is_none());
+        queue.changed_inputs();
+        assert!(queue.try_queue(now));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2562,6 +2818,229 @@ mod tests {
             std::fs::read_to_string(scratch.path().join("authors.txt")).unwrap(),
             "ab"
         );
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn markdown_hold_queued_author_driver_waits_for_consent_and_retries_only_unaccepted_work()
+    {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_storage::EngineStore;
+        let scratch = ScratchDir::new().unwrap();
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let source = "- parent\n  - child\n";
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+            .unwrap();
+        doc.richdoc_append_paragraph("Accepted before queueing");
+        let key = DocKey::new("capacity-hold", "main", "note").unwrap();
+        {
+            let mut store = EngineStore::open(&db, 1).unwrap();
+            store.bind_root_token(token, &NoFaults).unwrap();
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("capacity-hold", "main", 1, &NoFaults)
+                .unwrap();
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "capacity-hold".into(),
+                        version_id: "main".into(),
+                        object_id: "note".into(),
+                        path: "note.md".into(),
+                        text: source.into(),
+                        moment_id: "source".into(),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some("note.md"),
+                        content_kind: ContentKind::Richdoc,
+                        regime: Regime::LocalOnly,
+                    }),
+                    ..Default::default()
+                },
+                &NoFaults,
+                3,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        }
+        std::fs::write(scratch.path().join("note.md"), source).unwrap();
+        let modified = std::fs::metadata(scratch.path().join("note.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir":scratch.path(),"workspaceId":"capacity-hold","captureMode":"none",
+                }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        open.actor
+            .configure_reader_resolver(Arc::new(
+                dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                    dohc_engine_reader::Reader::new(Some(
+                        super::super::markdown_recovery::tests::witness_reader(
+                            &scratch,
+                            "witness-unsafe",
+                        ),
+                    )),
+                )),
+            ))
+            .await
+            .unwrap();
+        let (session, egress) = service
+            .ydoc_open(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"note.md","contentKind":"richdoc"}),
+                1,
+            )
+            .await
+            .unwrap();
+        drop(egress);
+        let id = session["sessionId"].as_str().unwrap();
+        let params = |author: &str, update: &[u8]| {
+            json!({
+                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
+                "expectedLineageClaimId":session["lineageClaimId"],
+                "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0},
+            })
+        };
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params(
+                    "first",
+                    &doc.richdoc_append_paragraph("First admitted edit"),
+                ),
+            )
+            .await
+            .unwrap();
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        let folded: Vec<_> = (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS - 1)
+            .map(|i| json!({"kind":"agent","agentId":format!("folded-{i}"),"onBehalfOf":"person"}))
+            .collect();
+        raw.execute(
+            "UPDATE ydoc_docs SET pending_authors_json=?1",
+            [json!(folded).to_string()],
+        )
+        .unwrap();
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params(
+                    "first",
+                    &doc.richdoc_append_paragraph("Known author fills coverage"),
+                ),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if lock(&service.sessions)
+                    .get(id)
+                    .unwrap()
+                    .author_settlement
+                    .held
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the real queued driver suspends on the hold");
+        let unaccepted = doc.richdoc_append_paragraph("Retry this unaccepted edit once");
+        for author in ["new-author", "another-new-author"] {
+            let error = service
+                .ydoc_record_update(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    None,
+                    params(author, &unaccepted),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.message, "ydoc-author-capacity");
+            let sessions = lock(&service.sessions);
+            let queue = &sessions.get(id).unwrap().author_settlement;
+            assert!(queue.held);
+            assert!(!queue.queued);
+            assert!(queue.retry_after.is_none());
+        }
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::metadata(scratch.path().join("note.md"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        {
+            let store = EngineStore::open_read_only(&db).unwrap();
+            assert_eq!(store.table_row_count("moments").unwrap(), 1);
+            assert_eq!(store.table_row_count("materialization_jobs").unwrap(), 0);
+            assert_eq!(store.table_row_count("live_device_settlements").unwrap(), 0);
+        }
+        service.ydoc_settle(&RequestContext::unbounded(), Some(handle.clone()),
+            json!({"sessionId":id,"allowLossySourceSha256":dohc_engine_storage::hex_sha256(source.as_bytes())}))
+            .await.unwrap();
+        assert!(
+            !lock(&service.sessions)
+                .get(id)
+                .unwrap()
+                .author_settlement
+                .held
+        );
+        service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                None,
+                params("new-author", &unaccepted),
+            )
+            .await
+            .unwrap();
+        service
+            .ydoc_settle(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({"sessionId":id}),
+            )
+            .await
+            .unwrap();
+        let saved = std::fs::read_to_string(scratch.path().join("note.md")).unwrap();
+        assert_eq!(saved.matches("Retry this unaccepted edit once").count(), 1);
+        assert!(saved.contains("Known author fills coverage"));
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
@@ -2720,6 +3199,10 @@ mod tests {
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
+        service.configure_reader(super::super::markdown_recovery::tests::witness_reader(
+            &scratch,
+            "witness-safe",
+        ));
         let opened = service.workspace_open(&RequestContext::unbounded(), json!({
             "rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
         })).await.unwrap();
@@ -2821,6 +3304,21 @@ mod tests {
             .live_application_register(&ctx, Some(handle.clone()), json!({"binding":binding}))
             .await
             .unwrap();
+        let registered = |service: &EngineService| {
+            service
+                .live_application_registration(
+                    &connection.handle(),
+                    Some(&handle),
+                    registration["registrationId"].as_u64().unwrap(),
+                )
+                .unwrap()
+                .activation_id()
+        };
+        assert_eq!(
+            registered(&service),
+            None,
+            "a registration that named nothing serves no activation before its adoption"
+        );
         let cut = dohc_engine_collab::live_update_application::OwnerAdoptionCut {
             relay_database_namespace: "owner-source-relay".into(),
             adoption_id: "actual-owner".into(),
@@ -2837,6 +3335,11 @@ mod tests {
             expected_local_sequence: sequence,
             events: vec![],
             terminal_receipt: None,
+            retained_prefix: None,
+            reconstruction:
+                dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
         };
         for replay in [false, true] {
             let mut ctx = RequestContext::unbounded();
@@ -2863,7 +3366,13 @@ mod tests {
                 adopted.response.result["adoption"]["localYDocSequence"],
                 sequence
             );
-            assert!(adopted.output_guard.unwrap().is_current());
+            let guard = adopted.output_guard.unwrap();
+            assert!(guard.is_current());
+            assert_eq!(registered(&service).as_deref(), Some("actual-owner"));
+            assert!(
+                format!("{guard:?}").contains(r#"activation_id: Some("actual-owner")"#),
+                "the adoption's answer belongs to the activation it made: {guard:?}"
+            );
         }
         session = assert_adopted_owner_move_refused(
             &service,
@@ -4260,6 +4769,43 @@ mod tests {
         assert!(total_wire_bytes > 1_048_576);
         assert!(base_pages >= 2, "one base must span pages");
         assert!(update_pages >= 6, "each update must span pages");
+    }
+
+    #[test]
+    fn restore_fenced_discovery_pages_fit_the_actual_wire_envelope() {
+        use dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced;
+        let params = owner_outbox_append_params("workspace", "append");
+        let binding: dohc_engine_collab::LiveObjectBinding =
+            serde_json::from_value(params["binding"].clone()).unwrap();
+        let rows: Vec<_> = (0..3)
+            .map(|index| OwnerOutboxRestoreFenced {
+                outbox_id: format!("queue-{index}-\"\\"),
+                binding: binding.clone(),
+                pending_bytes: 12,
+            })
+            .collect();
+        let id = dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
+        let wire_bytes = |result| {
+            serde_json::to_vec(&dohc_engine_protocol::wire::Envelope::Response(Response {
+                id,
+                result,
+            }))
+            .unwrap()
+            .len()
+        };
+        let budget = 256
+            + serde_json::to_vec(&rows[0]).unwrap().len()
+            + serde_json::to_vec(&rows[0].outbox_id).unwrap().len();
+        let first = restore_fenced_page(rows.clone(), 3, budget).unwrap();
+        assert_eq!(first["queues"].as_array().unwrap().len(), 1);
+        assert_eq!(first["next"], rows[0].outbox_id);
+        assert!(wire_bytes(first) <= budget);
+        assert!(restore_fenced_page(rows.clone(), 3, budget - 1).is_err());
+        let all = restore_fenced_page(rows, 64, usize::MAX).unwrap();
+        assert_eq!(all["queues"].as_array().unwrap().len(), 3);
+        assert!(all["next"].is_null());
+        let empty = restore_fenced_page(Vec::new(), 64, budget).unwrap();
+        assert_eq!(empty, json!({"queues": [], "next": null}));
     }
 
     #[tokio::test]

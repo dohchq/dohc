@@ -196,7 +196,8 @@ describe("chat authorship display", () => {
     for (const at of [1, 3]) {
       const { createdAtMs } = messages[at]!;
       expect(slot(items[at]!).className).toBe(slot(items[at - 1]!).className);
-      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["w-9", "shrink-0", "justify-end"]));
+      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["justify-end"]));
+      expect(items[at]!.querySelector(".group")!.className).toContain("grid-cols-[36px_minmax(0,1fr)]");
       const time = slot(items[at]!).querySelector("time")!;
       expect(time.textContent).toBe(formatClockDigits(createdAtMs));
       expect(time.textContent).not.toMatch(/AM|PM/i);
@@ -299,6 +300,47 @@ describe("chat authorship display", () => {
     expect(avatar.className).toMatch(/\brounded-full\b/u);
     expect(avatar.className).toContain("border-dashed");
     expect(avatar.className).not.toMatch(/hue/u);
+  });
+
+  it("shows an agent that joined with a link as an agent, then a link holder", () => {
+    render(
+      <AgentSettingsProvider settings={DEFAULT_USER_SETTINGS}>
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[
+            { presentation: { group: "7", hue: null, self: false },
+              id: "message-link-agent",
+              threadId: "thread-1",
+              authorKind: "link",
+              linkAgent: true,
+              authorDisplayName: "Claude Code",
+              body: "Booked the cabin",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />
+      </AgentSettingsProvider>,
+    );
+    const author = screen.getByTestId("test-chat-message-author");
+    expect(author.textContent).toBe("Claude Code");
+    expect(author.querySelector(".text-agent")?.textContent).toBe("Claude Code");
+    const badge = screen.getByTestId("test-chat-agent-badge");
+    const mark = screen.getByTestId("test-chat-message-link-holder");
+    expect(badge.getAttribute("aria-label")).toBe("agent");
+    expect(mark.textContent).toBe("Link holder");
+    expect(mark.title).toBe("Link holder");
+    // A screen reader meets the agent badge, then the name, then the link mark.
+    expect(badge.compareDocumentPosition(author) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(author.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const avatar = document.querySelector<HTMLElement>("[data-link-agent]")!;
+    expect(avatar.title).toBe("Claude Code");
+    expect(avatar.className).toMatch(/\brounded-lg\b/u);
+    expect(avatar.className).toContain("border-dashed");
+    expect(avatar.className).toContain("border-agent");
+    expect(avatar.className).toContain("text-agent");
   });
 
   it("renders file chips without requiring a person or agent roster", () => {

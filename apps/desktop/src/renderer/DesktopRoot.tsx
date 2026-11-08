@@ -13,43 +13,59 @@ import { applyLookSettings, differsOnlyInLook } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
-import { workspaceName } from "./Titlebar";
+import { Titlebar, workspaceName } from "./Titlebar";
 import { ChevronRight } from "lucide-react";
-import { readError } from "../ipc/errorWords";
+import { readError, refusalCode } from "../ipc/errorWords";
+import { REGISTRY_READ_FAILURE_TITLE, registryReadFailureNext } from "../workspaces/registryReadFailure";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
 import { ShellErrorReporter } from "./shell/useShellError";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
+import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
-import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
+import type { NoticeTarget } from "./shell/noticeTarget";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
-import { TITLEBAR_HEIGHT_PX } from "./tokens";
+import { useOldWindowState } from "./shell/oldWindowState";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
   import("./dev/StatesPage").then((module) => ({ default: module.StatesPage })),
 );
 
+const NOOP = () => undefined;
+
 // The registry error has no workspace shell; it answers menu commands
-// itself and reports into its own notices.
-function RegistryErrorMenuCommands() {
+// itself, reports into its own notices, and offers updates in its title bar.
+function RegistryErrorTitlebar() {
   const reportFailure = useContext(ShellErrorReporter);
+  const update = useDesktopUpdate(reportFailure);
+  useUpdateFailureNotices(update, "", useCallback(
+    (failure: { title?: string; message: string; retry: () => void }) => reportFailure?.({
+      message: failure.title ? `${failure.title}. ${failure.message}` : failure.message,
+      retry: failure.retry,
+    }),
+    [reportFailure],
+  ), NOOP);
   useMenuCommandsWithoutWorkspace(useCallback(
     (message: string, cause: unknown) => reportFailure?.({ message, cause }),
     [reportFailure],
-  ));
-  return null;
+  ), update.run);
+  return (
+    <div className="app-chrome absolute inset-x-0 top-0">
+      <Titlebar update={<TitlebarUpdateButton update={update} />} />
+    </div>
+  );
 }
 
 export function DesktopRoot() {
   useEffect(() => bindOwnPresentation(bridge()), []);
   const [loaded, setLoaded] = useState(false);
   // What the registry read said, and the error as it arrived for the details.
-  const [loadError, setLoadError] = useState<{ message: string; cause: string | null } | null>(null);
+  const [loadError, setLoadError] = useState<{ message: string; cause: string | null; next: string } | null>(null);
   const [loadDetailsOpen, setLoadDetailsOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -68,10 +84,12 @@ export function DesktopRoot() {
   const pathOpenFailures = useHeldWorkspacePathOpenFailures();
   // Outlives every workspace switch, so a sent deletion still reports.
   const accountDeletion = useAccountDeletion();
+  // Forget can leave this window showing a workspace it can no longer edit.
+  const { oldWindow, recheck: recheckOldWindow } = useOldWindowState(isManagerWindow ? null : workspace?.workspaceId ?? null);
   // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
-    open: OpenOnSwitch;
+    open: NoticeTarget;
   } | null>(null);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
@@ -193,6 +211,7 @@ export function DesktopRoot() {
         setLoadError({
           message: words ?? "dohc could not read the file that lists your workspaces.",
           cause: arrived,
+          next: registryReadFailureNext(refusalCode(cause)),
         });
         setLoaded(true);
       });
@@ -224,9 +243,19 @@ export function DesktopRoot() {
   useEffect(() => {
     return bridge().onWorkspaceActivity((event) => {
       if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId.current)) return;
-      void refreshWorkspaceRegistry().catch(() => undefined);
+      const refreshed = refreshWorkspaceRegistry();
+      if (event.workspaceId !== undefined) {
+        void refreshed.catch(() => undefined);
+        return;
+      }
+      // Forget changes the list. A window that keeps its workspace, because
+      // the list still has it or could not be read, may have been left by it.
+      const shown = activeWorkspaceId.current;
+      void refreshed.then((listed) => {
+        if (listed.some((entry) => entry.workspaceId === shown)) recheckOldWindow();
+      }, recheckOldWindow);
     });
-  }, [refreshWorkspaceRegistry]);
+  }, [refreshWorkspaceRegistry, recheckOldWindow]);
 
   useEffect(() => {
     return bridge().onWorkspaceActivated((next) => {
@@ -248,10 +277,15 @@ export function DesktopRoot() {
   }, [shownWorkspace]);
 
   // Signal first paint when real content is about to mount (not while the
-  // registry IPC is still pending and the root renders null).
+  // registry IPC is still pending and the root renders null). The two marks
+  // tell a window that never shows apart: no answer, or no frame.
   useEffect(() => {
     if (loaded) {
-      requestAnimationFrame(() => window.dohcDesktopInternal?.firstPaint());
+      performance.mark("dohc:workspace-registry-loaded");
+      requestAnimationFrame(() => {
+        performance.mark("dohc:first-frame");
+        window.dohcDesktopInternal?.firstPaint();
+      });
     }
   }, [loaded]);
 
@@ -265,26 +299,23 @@ export function DesktopRoot() {
   if (!loaded) return null;
   if (loadError) {
     const loadDetailsText = errorDetails([
-      ["Error", "dohc couldn't read its workspace registry"],
+      ["Error", REGISTRY_READ_FAILURE_TITLE],
       ["Detail", loadError.message],
       ["Cause", loadError.cause],
       ["Platform", bridge().platform],
     ]);
     return (
       <StandaloneNotices>
-      <RegistryErrorMenuCommands />
       <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
-        {/* No title bar here, so this strip moves the window. */}
-        <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />
+        <RegistryErrorTitlebar />
         <span className="text-sm font-semibold text-ink">
-          dohc couldn't read its workspace registry
+          {REGISTRY_READ_FAILURE_TITLE}
         </span>
         <span className="max-w-lg text-xs leading-relaxed text-muted">
           {loadError.message}
         </span>
         <span className="max-w-lg text-xs text-subtle">
-          Your files are untouched. Fix or move the registry file named in the
-          technical details, then relaunch dohc.
+          {loadError.next}
         </span>
         <button
           type="button"
@@ -380,6 +411,7 @@ export function DesktopRoot() {
             onManageWorkspaces={() => bridge().openWorkspaceManager()}
             sentNotices={sentNotices}
             accountDeletion={accountDeletion.deletion}
+            oldWindow={oldWindow}
             {...(openOnSwitch?.workspaceId === workspace.workspaceId
               ? { openOnReady: openOnSwitch.open }
               : {})}

@@ -672,7 +672,7 @@ const demoBridge = {
     return { runs: {} };
   },
   async chatDispatchStateForThread() {
-    return { liveRunId: null, pendingCount: 0, paused: false };
+    return { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
   },
   async readChatDispatchPaused() {
     return { paused: false };

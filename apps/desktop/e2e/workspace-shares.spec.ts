@@ -177,7 +177,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
       { path: "docs/plan.md", contents: "# Plan\n\nShare me.\n" },
     ]);
 
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [
       {
@@ -253,7 +253,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const row = page.locator(`[data-testid="sharing-granted-row"][data-share-id="${shareId}"]`);
     await expect(row).toBeVisible();
     await expect(row).toContainText("plan.md");
-    await expect(row).toContainText("docs/");
+    await expect(row.getByTestId("sharing-row-who")).toHaveText(`${RECIPIENT_EMAIL} can view`);
     // Ending asks before it ends: the menu opens the confirm.
     await row.hover();
     await row.getByRole("button", { name: "Share actions" }).click();
@@ -261,7 +261,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(RECIPIENT_EMAIL);
     await confirm.getByTestId("sharing-end").click();
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("ended");
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
     // owner-removed explanation (#1438).
@@ -319,7 +319,7 @@ confidentialTest.describe("View link lifecycle", () => {
       ]);
 
       relay = await spawnSyncRelay({
-        dbPath: join(temp.baseDir, "relay.sqlite"),
+        dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
         linkBoundary: { linkKey, relayExchangeKey, publicViewerOrigin },
       });
       await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
@@ -737,7 +737,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
   try {
     // A test-only remote peer seeds shared and unshared content through the
     // relay protocol under the granter account.
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     const granter = new RelayFilePeer({
       baseUrl: relay.baseUrl,
@@ -958,7 +958,7 @@ test("mount side: add a share into a workspace and open it beside local files", 
 
   try {
     // A test-only remote peer seeds shared and unshared content on the relay.
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({
       baseUrl: relay.baseUrl,
       token: GRANTER_TOKEN,
@@ -1086,7 +1086,7 @@ test("mount side: an Edit code opens separately by default, and added to a works
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({
       baseUrl: relay.baseUrl,
       token: GRANTER_TOKEN,
@@ -1223,7 +1223,7 @@ test("Comment handoff opens files without creating a second generic chat", async
 
   try {
     relay = await spawnSyncRelay({
-      dbPath: join(temp.baseDir, "relay.sqlite"),
+      dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
       linkBoundary: {
         linkKey,
         relayExchangeKey,
@@ -1386,7 +1386,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     const granter = new RelayFilePeer({
       baseUrl: relay.baseUrl,
@@ -1525,7 +1525,7 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
   const EDITED = "# Shared\n\nThe comet-tail draft, corrected.\n";
 
   try {
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     const granter = new RelayFilePeer({
       baseUrl: relay.baseUrl,
@@ -1720,7 +1720,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
   const IMPORTED = "The imported ledger.\n";
 
   try {
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     const granter = new RelayFilePeer({
       baseUrl: relay.baseUrl,

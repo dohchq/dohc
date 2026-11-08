@@ -30,6 +30,17 @@ export interface TokenCipher {
   decrypt(cipher: string): string;
 }
 
+/**
+ * Whether this run may seal the token with the OS keychain. A desktop e2e run
+ * gives the app its own HOME, where macOS finds no keychain, opens a dialog to
+ * create one, and blocks the main process until someone answers. So an
+ * unpackaged test run on a Mac never asks the keychain, and the store keeps the
+ * token with its plain fallback in the test's own profile.
+ */
+export function mayUseKeychain(run: { isPackaged: boolean; platform: NodeJS.Platform; env: NodeJS.ProcessEnv }): boolean {
+  return run.isPackaged || run.platform !== "darwin" || run.env.DOHC_DESKTOP_TEST !== "1";
+}
+
 const FILE_NAME = "dohc-cloud.json";
 const INVALID_FILE_NAME = "dohc-cloud-invalid.json";
 const DELETED_FILE_NAME = "dohc-cloud-deleted.json";

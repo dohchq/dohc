@@ -138,6 +138,7 @@ async fn an_open_base_conflict_freezes_the_settle() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
+            None,
         )
         .await
         .expect_err("an open base conflict must freeze the settle");
@@ -400,6 +401,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
             12,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -717,10 +719,13 @@ async fn an_absent_path_resolution_uses_the_derived_live_lease() {
                     rusqlite::params![WS, PATH],
                 )
                 .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                // The engine refuses incoming text over an absent current side in
+                // a sync conflict, so this test uses a non-sync conflict.
                 tx.execute(
-                    "UPDATE conflicts SET current_exists=0, current_object_id=NULL, \
-                     current_blob_sha256=NULL, current_binary_sha256=NULL, \
-                     current_updated_at_ms=NULL, current_latest_moment_id=NULL \
+                    "UPDATE conflicts SET metadata_origin='api', current_exists=0, \
+                     current_object_id=NULL, current_blob_sha256=NULL, \
+                     current_binary_sha256=NULL, current_updated_at_ms=NULL, \
+                     current_latest_moment_id=NULL \
                      WHERE workspace_id=?1 AND conflict_id=?2",
                     rusqlite::params![WS, conflict_id],
                 )

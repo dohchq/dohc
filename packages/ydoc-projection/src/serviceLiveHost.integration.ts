@@ -112,7 +112,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
     };
     const firstReader = await readAccepted();
     const firstSettlement = await active.settle(document);
-    expect(firstSettlement.materialized).toBe(true);
+    expect(firstSettlement).toMatchObject({materialized: true});
     expect(firstReader.capture.invalidated.aborted).toBe(false);
     expect((await active.captureNative(firstReader.capture.binding)).registrationId).toBe(firstReader.capture.registrationId);
     expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
@@ -214,7 +214,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       expect(yDocToMarkdown(doc)).toBe("Hello");
       admit("after-first-resume");
       expect(await active!.drain(document)).toMatchObject({kind: "done", terminalReceipt: {deliveryId: "after-first-resume"}});
-      expect((await active!.settle(document)).materialized).toBe(true);
+      expect(await active!.settle(document)).toMatchObject({materialized: true});
       expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(doc));
       deployment.storage.createShare({share: {shareId: "second-share", workspaceId: "workspace", granterUserId: "owner",
         selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: 4},

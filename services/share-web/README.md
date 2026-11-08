@@ -331,6 +331,33 @@ They require the recipient account cookie, configured public Origin, and relay e
 The desktop transport also accepts `hold` on `GET /sync/shares/:shareId/log`.
 It retains its existing envelope, channel filtering, and cursor contract.
 
+### Alerts on this device
+
+A signed-in browser keeps one push subscription per installation on this server.
+Each endpoint is a POST with a JSON body, the public Origin, and the account session cookie.
+The browser mints `installationId` once: 16 random bytes in base64url.
+
+- `POST /api/push/status` takes `{installationId}` and returns the installation's state.
+- `POST /api/push/subscribe` takes `{installationId, vapidKeyId, endpoint, p256dh, auth, expiresAtMs}`.
+- `POST /api/push/unsubscribe` takes `{installationId}`.
+
+Configure all three relay values: `DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY`, `DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY`, and `DOHC_RELAY_PUSH_VAPID_SUBJECT`.
+The keys are a matching P-256 pair in base64url. The subject is a contact URI, such as `mailto:admin@example.com`.
+Keep the private key on the relay and reuse the pair after a restart. Rotating the pair requires browsers to subscribe again.
+Partial configuration stops the relay and names each missing value.
+With no push configuration set, status and unsubscribe return `{ok: true, available: false}`. Subscribe receives 409.
+Otherwise each returns `{ok: true, available: true, vapidPublicKey, vapidKeyId, enabled, generation, fingerprint}`.
+`DOHC_RELAY_PUSH_HOSTS` optionally replaces the allowed push hosts with a comma-separated list.
+The defaults are `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com`, and `.notify.windows.com`.
+A leading dot matches subdomains, such as a browser endpoint under `notify.windows.com`.
+Subscribe receives 409 when its endpoint is outside that list.
+`fingerprint` is the hex SHA-256 of the stored endpoint. The server never returns an endpoint.
+Alerts are on only for the account sign-in that turned them on, until that sign-in or the browser subscription expires.
+When another account signs in on the same browser and subscribes with the same `installationId` and `endpoint`, the alerts move to that account.
+Another installation's endpoint, or another account's installation with a different endpoint, receives 409. A changed `vapidKeyId` also receives 409.
+Link holders and signed-out browsers receive 401.
+The trusted relay endpoints are POSTs to `/sync/push/status`, `/sync/push/subscribe`, and `/sync/push/unsubscribe`.
+
 
 ## Storage and recovery
 
@@ -476,6 +503,9 @@ The file accepts these fields; all except `settlement` are required. Unknown fie
 | `ingress` | `{aggregateBytes, applicationWorkingReserveBytes, maxUploads, uploadDeadlineMs}` for the daemon |
 | `client` | `{aggregateBytes, maxUploads, connectTimeoutMs, requestDeadlineMs}` for the relay client |
 | `settlement` | Optional `{maxApplicationsPerSettlement}` with a positive integer limit |
+
+Also set `DOHC_ENGINE_READER_CONFIG` to the Markdown reader's JSON configuration, with absolute `node`, `bundle` and `manifest` paths.
+The relay refuses to start a service host without it.
 
 Each root must be an existing canonical directory with the intended workspace
 identity and main version initialized through the engine. Use dedicated service

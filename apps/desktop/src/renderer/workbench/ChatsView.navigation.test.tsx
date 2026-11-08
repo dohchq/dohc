@@ -285,7 +285,7 @@ describe("ChatsView expand-to-tab", () => {
 
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
     await waitFor(() => {
-      expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+      expect(screen.getByTestId("chats-dm-message").className).toContain("dohc-target-flash");
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     });
   });
@@ -361,7 +361,11 @@ describe("ChatsView expand-to-tab", () => {
   it("restores the composer's reply/resolve mode, not just its text", async () => {
     // Without the mode, a reply (or decision resolution) drafted before the
     // handoff would post as a plain top-level comment after it.
+    const user = userEvent.setup();
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "answer", parentMessageId: "message-1", body: "replying mid-expand" }),
+    });
     renderView(vi.fn(), vi.fn(), {
       variant: "page",
       initialNav: { level: "thread", channel: channel(), thread: thread() },
@@ -378,8 +382,19 @@ describe("ChatsView expand-to-tab", () => {
     });
 
     await screen.findByTestId("chats-thread-view");
-    expect(await screen.findByTestId("chats-replying-mode")).toBeTruthy();
+    // The answer is also the reply, so one bar shows, and the send carries both.
     expect(await screen.findByTestId("chats-resolving-mode")).toBeTruthy();
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    await user.click(screen.getByTestId("chats-send"));
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        parentMessageId: "message-1",
+        body: "replying mid-expand",
+        resolves: { messageId: "message-1" },
+      }),
+    );
   });
 
   it("reports draft edits so the shell can hand them to the next mount", async () => {

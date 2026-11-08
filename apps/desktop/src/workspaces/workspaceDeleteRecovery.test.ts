@@ -52,7 +52,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   let placement: Promise<void> | undefined;
   let interrupted = false;
   let refuse: string | undefined;
-  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
+  const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
     if (refuse) throw new Error(refuse);
     if (!committed) placement = placementGate.then(async () => { for (const path of tracked) await write(path, "tracked"); });
     committed ??= { operationId: input.operationId, versionId: "main", momentCount: tracked.length,
@@ -92,7 +92,7 @@ describe("delete recovery", () => {
     expect(result).toMatchObject({ undo: { available: false,
       reason: "Cannot undo the delete. Invalid recovery path: folder/.dohc. Restore it from the trash." } });
     expect(await readDeleteRecovery(f.root, result.operationId!)).toBeUndefined();
-    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: result.operationId! }, f.history))
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: result.operationId! }, f.history, {agent: true}))
       .toMatchObject({ ok: true, members: [{ operation: "delete", path: "folder/tracked.txt" }] });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
@@ -101,7 +101,7 @@ describe("delete recovery", () => {
     const f = await fixture();
     let queued: Promise<unknown> | undefined;
     f.afterCommit(id => {
-      queued = action === "read" ? readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history) : f.undo(id);
+      queued = action === "read" ? readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true}) : f.undo(id);
     });
     const finish = await prepareDeleteWorkspacePathAs(f.operation, "folder", agent, f.options);
     expect(queued).toBeDefined();
@@ -127,7 +127,7 @@ describe("delete recovery", () => {
       await started.promise;
       const id = f.groups[0]!;
       const undo = f.undo(id);
-      expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toMatchObject({ ok: true });
+      expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true})).toMatchObject({ ok: true });
       expect((await readDeleteRecovery(f.root, id))?.engine).toBeUndefined();
       release.resolve();
       expect(await pending).toMatchObject({ ok: true, trashed: accepts, undo: { available: true } });
@@ -191,7 +191,7 @@ describe("delete recovery", () => {
       const id = f.groups[0]!;
       undo = f.undo(id);
       // A shared read drains any Undo already admitted to the workspace queue.
-      expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history))
+      expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history, {agent: true}))
         .toMatchObject({ ok: true, withoutHistory: ["folder/rowless.txt"] });
       expect((await readDeleteRecovery(f.root, id))?.engine).toBeUndefined();
       release.resolve();

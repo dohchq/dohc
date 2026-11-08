@@ -323,6 +323,7 @@ mod tests {
         ApplyDisposition, NoLiveLeases, adopt_join_identity, apply_envelope_with,
         apply_moment_envelope, list_replication_ops, read_pushed_seq,
     };
+    use dohc_engine_collab::live_update_application::ReleasedTails;
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
     use dohc_engine_testkit::open_store;
@@ -414,8 +415,14 @@ mod tests {
         .unwrap();
         for (index, store) in [&mut peer, &mut owner].into_iter().enumerate() {
             for attempt in 0..2 {
-                let outcome = apply_moment_envelope(store, &envelope, &NoFaults, &NoLiveLeases)
-                    .expect("accept mixed relay snapshot");
+                let outcome = apply_moment_envelope(
+                    store,
+                    &envelope,
+                    &NoFaults,
+                    &NoLiveLeases,
+                    &ReleasedTails::default(),
+                )
+                .expect("accept mixed relay snapshot");
                 if index == 0 && attempt == 0 {
                     assert!(matches!(outcome.primary, ApplyDisposition::Applied(_)));
                 } else {
@@ -460,8 +467,14 @@ mod tests {
         let original = source(&mut store);
         let envelope = proved(original);
         store.write_with(&NoFaults,|tx|{tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id=?2 AND origin_seq=?3",params![envelope.payload.to_string(),envelope.origin_id,envelope.origin_seq]).map_err(SyncError::persist)?;Ok::<_,SyncError>(())}).unwrap();
-        let result =
-            apply_moment_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases).unwrap();
+        let result = apply_moment_envelope(
+            &mut store,
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+            &ReleasedTails::default(),
+        )
+        .unwrap();
         assert_eq!(result.primary, ApplyDisposition::Skipped);
         let (payload,authors):(String,String)=store.read_with(|conn|conn.query_row("SELECT r.payload_json,m.author_json FROM replication_log r JOIN moments m ON m.workspace_id=r.workspace_id AND m.moment_id='moment' WHERE r.origin_id=?1 AND r.origin_seq=?2",params![envelope.origin_id,envelope.origin_seq],|r|Ok((r.get(0)?,r.get(1)?))).map_err(SyncError::corrupt)).unwrap();
         assert_eq!(
@@ -478,7 +491,13 @@ mod tests {
         let mut forged = envelope.clone();
         forged.admitted_author_snapshot = Some(json!([{"kind":"human","humanId":"other"}]));
         assert!(matches!(
-            apply_moment_envelope(&mut store, &forged, &NoFaults, &NoLiveLeases),
+            apply_moment_envelope(
+                &mut store,
+                &forged,
+                &NoFaults,
+                &NoLiveLeases,
+                &ReleasedTails::default()
+            ),
             Err(SyncError::CoordinateDiverged)
         ));
     }
@@ -518,9 +537,15 @@ mod tests {
             .unwrap();
         retain_text(&mut peer);
         assert!(matches!(
-            apply_moment_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-                .unwrap()
-                .primary,
+            apply_moment_envelope(
+                &mut peer,
+                &envelope,
+                &NoFaults,
+                &NoLiveLeases,
+                &ReleasedTails::default()
+            )
+            .unwrap()
+            .primary,
             ApplyDisposition::Applied(_)
         ));
         let authors: String = peer
@@ -556,9 +581,15 @@ mod tests {
                 .remove("settlementReference");
             forged.payload["authors"] = claimed;
             assert!(matches!(
-                apply_moment_envelope(&mut ordinary, &forged, &NoFaults, &NoLiveLeases)
-                    .unwrap()
-                    .primary,
+                apply_moment_envelope(
+                    &mut ordinary,
+                    &forged,
+                    &NoFaults,
+                    &NoLiveLeases,
+                    &ReleasedTails::default()
+                )
+                .unwrap()
+                .primary,
                 ApplyDisposition::Refused(_)
             ));
             assert_eq!(ordinary.table_row_count("moments").unwrap(), 0);
@@ -570,9 +601,15 @@ mod tests {
         retain_text(&mut empty);
         envelope.admitted_author_snapshot = Some(json!([]));
         assert!(matches!(
-            apply_moment_envelope(&mut empty, &envelope, &NoFaults, &NoLiveLeases)
-                .unwrap()
-                .primary,
+            apply_moment_envelope(
+                &mut empty,
+                &envelope,
+                &NoFaults,
+                &NoLiveLeases,
+                &ReleasedTails::default()
+            )
+            .unwrap()
+            .primary,
             ApplyDisposition::Applied(_)
         ));
         let (native, retained): (Option<String>, String) = empty.read_with(|conn| {
@@ -600,9 +637,15 @@ mod tests {
         }).unwrap();
         for _ in 0..2 {
             assert_eq!(
-                apply_moment_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-                    .unwrap()
-                    .primary,
+                apply_moment_envelope(
+                    &mut store,
+                    &envelope,
+                    &NoFaults,
+                    &NoLiveLeases,
+                    &ReleasedTails::default()
+                )
+                .unwrap()
+                .primary,
                 ApplyDisposition::Skipped
             );
         }
@@ -625,7 +668,13 @@ mod tests {
             let mut forged = envelope.clone();
             forged.admitted_author_snapshot.as_mut().unwrap()[0]["attribution"][field] = changed;
             assert!(matches!(
-                apply_moment_envelope(&mut store, &forged, &NoFaults, &NoLiveLeases),
+                apply_moment_envelope(
+                    &mut store,
+                    &forged,
+                    &NoFaults,
+                    &NoLiveLeases,
+                    &ReleasedTails::default()
+                ),
                 Err(SyncError::CoordinateDiverged)
             ));
         }
@@ -643,9 +692,15 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            apply_moment_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-                .unwrap()
-                .primary,
+            apply_moment_envelope(
+                &mut peer,
+                &envelope,
+                &NoFaults,
+                &NoLiveLeases,
+                &ReleasedTails::default()
+            )
+            .unwrap()
+            .primary,
             ApplyDisposition::Applied(_)
         ));
         let imported: String = peer.read_with(|conn| conn.query_row("SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='moment'", [], |r|r.get(0)).map_err(SyncError::corrupt)).unwrap();
@@ -777,9 +832,15 @@ mod tests {
             reason: "authorship-mismatch".into(),
         });
         assert!(matches!(
-            apply_moment_envelope(&mut peer, &refused, &NoFaults, &NoLiveLeases)
-                .unwrap()
-                .primary,
+            apply_moment_envelope(
+                &mut peer,
+                &refused,
+                &NoFaults,
+                &NoLiveLeases,
+                &ReleasedTails::default()
+            )
+            .unwrap()
+            .primary,
             ApplyDisposition::Refused(_)
         ));
         let mut next = refused.clone();

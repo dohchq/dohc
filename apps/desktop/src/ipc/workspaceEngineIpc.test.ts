@@ -8,11 +8,13 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
-import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
+import { HistoryStillPausedError, ipcWireError, isHistoryCatchingUp, liveEditingStoppedPaths, readError } from "./errorWords";
+import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
 import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { GetCollectionRecordHistoryResult, historyOperations, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
@@ -141,6 +143,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const ydoc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
     sessionFor: (value) => value === sender ? renderers.current(sender) : undefined,
+    authorities: authority,
     acquireWorkspace: (id) => {
       const lease = authority.acquire(id);
       return { workspace: canonicalWorkspaceFor(lease), assertCurrent: lease.assertCurrent, release: lease.release };
@@ -169,6 +172,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
       moments: [], nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     })),
     readMoment: vi.fn<WorkspaceEngineCapture["readMoment"]>(async () => null),
+    retryHistoryCapture: vi.fn<WorkspaceEngineCapture["retryHistoryCapture"]>(async () => undefined),
+    listVersions: vi.fn<WorkspaceEngineCapture["listVersions"]>(async () => ({ versions: [], activeVersionId: "main" })),
     restoreFileToBeforeMoment: vi.fn<WorkspaceEngineCapture["restoreFileToBeforeMoment"]>(async () => {
       events.push("restore");
       return { restored: "text", restoredMomentId: "restored", path: "notes/a.md" };
@@ -194,7 +199,8 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     if (id !== workspace.workspaceId) throw new Error("unknown workspace");
     return workspace;
   });
-  const displayName = vi.fn(() => "You");
+  // Settings lists one agent, "agent", named "You".
+  const displayName = vi.fn((agentId: string): string | undefined => agentId === "agent" ? "You" : undefined);
   const syncProjection = vi.fn(async (_workspace: RegistryEntry, status: SyncStatusResult) => status);
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   let missingAdapter = false;
@@ -246,7 +252,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
       routed.push(_workspace);
       return missingAdapter ? null : work(adapter);
     },
-    requireEngineCapture, localAgentDisplayName: displayName,
+    requireEngineCapture, agentName: displayName,
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
@@ -294,9 +300,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
-  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, historyOperations.listVersionLastChanges.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  captureRecoveryOperations.retryHistoryCapture.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -409,6 +415,46 @@ describe("workspace engine IPC registrations", () => {
     h.writable.mockImplementation(() => { throw new Error("readonly"); });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("readonly");
     expect(h.adapter.reconcileCapture).toHaveBeenCalledOnce();
+  });
+  it("restarts History capture only for the writable workspace this renderer shows", async () => {
+    const h = await harness();
+    await h.invoke(captureRecoveryOperations.retryHistoryCapture.channel);
+    expect(h.capture.retryHistoryCapture).toHaveBeenCalledOnce();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    await expect(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel, { workspaceId: "other" })).rejects.toThrow();
+    h.writable.mockImplementation(() => { throw new Error("readonly"); });
+    await expect(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel)).rejects.toThrow("readonly");
+    h.writable.mockImplementation(() => undefined);
+    h.capture.retryHistoryCapture.mockRejectedValueOnce(new HistoryStillPausedError([]));
+    await expect(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel)).rejects.toThrow("History is still paused.");
+    expect(h.capture.retryHistoryCapture).toHaveBeenCalledTimes(2);
+    expect(h.notify).toHaveBeenCalledTimes(2);
+  });
+  // Electron sends a rejected handler's error as one string. Why History is
+  // still paused, and the pages it names, must reach the renderer in it.
+  it("carries why Try again left History paused, and every page whose live editing stopped, to the renderer", async () => {
+    const h = await harness();
+    const received = async (refusal: Error): Promise<string> => {
+      h.capture.retryHistoryCapture.mockRejectedValueOnce(refusal);
+      const refused = await Promise.resolve(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel)).then(() => null, (error: unknown) => error);
+      expect(refused).toBe(refusal);
+      return `Error invoking remote method '${captureRecoveryOperations.retryHistoryCapture.channel}': ${String(ipcWireError(refused))}`;
+    };
+    const stopped = await received(new HistoryStillPausedError(["notes/plan.md"]));
+    expect(stopped).toContain("HistoryStillPausedError [live-editing-stopped]: ");
+    expect(liveEditingStoppedPaths(stopped)).toEqual(["notes/plan.md"]);
+    expect(readError(stopped).cause).toBe('HistoryStillPausedError [live-editing-stopped]: History is still paused. Live editing stopped on ["notes/plan.md"]');
+    const paths = ["notes/a, b.md", "notes/12:30 \"call\".md"];
+    const several = await received(new HistoryStillPausedError(paths));
+    expect(liveEditingStoppedPaths(several)).toEqual(paths);
+    expect(isHistoryCatchingUp(several)).toBe(false);
+    const other = await received(new HistoryStillPausedError([]));
+    expect(liveEditingStoppedPaths(other)).toEqual([]);
+    expect(readError(other).cause).toBe("HistoryStillPausedError: History is still paused.");
+    // History still taking in files reaches the renderer as catching up.
+    const updating = await received(new DaemonRefusalError({ code: "OVERLOADED", message: "Workspace is still updating. Try again.", retry: "afterBackoff" }, undefined));
+    expect(isHistoryCatchingUp(updating)).toBe(true);
+    expect(isHistoryCatchingUp(await received(new EngineCaptureNotSettledError("workspace-1")))).toBe(true);
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();
@@ -582,7 +628,7 @@ describe("workspace engine IPC registrations", () => {
         entry(8, { ...automation, automationRun: { claimId: "claim-here", automationName: "Stamp the finish date" } }),
         entry(7, { ...automation, automationRun: { claimId: "claim-gone", automationName: "Old name" } }),
         entry(6, automation),
-        entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
+        entry(5, { authorOriginId: "agent", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
         entry(3, { actorKind: "human", authorOriginId: "user-ana", onBehalfOf: "user-ana" }),
         entry(2, { ...automation, onBehalfOf: "user-ana" }),
@@ -786,6 +832,73 @@ describe("workspace engine IPC registrations", () => {
     expect(result).toMatchObject({ moment: { authorLabels: ["Someone you shared with", "Someone you shared with"] } });
   });
 
+  it("gives each version its newest shown change of its own and the person who made it", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const version = (id: string, kind: "main" | "named") => ({ id, workspaceId: "workspace", kind, name: id, createdAtMs: 1,
+      ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+    h.capture.listVersions.mockResolvedValue({ versions: [version("main", "main"), version("draft", "named"), version("fresh", "named")], activeVersionId: "main" });
+    const named = { kind: "named" as const, userId: "u-ana", grantId: "g-1", grantGeneration: 1 };
+    type Authors = NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>;
+    const change = (versionId: string, path: string, recordedAtMs: number, authors?: Authors) => ({
+      ...historyDetail(path).moment, versionId, recordedAtMs, protected: false, momentOrder: recordedAtMs, ...(authors ? { authors } : {}) });
+    const pages: Record<string, ReturnType<typeof change>[]> = {
+      main: [change("main", "notes/a.md", 30, [{ kind: "human", humanId: "person-local" }])],
+      draft: [change("draft", "private/a.md", 50), change("draft", "notes/a.md", 40, [named]), change("main", "notes/a.md", 30)],
+      fresh: [change("main", "notes/a.md", 30)],
+    };
+    h.capture.listMoments.mockImplementation(async (input) => ({ ...historyPage(), nextCursor: null, moments: pages[input?.versionId ?? ""] ?? [] }));
+    await expect(h.invoke(historyOperations.listVersionLastChanges.channel)).resolves.toEqual({ versions: [
+      { versionId: "main", lastChange: { atMs: 30, personName: "Ice" } },
+      { versionId: "draft", lastChange: { atMs: 40, personName: "Someone you shared with" } },
+      { versionId: "fresh", lastChange: null },
+    ] });
+    expect(h.capture.listMoments).toHaveBeenCalledWith({ versionId: "draft", limit: 50 });
+    expect(h.prepareNamed).toHaveBeenCalledWith([{ kind: "human", humanId: "person-local" }, named]);
+  });
+
+  it("names no one for an agent's change or one several people made", async () => {
+    const h = await harness();
+    const version = (id: string, kind: "main" | "named") => ({ id, workspaceId: "workspace", kind, name: id, createdAtMs: 1,
+      ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+    h.capture.listVersions.mockResolvedValue({ versions: [version("main", "main"), version("draft", "named")], activeVersionId: "main" });
+    type Authors = NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>;
+    const change = (versionId: string, recordedAtMs: number, authors: Authors) => ({
+      ...historyDetail().moment, versionId, recordedAtMs, protected: false, momentOrder: recordedAtMs, authors });
+    const pages: Record<string, ReturnType<typeof change>[]> = {
+      main: [change("main", 30, [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf: "person-local" }])],
+      draft: [change("draft", 40, [{ kind: "human", humanId: "person-local" }, { kind: "human", humanId: "person-other" }])],
+    };
+    h.capture.listMoments.mockImplementation(async (input) => ({ ...historyPage(), nextCursor: null, moments: pages[input?.versionId ?? ""] ?? [] }));
+    await expect(h.invoke(historyOperations.listVersionLastChanges.channel)).resolves.toEqual({ versions: [
+      { versionId: "main", lastChange: { atMs: 30 } },
+      { versionId: "draft", lastChange: { atMs: 40 } },
+    ] });
+  });
+
+  it("reads past a page of version markers to a version's own change, and stops at what it was made from", async () => {
+    const h = await harness();
+    const version = (id: string, kind: "main" | "named", createdAtMs: number) => ({ id, workspaceId: "workspace", kind, name: id, createdAtMs,
+      ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+    h.capture.listVersions.mockResolvedValue({ versions: [version("draft", "named", 20), version("fresh", "named", 35)], activeVersionId: "draft" });
+    const change = (versionId: string, recordedAtMs: number) => ({
+      ...historyDetail().moment, versionId, recordedAtMs, protected: false, momentOrder: recordedAtMs });
+    h.capture.listMoments.mockImplementation(async (input) => {
+      if (input?.versionId === "fresh") return { ...historyPage(), nextCursor: historyCursor(2), moments: [change("main", 30)] };
+      // Draft's first page is only the versions made from it.
+      return input?.cursor === undefined
+        ? { ...historyPage(), nextCursor: historyCursor(5), moments: [], versionMarkers: [version("idea", "named", 60)] }
+        : { ...historyPage(), nextCursor: null, moments: [change("draft", 40)] };
+    });
+    await expect(h.invoke(historyOperations.listVersionLastChanges.channel)).resolves.toEqual({ versions: [
+      { versionId: "draft", lastChange: { atMs: 40 } },
+      { versionId: "fresh", lastChange: null },
+    ] });
+    expect(h.capture.listMoments).toHaveBeenCalledWith({ versionId: "draft", limit: 50, cursor: historyCursor(5) });
+    // Fresh's page is older than Fresh, so nothing past it is Fresh's own.
+    expect(h.capture.listMoments.mock.calls.filter(([input]) => input?.versionId === "fresh")).toHaveLength(1);
+  });
+
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {
     const summary = { id: "shared", versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
       metadata: { origin: "local-file" }, momentOrder: 1, authors: [{ kind: "agent" as const, agentId: "trip-agent-hosted", onBehalfOf: "owner-person" }] };
@@ -845,7 +958,7 @@ describe("workspace engine IPC registrations", () => {
     const names = async () => ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> })
       .moments.map((moment) => moment.agentAuthorName);
     await expect(names()).resolves.toEqual(["You", "Agent"]);
-    h.displayName.mockReturnValue("ice@example.com");
+    h.displayName.mockImplementation((agentId) => agentId === "agent" ? "ice@example.com" : undefined);
     await expect(names()).resolves.toEqual(["ice@example.com", "Agent"]);
     h.capture.readMoment.mockResolvedValue({
       protected: false,
@@ -861,7 +974,7 @@ describe("workspace engine IPC registrations", () => {
     });
   });
 
-  it("uses Settings only for dohc runs and handshake names for other agents", async () => {
+  it("uses Settings names for your agents and handshake names for other agents", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({
       moments: [{ agentId: "agent", agentRunId: "run-1" }, { agentId: "Pat" }, { agentId: "dohc-mcp" }].map((identity, index) => ({
@@ -874,7 +987,7 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "You" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
-    h.displayName.mockReturnValue("ice@example.com");
+    h.displayName.mockImplementation((agentId) => agentId === "agent" ? "ice@example.com" : undefined);
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
       moments: [{ agentAuthorName: "ice@example.com" }, { agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
     });
@@ -890,6 +1003,40 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "detail" })).resolves.toMatchObject({
       moment: { agentAuthorName: "ice@example.com", beforeText: null, afterText: "body" },
     });
+  });
+
+  it("names each agent's changes by that agent, with the name Settings gives it now", async () => {
+    const h = await harness();
+    const settingsNames = new Map([["nova", "Nova"], ["codex", "Codex"]]);
+    h.displayName.mockImplementation((agentId) => settingsNames.get(agentId));
+    h.capture.listMoments.mockResolvedValue({
+      // Codex's last change came through dohc's command line, which records no run id.
+      moments: [{ agentId: "nova", agentRunId: "run-1" }, { agentId: "codex", agentRunId: "run-2" }, { agentId: "codex" }].map((run, index) => ({
+        id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
+        authors: [{ kind: "agent", onBehalfOf: "person-local", ...run }],
+      })),
+      nextCursor: null, latestMomentOrder: 2, activeVersionId: "main", ...historyPageFields,
+    });
+    const recordChange = (historyId: number, authorOriginId: string): CollectionGetRecordResult["history"][number] => ({
+      historyId, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+      authorOriginId, actorKind: "agent", onBehalfOf: "person-local", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null,
+    });
+    h.adapter.getCollectionRecord.mockResolvedValue({
+      collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+      record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
+      history: [recordChange(1, "nova"), recordChange(2, "codex")],
+    });
+    const names = async () => {
+      const moments = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: Array<{ agentAuthorName?: string }> };
+      const record = GetCollectionRecordHistoryResult.parse(await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" }));
+      return [...moments.moments.map((moment) => moment.agentAuthorName), ...record.entries.map(({ author }) => author?.kind === "agent" ? author.name : null)];
+    };
+    await expect(names()).resolves.toEqual(["Nova", "Codex", "Codex", "Nova", "Codex"]);
+    // A rename shows at once, and an agent removed from Settings keeps its id.
+    settingsNames.set("codex", "Kit");
+    settingsNames.delete("nova");
+    await expect(names()).resolves.toEqual(["nova", "Kit", "Kit", "nova", "Kit"]);
   });
 
   it("restores as the person signed in here, never one the renderer names, and History names them", async () => {

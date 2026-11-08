@@ -78,6 +78,20 @@ fn fold_data() -> &'static FoldData {
     })
 }
 
+/// `name` with its `;`, `` ` `` and `K` written as U+037E, U+1FEF and U+212A,
+/// the only other characters Unicode normalizes to an ASCII character. A
+/// folder that ignores normalization reaches one file through both spellings.
+pub fn look_alike_spelling(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            ';' => '\u{037e}',
+            '`' => '\u{1fef}',
+            'K' => '\u{212a}',
+            c => c,
+        })
+        .collect()
+}
+
 /// Full case folding with canonical equivalence and default-ignorable removal.
 pub fn fold_segment(segment: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
@@ -188,7 +202,7 @@ fn is_os_metadata(normalized: &str) -> bool {
 /// may go with a folder it alone keeps. Volume folders such as `.Trashes` can
 /// hold a person's files, so they never go.
 #[cfg(target_vendor = "apple")]
-pub(crate) fn is_finder_metadata_file(normalized: &str) -> bool {
+pub fn is_finder_metadata_file(normalized: &str) -> bool {
     MACOS_METADATA_FILES.contains(&normalized) || normalized.starts_with(APPLE_DOUBLE_PREFIX)
 }
 
@@ -249,6 +263,35 @@ pub fn is_excluded_file(rel_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn look_alike_spellings_cover_canonical_ascii_equivalents() {
+        use unicode_normalization::UnicodeNormalization;
+        let mut derived = Vec::new();
+        for character in (0x80..=0x10ffff).filter_map(char::from_u32) {
+            let text = character.to_string();
+            for normalized in [
+                text.nfc().collect::<String>(),
+                text.nfd().collect::<String>(),
+            ] {
+                if normalized.len() == 1 && normalized.is_ascii() {
+                    let pair = (normalized, text.clone());
+                    if !derived.contains(&pair) {
+                        derived.push(pair);
+                    }
+                }
+            }
+        }
+        let actual: Vec<_> = (0..=0x7f)
+            .map(|code| char::from_u32(code).unwrap().to_string())
+            .filter_map(|ascii| {
+                let spelling = look_alike_spelling(&ascii);
+                (spelling != ascii).then_some((ascii, spelling))
+            })
+            .collect();
+        derived.sort();
+        assert_eq!(actual, derived);
+    }
 
     #[test]
     fn shared_unicode_and_alias_fixtures() {

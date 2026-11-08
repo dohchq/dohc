@@ -13,7 +13,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-const NOTICE = "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
+const NOTICE = "This file changed outside dohc.";
 const RECOVERED_COPY = /^(.+) \(recovered [0-9a-f]{8} [0-9a-f]{64}\)\.md$/;
 
 async function openNote(page: Page, path: string): Promise<void> {

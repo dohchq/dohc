@@ -145,6 +145,12 @@ type EngineDocOpenOutcome =
       token: number;
       kind: "bound";
       doc: Y.Doc;
+      // The file head `doc`'s state was installed with. Undefined while the
+      // head is unknown.
+      headSha256?: string | null;
+      lastSave: EngineYDocBinding["lastSave"];
+      // Counts states main installed other than this session's own saves.
+      pairedInstalls: number;
       objectId: string | null;
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
@@ -174,6 +180,8 @@ function nextSessionId(): string {
   return `eyd-${Date.now().toString(36)}-${engineDocSessionCounter.toString(36)}`;
 }
 
+const EMPTY_YJS_UPDATE = new Uint8Array([0, 0]);
+
 function makeTransport(
   workspaceId: string,
   path: string,
@@ -183,13 +191,18 @@ function makeTransport(
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
   writesRefused: { current: boolean },
+  // Main reported the path gone. A remote edit after that would change the
+  // text set aside at the deletion, so only its head is kept.
+  documentGone: () => boolean,
   kind: LiveDocumentKind,
+  allowLossySourceSha256?: string,
 ): EngineYDocTransport {
   let lineageGeneration = 1;
   return {
     ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
       const result = await bridge().openEngineYDocSession({
+        ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
         workspaceId,
         path,
         sessionId,
@@ -199,6 +212,7 @@ function makeTransport(
       }
       return {
         available: result.available,
+        headSha256: result.headSha256,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.objectId ? { objectId: result.objectId } : {}),
         ...(result.versionId ? { versionId: result.versionId } : {}),
@@ -258,7 +272,12 @@ function makeTransport(
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
         if (event.sessionId !== sessionId) return;
-        listener(event.update, event.lineageGeneration);
+        if (!documentGone()) {
+          listener(event.update, event.lineageGeneration, event.head);
+        } else if (event.head?.sha256 !== undefined) {
+          // A known head alone still arrives, so a check waiting on it settles.
+          listener(EMPTY_YJS_UPDATE, event.lineageGeneration, event.head);
+        }
       });
     },
     onLineageReplacement(listener) {
@@ -269,6 +288,7 @@ function makeTransport(
           update: event.update,
           recoveredPaths: event.recoveredPaths,
           artifactAssets: event.artifactAssets,
+          ...(event.head ? { head: event.head } : {}),
           lineageGeneration: event.lineageGeneration,
         });
       });
@@ -291,6 +311,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  allowLossySourceSha256?: string;
   accessEnded?: boolean;
   workspaceId: string;
   path: string;
@@ -329,7 +350,7 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     retry?: () => void;
   } | null;
-  permanentFailure: { token: number } | null;
+  permanentFailure: { token: number; draftId: number | null } | null;
   // The file changed outside dohc while this session held it, and whether
   // the document then had edits no save carried.
   changedOutside: { token: number; unsaved: boolean } | null;
@@ -432,7 +453,9 @@ function createEngineDocSession(
     sessionId,
     localSeq,
     writesRefused,
+    () => deletionPending,
     documentKind,
+    input.allowLossySourceSha256,
   );
 
   let snapshot = emptyLeaseSnapshot(requestKey);
@@ -536,6 +559,9 @@ function createEngineDocSession(
     kind: "bound",
     doc,
     objectId: bound.objectId,
+    headSha256: bound.headSha256,
+    lastSave: bound.lastSave,
+    pairedInstalls: bound.pairedInstalls,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
@@ -807,7 +833,8 @@ function createEngineDocSession(
   ): void => {
     writesRefused.current = true;
     // The PATH is gone whichever lineage wins: deletion outlives any later
-    // replacement, and a fresh recovery slot re-captures on its first edit.
+    // replacement, and a fresh recovery slot re-captures on the first local
+    // edit. Remote edits stop at the transport once deletion is pending.
     deletionPending = true;
     deletionCause = cause;
     recovery.transition = "deletion";
@@ -944,7 +971,7 @@ function createEngineDocSession(
     if (!disposed) {
       publish((current) => ({
         ...current,
-        permanentFailure: { token },
+        permanentFailure: { token, draftId: recovery.draftId },
       }));
       reportSaveState(saveProblem("error", "dohc could not confirm the file was saved."), readError(error).words);
     }
@@ -1127,8 +1154,8 @@ function createEngineDocSession(
       if (writesRefused.current) {
         if (recovery.snapshotBytes === null && deletionPending) {
           // A replacement installed a fresh recovery slot while the path
-          // stayed deleted. The first edit on the winner starts its own
-          // draft instead of vanishing.
+          // stayed deleted. The first local edit on the winner starts its
+          // own draft instead of vanishing.
           captureDeletion(doc, deletionCause, true);
           return;
         }
@@ -1448,6 +1475,15 @@ function createEngineDocSession(
             if (checkedState) onSaveState(checkedState);
             observeSaveState(replacement);
             setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));
+          });
+          // The head changes in the task that applied its state, so a check
+          // never reads one without the other.
+          bound.onHeadChanged(() => {
+            if (disposed) return;
+            publish(current => current.outcome?.kind === "bound" && current.outcome.doc === bound.doc
+              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, lastSave: bound.lastSave,
+                pairedInstalls: bound.pairedInstalls } }
+              : current);
           });
           // An edit is unsaved the instant it happens. Only main's settle
           // report may clear it — nothing here guesses "saved". The seed apply

@@ -26,6 +26,40 @@ describe("ActivityBar views", () => {
   });
 });
 
+describe("ActivityBar counts", () => {
+  // The count shows at most "9+", as Notices' does. The button's name keeps
+  // the exact number, and its tooltip stays the view's label.
+  it.each([
+    { count: 1, shown: "1", name: "Search, 1 result" },
+    { count: 9, shown: "9", name: "Search, 9 results" },
+    { count: 12, shown: "9+", name: "Search, 12 results" },
+  ])("shows $shown for $count results", ({ count, shown, name }) => {
+    render(
+      <ActivityBar
+        views={VIEW_IDS}
+        activeView="chats"
+        sidebarVisible
+        hasConflict={false}
+        searchResultCount={count}
+        onSelectView={() => undefined}
+      />,
+    );
+
+    const search = screen.getByRole("button", { name });
+    expect(search.getAttribute("title")).toBe("Search");
+    expect(screen.getByTestId("activity-search-count").textContent).toBe(shown);
+  });
+
+  it("names the Search button by its label alone with no results", () => {
+    render(
+      <ActivityBar views={VIEW_IDS} activeView="chats" sidebarVisible hasConflict={false} onSelectView={() => undefined} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Search" })).toBeTruthy();
+    expect(screen.queryByTestId("activity-search-count")).toBeNull();
+  });
+});
+
 describe("ActivityBar Sharing and Settings", () => {
   it("renders Settings as an inert icon when the host omits its action", () => {
     render(
@@ -101,7 +135,7 @@ describe("ActivityBar order and pinned apps", () => {
   it("shows only the views it is given, in their order", () => {
     render(
       <ActivityBar
-        views={["sites", "explorer"]}
+        views={["graph", "explorer"]}
         activeView="explorer"
         sidebarVisible
         hasConflict={false}
@@ -113,7 +147,7 @@ describe("ActivityBar order and pinned apps", () => {
       [...rail.querySelectorAll("[data-testid^='activity-']")]
         .map((button) => button.getAttribute("data-testid"))
         .filter((id) => id !== "activity-bar" && id !== "activity-sharing" && id !== "activity-settings"),
-    ).toEqual(["activity-sites", "activity-explorer"]);
+    ).toEqual(["activity-graph", "activity-explorer"]);
     expect(screen.queryByTestId("activity-search")).toBeNull();
   });
 

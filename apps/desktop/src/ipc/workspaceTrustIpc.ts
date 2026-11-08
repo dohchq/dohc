@@ -57,7 +57,8 @@ export function workspaceTrustHandlers<
     const trusted = await dependencies.confirm(event, workspace);
     dependencies.onAsk?.(workspace.workspaceId);
     if (!trusted) return;
-    // The dialog can outlast the window's workspace.
+    // The dialog can outlast the window's workspace. The grant is written
+    // inside this operation: Forget waits for it, then restricts again.
     operation.assertCurrent();
     if (!(await trust.trust(workspace, { folder }))) return;
     if (await trust.isTrusted(workspace)) dependencies.notifyChanged(workspace.workspaceId, true);

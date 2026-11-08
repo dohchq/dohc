@@ -83,6 +83,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
   let renderer: Awaited<ReturnType<typeof bindEngineYDoc>> | undefined;
   let deployment: ReturnType<typeof openRelayDeployment> | undefined;
   let child: ChildProcess | undefined;
+  let restoreOutboxRequests: (() => void) | undefined;
   let handoffEditInjected = false;
   let handoffCount = 0;
   let closeNamedPeer: (() => void) | undefined;
@@ -124,7 +125,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const dbPath = join(workspaceRoot,".dohc/engine/engine.db");
     const listeners = new Map<string,(payload: any) => void>();
     const sender = {id: 7,isDestroyed: () => false,send: (channel: string,payload: unknown) => listeners.get(channel)?.(payload),once() {return this;}};
-    ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",generation: 1,isCurrent: () => true}),
+    ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",attachmentId: workspace.attachmentId,generation: 1,isCurrent: () => true}),
+      authorities: {isCurrentAttachment: () => true},
       acquireWorkspace: () => ({workspace,assertCurrent() {},release() {}}),captureFor: () => capture,ensureCaptureFor: async () => undefined,
       isSharedView: () => false,resolveDocumentPath: async (_workspace,path) => path,localPersonId: () => "person-local",onError: (message,error) => {console.error(message,error);}});
     const openRenderer = async (sessionId: string) => {
@@ -132,7 +134,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       return bindEngineYDoc({
       open: () => ipc!.open(sender,{workspaceId: "workspace",sessionId,path: "docs/a.md"}),stageLocalUpdate: () => ++seq,
       async applyLocalUpdate(update,seq,lineageGeneration,requestId) {const result = ipc!.applyUpdate(sender,{sessionId,update,seq,lineageGeneration,requestId}); if (!result.accepted) throw new Error(result.reason);},
-      onRemoteUpdate(listener) {listeners.set(CHANNELS.engineYDocRemoteUpdate,event => listener(event.update,event.lineageGeneration)); return () => listeners.delete(CHANNELS.engineYDocRemoteUpdate);},
+      onRemoteUpdate(listener) {listeners.set(CHANNELS.engineYDocRemoteUpdate,event => listener(event.update,event.lineageGeneration,event.head)); return () => listeners.delete(CHANNELS.engineYDocRemoteUpdate);},
       onLineageReplacement(listener) {listeners.set(CHANNELS.engineYDocLineageReplacement,listener); return () => listeners.delete(CHANNELS.engineYDocLineageReplacement);},
       async acknowledgeLineageReplacement(lineageGeneration) {const result=ipc!.acknowledgeLineageReplacement(sender,{sessionId,lineageGeneration}); if (!result.accepted) throw new Error(result.reason); return result.updates;},
       adoptOwner: lineageGeneration => ipc!.prepareOwnerHandoff(sender,{sessionId,lineageGeneration}),
@@ -219,7 +221,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       const admissionPath = join(root,"owner-admission.json");
       writeFileSync(admissionPath,JSON.stringify({version: 1,shares: [{workspaceId: "workspace",shareId: "share"}],validation: policy,
         maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,maxDocumentsPerPass: 10,pollIntervalMs: 100,passDeadlineMs: 30_000}));
-      const mainPath = fileURLToPath(new URL("../../../services/sync-relay/dist/main.js",import.meta.url));
+      const mainPath = process.env.DOHC_OWNER_DESKTOP_PROOF_RELAY_MAIN
+        ? resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_RELAY_MAIN)
+        : fileURLToPath(new URL("../../../services/sync-relay/dist/main.js",import.meta.url));
       for (const devicePath of ["",relayConfig]) {
         const refused = spawnSync(process.execPath,[mainPath],{windowsHide: true,timeout: 20_000,encoding: "utf8",
           env: {...process.env,NODE_ENV: "test",SYNC_RELAY_TEST_AUTH: "1",SYNC_RELAY_PORT: "0",DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
@@ -237,6 +241,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       child.stdout!.on("data",chunk => {childOutput += String(chunk); writeFileSync(join(root,"standalone.log"),childOutput);});
       child.stderr!.on("data",chunk => {childOutput += String(chunk); writeFileSync(join(root,"standalone.log"),childOutput);});
       await expect.poll(() => {if (child!.exitCode !== null) throw new Error(childOutput); return childOutput.includes("SYNC_RELAY_LISTENING");},{timeout: 30_000}).toBe(true);
+      const outboxRequests = vi.spyOn(singleton,"sendRequest");
+      restoreOutboxRequests = () => outboxRequests.mockRestore();
       connection = connect();
       await expect.poll(() => rendererDoc.getMap("frontmatter").get("remote"),{timeout: 30_000}).toBe("Standalone remote edit");
       const initialHandoffs = handoffCount;
@@ -244,6 +250,12 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       await expect.poll(() => readFileSync(join(workspaceRoot,"docs/a.md"),"utf8"),{timeout: 30_000}).toContain("Standalone owner edit");
       await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBe(0);
       expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBeGreaterThan(0);
+      for (const method of ["ydoc.ownerOutbox.readPending", "ydoc.ownerOutbox.acknowledge"]) {
+        const index = outboxRequests.mock.calls.findIndex(([request]) => request.method === method);
+        expect(index, `${method} completes after the device handshake`).toBeGreaterThanOrEqual(0);
+        await expect(outboxRequests.mock.results[index]!.value).resolves.toHaveProperty("result");
+      }
+      restoreOutboxRequests(); restoreOutboxRequests = undefined;
       expect(rendererDoc.getMap("frontmatter").get("duringHandoff")).toBe("Queued owner edit");
       expect(rendererDoc.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
       expect(readFileSync(join(workspaceRoot,"docs/a.md"),"utf8")).toContain("Owner edit before first connection");
@@ -380,7 +392,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const waitingAfterEdits = peerSync.nextApplied(peerSignal.signal);
     const cancelWaiting = expect(waitingAfterEdits).rejects.toThrow();
     await expect.poll(() => frameChanges.listenerCount()).toBe(2);
-    expect((await control.settle(document)).materialized).toBe(true);
+    expect(await control.settle(document)).toMatchObject({materialized: true});
     expect(namedPeer.invalidated.aborted).toBe(false);
     peerSignal.abort(); await cancelWaiting; peerSync.close();
     expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBe(0);
@@ -513,7 +525,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     expect(await drain()).toHaveProperty("kind", "done");
     expect(handoffCount).toBe(handoffsAfterRestore);
     expect(native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all()).toEqual(pendingTail);
-    expect((await control.settle(document)).materialized).toBe(true);
+    expect(await control.settle(document)).toMatchObject({materialized: true});
     expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(renderer.doc!));
     await reconnect();
     expect(await drain()).toHaveProperty("kind", "done");
@@ -533,6 +545,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     await attempt(() => releaseTailAdmission?.());
     await attempt(() => closeNamedPeer?.());
     await attempt(() => captures.mockRestore());
+    await attempt(() => restoreOutboxRequests?.());
     await attempt(async () => {if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}});
     await attempt(() => closeNetwork?.());
     await attempt(() => renderer?.destroy());

@@ -1,10 +1,10 @@
 # dohc
 
-dohc is a local-first workspace where people and their agents build on files, documents, data, chat, and apps.
-It provides sync, sharing, permissions, and history so each workflow does not have to recreate them.
+dohc is a local-first workspace where people and their agents build, share, and manage small apps alongside their files, documents, data, and chat.
+It provides sync, sharing, permissions, and history so each app and workflow does not have to recreate them.
 Users own their work and choose their tools, agents, and workflows.
 
-We are building the MVP and have not launched with users.
+dohc is an early alpha released as nightly builds. Nobody outside the team uses it yet.
 
 ## How to use this document
 
@@ -34,6 +34,20 @@ Separate product choices from demonstrated advantages. Support claims of superio
 
 A workspace must be useful to one person on one device. Team collaboration is still core: adding another person or agent should extend the same work, not require exports, copied context, or a new system.
 
+### The job
+
+An agent can build a small app really quickly. The hard part comes after. Each app needs these things:
+
+- a place for its data;
+- an interface people already know;
+- a safe way for other people to use it;
+- a way to work on it together;
+- a record of what each agent made and changed.
+
+Developers can assemble these from separate tools. Most people cannot. dohc provides them in one workspace.
+Prefer work that makes one of these easier.
+Documents, Collections, and chat must stay useful without an app.
+
 ### Product commitments
 
 1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Drive should win through the managed network and operational experience, not a crippled local product.
@@ -44,7 +58,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 4. **Built for humans and agents.** Design every feature and surface for two users from the start: a human and an agent. Parity is not an MCP server added after the fact; the feature itself must work for both. For example, a share link sent to an agent should work just like one sent to a friend: with the link alone, the agent can read, edit, comment, and chat, with no computer use, no separate integration, and no impersonating a person.
 
-5. **Agent agnostic.** dohc does not provide or supervise the user's agents. Any agent that can work with ordinary files should remain useful. dohc adds reliable tools and optional identity, provenance, and policy controls. It must not impose a universal agent approval workflow.
+5. **Agent agnostic.** dohc does not provide or supervise the user's agents. Any agent that can work with ordinary files should remain useful. dohc adds reliable tools and optional identity, provenance, and policy controls. It must not impose a universal agent approval workflow. A dohc control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat, and an automation they build may message their agent. An agent reaches the same action through the CLI or MCP.
 
 6. **Chat is part of the workspace.** Chat connects humans, agents, files, data, and apps. It supports requests, discussion, handoffs, and proactive agent messages. Users and agents can turn useful outcomes into durable work instead of losing them in a transcript.
 
@@ -52,7 +66,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Apps and Collection automations extend the work; their source and definitions live in the workspace, where any agent can read and change them. People customize dohc through a settings file and pinned apps. They do not rewrite built-in parts, and updates keep their settings and apps. The core must already provide the reliable substrate.
 
-Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
+Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, an app builder whose apps live apart from the work, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
 
 ### Design for work nobody has read
 
@@ -199,10 +213,12 @@ Run the smallest check that proves the change.
 
 ## Pull requests and merging
 
-Blacksmith stays off until Ice enables the repository variable `BLACKSMITH_ENABLED`.
+Use the [PR template](.github/pull_request_template.md) for the problem, resulting behavior, and verification evidence. Include screenshots or a recording when they help a reviewer assess a visible change. State any unverified behavior.
+
+Blacksmith stays off until a maintainer enables the repository variable `BLACKSMITH_ENABLED`.
 While off, run PR verification locally. Manual GitHub checks use GitHub-hosted `ubuntu-24.04` runners.
 When enabled, ready PRs from this repository use Blacksmith.
-Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with Ice's credentials. Ask Ice how to verify it.
+Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with maintainer credentials. Ask a maintainer how to verify it.
 Use passing cloud evidence instead of repeating full gates locally when it covers the change.
 Before changing CI activation, read [the Blacksmith setup procedure](docs/engineering/enable-blacksmith.md).
 Keep required contract, caller, and test changes together.

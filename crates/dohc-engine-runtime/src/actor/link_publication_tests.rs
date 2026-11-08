@@ -105,34 +105,54 @@ fn pause(ws: &str) -> (Arc<tokio::sync::Notify>, Sender<()>) {
 }
 impl Fixture {
     async fn wait_disk(&self, sources: usize) {
-        let result = tokio::time::timeout(
-            Duration::from_secs(if sources > 3 { 300 } else { 120 }),
-            async {
-                let mut next = 0;
-                loop {
-                    while next < sources
-                        && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
-                            .ok()
-                            .as_deref()
-                            == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
-                    {
-                        next += 1;
-                    }
-                    if next == sources {
-                        break;
-                    }
-                    self.actor.run(|_, _| Ok(())).await.unwrap();
-                    tokio::task::yield_now().await;
+        // A busy machine slows publication down without stopping it, so only a
+        // minute in which no file lands and no pending job finishes counts as a
+        // stall. A retried attempt changes neither. Reading the pending jobs
+        // costs a query over the whole operation, so it runs at most once a second.
+        let quiet = Duration::from_secs(60);
+        let (mut next, mut since, mut read_at) = (0, Instant::now(), None::<Instant>);
+        let mut pending: Option<Vec<String>> = None;
+        let stalled = loop {
+            let landed = next;
+            while next < sources
+                && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
+                    .ok()
+                    .as_deref()
+                    == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+            {
+                next += 1;
+            }
+            if next == sources {
+                break false;
+            }
+            if next != landed {
+                since = Instant::now();
+            }
+            if read_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                let read = self
+                    .actor
+                    .history_operation_pending_jobs(self.ws.clone(), OP.into());
+                let Ok(jobs) = tokio::time::timeout(quiet, read).await else {
+                    break true;
+                };
+                let jobs = jobs.unwrap();
+                read_at = Some(Instant::now());
+                if pending.as_ref() != Some(&jobs) {
+                    (pending, since) = (Some(jobs), Instant::now());
                 }
-            },
-        )
-        .await;
-        if result.is_err() {
-            let pending = self
-                .actor
-                .history_operation_pending_jobs(self.ws.clone(), OP.into())
-                .await
-                .unwrap();
+            }
+            if since.elapsed() >= quiet {
+                break true;
+            }
+            match tokio::time::timeout(quiet, self.actor.run(|_, _| Ok(()))).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => break true,
+            }
+            tokio::task::yield_now().await;
+        };
+        if stalled {
+            // The actor may be the thing that stopped, so report the last list it gave.
+            let pending = pending.map_or_else(|| "never read".into(), |jobs| format!("{jobs:?}"));
             let turns = placements()
                 .lock()
                 .unwrap()
@@ -148,11 +168,14 @@ impl Fixture {
                 })
                 .collect();
             panic!(
-                "automatic publication stalled: pending={pending:?}, remaining={remaining:?}, turns={}",
+                "automatic publication stalled: pending={pending}, remaining={remaining:?}, turns={}",
                 turns.len()
             );
         }
-        self.actor.run(|_, _| Ok(())).await.unwrap();
+        tokio::time::timeout(quiet, self.actor.run(|_, _| Ok(())))
+            .await
+            .expect("the actor stopped answering after publication wrote every file")
+            .unwrap();
         for i in 0..sources {
             assert_eq!(
                 std::fs::read_to_string(self.root.join(format!("source-{i:04}.md"))).unwrap(),
@@ -691,6 +714,7 @@ fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
 async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pending_jobs() {
     let mut counts = Vec::new();
     let mut initialization = Vec::new();
+    let mut expected_staging_entries = Vec::new();
     for pending in [20, 2000] {
         let sources = pending + 1;
         let f = Fixture::new(sources, sources);
@@ -752,6 +776,13 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
             store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET updated_at_ms=updated_at_ms+1 WHERE workspace_id=?1 AND object_id='source-0000'",[&ws]).map_err(StorageError::persist_public))?;
             Ok(())
         }).await.unwrap();
+        expected_staging_entries.push(
+            std::fs::read_dir(&staging)
+                .unwrap()
+                .collect::<std::io::Result<Vec<_>>>()
+                .unwrap()
+                .len() as u64,
+        );
         let (entered, release) = pause(&f.ws);
         drop(first);
         let next = finish_one_turn(&f, entered, release).await;
@@ -780,10 +811,17 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
         .unwrap();
     }
     assert!(counts[0].reads > 0 && counts[0].writes > 0 && counts[0].rows > 0);
-    assert_eq!(
-        counts[0], counts[1],
-        "one placement turn must not scale with pending jobs"
-    );
+    assert_eq!(counts[0].reads, counts[1].reads);
+    assert_eq!(counts[0].writes, counts[1].writes);
+    assert_eq!(counts[0].rows, counts[1].rows);
+    assert!(expected_staging_entries[0] >= 20);
+    assert!(expected_staging_entries[1] >= 2000);
+    for (actual, expected) in counts.iter().zip(expected_staging_entries) {
+        assert_eq!(
+            actual.staging_entries, expected,
+            "one placement turn must enumerate each staging entry once"
+        );
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {

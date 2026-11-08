@@ -8,12 +8,19 @@ import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
 
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
+import { compileOwner } from "./stage-agent-probe.mjs";
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 /** The platforms that build apps under crates/dohc-compiler-owner, and its Rust target on each. */
 const ownerTargets = { darwin: "aarch64-apple-darwin", linux: "x86_64-unknown-linux-gnu" };
 const ownerCrate = "crates/dohc-compiler-owner";
+const windowsOwnerSource = "src/workspaces/windowsCompilerOwner.cs";
+
+/** Builds the Windows job owner with the .NET Framework compiler that ships with Windows. */
+export function compileWindowsCompilerOwner(outfile, sourceRoot = desktopRoot) {
+  return compileOwner([join(sourceRoot, windowsOwnerSource)], outfile, "CompilerJob");
+}
 
 function compilerFiles(platform, arch) {
   const native = `node_modules/@esbuild/${platform}-${arch}`;
@@ -33,7 +40,7 @@ function refuseIntelMac(platform, arch) {
 // Windows x64, Apple silicon Macs and Linux x64 build apps. Linux arm64 ships
 // only the esbuild binary that Collection actions compile with.
 function stagedFiles(platform, arch) {
-  if (platform === "win32") return arch === "x64" ? [...compilerFiles(platform, arch), "compilerProcessRelay.mjs", "windowsCompilerJob.ps1"] : undefined;
+  if (platform === "win32") return arch === "x64" ? [...compilerFiles(platform, arch), "compilerProcessRelay.mjs", "compiler-owner.exe"] : undefined;
   if (platform === "darwin" || platform === "linux" && arch === "x64") return [...compilerFiles(platform, arch), "compiler-owner"];
   if (platform !== "linux" || !["arm64", "x64"].includes(arch)) return undefined;
   const native = `node_modules/@esbuild/${platform}-${arch}`;
@@ -136,6 +143,19 @@ async function buildCompilerOwner(sourceRoot, platform) {
   return join(targetDir, ownerTarget, "release", "dohc-compiler-owner");
 }
 
+/** csc output is not byte-reproducible, so an unchanged source and recipe reuse the checked staged owner. */
+async function stageWindowsCompilerOwner(sourceRoot, destination, staging) {
+  const sources = { [windowsOwnerSource]: sha256(await readFile(join(sourceRoot, windowsOwnerSource))) };
+  // These modules hold the compile recipe; hash the running copies, not files under sourceRoot.
+  for (const name of ["stage-app-compiler.mjs", "stage-agent-probe.mjs"]) sources[`scripts/${name}`] = sha256(await readFile(new URL(`./${name}`, import.meta.url)));
+  const current = await readFile(join(destination, "manifest.json"), "utf8").then(JSON.parse, () => null);
+  const previous = join(destination, "compiler-owner.exe"), owner = join(staging, "compiler-owner.exe");
+  if (JSON.stringify(current?.sources) === JSON.stringify(sources) &&
+      await readFile(previous).then(bytes => sha256(bytes) === current.files?.["compiler-owner.exe"], () => false)) await cp(previous, owner);
+  else await compileWindowsCompilerOwner(owner, sourceRoot);
+  return sources;
+}
+
 /** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
@@ -166,6 +186,7 @@ export async function stageAppCompiler(options = {}) {
   const owner = files.includes("compiler-owner") ? await buildCompilerOwner(sourceRoot, platform) : null;
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
+  let ownerSources;
   try {
     for (const path of files) await mkdir(dirname(join(staging, path)), { recursive: true });
     if (!node) {
@@ -180,7 +201,8 @@ export async function stageAppCompiler(options = {}) {
       const binary = platform === "win32" ? "esbuild.exe" : "bin/esbuild";
       for (const file of ["package.json", binary]) await cp(join(platformRoot, file), join(staging, "node_modules", nativePackage, file));
       if (platform === "win32") {
-        for (const file of ["compilerProcessRelay.mjs", "windowsCompilerJob.ps1"]) await cp(join(sourceRoot, "src/workspaces", file), join(staging, file));
+        await cp(join(sourceRoot, "src/workspaces/compilerProcessRelay.mjs"), join(staging, "compilerProcessRelay.mjs"));
+        ownerSources = await stageWindowsCompilerOwner(sourceRoot, destination, staging);
       } else {
         await cp(owner, join(staging, "compiler-owner"));
         await chmod(join(staging, "compiler-owner"), 0o755);
@@ -197,7 +219,7 @@ export async function stageAppCompiler(options = {}) {
     const identities = {};
     for (const path of files) identities[path] = sha256(await readFile(join(staging, path)));
     const runtime = pinned ? { nodeVersion: NODE_VERSION, nodeSha256: pinned.sha256 } : {};
-    await writeFile(join(staging, "manifest.json"), JSON.stringify({ ...runtime, platform, arch, files: identities }, null, 2));
+    await writeFile(join(staging, "manifest.json"), JSON.stringify({ ...runtime, platform, arch, ...(ownerSources && { sources: ownerSources }), files: identities }, null, 2));
     await requireAppCompiler(staging, platform, arch);
     const current = await readFile(join(destination, "manifest.json"), "utf8").catch(error => { if (error.code === "ENOENT") return null; throw error; });
     if (current === await readFile(join(staging, "manifest.json"), "utf8")) {

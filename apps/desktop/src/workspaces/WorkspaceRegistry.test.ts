@@ -158,3 +158,21 @@ describe("a folder reached through a link", () => {
     expect(findWorkspace("w-again")).toBeNull();
   });
 });
+
+describe("two folders whose names differ only in capitals", () => {
+  it("are two workspaces on a disk that tells capitals apart", async (ctx) => {
+    const parent = await createTestScratch("dohc-registry-capitals-");
+    await mkdir(join(parent, "Notes"));
+    const second = await mkdir(join(parent, "notes")).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === "EEXIST") return false;
+      throw error;
+    });
+    // A disk that ignores capitals has only one folder here.
+    if (!second) ctx.skip();
+    const entry = (workspaceId: string, name: string): RegistryEntry =>
+      ({ workspaceId, rootPath: canonicalWorkspaceRoot(join(parent, name)), kind: "personal", mode: "local-first" });
+    registerWorkspace(entry("w-upper", "Notes"));
+    registerWorkspace(entry("w-lower", "notes"));
+    expect(findWorkspace("w-upper")?.rootPath).not.toBe(findWorkspace("w-lower")?.rootPath);
+  });
+});

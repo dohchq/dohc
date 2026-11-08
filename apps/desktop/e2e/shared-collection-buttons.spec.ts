@@ -6,7 +6,7 @@ import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { relayJson } from "./helpers/relayPeer";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, writeWorkspaceFiles } from "./helpers/workspace";
+import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 
 const OWNER = "test:e2e-granter", RECIPIENT = "test:e2e-recipient";
 const COLLECTION = "trip/Tasks", RECORD = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -30,6 +30,7 @@ async function buttons(page: Page, workspaceId: string) {
 }
 
 async function openTable(page: Page) {
+  await showExplorerFiles(page);
   for (const path of ["trip", COLLECTION]) {
     const row = page.locator(`[data-testid="tree-row"][data-path="${path}"]`);
     await expect(row).toBeVisible({ timeout: 120_000 });
@@ -46,7 +47,7 @@ test("@two-client shared Buttons use host identity and show the named presser in
   let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let recipient: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
     await seedWorkspaceManifest(ownerTemp, workspaceId);
     await seedWorkspaceRegistry(ownerTemp, [{ workspaceId, rootPath: ownerTemp.rootPath }]);
     await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl,

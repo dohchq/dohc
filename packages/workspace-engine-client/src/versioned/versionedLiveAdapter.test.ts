@@ -2,7 +2,7 @@ import type { HistoryCursor } from "./versionedWireContract";
 function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, operationId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
 import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
 import type { JsonValue, Request, Response } from "../protocol";
 import {
@@ -31,6 +31,38 @@ import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");
+
+it.each([false, true])("forwards request cancellation without dropping its answer or closing the shared client: %s", async outcome => {
+  let finish!: (response: Response) => void;
+  let refuse!: (error: Error) => void;
+  let request!: Request;
+  const close = vi.fn();
+  const client = {close, sendRequest: vi.fn((input: Request, _signal?: AbortSignal, _progress?: () => void, cancelSignal?: AbortSignal) => {
+    expect(cancelSignal).toBe(cancel.signal);
+    request = input;
+    return new Promise<Response>((resolve, reject) => {finish = resolve; refuse = reject;});
+  })};
+  const adapter = new VersionedLiveAdapter(client, WORKSPACE, {workspaceId: WORKSPACE});
+  const cancel = new AbortController();
+  let settled = false;
+  const answer = adapter.rewriteHistoryLinks({workspaceId: WORKSPACE, operationId: "operation", requestId: "same-key", cancelSignal: cancel.signal});
+  void answer.then(() => {settled = true;}, () => {settled = true;});
+  cancel.abort();
+  await Promise.resolve();
+  expect(client.sendRequest.mock.calls[0]![3]?.aborted).toBe(true);
+  expect(settled).toBe(false);
+  expect(close).not.toHaveBeenCalled();
+  expect(request).not.toHaveProperty("cancelSignal");
+  if (outcome === true) {
+    refuse(new EngineRequestError(request.id, {code: "CANCELLED", message: "cancelled", retry: "no"}));
+    await expect(answer).rejects.toMatchObject({wireCode: "CANCELLED"});
+  } else {
+    const receipt = {documents: 1, links: 1, unchecked: [], uncheckedCount: 0, complete: true};
+    finish({id: request.id, result: receipt});
+    expect(await answer).toEqual(receipt);
+  }
+  expect(close).not.toHaveBeenCalled();
+});
 
 it("sends the link rewrite request identity and author in the correct fields", async () => {
   const requests: Request[] = [];
@@ -694,6 +726,47 @@ describe("VersionedLiveAdapter", () => {
       { status: "open" },
       { status: "open", afterConflictId: conflict.id },
     ]);
+  });
+
+  it("passes a listed conflict's waiting version through and refuses a malformed one", async () => {
+    const waitingVersion = {
+      code: "resolve-existing-conflict",
+      objectId: "object",
+      originId: "computer-d",
+      originSeq: 4,
+    } as const;
+    let answer: unknown = {
+      conflicts: [{ ...conflict, waitingVersion }],
+      nextAfterConflictId: null,
+    };
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        return { id: request.id, result: answer as never };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+    const list = () =>
+      adapter.listTextConflicts({ workspaceId: WORKSPACE, bodies: "withheld" });
+
+    await expect(list()).resolves.toMatchObject({
+      conflicts: [{ id: conflict.id, waitingVersion }],
+    });
+    for (const malformed of [
+      { ...waitingVersion, code: "conflict-wait-limit" },
+      { ...waitingVersion, originSeq: -1 },
+      { ...waitingVersion, originSeq: 1.5 },
+      { ...waitingVersion, originId: "" },
+      { ...waitingVersion, path: "a.md" },
+    ]) {
+      answer = {
+        conflicts: [{ ...conflict, waitingVersion: malformed }],
+        nextAfterConflictId: null,
+      };
+      await expect(list()).rejects.toThrow();
+    }
   });
 
   it("maps one versions.compareFiles page onto the store's entry page", async () => {

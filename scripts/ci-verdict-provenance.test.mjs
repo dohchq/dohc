@@ -32,7 +32,7 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "test --workspace=PASS doctests=PASS build daemon=PASS " +
+  "test --workspace=PASS reader tests=PASS doctests=PASS build daemon=PASS " +
   "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
 test("CI verdict helper can be imported from Node eval without a script path", () => {
@@ -98,6 +98,14 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       ),
     /cargo-audit/,
   );
+  // The workspace run skips the ignored reader regressions, so a verdict
+  // without this row says nothing about them.
+  for (const replacement of ["", "reader tests=SKIP ", "reader tests=FAIL "]) {
+    assert.throws(
+      () => check(passVerdict.replace("reader tests=PASS ", replacement)),
+      /reader tests/,
+    );
+  }
 });
 
 test("a PASS verdict requires scratch cleanup to have passed", () => {

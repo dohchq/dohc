@@ -29,18 +29,20 @@ describe("live agent dispatch store real daemon", () => {
         await lifecycle.start();
         sessions = createRealDaemonWorkspaceSessions(lifecycle);
         let nextChatId = 0;
-        const { agentChannel, started, secondTrigger } = await sessions.run(
+        const { channel, started, secondTrigger } = await sessions.run(
           { workspaceId, rootPath: root },
           async ({ client, workspace }) => {
             const chat = new ChatsLiveAdapter(client, workspace, {
               workspaceId,
               createId: (kind) => `${kind}-e2e-${(nextChatId += 1)}`,
             });
-            const agentChannel = await chat.ensureAgentChannel({ workspaceId });
+            // A person's message in an agent's chat records its request as it
+            // is written. In the general chat, recordTrigger records it.
+            const channel = await chat.ensureGeneralChannel({ workspaceId });
             const started = await chat.startChannelThread({
               authorActorKey: null,
               workspaceId,
-              channelId: agentChannel.channelId,
+              channelId: channel.channelId,
               title: "Real daemon dispatch",
               author: { kind: "human", displayName: "Sam" },
               body: "Run the real daemon dispatch flow.",
@@ -52,10 +54,10 @@ describe("live agent dispatch store real daemon", () => {
               author: { kind: "human", displayName: "Sam" },
               body: "Exercise failed-run requeue.",
             });
-            return { agentChannel, started, secondTrigger };
+            return { channel, started, secondTrigger };
           },
         );
-        expect(agentChannel.channelId).toBeTruthy();
+        expect(channel.channelId).toBeTruthy();
         const runIds = ["run-e2e-complete", "run-e2e-failed"];
         const handle = createLiveAgentDispatchStore(
           { workspaceId, rootPath: root },
@@ -69,6 +71,7 @@ describe("live agent dispatch store real daemon", () => {
             workspaceId,
             triggerMessageId: started.message.id,
             threadId: started.thread.id,
+            agentId: "default",
           }),
         ).resolves.toBe(true);
         const completeClaim = await store.claimNextPending(workspaceId, {
@@ -106,6 +109,7 @@ describe("live agent dispatch store real daemon", () => {
             workspaceId,
             triggerMessageId: secondTrigger.id,
             threadId: started.thread.id,
+            agentId: "default",
           }),
         ).resolves.toBe(true);
         const failedClaim = await store.claimNextPending(workspaceId, {
@@ -127,6 +131,7 @@ describe("live agent dispatch store real daemon", () => {
           handle.requeueFailedTrigger({
             workspaceId,
             triggerMessageId: secondTrigger.id,
+            agentId: "default",
             runId: "run-e2e-failed",
           }),
         ).resolves.toBe(true);
@@ -142,7 +147,7 @@ describe("live agent dispatch store real daemon", () => {
         // never queues a handled trigger or a second entry, even after the
         // workspace closes and opens again, and the pending one runs once.
         const replay = async (dispatch: typeof store, triggerMessageId: string) =>
-          await dispatch.recordTrigger({ workspaceId, triggerMessageId, threadId: started.thread.id });
+          await dispatch.recordTrigger({ workspaceId, triggerMessageId, threadId: started.thread.id, agentId: "default" });
         await expect(replay(store, started.message.id)).resolves.toBe(false);
         await expect(replay(store, secondTrigger.id)).resolves.toBe(false);
         await handle.close();

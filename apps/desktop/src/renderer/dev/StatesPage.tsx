@@ -2,15 +2,17 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, Bot, CheckCircle2, Diff, Merge, MessageSquare, MoreHorizontal, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Merge, MoreHorizontal, Plus, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatDispatchFailedRun,
   ChatFileMentionRecord,
   ChatMessageRecord,
+  ChatRunRecord,
   ChatThreadRecord,
   CloudStatusResult,
   DatabaseSnapshotResult,
@@ -23,15 +25,29 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
+import { collectionChangeDeletes, type CollectionChangeProposal, type CollectionChangeRow } from "../../workspaces/collectionChange";
+import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
+import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure } from "../workbench/CollectionChangeCard";
+import { CollectionChangeReviewCard } from "../workbench/CollectionChangeReviewDialog";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
-import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { PageIdentity } from "../PageIdentity";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
-import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
+import {
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
+  DocumentControls,
+  LossyNoteNoticeView,
+  LOSSY_NOTE_TITLE,
+  MarkdownSourceStrip,
+  OPENING_TITLE,
+  OpeningState,
+  SetAsideEditRow,
+  ViewActions,
+} from "../fileInspectorUi";
+import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "../readOnlyReasons";
 import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -46,6 +62,7 @@ import { SettingsNav } from "../settings/SettingsNav";
 import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
+import { deleteConfirmText } from "../workbench/deleteConfirm";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
@@ -60,7 +77,7 @@ import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
-import { AppRows } from "../workbench/AppsView";
+import type { ExplorerApps } from "../workbench/AppsSection";
 import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
@@ -73,12 +90,13 @@ import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddres
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
+import { EmptyEditorGroup } from "../workbench/EmptyEditorGroup";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
-import { CollectionsElsewhereRow, CollectionsRefusalRow, TreeRow, type VisibleRow } from "../workbench/Explorer";
-import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
+import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice, signInExpiredNotice } from "../workbench/NoticeCenter";
 import { EMPTY_ART, type EmptyArtKind } from "../workbench/EmptyArt";
-import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
+import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
@@ -87,6 +105,7 @@ import {
   AboutHistoryView,
   AboutLinksView,
   AboutSection,
+  AboutSectionAction,
   type AccessSetup,
   type AccessView,
   type ChatLinksView,
@@ -98,9 +117,11 @@ import { AboutConversationLinksView, type ConversationLinksView, type MentionedF
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { MERGE_RETRY_AFTER_CLOSE } from "../shell/useVersionMergeNotices";
 import { DismissConfirm, RecoveryList } from "../RecoveryList";
 import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
+import { NewVersionHint } from "../workbench/WorkspaceVersions";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -138,6 +159,9 @@ const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-su
 // the shell's menus get the room from their taller boxes, and the editor's
 // menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
+// The change review is 760px wide in the app, wider than a pane, so it is
+// drawn at the pane's width, as the Settings frame is, with the shadow's room.
+const REVIEW_ROOM = `${SHADOW_ROOM} w-[672px] [&>[role=dialog]]:w-full`;
 
 // The parts the page renders, when it renders only some.
 const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
@@ -202,9 +226,21 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      {/* Tall enough to hold the tab list, which the capture opens, and its
-          shadow. */}
-      <div className="h-28 bg-bg" />
+      {props.tabs.length === 0 ? (
+        <div className="flex h-[640px] flex-col bg-bg">
+          <EmptyEditorGroup
+            platform="win32"
+            create={{ markdown: noop, collection: noop, drawing: noop }}
+            recent={["plan.md", "notes.md"]}
+            files={[{ path: "plan.md" }, { path: "notes.md" }]}
+            onOpen={noop}
+          />
+        </div>
+      ) : (
+        // Tall enough to hold the tab list, which the capture opens, with
+        // the group's actions and its shadow.
+        <div className="h-46 bg-bg" />
+      )}
     </>
   );
 }
@@ -230,7 +266,7 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
 
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; dirty?: boolean; children: ReactNode; body?: ReactNode }) {
   const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
@@ -242,7 +278,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
             groupNumber={1}
             tabs={[{ path }]}
             activeTab={path}
-            activeTabDirty={false}
+            activeTabDirty={props.dirty ?? false}
             recoveryPaths={NO_RECOVERY}
             onActivate={noop}
             onClose={noop}
@@ -254,7 +290,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
         )}
       >
         {props.children}
-        <div className="h-4 rounded-b-lg bg-bg" />
+        {props.body ?? <div className="h-4 rounded-b-lg bg-bg" />}
       </EditorGroupFrame>
     </div>
   );
@@ -283,6 +319,7 @@ function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode
             onMove={noop}
             onMoveToGroup={noop}
             onCreateGroupRight={noop}
+            onShare={noop}
           />
         )}
       >
@@ -399,7 +436,7 @@ function Row(props: {
   name: string;
   folder?: boolean;
   app?: boolean;
-  selected?: boolean;
+  picked?: boolean;
   active?: boolean;
   drop?: boolean;
   force?: string;
@@ -410,7 +447,8 @@ function Row(props: {
         row={treeRow(props.name, props.folder || props.app)}
         collection={false}
         app={props.app ?? false}
-        selected={props.selected ?? false}
+        selected={Boolean(props.picked || props.active)}
+        picked={props.picked ?? false}
         active={props.active ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
@@ -451,6 +489,7 @@ function KindRows(props: { label: string; selected: boolean }) {
           collection={false}
           app={false}
           selected={props.selected}
+          picked={props.selected}
           active={false}
           tabbable={false}
           dropPreview={null}
@@ -469,6 +508,7 @@ const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   collection: "Registrations",
   group: "trip",
   chat: "Home",
+  agent: "Nova",
   compare: "Compare with Main",
   change: "Diff: plan.md",
   graph: "Graph",
@@ -486,7 +526,7 @@ function ObjectRows(props: { label: string; selected: boolean }) {
         <li key={kind} className="px-1">
           <span
             className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
-              props.selected ? "bg-selected text-ink" : "text-muted"
+              props.selected ? "bg-selected text-ink font-medium" : "text-muted"
             }`}
           >
             <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />
@@ -544,6 +584,38 @@ function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean 
   return (
     <div className="w-full overflow-hidden rounded-lg border border-line">
       <GlyphStrip groupId="states" groupNumber={1} {...props} />
+    </div>
+  );
+}
+
+// Two tabs over a strip of paper, the first active. An unsaved tab draws its
+// dot in its close's slot. `tab` and `close` force a state on the active tab
+// and on its close. states-page.spec.ts measures the tabs by `testId`.
+const UNSAVED_TABS = [{ path: "trip/plan.md" }, { path: "notes.md" }];
+const UNSAVED_RECOVERY: ReadonlySet<string> = new Set(["notes.md"]);
+const UNSAVED_ACTIVE_TAB = '[role="tab"][data-active]';
+function UnsavedTabStrip(props: { testId: string; dirty: boolean; recovered: boolean; tab?: string; close?: string }) {
+  return (
+    <div data-testid={props.testId} className="w-[360px] overflow-hidden rounded-lg border border-line">
+      <div data-force-state={props.tab} data-force-target={props.tab ? UNSAVED_ACTIVE_TAB : undefined}>
+        <div data-force-state={props.close} data-force-target={props.close ? `${UNSAVED_ACTIVE_TAB} button` : undefined}>
+          <EditorTabs
+            groupId="states"
+            groupNumber={1}
+            tabs={UNSAVED_TABS}
+            activeTab="trip/plan.md"
+            activeTabDirty={props.dirty}
+            recoveryPaths={props.recovered ? UNSAVED_RECOVERY : NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        </div>
+      </div>
+      <div className="h-4 bg-bg" />
     </div>
   );
 }
@@ -631,10 +703,12 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
 // One History timeline across two days: a file change, a version starting,
 // a labelled record change by an automation, a rules change an agent
 // approved that main could not date, the workspace starting, and an
-// unlabelled record change with no date or place. Only a rules change can
-// carry its approving agent. Local times, as above.
+// unlabelled record change with no date or place. Both undated changes
+// list last, under Date unknown. Only a rules change can carry its
+// approving agent. Local times, as above.
 const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
 const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
+const TIMELINE_SIGNUPS = "00000000-0000-4000-8000-0000000000b3";
 const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
   id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
   operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
@@ -643,10 +717,10 @@ function timelineVersion(id: string, kind: "main" | "named", name: string, creat
   return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
 }
 function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
-  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  by?: { automation?: string; rulesApprovedBy?: string; operation?: string }): TimelineEntry {
   const rules = by?.rulesApprovedBy;
   return { kind: "collection", datasetId, name, sortAtMs, change: {
-    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    revision, operation: rules ? "Fields and rules" : by?.operation ?? "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
     changesetBytes: rules ? 0 : 120, attachmentCount: 0,
     ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
     ...(rules ? {
@@ -656,13 +730,18 @@ function timelineChange(datasetId: string, name: string, revision: number, recor
   } };
 }
 const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_RULES = timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" });
+const TIMELINE_UNDATED = timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null);
+// A long Collection name beside a long title: the title has room to give.
+const TIMELINE_SIGNUPS_CHANGE = timelineChange(TIMELINE_SIGNUPS, "Registrations 2026", 7, new Date(2026, 6, 8, 9, 12).getTime(),
+  new Date(2026, 6, 8, 9, 12).getTime(), { operation: "confirm" });
 const TIMELINE_MIXED: TimelineEntry[] = [
   TIMELINE_FILE,
   timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
   TIMELINE_DATED,
-  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
+  TIMELINE_RULES,
   timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
-  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+  TIMELINE_UNDATED,
 ];
 // One afternoon in History, one line per change: Nova's three edits to one
 // file fold into one row, a person's edit shows their face, and the machine's
@@ -690,10 +769,13 @@ const TIMELINE_STORY: TimelineEntry[] = [
 const TIMELINE_COLLECTIONS = new Map([
   [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
   [TIMELINE_GUESTS, { name: "Guests" }],
+  [TIMELINE_SIGNUPS, { name: "Registrations 2026", operationLabels: new Map([["confirm", "Set status to Confirmed"]]), openHistory: noop }],
 ]);
 
 // The About tab on the drawing's document: who wrote what, who has it.
 const ABOUT_PATH = "notes/product-plan.md";
+// The Comments head's one action.
+const ABOUT_COMMENT_ACTION = <AboutSectionAction testId="linked-chat-new" label="Comment on this file" icon={Plus} onClick={noop} />;
 const ABOUT_THREADS: ChatThreadRecord[] = [
   { id: "thread-scope", title: "Launch scope", createdAtMs: new Date(2026, 6, 6, 14, 5).getTime(), updatedAtMs: new Date(2026, 6, 8, 9, 12).getTime() },
   { id: "thread-pricing", title: "Pricing questions", createdAtMs: new Date(2026, 6, 2, 11, 0).getTime(), updatedAtMs: new Date(2026, 6, 7, 16, 40).getTime() },
@@ -709,10 +791,21 @@ const ABOUT_MOMENTS: EngineMomentRecord[] = [
   aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list",
     authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
     authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-agent-2", recordedAtMs: new Date(2026, 6, 8, 9, 20).getTime(), momentOrder: 12, agentAuthorName: "Nova", summary: "Added the venue",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-agent-3", recordedAtMs: new Date(2026, 6, 8, 9, 5).getTime(), momentOrder: 11, agentAuthorName: "Nova", summary: "Drafted the plan",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
   aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" },
     authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
   aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
 ];
+// A person's edits in one sitting, as Ice's Untitled.md shows them.
+const ABOUT_SITTING: EngineMomentRecord[] = [0, 1, 2, 3, 4].map((step) => aboutMoment({
+  id: `about-sitting-${step}`, path: "Untitled.md", recordedAtMs: new Date(2026, 9, 27, 16, 40 - step * 4).getTime(), momentOrder: 20 - step,
+  personAuthorName: "Ice", authors: [{ kind: "human", humanId: "ice" }], authorPresentations: [{ group: "states-ice", hue: null, self: true }],
+}));
 const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
   kind: "share",
   shareId: "share-plan",
@@ -734,6 +827,8 @@ const ABOUT_ACCESS: AccessAnswer = {
   rows: [
     aboutGrant({ grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com" }),
     aboutGrant({ grantId: "grant-link", via: "link", access: "view" }),
+    // A long name truncates before its level.
+    aboutGrant({ grantId: "grant-rivera", recipientUserId: "rivera", recipientEmail: "alexandra.rivera-montgomery@example.com", access: "comment" }),
     aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
   ],
   visibility: "visible",
@@ -780,6 +875,14 @@ const ABOUT_MENTIONED: MentionedFile[] = [
 const ABOUT_MENTIONS: Extract<ConversationLinksView, { status: "ready" }> = {
   status: "ready", files: ABOUT_MENTIONED, more: false, building: false, partial: false,
 };
+// Two files a Group's link authors mentioned last: the cabin by an agent that
+// signed in with the link, the dates by a person who opened it.
+const ABOUT_LINK_MENTIONED: MentionedFile[] = [
+  { objectId: "states-cabin", path: "trip-plan/cabin.md", authors: [{ kind: "link", linkAgent: true, displayName: "Claude Code",
+    presentation: { group: "states-link-agent", hue: null, self: false } }] },
+  { objectId: "states-dates", path: "trip-plan/dates.md", authors: [{ kind: "link", displayName: "Wren",
+    presentation: { group: "states-wren", hue: null, self: false } }] },
+];
 function ConversationLinks(props: { view: ConversationLinksView }) {
   return <AboutConversationLinksView view={props.view} expanded onToggle={noop} onOpenFile={noop} onMore={noop} onRetry={noop} />;
 }
@@ -834,6 +937,11 @@ const CHAT_THREAD_MESSAGES = [
   chatMessage("comment-2", "Can we cut the last paragraph?", 2, "opening"),
 ];
 const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
+// The same thread in Claude Code's own chat.
+const CHAT_AGENT_THREAD_NAV = {
+  ...CHAT_THREAD_NAV,
+  channel: { ...CHAT_CHANNEL, id: "claude-code", name: "Claude Code", slug: "claude-code", kind: "agent", agentId: "claude-code" },
+} as const;
 const NO_BOOKMARKS = new Set<string>();
 
 // A thread at the drawing's column, its second comment hovered. Its
@@ -842,12 +950,16 @@ function ChatThreadSpecimen() {
   return (
     <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
+        workspaceId="states"
         nav={CHAT_THREAD_NAV}
+        channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={CHAT_THREAD_MESSAGES}
         messagesLoading={false}
         threadLocked={false}
         flashMessageId={null}
         runRecords={{}}
+        failedRun={null}
+        retryBusy={false}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -865,16 +977,162 @@ function ChatThreadSpecimen() {
   );
 }
 
+// A run that didn't reply: under the request when it posted nothing, under
+// its last post when it did. Try again only after a quit or restart.
+const STOPPED_REQUEST = chatMessage("opening", "Draft day 2 from the bookings, and add the ferry times.", 0);
+const STOPPED_REPLY: ChatMessageRecord = {
+  id: "stopped-reply", threadId: "post-plain", authorKind: "agent", authorDisplayName: "Claude Code",
+  presentation: neutralPresentation, body: "Ferry times are in day-2.md. Starting on the hotels next.",
+  createdAtMs: CHAT_AT + 60_000, parentMessageId: "opening",
+};
+const STOPPED_RUN: ChatRunRecord = {
+  runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
+  startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
+};
+function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFailedRun["nextStep"]; posted: boolean; retryable: boolean; busy?: boolean; ownChat?: boolean }) {
+  return (
+    <div className="w-[560px]">
+      <ThreadMessages
+        workspaceId="states"
+        nav={props.ownChat ? CHAT_AGENT_THREAD_NAV : CHAT_THREAD_NAV}
+        channelLabel={props.ownChat ? "Claude Code" : `#${CHAT_CHANNEL.name}`}
+        messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
+        messagesLoading={false}
+        threadLocked={false}
+        flashMessageId={null}
+        runRecords={props.posted ? { [STOPPED_REPLY.id]: STOPPED_RUN } : {}}
+        failedRun={{
+          runId: STOPPED_RUN.runId, triggerMessageId: "opening", words: props.words,
+          ...(props.nextStep ? { nextStep: props.nextStep } : {}), retryable: props.retryable,
+        }}
+        retryBusy={props.busy ?? false}
+        onRetryFailedRun={noop}
+        onOpenAgentSettings={noop}
+        reactionsByMessage={new Map()}
+        decisionsByMessage={new Map()}
+        attachmentsByMessage={new Map()}
+        reactionControls={CHAT_REACTIONS}
+        mentionCandidates={[]}
+        bookmarkFor={() => undefined}
+        bookmarkBusy={NO_BOOKMARKS}
+        toggleBookmark={async () => undefined}
+        beginReply={noop}
+        beginResolve={noop}
+        scrollToMessage={noop}
+        setMessageNode={noop}
+      />
+    </div>
+  );
+}
+
+// Claude Code asks Ada to apply a change to Volunteers, and its card draws in
+// each state. Ada made the Email rule earlier; the agent made the rest.
+const CHANGE_AT = (hour: number, minute: number) => new Date(2026, 6, 8, hour, minute).getTime();
+const VOLUNTEERS = "volunteers/dataset.json";
+const VOLUNTEERS_MIGRATION = "volunteers/migrations/004-due-date.sql";
+const byAgent = (path: string, minute = 41) => ({ path, author: { name: "Claude Code", agent: true }, atMs: CHANGE_AT(14, minute) });
+const CHANGE_ROWS: CollectionChangeRow[] = [
+  { kind: "field-added", key: "field:due-date", field: "Due date", type: "date", records: 12, empty: 12, source: byAgent(VOLUNTEERS) },
+  { kind: "field-renamed", key: "field:status:name", from: "Status", to: "Stage", button: false, source: byAgent(VOLUNTEERS) },
+  { kind: "field-removed", key: "field:notes", field: "Notes", button: false, values: 12, source: byAgent(VOLUNTEERS) },
+  { kind: "action-changed", key: "action:sign-up", action: "Sign up", source: byAgent("volunteers/backend.ts", 40) },
+  { kind: "field-unique", key: "field:email:unique", field: "Email", unique: true, values: 12,
+    source: { path: VOLUNTEERS, author: { name: "Ada", agent: false }, atMs: CHANGE_AT(13, 12) } },
+  { kind: "migration", key: "migration", file: VOLUNTEERS_MIGRATION, records: 12, source: byAgent(VOLUNTEERS_MIGRATION) },
+];
+const changeProposal = (rows: CollectionChangeRow[], files: string[], note: string | null): CollectionChangeProposal => ({
+  kind: "dohc-collection-change", version: 1, datasetId: "volunteers", name: "Volunteers", datasetPath: VOLUNTEERS, migrationPath: VOLUNTEERS_MIGRATION,
+  base: { revision: 3, revisionSha256: "a".repeat(64) }, revisionSha256: "b".repeat(64), changeSha256: "c".repeat(64), files, rows, note,
+});
+const CHANGE_PROPOSAL = changeProposal(CHANGE_ROWS, [VOLUNTEERS, "volunteers/schema.sql", "volunteers/backend.ts", VOLUNTEERS_MIGRATION],
+  "Checks the email address before it saves.");
+const RENAME_PROPOSAL = changeProposal([{ kind: "field-renamed", key: "field:stage:name", from: "Stage", to: "Phase", button: false, source: byAgent(VOLUNTEERS, 52) }],
+  [VOLUNTEERS], null);
+const CHANGE_AUTHORS = {
+  ada: { authorKind: "human", authorDisplayName: "Ada", presentation: SAMPLE_ADA },
+  agent: { authorKind: "agent", authorDisplayName: "Claude Code", presentation: neutralPresentation },
+} as const;
+const changeMessage = (id: string, by: keyof typeof CHANGE_AUTHORS, body: string, minute: number): ChatMessageRecord => ({
+  id, threadId: "change-dm", ...CHANGE_AUTHORS[by], body, createdAtMs: CHANGE_AT(14, minute),
+});
+const CHANGE_MESSAGE = changeMessage("change-ask", "agent", "Here's the change.", 41);
+const RENAME_MESSAGE = changeMessage("rename-ask", "agent", "Here's the rename of Stage to Phase that you asked for.", 52);
+const changeCard = (state: CollectionChangeState | null, proposal = CHANGE_PROPOSAL, message = CHANGE_MESSAGE): ComponentProps<typeof CollectionChangeCardView> => ({
+  message, proposal, change: state === null ? null : { proposal, rows: proposal.rows, state }, loadFailure: null, phase: { kind: "idle" }, notNow: false,
+  locked: false, onOpenPath: noop, onApply: noop, onUndo: noop, onReview: noop, onNotNow: noop, onUnfold: noop, onRetryLoad: noop, testIdPrefix: "states",
+});
+const WAITING = { kind: "waiting" } as const;
+const applyFailure = collectionApplyFailure("Volunteers");
+// Two volunteers with notes signed up after the change was sent.
+const shownDeletes = collectionChangeDeletes(CHANGE_ROWS);
+const deletesMore = collectionDeletesMoreFailure(shownDeletes, { ...shownDeletes, values: shownDeletes.values + 2 });
+
+// Ada added Phone after the agent asked, then applied the change from the
+// review, so her reply attaches the change it applied. Neither message
+// mentions its file, so neither draws a chip.
+const REVIEWED_PROPOSAL = changeProposal([CHANGE_ROWS[0]!,
+  { kind: "field-added", key: "field:phone", field: "Phone", type: "text", records: 12, empty: 12,
+    source: { path: VOLUNTEERS, author: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 44) } },
+  ...CHANGE_ROWS.slice(1)], CHANGE_PROPOSAL.files, CHANGE_PROPOSAL.note);
+const attachingChange = (message: ChatMessageRecord, fileId: string): ChatMessageRecord => ({ ...message, attachments: [{
+  attachmentId: `${message.id}-change`, threadId: message.threadId, messageId: message.id, targetKind: "file",
+  pathHint: `volunteers/changes/${fileId}.json`, createdAtMs: message.createdAtMs }] });
+const REVIEWED_ASK = attachingChange(CHANGE_MESSAGE, "8d0c5b7e-2f4a-4c1e-9b3d-6a7f0e2c5d14");
+const REVIEWED_REPLY = attachingChange(changeMessage("change-reviewed", "ada", "Applied the change to Volunteers.", 47), "3f2a91c0-7b6e-4d2a-8c5f-1e9b0a4d7c36");
+
+function ChangeAppliedFromReviewSpecimen() {
+  return <div className="flex h-[720px] w-[672px] flex-col">
+    <ChatMessageList testIdPrefix="states-change-chat" messages={[REVIEWED_ASK, REVIEWED_REPLY]} loading={false} emptyLabel="No messages yet." anchor="start"
+      renderMessageFooter={message => message.id === REVIEWED_ASK.id
+        ? <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, REVIEWED_PROPOSAL, REVIEWED_ASK)} appliedBy={REVIEWED_REPLY} /> : null} />
+  </div>;
+}
+
+const DEFINITION_BEFORE = `{
+  "name": "Volunteers",
+  "fields": [
+    { "id": "name", "name": "Name", "type": "text" },
+    { "id": "email", "name": "Email", "type": "text" },
+    { "id": "status", "name": "Status", "type": "select" },
+    { "id": "notes", "name": "Notes", "type": "text" }
+  ]
+}
+`;
+const DEFINITION_AFTER = `{
+  "name": "Volunteers",
+  "fields": [
+    { "id": "name", "name": "Name", "type": "text" },
+    { "id": "email", "name": "Email", "type": "text", "unique": true },
+    { "id": "status", "name": "Stage", "type": "select" },
+    { "id": "due_date", "name": "Due date", "type": "date" }
+  ]
+}
+`;
+const CHANGE_REVIEW: CollectionChangeReview = {
+  change: { proposal: CHANGE_PROPOSAL, rows: CHANGE_ROWS, state: WAITING },
+  preparation: { preparationId: "states-preparation", revisionSha256: "b".repeat(64), approvalDigest: "d".repeat(64) },
+  files: [
+    { path: VOLUNTEERS, before: DEFINITION_BEFORE, after: DEFINITION_AFTER },
+    { path: "volunteers/schema.sql", before: "notes TEXT\n", after: "due_date TEXT\n" },
+    { path: "volunteers/backend.ts", before: "signUp(input)\n", after: "signUp(checkEmail(input))\n" },
+    { path: VOLUNTEERS_MIGRATION, before: "", after: "ALTER TABLE volunteers DROP COLUMN notes;\n" },
+  ],
+};
+const changeReview = (open: ReadonlySet<string>): ComponentProps<typeof CollectionChangeReviewCard> => ({
+  asked: CHANGE_REVIEW.change, load: { kind: "ready", review: CHANGE_REVIEW }, phase: { kind: "idle" }, open,
+  onToggle: noop, onApply: noop, onNotNow: noop, onRetry: noop, locked: false, testIdPrefix: "states",
+});
+
 const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 
 // The agent picked from the roster, in each state its offer says. The
 // specimen agent takes the default agent colour, not a chosen one.
-const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
-const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "unknown"];
+const AGENT_DRAFT = "@Nova can you check funnel.csv against last week?";
 function agentOffer(state: AgentOfferState): AgentAddressedOffer {
   return {
     kind: "agent-addressed",
-    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    agent: { id: "agent:default", kind: "agent", handle: "Nova", label: "Nova" },
     presentation: { group: "states-agent", hue: null, self: false },
     state,
     working: state === "working",
@@ -887,7 +1145,6 @@ function AgentOfferComposer(props: {
   surface: "post" | "stream";
   id: string;
   width?: string;
-  focus?: boolean;
   replying?: boolean;
 }) {
   const composer = (
@@ -895,20 +1152,17 @@ function AgentOfferComposer(props: {
       surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
       placeholder={props.surface === "post" ? "What's happening in #general?" : "Message #general"}
       sendLabel={props.surface === "post" ? "Start post" : "Send message"} candidates={[]} onChange={noop} onSend={noop}
-      agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
+      agentOffer={agentOffer(props.state)}
       above={props.replying ? (
         <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
           cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
       ) : undefined} />
   );
-  const focused = props.focus ? (
-    <div data-force-state="focus-visible" data-force-target='[data-testid="composer-agent-offer-setup"]'>{composer}</div>
-  ) : composer;
   // A stream composer floats its offer above its top edge, into the room the
   // end of its conversation keeps, so it gets that room here.
   return props.surface === "post"
-    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{focused}</div>
-    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{focused}</div>;
+    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{composer}</div>
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{composer}</div>;
 }
 
 // The About rail at the drawing's 290px, on the chrome.
@@ -955,7 +1209,7 @@ const aboutLink = (source: string, title: string, line: number, snippet: string,
 };
 const ABOUT_LINK_ROWS = [
   aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 4, "Agreed to ship the beta from [[product-plan]] on Friday."),
-  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan]].", 1),
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan|the plan]].", 1),
   aboutLink("research/competitors.md", "Competitor landscape", 7,
     "Their launch list is shorter than the one in [[product-plan]], and their pricing has three tiers."),
 ];
@@ -995,16 +1249,24 @@ function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
   );
 }
 
-// The Sharing view's lists, as the drawing fills them.
+// The Sharing view's lists, as the drawing fills them: a long name cut in
+// its middle, one person, several at two levels, a link, two rows with one
+// name, and an ended share.
 const SHARING_CHECKED_AT = new Date(2026, 6, 8, 9, 40).getTime();
 const SHARING_GRANTED: AccessAnswer = {
   ...ABOUT_ACCESS,
   ref: null,
   rows: [
     aboutGrant({ shareId: "share-plan", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
-      selector: { paths: ["notes/product-plan.md"], versionId: null } }),
+      selector: { paths: ["notes/product-plan-2027-roadmap.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["trip/notes.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      selector: { paths: ["trip/notes.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-tea", recipientUserId: "tea", recipientEmail: "tea@example.com",
+      selector: { paths: ["trip/notes.md"], versionId: null }, access: "view" }),
     aboutGrant({ shareId: "share-research", grantId: "grant-link", via: "link", recipientUserId: null, recipientEmail: null,
-      selector: { paths: ["research/competitors.md"], versionId: null }, access: "view" }),
+      selector: { paths: ["research/notes.md"], versionId: null }, access: "view" }),
     aboutGrant({ shareId: "share-old", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
       subjectName: "budget.csv", selector: null, access: null, status: "revoked" }),
   ],
@@ -1044,6 +1306,22 @@ const SHARING_REMOVED: AccessAnswer = {
     aboutGrant({ shareId: "in-budget", grantId: "in-3", via: "received", sharerName: null, granterEmail: null, recipientUserId: "me",
       recipientEmail: null, selector: null, access: null, status: "removed", removalMessage: "Sam removed your access." }),
   ],
+};
+// A link, and a person who can do more than it lets anyone do.
+const SHARING_LINK_ABOVE: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [
+    aboutGrant({ shareId: "share-brief", grantId: "grant-brief-link", via: "link", recipientUserId: null, recipientEmail: null,
+      selector: { paths: ["plans/launch-brief.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-brief", grantId: "grant-brief-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["plans/launch-brief.md"], versionId: null } }),
+  ],
+};
+// A share dohc cannot read: it stays listed, and can still be ended.
+const SHARING_DAMAGED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [aboutGrant({ shareId: "share-bad", grantId: "grant-bad", recipientUserId: "kim", recipientEmail: "kim@example.com",
+    subjectName: "budget.csv", selector: null, access: null, status: "damaged" })],
 };
 const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
 const SHARING_ACTIONS: SharingActions = {
@@ -1096,23 +1374,86 @@ function notice(id: string, tone: "danger" | "success") {
 }
 
 // A failure whose text runs past three lines: the row clips it and offers Show more.
+const SELF_TEST_TITLE = "Nova didn't reply to the check.";
+const SELF_TEST_BODY =
+  "Nova's runner stopped at step 3 of 5, before its tools started, so the check never reached Nova. dohc kept the runner's log and the step that stopped with this notice, and Copy puts both on your clipboard. Fix what the log names, then run the check again.";
 const LONG_NOTICE = {
   id: "self-test",
   tone: "danger" as const,
-  title: "The self-test did not finish",
-  body: "dohc stopped the self-test at its third step and kept the log at C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log. Open the log to see the step that stopped, then try again.",
+  title: SELF_TEST_TITLE,
+  body: SELF_TEST_BODY,
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
-  copyText: "The self-test did not finish",
+  // The body promises that Copy gives the log and the step that stopped.
+  copyText: [
+    SELF_TEST_TITLE,
+    SELF_TEST_BODY,
+    "Log: C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log",
+    "Step that stopped: 3 of 5",
+  ].join("\n"),
   onDismiss: noop,
 };
+
+// A row with two worded actions: they sit under its text, not beside its title.
+const COLLECTIONS_WAITING_NOTICE = {
+  id: "collections-waiting",
+  tone: "warning" as const,
+  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
+  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
+  copyLabel: "Copy notice details",
+  onDismiss: noop,
+};
+
+// A failed merge while another merge dialog is open: Try again is disabled,
+// with its reason under it. The cause's words were only "Try again in a
+// moment.", which goes while Try again waits, so the toast has no body. The
+// app can't show this row, since the open dialog covers Notices.
+const MERGE_BLOCKED_TOAST = {
+  id: "merge-blocked",
+  title: "dohc could not merge Draft into Main",
+  message: "Try again in a moment.",
+  details: "Error: Rust engine daemon exited.",
+  atMs: 0,
+  canRetry: true,
+  retryBlocked: MERGE_RETRY_AFTER_CLOSE,
+  seen: false,
+};
+const MERGE_BLOCKED_NOTICE = {
+  id: "merge-blocked",
+  tone: "danger" as const,
+  title: MERGE_BLOCKED_TOAST.title,
+  body: "",
+  Icon: AlertTriangle,
+  actions: [{ label: "Try again", onClick: noop, disabled: true, reason: MERGE_RETRY_AFTER_CLOSE }],
+  copyText: MERGE_BLOCKED_TOAST.details,
+  onDismiss: noop,
+};
+
+// Twelve files picked in Research, as Explorer lists them.
+const DELETE_PATHS = [
+  "Research/competitors.md",
+  "Research/meeting-2026-07-08.md",
+  "Research/meeting-2026-07-15.md",
+  "Research/interview-notes.md",
+  "Research/pricing.md",
+  "Research/survey-results.csv",
+  "Research/market-size.md",
+  "Research/open-questions.md",
+  "Research/sources.md",
+  "Research/summary.md",
+  "Research/timeline.md",
+  "Research/whiteboard.png",
+];
 
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
     // `contain: paint` makes this box the containing block of the frame's
     // fixed backdrop, so the dialog sits over these rows and not the window.
-    <div className="relative h-72 w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
+    <div className="relative h-[30rem] w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
       <div className="flex flex-col gap-2 p-4 text-[13px] text-muted">
         <span>Research</span>
         <span>competitors.md</span>
@@ -1120,20 +1461,13 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       </div>
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
-          intent="danger"
-          title="Delete 12 files from Research?"
-          confirmLabel="Delete files"
+          {...deleteConfirmText(DELETE_PATHS, null)}
           onCancel={noop}
           onConfirm={noop}
           testId={`states-dialog-${props.theme}`}
           cancelTestId={`states-dialog-cancel-${props.theme}`}
           confirmTestId={`states-dialog-confirm-${props.theme}`}
-        >
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
-            restore them.
-          </p>
-        </ConfirmDialogCard>
+        />
       </OverlayFrame>
     </div>
   );
@@ -1206,20 +1540,25 @@ function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width
   );
 }
 
-const versionRows: MenuEntry[] = [
-  { id: "main", label: "Main", checked: true, onSelect: noop },
-  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
-  MENU_SEPARATOR,
-];
+// The versions menu on a version made from another version, and on Main.
 const radioMenuItems: MenuEntry[] = [
-  ...versionRows,
-  { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
-  { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  { id: "main", label: "Main", checked: false, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: true, onSelect: noop },
+  { id: "new", label: "New version", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  MENU_SEPARATOR,
   { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
-  { id: "merge", label: "Merge into Main…", icon: <Merge size={14} aria-hidden />, disabled: true, onSelect: noop },
+  {
+    id: "merge",
+    label: "Merge into Main…",
+    icon: <Merge size={14} aria-hidden />,
+    disabled: true,
+    description: "Only versions made from Main can merge into Main.",
+    onSelect: noop,
+  },
 ];
 const fieldMenuItems: MenuEntry[] = [
-  ...versionRows,
+  { id: "main", label: "Main", checked: true, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
   {
     id: "new",
     field: {
@@ -1228,6 +1567,23 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
+      hint: "Starts from Main",
+    },
+  },
+];
+// The versions menu before the first version, as only Main shows it: the
+// field says where the version starts, then what every version leaves alone.
+const firstVersionMenuItems: MenuEntry[] = [
+  { id: "main", label: "Main", checked: true, description: "Try changes without touching Main.", onSelect: noop },
+  {
+    id: "new",
+    field: {
+      label: "New version name",
+      value: "Draft",
+      onChange: noop,
+      onSubmit: noop,
+      onCancel: noop,
+      hint: <NewVersionHint versions={{ onMain: true, active: null }} first />,
     },
   },
 ];
@@ -1239,7 +1595,7 @@ const overflowMenuItems: MenuEntry[] = [
 ];
 const dangerMenuItems: MenuEntry[] = [
   { id: "reveal", label: "Reveal in folder", onSelect: noop },
-  { id: "forget", label: "Forget", danger: true, onSelect: noop },
+  { id: "delete", label: "Delete", danger: true, onSelect: noop },
 ];
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
@@ -1302,15 +1658,6 @@ function TableMenuSpecimen(props: { menuId: string }) {
   return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
 }
 
-// The section shows file text only. After `budget` is renamed `cost`, the
-// file holds the old name until the save lands.
-function AsWrittenSpecimen(props: { name: string }) {
-  return (
-    <div className="w-[420px] rounded-lg border border-line bg-bg">
-      <FrontmatterAsWritten markdown={`---\n# Monthly\n${props.name}: 100 # euros\n---\n\nBody`} propertiesShown />
-    </div>
-  );
-}
 
 // A page's top matter on paper, at the editor's font size, as a document
 // pane holds it. The pane is the hover zone that shows a lone +.
@@ -1323,6 +1670,10 @@ function TopmatterSpecimen(props: { children: ReactNode }) {
 }
 
 const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
+// An ID and a comment have no pill.
+const UNSHOWN = "---\nid: 01JD8K2V7QX4\nstatus: Draft\nowner: Sam\n# Times are local (JST)\n---\n";
+// The file a locked specimen offers to open externally.
+const STATES_NOTE = { workspaceId: "states", path: "product-plan.md" };
 const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
 
 // A reserved name shows only while a person types it, so the specimen types
@@ -1597,11 +1948,13 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
           <Row name="focused" force="focus-visible" />
-          <Row name="selected" selected />
-          <Row name="focused, selected" selected force="focus-visible" />
           <Row name="active" active />
-          <Row name="focused, hover" force="hover focus-visible" />
+          <Row name="picked" picked />
+          <Row name="picked, active" picked active />
+          <Row name="focused, picked" picked force="focus-visible" />
           <Row name="drop target" folder drop />
+          <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
+          <Row name="quarterly-planning-and-budget-review-2026" folder />
         </ul>
       </Section>
 
@@ -1728,6 +2081,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
           </div>
           <WorkspaceErrorToast error={toast("success")} onHide={noop} />
+          <WorkspaceErrorToast error={MERGE_BLOCKED_TOAST} onRetry={noop} onHide={noop} />
         </div>
       </Section>
 
@@ -1741,6 +2095,31 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={MERGE_BLOCKED_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            {/* Signed in to an account dohc can't confirm, then signed out,
+                which is a choice rather than a fault. */}
+            <LocalNoticeRow
+              notice={accountUnconfirmedNotice({ onTryAgain: noop, onOpenSyncSettings: noop })}
+              unread
+              onKeyDown={noop}
+              onAction={noop}
+              onDismiss={noop}
+            />
+            <LocalNoticeRow
+              notice={notConnectedNotice({ onConnectServer: noop })}
+              unread
+              onKeyDown={noop}
+              onAction={noop}
+              onDismiss={noop}
+            />
+            <LocalNoticeRow
+              notice={signInExpiredNotice({ onSignInAgain: noop })}
+              unread
+              onKeyDown={noop}
+              onAction={noop}
+              onDismiss={noop}
+            />
           </ul>
         </div>
       </Section>
@@ -1751,23 +2130,31 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
-        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
+        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled with its reason">
           <div
-            className="flex h-64 w-64 items-start justify-end"
+            className="flex h-72 w-72 items-start justify-end"
             data-force-state="focus focus-visible"
-            data-force-target="[role=menuitemradio]:nth-child(1)"
+            data-force-target="[role=menuitemradio]:nth-child(2)"
           >
-            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
-              <MenuSpecimen label="Versions" items={radioMenuItems} width={208} testId={`states-menu-radio-${theme}`} />
+            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(1)">
+              <MenuSpecimen label="Versions" items={radioMenuItems} width={256} testId={`states-menu-radio-${theme}`} />
             </div>
           </div>
         </Specimen>
       </Section>
 
       <Section part="menu-field" title="Menu with a name field">
-        <Specimen label="field: focus, Enter at its end">
+        <Specimen label="field: focus, Enter at its end, hint">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
-            <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
+            <MenuSpecimen label="Versions" items={fieldMenuItems} width={256} testId={`states-menu-field-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-first-version" title="Menu before the first version">
+        <Specimen label="only Main: field focus, hint, what versions leave alone">
+          <div className="flex h-64 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+            <MenuSpecimen label="Versions" items={firstVersionMenuItems} width={256} testId={`states-menu-first-version-${theme}`} />
           </div>
         </Specimen>
       </Section>
@@ -1803,14 +2190,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The capture opens each part's tab list. */}
+      {/* The first part opens its tab list. The empty active group is
+          captured with menus closed: opening the other group's tab list
+          focuses that group, and in a split specimen focus makes a group
+          active (#3391). */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
         </Specimen>
       </Section>
 
-      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+      <Section part="editor-groups-empty" title="Editor groups, empty active group" menusAtRest>
         <Specimen label="split: an empty active group, then one with tabs">
           <EditorGroupsSpecimen activeHasTabs={false} />
         </Specimen>
@@ -1868,12 +2258,12 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
-            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onRetry={noop} />
+            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onOpenFile={noop} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="diff: file no longer tracked">
           <div className="flex h-64 w-96 flex-col rounded-lg border border-line bg-bg">
-            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onRetry={noop} />
+            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onOpenFile={noop} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="restore refused">
@@ -1884,7 +2274,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="history-timeline" title="History timeline">
-        <Specimen label="one line per change: an agent's folded edits, holding the open one; a person; origins; a protected file">
+        <Specimen label="two lines per change: an agent's folded edits, holding the open one; a person; origins; a protected file">
           <div className="flex h-[300px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_STORY} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               openMomentId="story-nova-2" onRetry={noop} />
@@ -1893,9 +2283,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="the agent's run, listed: its earlier edit open; count hovered">
           <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
             <li data-force-state="hover" data-force-target="[data-testid=engine-moment-run-toggle]">
-              <MomentRow moment={STORY_RUN[0]!} fold={{ count: 3, expanded: true, onToggle: noop }} onOpenMoment={noop} />
-              <MomentRow moment={STORY_RUN[1]!} nested="run" selected onOpenMoment={noop} />
-              <MomentRow moment={STORY_RUN[2]!} nested="run" onOpenMoment={noop} />
+              <HistoryRow moment={STORY_RUN[0]!} context="workspace" fold={{ count: 3, expanded: true, onToggle: noop }} onOpen={noop} />
+              <HistoryRow moment={STORY_RUN[1]!} context="workspace" nested="run" selected onOpen={noop} />
+              <HistoryRow moment={STORY_RUN[2]!} context="workspace" nested="run" onOpen={noop} />
             </li>
           </ul>
         </Specimen>
@@ -1903,6 +2293,12 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Collections at the sidebar's default width: who made a change cuts before the Collection's name">
+          <div data-testid={`states-history-collections-narrow-${theme}`} className="flex h-[260px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_DATED, TIMELINE_RULES, TIMELINE_SIGNUPS_CHANGE, TIMELINE_UNDATED]} hasMore={false} loadingMore={false} onLoadMore={noop}
+              onOpenMoment={noop} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="partial: a Collection did not load">
@@ -1971,7 +2367,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="saving" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
@@ -1985,7 +2381,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="pending share" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenCalm state="pending-share" shown="pending-share" />}
@@ -1999,7 +2395,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="held: file in use" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-held-${theme}`} truncate quietWhenCalm state="file-locked" shown="file-locked" />}
@@ -2013,12 +2409,18 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="failed" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" body={
+            <div className="flex h-56 flex-col rounded-b-lg bg-bg">
+              <EmptyState icon={AlertTriangle} tone="danger" title="dohc could not read this file.">
+                <SecondaryButton data-testid="file-read-retry" onClick={noop}>Try again</SecondaryButton>
+              </EmptyState>
+            </div>
+          }>
             <ViewActions
               onShare={noop}
               actions={
                 <DocumentControls
-                  toggle={{ label: "Edit", disabled: true }}
+                  toggle={{ label: "Edit", disabled: true, title: "dohc could not open this file." }}
                   menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
                 />
               }
@@ -2026,7 +2428,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="narrow, changed on disk">
-          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`}>
+          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`} dirty>
             <ViewActions
               onShare={noop}
               status={
@@ -2065,15 +2467,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      <Section part="frontmatter-as-written" title="Frontmatter as written">
-        <Specimen label="rename saved">
-          <AsWrittenSpecimen name="cost" />
-        </Specimen>
-        <Specimen label="rename saving: the file keeps the old name">
-          <AsWrittenSpecimen name="budget" />
-        </Specimen>
-      </Section>
-
       {/* On the title bar's own fill. */}
       <Section part="title-bar-status" title="Title bar status">
         {/* The saved dot alone while nothing needs the person, and its words
@@ -2104,7 +2497,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="History at its default width: the recovery change">
           <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
             <li>
-              <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
+              <HistoryRow moment={RECOVERY_MOMENT} context="workspace" onOpen={noop} />
             </li>
           </ul>
         </Specimen>
@@ -2128,10 +2521,12 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="about" title="About">
-        <Specimen label="a document: chats, history, access checked">
+        <Specimen label="a document: access checked, comments, history, links">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
+            <AboutSection id="chats" label="Comments" count="2" expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
               <ul className="m-0 list-none p-0">
                 {ABOUT_THREADS.map((thread) => (
                   <li key={thread.id}>
@@ -2145,15 +2540,46 @@ function Pane(props: { theme: "light" | "dark" }) {
               expanded
               onToggle={noop}
               onOpenMoment={noop}
+              onOpenHistory={noop}
             />
-            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS }} expanded onToggle={noop} onRetry={noop}
-              onMore={noop} setup={ACCESS_UNEXPLAINED} />
+            <AboutLinksView links={{ ...ABOUT_LINKS, next: null }} chats={ABOUT_CHAT_LINKS} expanded onToggle={noop}
+              onOpenLink={noop} onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a new document: only its heads, and only you">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: "4.md" }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
+            <AboutSection id="chats" label="Comments" count="0" empty expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
+              {null}
+            </AboutSection>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_MOMENTS.slice(-1), more: false }} expanded
+              onToggle={noop} onOpenMoment={noop} onOpenHistory={noop} />
+            <AboutLinksView links={{ status: "ready", rows: [], next: null, gathering: 0 }}
+              chats={{ status: "ready", rows: [], next: null, gathering: 0 }} expanded onToggle={noop}
+              onOpenLink={noop} onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a person's sitting of edits">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ path: "Untitled.md" }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} onShare={noop} />
+            <AboutSection id="chats" label="Comments" count="0" empty expanded onToggle={noop} actions={ABOUT_COMMENT_ACTION}>
+              {null}
+            </AboutSection>
+            <AboutHistoryView view={{ status: "ready", moments: ABOUT_SITTING, more: true }} expanded
+              onToggle={noop} onOpenMoment={noop} onOpenHistory={noop} />
+            <AboutLinksView links={{ status: "ready", rows: [], next: null, gathering: 0 }}
+              chats={{ status: "ready", rows: [], next: null, gathering: 0 }} expanded onToggle={noop}
+              onOpenLink={noop} onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
           </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="access may be out of date">
           <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, freshness: "stale" } }} />
         </Specimen>
-        <Specimen label="no share within its coverage">
+        <Specimen label="only you: no share from this workspace">
           <AccessSpecimen view={{ status: "ready", answer: { ...ABOUT_ACCESS, rows: [] } }} />
         </Specimen>
         <Specimen label="unknown: the workspace does not sync">
@@ -2174,8 +2600,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="the first read: lines after 150 ms until it answers">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
-              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            <AboutSection id="chats" label="Comments" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
             </AboutSection>
             <AboutHistoryView view={{ status: "loading" }} expanded onToggle={noop} onOpenMoment={noop} />
           </AboutPanelSpecimen>
@@ -2183,15 +2609,15 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="while the workspace is read in: no deadline">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ path: ABOUT_PATH }} />
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
-              <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            <AboutSection id="chats" label="Comments" expanded onToggle={noop}>
+              <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
             </AboutSection>
             <AboutHistoryView view={{ status: "updating" }} expanded onToggle={noop} onOpenMoment={noop} />
           </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="failed reads: words in Notices">
           <AboutPanelSpecimen>
-            <AboutSection id="chats" icon={MessageSquare} label="Chats" expanded onToggle={noop}>
+            <AboutSection id="chats" label="Comments" expanded onToggle={noop}>
               <RetryRow testId="linked-chats-failed" onRetry={noop} />
             </AboutSection>
             <AboutHistoryView view={{ status: "failed", retry: noop }} expanded onToggle={noop} onOpenMoment={noop} />
@@ -2249,6 +2675,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
         </Specimen>
+        <Specimen label="a link, and a person who can do more">
+          <SharingSpecimen granted={ready(SHARING_LINK_ABOVE)} received={ready({ ...SHARING_RECEIVED, rows: [] })} mounts={[]} />
+        </Specimen>
         <Specimen label="may be out of date">
           <SharingSpecimen granted={ready({ ...SHARING_GRANTED, freshness: "stale" })}
             received={ready({ ...SHARING_RECEIVED, freshness: "stale" })} />
@@ -2272,7 +2701,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             confirmShareId="share-plan" />
         </Specimen>
         <Specimen label="keyboard focus on a row's actions">
-          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
             <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-granted-menu"]'>
               <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
@@ -2280,12 +2709,15 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="keyboard focus on a row's code copy">
-          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
             <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-copy-code"]'>
               <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
             </div>
           </div>
+        </Specimen>
+        <Specimen label="a share dohc cannot read">
+          <SharingSpecimen granted={ready(SHARING_DAMAGED)} received={ready({ ...SHARING_RECEIVED, rows: [] })} mounts={[]} />
         </Specimen>
         <Specimen label="removed shares still on this computer, and skipped changes">
           <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready(SHARING_REMOVED)}
@@ -2344,24 +2776,39 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* Its empty and loading states are the shared ones above, in Empty
-          ("create") and Loading. */}
-      <Section part="apps-shelf" title="Apps shelf">
-        <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
-          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
-            <AppRows apps={SHELF_APPS} pinnedApps={["trip-planner"]} activePath={siteTabPath("apps/funnel-dashboard")}
-              onOpenPath={noop} onSetPinned={noop} />
+      {/* The Explorer's Home, at the sidebar's narrowest. */}
+      <Section part="explorer-home" title="Explorer Home" menusAtRest>
+        <Specimen label="open editors with one unsaved, pinned, pages in folders, Collections, apps, other files; a page open; a row hovered">
+          <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
+            data-force-target='[data-section="pages"]:nth-of-type(1)'>
+            <Explorer {...HOME_SPECIMEN} />
           </div>
         </Specimen>
-        <Specimen label="keyboard focus: a row, then a pin">
+        <Specimen label="a new workspace: no open editors, and Pages, Collections and Apps each say they have nothing">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} editorGroups={HOME_NO_EDITORS} files={[]} folders={[]} pinned={[]} apps={HOME_NO_APPS}
+              appFolders={new Set()} dataCollections={[]} onIncludeArchivedCollections={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a share view holding one app: Open editors, then only Apps">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} editorGroups={HOME_NO_EDITORS} files={[{ path: "trip-planner/index.html", kind: "file" }]}
+              folders={["trip-planner"]} pinned={[]} apps={HOME_SHARED_APP} appFolders={new Set(["trip-planner"])} dataCollections={[]}
+              shareView={{ granterEmail: "sam@example.com" }} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus on an open editor">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="focus focus-visible"
-            data-force-target='li:nth-child(1) [data-testid="sites-row"]'>
-            <div data-force-state="focus focus-visible" data-force-target='li:nth-child(3) [data-testid="sites-pin"]'>
-              <AppRows apps={SHELF_APPS} pinnedApps={[]} activePath={null} onOpenPath={noop} onSetPinned={noop} />
-            </div>
+            data-force-target='[data-testid="open-editor-row"]:nth-child(2) > button'>
+            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} apps={undefined} dataCollections={[]} />
           </div>
         </Specimen>
-        <Specimen label="failed read: words in Notices">
+        <Specimen label="loading: blank for 150 ms, then skeleton rows">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} listed={false} />
+          </div>
+        </Specimen>
+        <Specimen label="failed apps read: words in Notices">
           <div className="w-60 rounded-lg border border-line bg-panel p-1">
             <RetryRow testId={`states-apps-failed-${theme}`} onRetry={noop} />
           </div>
@@ -2385,6 +2832,115 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="thread: opening post, divider, a run of two comments, the second hovered">
           <ChatThreadSpecimen />
+        </Specimen>
+        <Specimen label="failed before the agent posted">
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed after the agent posted">
+          <ChatFailedRunSpecimen
+            words="Claude Code stopped before finishing. Its run ended with an error."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed, in the agent's own chat">
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted={false}
+            retryable={false}
+            ownChat
+          />
+        </Specimen>
+        <Specimen label="failed, its agent turned off since">
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "turn-on", name: "Claude Code" }}
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed, its agent gone from Settings">
+          <ChatFailedRunSpecimen
+            words="Your agent didn't reply. Its run ended with an error."
+            nextStep={{ kind: "add-agent" }}
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="stopped when dohc quit, before the agent posted">
+          <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable />
+        </Specimen>
+        <Specimen label="stopped when dohc restarted, after the agent posted">
+          <ChatFailedRunSpecimen words="Claude Code stopped before finishing. dohc restarted during its run." posted retryable />
+        </Specimen>
+        <Specimen label="stopped, Try again pressed">
+          <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable busy />
+        </Specimen>
+        <Specimen label="stopped again after its second attempt">
+          <ChatFailedRunSpecimen words="Claude Code stopped before finishing. dohc quit during its run." posted retryable={false} />
+        </Specimen>
+      </Section>
+
+      <Section part="change-card" title="Collection change card">
+        <Specimen label="loading">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(null)} /></div>
+        </Specimen>
+        <Specimen label="waiting: it deletes values, Ada made one part, the agent's note sits under its code change">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} /></div>
+        </Specimen>
+        <Specimen label="applying">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "applying", words: "Applying…" }} /></div>
+        </Specimen>
+        <Specimen label="applied, which History can't undo; a later rename, applied, with Undo">
+          <div className="flex w-[672px] flex-col">
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: false })} appliedBy={changeMessage("change-applied", "ada", "Applied the change to Volunteers.", 47)} />
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, RENAME_PROPOSAL, RENAME_MESSAGE)}
+              appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} />
+          </div>
+        </Specimen>
+        <Specimen label="the rename, undone">
+          <div className="w-[672px]">
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: false }, RENAME_PROPOSAL, RENAME_MESSAGE)}
+              appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} undoneBy={changeMessage("rename-undone", "ada", "Undid the change to Volunteers.", 55)} />
+          </div>
+        </Specimen>
+        <Specimen label="failed, with Try again">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(null) }} /></div>
+        </Specimen>
+        <Specimen label="refused by the server that keeps it: no Try again">
+          <div className="w-[672px]">
+            <CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" })) }} />
+          </div>
+        </Specimen>
+        <Specimen label="Not now">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>
+        </Specimen>
+        <Specimen label="Ada changed its files after it was sent">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
+        </Specimen>
+        <Specimen label="records changed after it was sent, so it would now delete more: no Apply">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...deletesMore }} /></div>
+        </Specimen>
+        <Specimen label="in a DM, applied from the review after Ada added Phone: the card credits her part, and her reply has no chip">
+          <ChangeAppliedFromReviewSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="change-review" title="Collection change review">
+        <Specimen label="ready, keyboard focus on the first row">
+          <div className={REVIEW_ROOM} data-force-state="focus focus-visible" data-force-target='[data-testid="states-change-review-row"]:first-child > button'>
+            <CollectionChangeReviewCard {...changeReview(new Set<string>())} />
+          </div>
+        </Specimen>
+        <Specimen label="the first row's file changes open">
+          <div className={REVIEW_ROOM}><CollectionChangeReviewCard {...changeReview(new Set([CHANGE_ROWS[0]!.key]))} /></div>
         </Specimen>
       </Section>
 
@@ -2598,6 +3154,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             </div>
           </div>
         </Specimen>
+        <Specimen label="files mentioned last by a link agent and by a link holder">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_LINK_MENTIONED }} />
+          </AboutPanelSpecimen>
+        </Specimen>
         <Specimen label="gathering while the conversation's link index builds">
           <AboutPanelSpecimen>
             <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 1), building: true, partial: true }} />
@@ -2608,7 +3169,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 2), partial: true }} />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="loading, a failed read with its words in Notices, then a conversation dohc does not list">
+        <Specimen label="loading, a failed read, then a conversation dohc does not list">
           <AboutPanelSpecimen>
             <ConversationLinks view={{ status: "loading" }} />
             <ConversationLinks view={{ status: "failed" }} />
@@ -2621,6 +3182,20 @@ function Pane(props: { theme: "light" | "dark" }) {
           the tab row, as a document does: a calm save state says so only to
           screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {([false, true] as const).map((held) => (
+          <Specimen key={String(held)} label={held ? "held change" : "read-only note"} className="w-full">
+            <TabRowActionsSpecimen width="w-full" body={
+              <LossyNoteNoticeView held={held}>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Open externally</button>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Edit anyway</button>
+              </LossyNoteNoticeView>
+            }>
+              <ViewActions onShare={noop} actions={
+                <DocumentControls toggle={{ label: "Edit", disabled: true, title: LOSSY_NOTE_TITLE }} menu={null} />
+              } />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
             <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">
@@ -2653,7 +3228,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
             <Row name="trip-planner" app />
-            <Row name="signup" app selected />
+            <Row name="signup" app picked />
             <Row name="dashboard" app force="focus-visible" />
           </ul>
         </Specimen>
@@ -2684,14 +3259,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             ))}
           </div>
         </Specimen>
-        <Specimen label="Set up focused; above a reply bar; then a narrow pane">
+        <Specimen label="Above a reply bar; then a narrow pane">
           <div className="flex flex-col gap-3">
-            <AgentOfferComposer state="no-command" surface="post" id={`states-agent-post-focus-${theme}`} focus />
-            <AgentOfferComposer state="runner-off" surface="stream" id={`states-agent-stream-focus-${theme}`} focus />
             <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
             <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
             <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
-            <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
           </div>
         </Specimen>
       </Section>
@@ -2777,6 +3349,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <PropertiesPanel body={LONG_PILL} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
+        <Specimen label="a list: its items, with commas">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\ntags:\n  - kyoto\n  - food\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a list it can't edit: a lock, and why on hover or focus">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nplaces: [\"Kyoto, Japan\", Osaka]\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
         <Specimen label="reserved name, typed">
           <TopmatterSpecimen>
             <ReservedPillSpecimen />
@@ -2791,7 +3373,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <TopmatterSpecimen>
             {/* Written on one line, the block cannot change one property
                 without rewriting the others. */}
-            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} />
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} file={STATES_NOTE} />
           </TopmatterSpecimen>
         </Specimen>
         <Specimen label="set by an automation">
@@ -2813,9 +3395,43 @@ function Pane(props: { theme: "light" | "dark" }) {
             </TopmatterSpecimen>
           </div>
         </Specimen>
+        <Specimen label="lines no pill shows: <> opens Source">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={UNSHOWN} onChange={noop} onShowSource={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="<> hovered">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="properties-source"]`}>
+              <PropertiesPanel body={UNSHOWN} onChange={noop} onShowSource={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="<> keyboard focus">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-visible" data-force-target={`[data-testid="properties-source"]`}>
+              <PropertiesPanel body={UNSHOWN} onChange={noop} onShowSource={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="locked, every line a pill: no <>">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} onShowSource={noop} file={STATES_NOTE} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a note you can only view: no + or ×, and <>">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={UNSHOWN} onChange={noop} readOnly onShowSource={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a note you can only view, every line a pill">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} readOnly onShowSource={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
       </Section>
 
-      <Section part="settings-sync" title="Settings: Sync and sharing">
+      <Section part="settings-sync" title="Settings: Sync and sharing" menusAtRest>
         <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
           <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
@@ -2848,9 +3464,25 @@ function Pane(props: { theme: "light" | "dark" }) {
             </SettingRow>
           </div>
         </Specimen>
-        <Specimen label="sync on, account unconfirmed: not syncing, with Try again">
+        <Specimen label="account unconfirmed: not syncing, with Try again and Pause sync">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="sign-in expired: not syncing, with Sign in again and Pause sync">
+          <div className="w-[640px]">
+            <CloudSyncSettings
+              workspaceId="ws-trip"
+              cloud={{ ...settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: true }), signInExpired: true, onSignInAgain: noop }}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="not connected: not syncing, with Connect server and Pause sync">
+          <div className="w-[640px]">
+            <CloudSyncSettings
+              workspaceId="ws-trip"
+              cloud={settingsCloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: true })}
+            />
           </div>
         </Specimen>
         <Specimen label="protected files: the passphrase field and its error">
@@ -3034,7 +3666,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* The catalog is a listbox the textarea controls, not a menu, so it
           is drawn open here under its composer instead of being opened. */}
-      <Section part="composer-poll" title="Composer catalog and poll">
+      <Section part="composer-poll" title="Composer catalog and poll" menusAtRest>
         <Specimen label="/ in a new post: Poll active">
           <ComposerCatalogSpecimen theme={theme} surface="post" />
         </Specimen>
@@ -3062,9 +3694,9 @@ function Pane(props: { theme: "light" | "dark" }) {
               room the end of its conversation keeps, so it gets that room. */}
           <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
             <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
-              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              value={`@Nova ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
               sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
-              agentOffer={agentOffer("runs")} onSetUpAgent={noop}
+              agentOffer={agentOffer("runs")}
               above={
                 <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
                   cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
@@ -3127,6 +3759,54 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="open, plum chosen, keyboard focus on olive">
           <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Olive"]'>
             <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Each strip holds a tab list, so the part holds them at rest. */}
+      <Section part="tab-unsaved" title="Unsaved tabs" menusAtRest>
+        <Specimen label="saved, for the width">
+          <UnsavedTabStrip testId={`states-tab-unsaved-clean-${theme}`} dirty={false} recovered={false} />
+        </Specimen>
+        <Specimen label="the active tab, unsaved">
+          <UnsavedTabStrip testId={`states-tab-unsaved-dirty-${theme}`} dirty recovered={false} />
+        </Specimen>
+        <Specimen label="an inactive tab holding recovered changes">
+          <UnsavedTabStrip testId={`states-tab-unsaved-recovered-${theme}`} dirty={false} recovered />
+        </Specimen>
+        <Specimen label="hover on the unsaved active tab">
+          <UnsavedTabStrip testId={`states-tab-unsaved-hover-${theme}`} dirty recovered tab="hover" />
+        </Specimen>
+        <Specimen label="the pointer on its close">
+          <UnsavedTabStrip testId={`states-tab-unsaved-close-${theme}`} dirty recovered tab="hover" close="hover" />
+        </Specimen>
+        <Specimen label="keyboard focus on the unsaved active tab">
+          <UnsavedTabStrip testId={`states-tab-unsaved-focus-${theme}`} dirty recovered tab="focus-visible" />
+        </Specimen>
+      </Section>
+
+      <Section part="read-only-reasons" title="Read-only reasons">
+        <Specimen label="the replacement did not finish: the chip with Try again, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-replacement-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={REPLACEMENT_FAILED_REASON} onRetry={noop} />
+            </div>
+            <MarkdownSourceStrip words={REPLACEMENT_FAILED_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="the connection was lost: the chip, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-connection-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={CONNECTION_LOST_REASON} />
+            </div>
+            <MarkdownSourceStrip words={CONNECTION_LOST_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="an edit refused for good: its set-aside row">
+          <div className="w-[440px] overflow-hidden rounded-lg border border-line">
+            <SetAsideEditRow message={DOCUMENT_NOT_SAVED_DRAFT_NOTICE} getText={() => null} onDismiss={noop} />
           </div>
         </Specimen>
       </Section>
@@ -3330,7 +4010,7 @@ const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
   rows: [
     usageRow("version.create", "Create a workspace version", { renderer: usageCell(41), cli: usageCell(2, false) }, "2026-10-07"),
     usageRow("file.kept.save", "Save a kept copy beside its file", { renderer: usageCell(3), cli: usageCell(1), mcp: usageCell(0) }, "2026-10-06"),
-    usageRow("version.try", "Try changes in a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
+    usageRow("version.merge", "Merge a workspace version", { renderer: usageCell(1) }, "2026-09-03"),
     usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
     usageRow("chat.export", "Export a chat", {}),
   ],
@@ -3412,6 +4092,78 @@ const SHELF_APPS: SitePackageInfo[] = [
   { ...SHELF_APP, root: "notes/reading-list", title: "Reading list", confidence: "low" },
 ];
 
+const HOME_APPS: ExplorerApps = {
+  state: { status: "ready", workspaceId: "states", apps: SHELF_APPS },
+  retry: noop,
+  pinnedApps: ["trip-planner"],
+  onSetPinned: noop,
+  reveal: false,
+  onRevealed: noop,
+};
+
+const HOME_NO_APPS: ExplorerApps = { ...HOME_APPS, state: { status: "ready", workspaceId: "states", apps: [] }, pinnedApps: [] };
+
+// A share that holds one app and nothing else.
+const HOME_SHARED_APP: ExplorerApps = { ...HOME_NO_APPS, state: { status: "ready", workspaceId: "states", apps: [SHELF_APP] } };
+
+// One editor group with nothing open in it.
+const HOME_NO_EDITORS: ExplorerProps["editorGroups"] = [{ id: "primary", tabs: [], activeTab: null, size: 1 }];
+
+const HOME_FILES = [
+  "Trip plan.md", "Packing list.md", "Budget.md",
+  "Days/Day 1 - Lisbon.md", "Days/Day 2 - Sintra.md", "Days/Day 3 - Porto.md",
+  "Research/Restaurants.md", "Research/Trains.md",
+  "trip-planner/index.html", "notes/reading-list/index.html",
+  "guests/dataset.json",
+  "receipts/hotel.pdf", "photos/tram.png", "itinerary.csv",
+].map((path) => ({ path, kind: "file" as const }));
+
+const HOME_SPECIMEN: ExplorerProps = {
+  workspaceId: "states",
+  mode: "home",
+  onModeChange: noop,
+  listed: true,
+  files: HOME_FILES,
+  folders: ["Days", "Research", "trip-planner", "notes", "notes/reading-list", "guests", "receipts", "photos"],
+  editorGroups: [{
+    id: "primary",
+    tabs: [{ path: "Days/Day 2 - Sintra.md" }, { path: "itinerary.csv" }, { path: "Budget.md" }],
+    activeTab: "Days/Day 2 - Sintra.md",
+    size: 1,
+  }],
+  activeEditorGroup: "primary",
+  dirtyPaths: new Set(["Budget.md"]),
+  recoveryPaths: new Set(),
+  expandedFolders: ["Days"],
+  pinned: ["Trip plan.md"],
+  openEditorsHeight: 180,
+  onOpenEditorsHeightChange: noop,
+  newFolderRequest: null,
+  onNewPage: noop,
+  onOpenFile: noop,
+  onActivateTab: noop,
+  onCloseTab: noop,
+  onCloseAllTabs: noop,
+  onCollapseFolders: noop,
+  onSetFolderExpanded: noop,
+  onToggleFolder: noop,
+  onTogglePin: noop,
+  collectionFolders: new Set(),
+  appFolders: new Set(["trip-planner", "notes/reading-list"]),
+  onOpenCollection: noop,
+  apps: HOME_APPS,
+  dataCollections: [{ datasetId: "guests", datasetPath: "guests/dataset.json", tableId: "guests", name: "Guests" }],
+  onPathsChanged: noop,
+  onImportFiles: noop,
+  shareView: null,
+  onRefreshShareMounts: noop,
+  onUnmountShare: noop,
+  onShare: noop,
+  onRefresh: noop,
+  onError: noop,
+  onNewCollection: noop,
+};
+
 const SYNCED_STATUS: SyncStatusResult = {
   state: "synced",
   pendingChangeCount: 0,
@@ -3426,7 +4178,33 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "syncing", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 0 },
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
-  { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
+  { label: "account unconfirmed", syncStatus: { ...SYNCED_STATUS, state: "account-unconfirmed" }, failedSaves: 0 },
+  { label: "not connected", syncStatus: { ...SYNCED_STATUS, state: "not-connected" }, failedSaves: 0 },
+  { label: "sign-in expired", syncStatus: { ...SYNCED_STATUS, state: "sign-in-expired" }, failedSaves: 0 },
+  {
+    label: "not connected: live editing shows beside it",
+    syncStatus: { ...SYNCED_STATUS, state: "not-connected", ownerLiveDelivery: "retrying" },
+    failedSaves: 0,
+  },
+  // Live editing beside the save state. It adds nothing while the server is
+  // named, a ring while dohc retries by itself, and a filled dot otherwise.
+  {
+    label: "server unreachable: live editing waits on it",
+    syncStatus: {
+      ...SYNCED_STATUS,
+      state: "sync-failed",
+      syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      ownerLiveDelivery: "retrying",
+    },
+    failedSaves: 0,
+  },
+  { label: "live editing retrying", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying" }, failedSaves: 0 },
+  {
+    label: "live editing paused for a reason",
+    syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying", ownerLiveDeliveryReason: "document-unavailable" },
+    failedSaves: 0,
+  },
+  { label: "live editing active", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "active" }, failedSaves: 0 },
 ];
 
 // `parts` renders only those parts, so a test renders only what it checks.

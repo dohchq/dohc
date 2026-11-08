@@ -389,7 +389,7 @@ pub(crate) fn export_covered_heads_in_tx(
                     return Err(failure.error);
                 }
                 if let Some(wait) = failure.waiting_asset {
-                    let (path, sha256) = match wait {
+                    let (path, sha256) = match *wait {
                         crate::ydoc_apply::SceneAssetWait::Head { path, sha256 } => {
                             (Some(path), sha256)
                         }
@@ -1227,7 +1227,13 @@ mod tests {
             recorded_at_ms: 10,
         };
         assert!(matches!(
-            crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_moment_envelope(
+                &mut store,
+                &refused,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+            ),
             Ok(crate::ApplyOutcome {
                 primary: crate::ApplyDisposition::Refused(_),
                 refusals: ref outcome_refusals,
@@ -1274,7 +1280,13 @@ mod tests {
             recorded_at_ms: 10,
         };
         assert!(matches!(
-            crate::apply_moment_envelope(&mut store, &refused, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_moment_envelope(
+                &mut store,
+                &refused,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+            ),
             Ok(crate::ApplyOutcome {
                 primary: crate::ApplyDisposition::Refused(_),
                 refusals: ref outcome_refusals,
@@ -2290,6 +2302,9 @@ mod tests {
         .expect("peer receives the base before opening its editor");
         let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             next_cursor: ops.len() as i64,
             ops,
             has_more: false,
@@ -2333,6 +2348,9 @@ mod tests {
         let ops =
             crate::list_replication_ops(&source, "ws", "local", -1, 100).expect("exported ops");
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             next_cursor: ops.len() as i64,
             ops: ops.into_iter().skip(1).collect(),
             has_more: false,
@@ -2366,6 +2384,9 @@ mod tests {
             .expect("deferred file moment");
         assert_eq!(pending, 0, "an already projected artifact is history only");
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             next_cursor: 2,
             ops: Vec::new(),
             has_more: false,
@@ -3659,7 +3680,7 @@ mod tests {
             "UPDATE ydoc_docs SET head_snapshot_seq=1",
             "UPDATE snapshots SET blob_sha256=(SELECT sha256 FROM blobs WHERE text='rival')",
             "INSERT INTO live_device_application_bindings VALUES \
-             ('relay','ws','main','seed-object','lineage','seed-object.md','[\"seed-object.md\"]',0,'host',1,'instance','connection',1)",
+             ('relay','ws','main','seed-object','lineage','seed-object.md','[\"seed-object.md\"]',0,'host',1,'instance','connection',1,NULL)",
             "INSERT INTO replication_log \
              (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
              VALUES ('ws','peer',0,'moment.append','{\"momentId\":\"seed-moment\"}',12,1)",

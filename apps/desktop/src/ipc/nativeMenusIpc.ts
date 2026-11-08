@@ -61,6 +61,8 @@ export function registerNativeMenusIpcHandlers<
   // what was right-clicked), and the chosen id resolves the same invoke —
   // null on dismiss. Show in Finder, or its Windows and Linux twin, runs here
   // (containment first) so no broader open-path IPC needs to exist for it.
+  // A `reveal` request skips the menu and runs that same reveal, so Try again
+  // can repeat it.
   registerHandler(CHANNELS.showExplorerMenu, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShowExplorerMenuPayload.parse(payload);
@@ -98,7 +100,7 @@ export function registerNativeMenusIpcHandlers<
       },
     );
 
-    const chosen = await (() => {
+    const chosen = input.reveal ? "open-externally" : await (() => {
       // Test seam (DOHC_TEST_PICK_PATH precedent): a NATIVE menu cannot be
       // driven by Playwright. Read per-invoke so a spec can repoint it via
       // electronApp.evaluate between right-clicks; values outside the closed
@@ -123,6 +125,7 @@ export function registerNativeMenusIpcHandlers<
           return explorerMenuEntries({
             kind: input.kind,
             pinned: input.pinned === true,
+            ...(input.count !== undefined && input.kind !== "root" ? { count: input.count } : {}),
             isMountPath: menuContext.isMountPath,
             hasMountRecord: menuContext.hasMountRecord,
             // Sharing onward is offered nowhere in a share view or a mount:
@@ -207,7 +210,7 @@ export function registerNativeMenusIpcHandlers<
                   item("Settings", "settings"),
                   separator,
                   item("Check for Updates…", "check-updates"),
-                  item("Update and Restart", "install-update", {
+                  item("Restart to Update", "install-update", {
                     enabled: currentUpdateState().canInstall === true,
                   }),
                   separator,

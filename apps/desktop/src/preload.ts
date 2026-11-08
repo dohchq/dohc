@@ -23,6 +23,8 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  appViewOperations,
+  AppViewEvent,
   workspaceSyncOperations,
   CaptureHoldsEvent,
   workspaceFolderNameOperations,
@@ -30,6 +32,7 @@ import {
   systemPrivacySettingsOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
+  updateDownloadOperations,
   DesktopUserSettingsResult,
   AgentColorChangedEvent,
   ShareDirectWritesPushedEvent,
@@ -40,10 +43,13 @@ import {
   EngineYDocSaveStateEvent,
   ExitRoundAnswerPayload,
   ExitRoundMessage,
+  VersionRoundAnswerPayload,
+  VersionRoundMessage,
   ExplorerMenuCommand,
   MenuCommand,
   CrashReportChangedEvent,
   CollectionCopiesLeftChangedEvent,
+  CollectionRulesChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
@@ -61,6 +67,8 @@ import {
   collectionCopiesLeftOperations,
   workspaceTrustOperations,
   WorkspaceTrustChangedEvent,
+  oldWindowOperations,
+  OldWindowStateChangedEvent,
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
@@ -72,8 +80,10 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  stoppedRunOperations,
   chatDispatchPauseOperations,
   ChatDispatchPausedEvent,
+  ChatAgentRequestsChangedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
@@ -152,6 +162,7 @@ const bridge: DohcDesktopBridge = {
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
   ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(updateDownloadOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -267,6 +278,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
+  ...operationBridge(appViewOperations, invoke),
+  onAppViewEvent: listener => onEvent(CHANNELS.appViewEvent, AppViewEvent, listener),
   ...operationBridge(datasetOperations, invoke),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
   ...operationBridge(sharedViewAccessOperations, invoke),
@@ -329,6 +342,8 @@ const bridge: DohcDesktopBridge = {
   onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
+  onCollectionRulesChanged: (listener) =>
+    onEvent(CHANNELS.collectionRulesChanged, CollectionRulesChangedEvent, listener),
   onAutomationRunsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
@@ -525,6 +540,9 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.workspaceActivated, WorkspaceActivated, ({ file, ...workspace }) => listener(workspace, file)),
   onWorkspacePathOpenFailed: (listener) =>
     onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
+  ...operationBridge(oldWindowOperations, invoke),
+  onOldWindowStateChanged: (listener) =>
+    onEvent(CHANNELS.oldWindowStateChanged, OldWindowStateChangedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
@@ -532,6 +550,10 @@ const bridge: DohcDesktopBridge = {
   onExitRound: (listener) => onEvent(CHANNELS.exitRound, ExitRoundMessage, listener),
   answerExitRound: async (payload) => {
     await ipcRenderer.invoke(CHANNELS.exitRoundAnswer, ExitRoundAnswerPayload.parse(payload));
+  },
+  onVersionRound: (listener) => onEvent(CHANNELS.versionRound, VersionRoundMessage, listener),
+  answerVersionRound: async (payload) => {
+    await ipcRenderer.invoke(CHANNELS.versionRoundAnswer, VersionRoundAnswerPayload.parse(payload));
   },
   holdQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.holdQuit);
@@ -560,9 +582,12 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(agentRunStateOperations, invoke),
   onAgentRunState: (listener) =>
     onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
+  ...operationBridge(stoppedRunOperations, invoke),
   ...operationBridge(chatDispatchPauseOperations, invoke),
   onChatDispatchPaused: (listener) =>
     onEvent(CHANNELS.chatDispatchPaused, ChatDispatchPausedEvent, listener),
+  onChatAgentRequestsChanged: (listener) =>
+    onEvent(CHANNELS.chatAgentRequestsChanged, ChatAgentRequestsChangedEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

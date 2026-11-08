@@ -47,7 +47,7 @@ function ScopedAction(props: CollectionActionDialogProps) {
   }
   const disabled = busy || pending !== null;
   return <Overlay onClose={disabled ? undefined : props.onClose}><form onSubmit={event => { event.preventDefault(); submit(); }} role="dialog" aria-modal="true" aria-labelledby="collection-action-title" className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-auto rounded-xl border border-line bg-panel p-5">
-    <h2 id="collection-action-title" className="m-0 text-sm font-semibold text-ink">{operation?.label ?? "Collection action"}</h2>
+    <h2 id="collection-action-title" className="m-0 text-base font-semibold text-ink">{operation?.label ?? "Collection action"}</h2>
     {!operation ? <p className="m-0 text-[13px] text-muted">This action is unavailable. Close this dialog and refresh the Collection.</p> : result ? <><p role="status" className="m-0 text-[13px] text-ink">Action completed</p><pre aria-label="Action result" className="max-h-64 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[12px] text-ink">{JSON.stringify(result.result, null, 2)}</pre></> : <>
       <label className="text-[12px] text-muted">Advanced JSON input<textarea aria-label="Advanced JSON input" value={input} disabled={disabled} rows={9} className={`${inputClass} mt-1 font-mono`} onChange={event => { setInput(event.target.value); setInvalid(null); }} /></label>
       <p className="m-0 text-[12px] text-muted">Use the input expected by this authored action.</p>

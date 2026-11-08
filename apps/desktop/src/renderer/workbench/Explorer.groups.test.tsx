@@ -11,6 +11,9 @@ function explorerProps(
 ): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
     files: [
       { path: "one.md", kind: "file" },
       { path: "two.md", kind: "file" },
@@ -38,7 +41,6 @@ function explorerProps(
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),

@@ -6,14 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOwnedCompilerProcess as superviseCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
 import { compileClosedAppInProcess as compileClosedApp } from '../src/workspaces/closedAppCompilerProcess.ts';
-import { stageAppCompiler } from './stage-app-compiler.mjs';
+import { compileWindowsCompilerOwner, stageAppCompiler } from './stage-app-compiler.mjs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { warmWindowsCompiler } from './warm-windows-compiler.mjs';
-
-before(warmWindowsCompiler,{timeout:190000});
 
 function reportCompilerFailure(running){
   // assert.rejects' property comparison omits custom error fields. Observe
@@ -24,9 +21,7 @@ function reportCompilerFailure(running){
 const runOwnedCompilerProcess=(...args)=>reportCompilerFailure(superviseCompilerProcess(...args));
 const compileClosedAppInProcess=(...args)=>reportCompilerFailure(compileClosedApp(...args));
 
-// The compile deadline counts from the owner's spawn. Beside other work, one
-// Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
-// inside each 30 s test.
+// The compile deadline counts from the owner's spawn and is 20 s, inside each 30 s test.
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
 // dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin=process.platform==='darwin'&&process.arch==='arm64';
@@ -35,16 +30,17 @@ const owned={skip:!(process.platform==='win32'||confined),timeout:30000};
 const ownerOnly={skip:!confined,timeout:30000};
 // macOS and Linux run the worker under the staged official Node and owner, as
 // the installed app does. Seatbelt stops any Node that loads libraries from
-// outside its own file.
+// outside its own file. Windows runs this Node under the compiled job owner.
 let staged,stagedRoot;
 before(async()=>{
-  if(!confined)return;
+  if(!confined&&process.platform!=='win32')return;
   stagedRoot=await mkdtemp(join(tmpdir(),'dohc-compiler-process-staged-'));
   staged=join(stagedRoot,'app-compiler');
-  await stageAppCompiler({destination:staged});
+  if(confined)await stageAppCompiler({destination:staged});
+  else await compileWindowsCompilerOwner(join(stagedRoot,'compiler-owner.exe'));
 });
 after(()=>stagedRoot&&rm(stagedRoot,{recursive:true,force:true}));
-const runtimeFor=workerPath=>confined?{nodeExecutable:join(staged,'node'),ownerExecutable:join(staged,'compiler-owner'),workerPath}:{nodeExecutable:process.execPath,workerPath};
+const runtimeFor=workerPath=>confined?{nodeExecutable:join(staged,'node'),ownerExecutable:join(staged,'compiler-owner'),workerPath}:{nodeExecutable:process.execPath,ownerExecutable:join(stagedRoot,'compiler-owner.exe'),workerPath};
 const compilerWorker=()=>confined?join(staged,'worker.mjs'):fileURLToPath(new URL('../src/workspaces/closedAppCompilerWorker.ts',import.meta.url));
 // A worker writes its marker into its build directory, the only place the
 // owner's sandbox lets it write, so each test gives the supervisor its own temporary root.
@@ -128,7 +124,7 @@ for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned 
     assert.equal(error.reason,mode==='cancel'?'cancelled':'timeout');
     if(mode==='timeout'){
       assert.match(error.details,/Last stage: /);assert.match(error.details,/elapsed=\d+ms/);assert.match(error.details,/stderr tail: /);
-      if(process.platform==='win32')for(const stage of ['PowerShell running','Add-Type done','job assigned','admitted','worker spawned'])assert.match(error.details,new RegExp(`${stage}=\\d+ms`));
+      if(process.platform==='win32')for(const stage of ['owner running','job assigned','admitted','worker spawned'])assert.match(error.details,new RegExp(`${stage}=\\d+ms`));
     }
     return true;
   });

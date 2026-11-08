@@ -344,6 +344,20 @@ describe("desktop CLI proxy", () => {
     });
   });
 
+  it("returns what each agent reported with dohc_read_chat, and nothing when it reported nothing", async () => {
+    await withWorkspace(async (base) => {
+      const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+      const chat = {
+        ...results.chat,
+        messages: [{ ...message, authorReported: reported }, { ...message, id: "message-3" }],
+      };
+      const ctx: ToolContext = { ...base, request: async () => chat };
+      const read = await readChat(ctx, { threadId: thread.id });
+      expect(read).toEqual(chat);
+      expect((read as typeof chat).messages[1]).not.toHaveProperty("authorReported");
+    });
+  });
+
   it("returns an honest failure when an injected transport returns an invalid result", async () => {
     await withWorkspace(async (base) => {
       const ctx: ToolContext = {
@@ -353,7 +367,7 @@ describe("desktop CLI proxy", () => {
 
       await expect(readChat(ctx, { threadId: thread.id })).resolves.toMatchObject({
         ok: false,
-        reason: expect.stringContaining("Invalid discriminator value"),
+        reason: expect.stringContaining("invalid_union"),
       });
       // A malformed write response is never widened into a success.
       await expect(

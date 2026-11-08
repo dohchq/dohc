@@ -345,6 +345,7 @@ export async function setCollectionRecordFields(
   // The session's own document, judged at the first turn that would change
   // it: the file can change between the read above and this open.
   let sessionLossy: boolean | undefined;
+  const headSha256 = current ? createHash("sha256").update(current.text).digest("hex") : null;
   let sharedFileUpdates: Record<string, SharedFileUpdate> | undefined;
   const appendPrefix = input.idempotencyKeyPrefix ?? (input.allowPendingSharedSettlement ? `collection-fields/${randomUUID()}` : undefined);
   try {
@@ -381,7 +382,7 @@ export async function setCollectionRecordFields(
             kept[field] = currentValue;
             return null;
           }
-          sessionLossy ??= isLossyDocument(doc);
+          sessionLossy ??= isLossyDocument(doc, headSha256);
           if (sessionLossy) throw new Error(lossyNoteRefusal(input.recordPath));
           if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
           replaced[field] = currentValue;

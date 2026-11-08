@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, DatabaseSync } from "node:sqlite";
-import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { generateDatasetSchema } from "./datasetGenerator";
 
 const quote = (name: string) => `"${name}"`;
@@ -40,16 +41,36 @@ function generatedSchema(actual: string, definition: DatasetDefinition): boolean
       });
       db.exec(sql);
       db.setAuthorizer(null);
+      // dohc adds a unique field as a plain column and a unique index, where the generator writes UNIQUE in the column. Both are one key.
+      const keys: string[] = [];
+      const objects = db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE type IN ('trigger','view','index') AND sql IS NOT NULL ORDER BY type,name").all().filter(object => {
+        const key = /^CREATE UNIQUE INDEX "[^"]+" ON "([^"]+)" \("([^"]+)"\)$/.exec(String(object.sql));
+        if (key) keys.push(`${key[1]}.${key[2]}`);
+        return !key;
+      });
       const tables = definition.tables.map(table => ({ name: table.sqlName,
-        constraints: tableConstraints(String(db.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?").get(table.sqlName)!.sql)) }));
-      const objects = db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE type IN ('trigger','view','index') AND sql IS NOT NULL ORDER BY type,name").all();
+        constraints: tableConstraints(String(db.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?").get(table.sqlName)!.sql)).map(clause => {
+          const key = /^("([^"]+)" (?:TEXT|REAL|INTEGER)(?: NOT NULL)?) UNIQUE(?= |$)/.exec(clause);
+          if (!key) return clause;
+          keys.push(`${table.sqlName}.${key[2]}`);
+          return key[1] + clause.slice(key[0].length);
+        }).sort() }));
       const tableNames = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").all();
-      return JSON.stringify({tables,objects,tableNames});
+      return JSON.stringify({tables,objects,keys:keys.sort(),tableNames});
     } finally { db.close(); }
   };
   // Exact source proves predicates, while structural inspection accepts only dohc's known ALTER ADD layout.
   if (actual === generateDatasetSchema(definition)) return true;
   try { return inspect(actual) === inspect(generateDatasetSchema(definition)); } catch { return false; }
+}
+
+/**
+ * dohc generated the revision's schema and operation code, so each operation does what its kind and fields declare.
+ * `schemaSql` is the saved schema the revision names. Edited generated code counts as custom.
+ */
+export function hasGeneratedDatasetSources(revision: DatasetRevision, schemaSql: string): boolean {
+  return hasGeneratedDatasetRevision(revision) && createHash("sha256").update(schemaSql).digest("hex") === revision.schemaSha256 &&
+    generatedSchema(schemaSql, revision.definition);
 }
 
 export function generateFieldMigration(input: { previous: DatasetDefinition; next: DatasetDefinition; schemaSql: string; tableId: string; field: DatasetColumnField }) {

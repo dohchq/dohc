@@ -8,9 +8,12 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
+  LOSSY_NOTE_TITLE,
   OpeningState,
   ViewActions,
   OrphanedDraftNotices,
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
+  MarkdownSourceStrip,
   EngineRemovalInProgressNotice,
   LossyNoteNotice,
   OpenExternallyLink,
@@ -18,12 +21,14 @@ import {
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  SAVE_STATE,
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
 import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
+import { readOnlyReasons, transitionReason } from "./readOnlyReasons";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
@@ -31,7 +36,6 @@ import {
 } from "./useAutosavedTextDraft";
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
-import { CopyButton } from "./ui/CopyButton";
 import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
@@ -72,7 +76,6 @@ import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
 import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
-import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
@@ -118,7 +121,7 @@ const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
     default: mod.PropertiesPanel,
   })),
-) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement>;
+) as LazyExoticComponent<(props: PropertiesPanelProps) => React.ReactElement | null>;
 
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
@@ -160,7 +163,7 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
 }
 
 export const CHANGED_OUTSIDE_NOTICE =
-  "This file changed outside dohc. Reload to see the new version. dohc keeps your text in History.";
+  "This file changed outside dohc.";
 
 // How long the save chip says Reloaded after the document took in a change
 // made outside dohc.
@@ -306,7 +309,10 @@ export function MarkdownView(props: {
   // Whether the note is a lossy note. The inspector holds the engine open
   // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
-  onEditAnyway: () => void;
+  // The engine holds a change to this note, which Edit anyway saves.
+  changeHeld?: boolean;
+  // Absent where saving can't take the consent, as in a received share.
+  onEditAnyway?: () => void;
   // Set while capture holds the note. A held lossy note shows the hold, which
   // Edit anyway would reach only after its warning.
   onRetryHeldCapture?: () => void;
@@ -769,7 +775,7 @@ export function MarkdownView(props: {
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
   // The file changed outside dohc. Reopening closes this session first, and
-  // main lets the disk version stand, keeping any unsaved text in History.
+  // main lets the disk version stand. Reload can wait for capture to record it.
   // A document with nothing unsaved reopens by itself, never over edits main
   // has not confirmed; otherwise the notice asks the person.
   const { onReloadChangedOutside, onButtonError } = props;
@@ -865,6 +871,17 @@ export function MarkdownView(props: {
   const hasSetAsideEdit =
     engine.deletedDraftId !== null &&
     orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
+  // Why editing is off. The source strip and the chip's tooltip both say it,
+  // and with no sentence the chip has no tooltip.
+  const readOnlyWords = readOnlyReasons({
+    gone: engine.deletedWhileEditing,
+    accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
+    shared: !!props.forceReadOnly,
+    transition: transitionReason(engine),
+    // Its set-aside row says why until the person dismisses it.
+    notSaved: engine.permanentFailureWhileEditing &&
+      !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
+  }).join(" ");
 
   useEffect(() => {
     if (surfaceMode === "read") preloadMarkdownEditor();
@@ -964,9 +981,15 @@ export function MarkdownView(props: {
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
+  // The record this file is, as the record row hears from main. The engine
+  // gave it its `id`, so the properties count that line as shown.
+  const [record, setRecord] = useState<{ workspaceId: string; path: string; id: string } | null>(null);
+  const recordId = record?.workspaceId === props.workspaceId && record.path === props.path ? record.id : undefined;
   const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
-    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} />
+    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
   ) : null;
+  // Read-only properties and a refused title offer this file to open externally.
+  const noteFile = { workspaceId: props.workspaceId, path: props.path, onError: props.onButtonError };
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
     // discarded — the store outlives this view and the refusal screen renders
@@ -990,6 +1013,12 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
+  // A disabled Edit says why: the chip's words, or else the restriction its
+  // notice states. Never the chip's save state: a set-aside edit doesn't stop
+  // editing.
+  const editReason = readOnlyWords || (props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
+    : props.truncated ? SAVE_STATE["too-large"].title
+    : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
@@ -2096,8 +2125,10 @@ export function MarkdownView(props: {
       <OrphanedDraftNotices
         workspaceId={props.workspaceId}
         path={props.path}
-        message="This document became read-only. Copy your text to keep it."
-        messageDraftId={readOnlyDraftId.current}
+        message={engine.permanentFailureWhileEditing
+          ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
+          : "This document became read-only. Copy your text to keep it."}
+        messageDraftId={engine.permanentFailureWhileEditing ? engine.permanentFailureDraftId : readOnlyDraftId.current}
         replacedDraftIds={engine.replacedDraftIds}
       />
     </>
@@ -2126,17 +2157,11 @@ export function MarkdownView(props: {
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
                 : engineChipState}
               title={
-                engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
-                  ? "Your access to this document ended."
+                readOnly
+                  ? readOnlyWords
                   : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
                     engine.saveState.kind === "changed-on-disk"
-                  ? CHANGED_OUTSIDE_NOTICE
-                  : (engineChipState === "deleted" ||
-                  engineChipState === "object-changed") &&
-                hasSetAsideEdit
-                  ? goneNotice(engine.goneCause, true)
-                  : typeof engineChipState !== "string" && engineChipState.kind === "error" && engine.saveError
-                    ? engine.saveError
+                    ? CHANGED_OUTSIDE_NOTICE
                     : undefined
               }
               onRetry={engine.retryReplacement ?? undefined}
@@ -2170,10 +2195,10 @@ export function MarkdownView(props: {
           // the top-matter zone (which renders the same metadata as chrome)
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
-              <span>{readOnly ? "Read-only markdown source" : "Read-only markdown source — switch back to Editor to make changes."}</span>
-              <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
-            </div>
+            <MarkdownSourceStrip
+              words={readOnly ? readOnlyWords : "Read-only markdown source — switch back to Editor to make changes."}
+              getText={() => sourceMarkdown}
+            />
             {sourceMarkdown === null ? (
               <SkeletonRows layout="panel" label="Loading source..." />
             ) : (
@@ -2219,23 +2244,13 @@ export function MarkdownView(props: {
               ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
+              file={noteFile}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
-            {readOnly ? null : (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} />
-              </Suspense>
-            )}
-            <LiveFrontmatterAsWritten
-              workspaceId={props.workspaceId}
-              path={props.path}
-              // Null until the inspector has read the file.
-              body={props.contentRequestId > 0 ? props.body : null}
-              ydoc={displayDoc}
-              saveState={engine.saveState}
-              propertiesShown={!readOnly}
-            />
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
+            </Suspense>
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2293,7 +2308,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={readOnly ? readOnlyWords : undefined} />
             ) : null}
           </>
         }
@@ -2303,7 +2318,7 @@ export function MarkdownView(props: {
               label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : undefined,
+              title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
               onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {
@@ -2358,7 +2373,7 @@ export function MarkdownView(props: {
           <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
         </EngineMayHoldDocumentNotice>
       ) : props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
@@ -2407,15 +2422,13 @@ export function MarkdownView(props: {
               onChange={onPropertiesDraft}
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
+              file={noteFile}
               onEnterBody={() => wysiwygRef.current?.focus("start")}
             />
             {recordButtons}
-            {!readOnly ? (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
-              </Suspense>
-            ) : null}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
+            </Suspense>
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
@@ -2482,17 +2495,23 @@ export function MarkdownView(props: {
               filenameStem={filenameStem(props.path)}
               readOnly={readOnly}
               opening={opening}
+              file={noteFile}
             />
             {recordButtons}
-            {/* Opening, the panel draws its pills where they will be and the
-                block as written starts as it will once the open answers, so
-                the ready document draws in the same place. */}
-            {readOnly ? null : (
-              <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} opening={opening} />
-              </Suspense>
-            )}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
+            {/* Opening, the panel draws its pills where they will be, so the
+                ready document draws in the same place. */}
+            <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
+              <LazyPropertiesPanel
+                body={draft}
+                onChange={onPropertiesDraft}
+                fieldMarks={fieldMarks}
+                opening={opening}
+                readOnly={readOnly}
+                recordId={recordId}
+                file={noteFile}
+                onShowSource={toggleSourceView}
+              />
+            </Suspense>
           </div>
           {/* The editor's own rules draw the body, so it replaces it in place. */}
           <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">

@@ -3,7 +3,7 @@ import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime, formatShortTime } from "../time";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
@@ -132,7 +132,7 @@ export function FeedReactionPill(props: {
         event.stopPropagation();
         props.onClick(event);
       }}
-      className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-sans text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50"
+      className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-sans text-[11px] leading-5 text-muted hover:border-accent/60 disabled:cursor-default aria-disabled:cursor-default aria-disabled:opacity-50"
     >
       <span aria-hidden>{props.emoji}</span>
       <span className="tabular-nums">{props.count}</span>
@@ -187,7 +187,7 @@ export function PostCard(props: {
   onOpenPath?: (path: string) => void;
 }) {
   const message = props.data.openingMessage;
-  const isAgent = message?.authorKind === "agent";
+  const isAgent = message ? isAgentAuthor(message) : false;
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
   const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
@@ -240,14 +240,14 @@ export function PostCard(props: {
           props.onOpen();
         }
       }}
-      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-visible focus-visible:rounded-lg focus-visible:-outline-offset-2`}
+      className={`${FEED_ROW} cursor-pointer text-left dohc-focus-row focus-visible:rounded-lg`}
     >
       {/* Compatibility target retained for existing navigation and e2e
           drivers. The row itself is the semantic button. */}
       <div data-testid="chats-thread" data-thread-id={props.thread.id} className="flex items-start gap-3">
         <ChatAvatar presentation={message?.presentation ?? neutralPresentation}
           name={message?.authorDisplayName ?? "?"}
-          kind={message?.authorKind ?? "human"}
+          kind={message?.authorKind ?? "human"} linkAgent={message?.linkAgent === true}
           size="row"
         />
         <div className="min-w-0 flex-1">
@@ -257,7 +257,7 @@ export function PostCard(props: {
               className="truncate text-[13px] font-semibold text-ink"
             >
               {message ? (
-                <AgentName kind={message.authorKind} presentation={message.presentation}>{chatAuthorLabel(message)}</AgentName>
+                <AgentName kind={message.authorKind} presentation={message.presentation} linkAgent={message.linkAgent === true}>{chatAuthorLabel(message)}</AgentName>
               ) : "Unknown author"}
             </span>
             {isAgent ? (
@@ -328,8 +328,8 @@ export function PostCard(props: {
                 <span
                   data-testid="chats-post-decision-open"
                   role="img"
-                  aria-label="Poll open"
-                  title="Poll open"
+                  aria-label="Unanswered"
+                  title="Unanswered"
                   className="inline-flex text-muted"
                 >
                   <CircleHelp size={13} strokeWidth={1.9} aria-hidden />

@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { ChatBookmark } from "@dohc/workspace-contracts/engine";
+import { isLivePageOwnedRefusal } from "../ipc/errorWords";
 import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import type { WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
@@ -16,7 +17,7 @@ export interface DesktopChatBookmarkProjectionState {
 }
 
 type BookmarkWorkspace = { workspaceId: string; rootPath: string; attachmentId?: symbol };
-type BookmarkCapture = Pick<WorkspaceEngineCapture, "writeGeneratedTextFile" | "archiveGeneratedTextFile">;
+type BookmarkCapture = Pick<WorkspaceEngineCapture, "writeGeneratedTextFile" | "archiveGeneratedTextFile" | "checkGeneratedTextArchive" | "generatedTextArchiveMoved">;
 
 export function chatBookmarkDestination(title: string, targetId: string): string {
   const stem = title
@@ -44,7 +45,7 @@ export function createDesktopChatBookmarks<
   canonicalWorkspaceFor(lease: WorkspaceAuthorityLease<Workspace, State>): Workspace;
   linkedChatStoreFor(workspace: Workspace): Pick<DesktopLinkedChatStore,
     "findBookmark" | "listThreads" | "listMessages" | "listChannels" |
-    "markBookmarkReady" | "markBookmarkFailed" | "listPendingBookmarks" | "archiveBookmark">;
+    "markBookmarkReady" | "markBookmarkFailed" | "listPendingBookmarks" | "archiveBookmark" | "markBookmarkPending" | "retryFailedBookmark">;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   sharedViewOf(workspaceId: string): unknown;
@@ -214,6 +215,8 @@ export function createDesktopChatBookmarks<
             failureReason:
               error instanceof Error ? error.message : "Projection failed",
           });
+          // A page with live editing on keeps its refusal, so Chats can offer Try again and Live documents.
+          if (isLivePageOwnedRefusal(error)) throw error;
           throw new Error(
             failed.bookmark.failureReason ?? "Could not save chat bookmark.",
           );
@@ -281,6 +284,20 @@ export function createDesktopChatBookmarks<
             bookmarkId,
           });
           if (!bookmark) throw new Error("That bookmark no longer exists.");
+          // An archive that failed. Only a person archiving again queues it
+          // again: the worker never picks up a failed projection.
+          const failed = bookmark.state === "archived" && bookmark.projectionState === "failed";
+          // The engine already moved the page, so the archive finishes at
+          // this generation's path, where the page is now.
+          if (failed && await capture.generatedTextArchiveMoved({ fromPath: bookmark.destinationPath,
+            toPath: chatBookmarkArchiveDestination(bookmark),
+            ...(bookmark.projectionObjectId ? { expectedObjectId: bookmark.projectionObjectId } : {}) })) {
+            return (await store.retryFailedBookmark({ workspaceId: workspace.workspaceId, ownerUserId, bookmarkId,
+              generation: bookmark.generation })).bookmark;
+          }
+          // A page with live editing on keeps its bookmark and its place.
+          if (bookmark.state === "active" || failed) await capture.checkGeneratedTextArchive(bookmark.destinationPath);
+          if (failed) return store.markBookmarkPending({ workspaceId: workspace.workspaceId, ownerUserId, bookmarkId });
           return store.archiveBookmark({
             workspaceId: workspace.workspaceId,
             ownerUserId,

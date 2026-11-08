@@ -104,6 +104,11 @@ export function automationCount(file: ListCollectionAutomationsResult | null, ta
   return file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)).length : 0;
 }
 
+/** False once dohc knows a Collection's automations.yaml does not exist yet. */
+export function automationsFileMade(file: ListCollectionAutomationsResult | null): boolean {
+  return (file?.status === "shared" ? file.definitions.file.status : file?.status) !== "missing";
+}
+
 /** The ⚡ Automations button at the top of a Collection, with how many it has. */
 export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void }) {
   return (
@@ -1022,12 +1027,14 @@ function OwnerAutomationsPanel(props: {
         ) : file === null ? null : file.status === "unavailable" ? (
           <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>
         ) : file.status === "unreadable" ? (
-          <div className="px-3 py-3 text-[12px] text-muted">
-            <p className="m-0">dohc cannot read {AUTOMATIONS_FILE}. Fix the file to edit automations here.</p>
-            <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
-              {file.diagnostic.code}{file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
-            </p>
-            <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+          <div className="px-3 pb-3 pt-2">
+            <StatusLine tone="danger" icon={AlertTriangle} label="Cannot read">
+              <p className="m-0">dohc cannot read {AUTOMATIONS_FILE}. Fix the file to edit automations here.</p>
+              <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
+                {file.diagnostic.code}{file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
+              </p>
+              <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+            </StatusLine>
           </div>
         ) : file.status === "missing" || shown.length === 0 ? (
           <div className="flex h-full py-4">

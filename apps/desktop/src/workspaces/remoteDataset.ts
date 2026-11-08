@@ -12,7 +12,7 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import type { CollectionsRefusalError } from "./collectionsHolder";
-import { ipcWireError, SERVER_COLLECTIONS_UNAVAILABLE } from "../ipc/errorWords";
+import { ipcWireError } from "../ipc/errorWords";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
 import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
@@ -212,7 +212,7 @@ export function createRemoteDatasetData(input: {
     async approveMigrationCandidate(value) {
       if (input.shareId !== undefined || value.workspaceId !== input.workspaceId) throw new Error("Only the Collection owner can change its rules.");
       const signal = value.signal ? AbortSignal.any([input.signal, value.signal]) : input.signal;
-      const raw = await request(`${path(value.datasetId)}/approve-migration`, { candidateId: value.candidateId, checkpointSha256: value.checkpointSha256, approvalAgent:value.approvalAgent }, signal);
+      const raw = await request(`${path(value.datasetId)}/approve-migration`, { candidateId: value.candidateId, checkpointSha256: value.checkpointSha256, changeSha256: value.changeSha256, approvalAgent:value.approvalAgent }, signal);
       const result = DatasetResult.parse({ ...(raw as object), kind: "migrated" });
       if (result.kind !== "migrated" || result.revision.datasetId !== value.datasetId || result.cursor.workspaceId !== input.workspaceId || result.cursor.datasetId !== value.datasetId || result.cursor.approvedRevisionHash !== result.revision.revisionSha256) {
         throw new Error("The server did not confirm this Collection change. Refresh the Collection before reviewing it again.");
@@ -266,18 +266,20 @@ export function createRemoteDatasetData(input: {
 
 /**
  * The server didn't give the list of a workspace's Collections, on a
- * computer that doesn't keep the workspace's own. Its first line says where
- * those are. The rest is the server's error as it would cross IPC alone, so
- * a window shows both as before and the CLI prints both.
+ * computer that doesn't keep the workspace's own. `elsewhere` says where
+ * those are. `failure` is the server's error as it would cross IPC alone, so
+ * a window reports it as it would that error.
  */
 export class ServerCollectionsUnavailableError extends Error {
   override name = "ServerCollectionsUnavailableError";
-  readonly code = SERVER_COLLECTIONS_UNAVAILABLE;
-  readonly computerLabel: string | null;
+  readonly elsewhere: CollectionsRefusalError;
+  readonly failure: string;
   constructor(elsewhere: CollectionsRefusalError, cause: unknown) {
     const wire = ipcWireError(cause);
-    super(`${elsewhere.message}\n${wire instanceof Error && wire.name === "Error" ? wire.message : String(wire)}`, { cause });
-    this.computerLabel = elsewhere.computerLabel;
+    const failure = wire instanceof Error && wire.name === "Error" ? wire.message : String(wire);
+    super(`${elsewhere.message}\n${failure}`, { cause });
+    this.elsewhere = elsewhere;
+    this.failure = failure;
   }
 }
 
@@ -373,8 +375,10 @@ export async function resolveRemoteDatasetRevision(data: Pick<OwnerDatasetData, 
 }
 
 export interface DatasetAuthorityRoute {
-  /** Returns the durable local transfer marker; absent means this dataset is local. */
+  /** Returns the durable local transfer marker once its move finished; absent means this dataset is local. */
   status(datasetId: string): Promise<import("./localDatasetTransfer").DatasetTransferStatus | null>;
+  /** The durable local transfer marker as it stands now. Reading it never waits for a move or resumes one. */
+  marker(datasetId: string): import("./localDatasetTransfer").DatasetTransferStatus | null;
   remote(origin: string, datasetId: string): Promise<OwnerDatasetData>;
 }
 
@@ -394,7 +398,10 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
       for (let scannedPages = 0; ; scannedPages++) {
         const localPage = await local.list({ after, limit, includeArchived: true });
         for (let index = 0; index < localPage.datasets.length; index++) {
-          const row = localPage.datasets[index]!, authority = await target(row.datasetId);
+          // A dataset whose move hasn't finished lists from this computer, which still keeps its records.
+          // Listing never waits for an unfinished move or resumes a stopped one, so a stop can't fail the whole list.
+          // A finished move's dataset can still wait briefly while the move removes its archive.
+          const row = localPage.datasets[index]!, authority = route.marker(row.datasetId)?.state === "imported" ? await target(row.datasetId) : local;
           after = row.datasetId;
           if (authority !== local && authority.deletionStatus && (await authority.deletionStatus({ datasetId: row.datasetId })).deleted) continue;
           const current = authority === local ? row : await authority.describe(row.datasetId, { includeArchived: true });
@@ -443,7 +450,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     },
     setGrant: async value => {
       const authority = await target(value.datasetId);
-      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("Publish this Collection before managing shared access.");
+      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("This Collection is only on this computer. Move it to your server to give a person access.");
       await authority.setGrant(value);
     },
   };

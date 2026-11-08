@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import type { AddressedDatasetDescription as DatasetDescription, DatasetListElsewhere } from "@dohc/cli/dataset";
-import { collectionsElsewhereWords, readCollectionsRefusal, readServerCollectionsUnavailable, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, collectionsRefusalError, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 
 // Stable empty set: the Explorer is memoized, so the "no collections"
 // default must not be a fresh identity per render.
@@ -32,10 +32,15 @@ export function useCollectionFolders(
   // `elsewhere`: another computer keeps the workspace's Collections, and the
   // list holds the ones on this computer's server. It says where the others
   // are, or, when the server didn't answer, where all of them are.
-  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null } | null>(null);
+  // `unknown`: the list was cleared for another read, such as the archived
+  // list, and no read has landed since. It is being read, or that read failed.
+  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null; unknown?: "reading" | "failed" } | null>(null);
   const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const collectionsElsewhere = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
+  // The list has loaded at least once. Showing the archived list again keeps it loaded.
+  const collectionsListed = !shareViewEnded && dataState?.workspaceId === workspaceId;
+  const collectionsUnknown = collectionsListed ? dataState?.unknown : undefined;
   // Why this computer cannot list the workspace's Collections, such as
   // another computer keeping them. The list says so in place, so a refresh
   // after each change does not report it again.
@@ -44,33 +49,44 @@ export function useCollectionFolders(
   const datasetRequest = useRef(0);
   const [archiveView, setArchiveView] = useState<{ workspaceId: string; enabled: boolean }>({ workspaceId, enabled: false });
   const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
-  const setIncludeArchived = useCallback((enabled: boolean) => { datasetRequest.current++; setDataState(null); setArchiveView({ workspaceId, enabled }); }, [workspaceId]);
+  const setIncludeArchived = useCallback((enabled: boolean) => {
+    datasetRequest.current++;
+    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null, unknown: "reading" });
+    setArchiveView({ workspaceId, enabled });
+  }, [workspaceId]);
   const refreshDatasets = useCallback(async () => {
     const request = ++datasetRequest.current;
-    let result;
-    try {
-      result = await bridge().dataset({ workspaceId, action: "list", limit: 50, ...(includeArchived ? { includeArchived: true } : {}) });
-    } catch (error) {
-      const refusal = readCollectionsRefusal(error);
-      if (refusal === null) {
-        // The server didn't answer: the list keeps what it last showed, or
-        // says where the Collections are, and the failure is reported.
-        const unavailable = readServerCollectionsUnavailable(error);
-        if (unavailable === null) throw error;
-        if (request === datasetRequest.current) {
-          setDataState(current => current?.workspaceId === workspaceId && current.elsewhere !== null ? current
-            : { workspaceId, datasets: [], nextCursor: null, elsewhere: { computer: unavailable.computer, others: false, words: unavailable.elsewhere } });
-          setRefusalState(null);
-        }
-        throw new Error(unavailable.failure);
+    // A list that isn't known shows Try again when its read fails, and holds
+    // its place again while Try again reads it.
+    setDataState(current => current?.workspaceId === workspaceId && current.unknown === "failed" ? { ...current, unknown: "reading" } : current);
+    const failed = (error: unknown): never => {
+      if (request === datasetRequest.current) {
+        setDataState(current => current?.workspaceId === workspaceId && current.unknown ? { ...current, unknown: "failed" } : current);
       }
-      if (request !== datasetRequest.current) return;
-      setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
-      setRefusalState({ workspaceId, refusal });
-      return;
+      throw error;
+    };
+    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, ...(includeArchived ? { includeArchived: true } : {}) }).catch(failed);
+    const latest = request === datasetRequest.current;
+    if (result.kind === "collections-refused") {
+      const { refusal } = result;
+      if (refusal.kind !== "server-unavailable") {
+        if (latest) {
+          setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
+          setRefusalState({ workspaceId, refusal });
+        }
+        return;
+      }
+      // The server didn't answer: the list keeps what it last showed, or
+      // says where the Collections are, and the failure is reported.
+      if (latest) {
+        setDataState(current => current?.workspaceId === workspaceId && current.elsewhere !== null ? current
+          : { workspaceId, datasets: [], nextCursor: null, elsewhere: { computer: refusal.computer, others: false, words: refusal.words } });
+        setRefusalState(null);
+      }
+      throw new Error(refusal.failure);
     }
-    if (request !== datasetRequest.current) return;
-    if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
+    if (!latest) return;
+    if (result.kind !== "list") return failed(Error("dohc could not read the Collections list."));
     setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor, elsewhere: elsewhereOf(result.elsewhere, result.datasets) });
     setRefusalState(null);
   }, [workspaceId, includeArchived]);
@@ -78,6 +94,8 @@ export function useCollectionFolders(
     if (!nextDataset) return;
     const request = ++datasetRequest.current;
     const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, after: nextDataset, ...(includeArchived ? { includeArchived: true } : {}) });
+    // A later page that this computer can't list is reported, not shown in place.
+    if (result.kind === "collections-refused") throw collectionsRefusalError(result.refusal);
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
     setDataState(current => {
@@ -115,5 +133,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere };
+  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown };
 }

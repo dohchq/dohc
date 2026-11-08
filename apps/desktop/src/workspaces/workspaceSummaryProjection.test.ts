@@ -344,6 +344,25 @@ describe("workspace summary projection", () => {
     ).toEqual(["m-traversal", "m-secret", "m-slash"]);
   });
 
+  it("says what a removal from the list would drop: sync and joined chats", () => {
+    const remote = { workspaceId: "ws-1", ownerUserId: "user-1" };
+    const channel = (shareId: string, extra: Record<string, unknown> = {}) => ({
+      shareId, channelWireId: `wire-${shareId}`, access: "read-write", granterEmail: null,
+      relayUrl: "https://relay.test", recipientUserId: "user-1", ...extra,
+    });
+    const plain = workspaceSummaryFor(entry());
+    expect(plain.sync).toBeUndefined();
+    expect(plain.joinedChatCount).toBeUndefined();
+    expect(workspaceSummaryFor(entry({ remote })).sync).toBe("on");
+    expect(workspaceSummaryFor(entry({ pausedRemote: remote })).sync).toBe("paused");
+    const joined = workspaceSummaryFor(entry({
+      sharedChannels: [channel("a"), channel("b", { ended: true }), channel("c", { left: true }), null],
+    }));
+    expect(joined.joinedChatCount).toBe(2);
+    expect(workspaceSummaryFor(entry({ sharedChannels: [channel("c", { left: true })] })).joinedChatCount)
+      .toBeUndefined();
+  });
+
   it("treats an absent share view as an ordinary workspace", () => {
     expect(workspaceSummaryFor(entry()).shareView).toBeUndefined();
     expect(workspaceSummaryFor(entry({ shareView: undefined })).shareView).toBeUndefined();

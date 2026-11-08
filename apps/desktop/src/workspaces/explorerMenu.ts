@@ -20,7 +20,10 @@ export type ExplorerMenuEntry =
 export interface ExplorerMenuScope {
   // What was right-clicked.
   kind: "root" | "folder" | "file";
+  // For a selection, whether every row in it is pinned.
   pinned: boolean;
+  // How many selected rows the menu acts on, when there are two or more.
+  count?: number;
   // A shared-with-me/… path: a read-only projection of someone else's files.
   isMountPath: boolean;
   // That path is a mount ROOT with a matching mount record.
@@ -37,6 +40,13 @@ export function revealInFileManagerLabel(platform: string | undefined): string {
   if (platform === "darwin") return "Show in Finder";
   if (platform === "win32") return "Show in File Explorer";
   return "Show in file manager";
+}
+
+// The file manager's name inside a sentence, such as a failed reveal's.
+export function fileManagerName(platform: string | undefined): string {
+  if (platform === "darwin") return "Finder";
+  if (platform === "win32") return "File Explorer";
+  return "the file manager";
 }
 
 const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
@@ -57,6 +67,15 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     folder: canCreateFolder,
     collection: canCreateCollection,
   } = workspaceCreateOffers(scope.shareView);
+
+  // A selection: only what acts on every row, with the count.
+  if (scope.count !== undefined && scope.kind !== "root") {
+    const n = scope.count;
+    return [
+      ...(canWrite && !scope.isMountPath ? [item(`Delete ${n} items`, "delete")] : []),
+      scope.pinned ? item(`Unpin ${n} items`, "unpin") : item(`Pin ${n} items`, "pin"),
+    ];
+  }
 
   if (scope.isMountPath) {
     return [

@@ -22,8 +22,6 @@ import type {
 } from "../ipc/bridgeContract";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
-import { CustomizeContext } from "./settings/customize";
-import { documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import { deferred } from "../testing/deferred";
 import {
@@ -41,6 +39,7 @@ import {
 } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { publishReopenKey } from "./documentVersionKey";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
 // module evaluates and tracks droppable geometry with IntersectionObserver.
@@ -305,6 +304,7 @@ function pageWithHost(
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
     onNotice?: CollectionPageProps["onNotice"];
+    onOpenFile?: CollectionPageProps["onOpenFile"];
   },
 ) {
   return (
@@ -322,6 +322,7 @@ function pageWithHost(
         {...SHELL_PROPS}
         onError={view?.onError ?? SHELL_PROPS.onError}
         onNotice={view?.onNotice ?? SHELL_PROPS.onNotice}
+        onOpenFile={view?.onOpenFile ?? SHELL_PROPS.onOpenFile}
       />
       <CollectionFieldWriteHost />
     </>
@@ -554,25 +555,21 @@ describe("CollectionPage", () => {
     expect(onNewRecord.mock.calls).toEqual([["tasks"], ["tasks"]]);
   });
 
-  it("names the Collection's files from Customize… and hands them to the agent", async () => {
+  it("names the Collection's files from Customize… and opens one in a tab", async () => {
     const bridge = makeBridge([]);
-    const ask = vi.fn();
+    const onOpenFile = vi.fn();
     vi.stubGlobal("dohcDesktop", bridge);
-    render(
-      <CustomizeContext.Provider value={{ customize: vi.fn(), askAgent: { ready: true, ask, setUp: vi.fn() } }}>
-        {pageWithHost(() => undefined, () => undefined)}
-      </CustomizeContext.Provider>,
-    );
+    render(pageWithHost(() => undefined, () => undefined, { onOpenFile }));
 
     fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
     const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
     expect(within(dialog).getByText("tasks/collection.yaml")).toBeDefined();
     expect(within(dialog).getByText("tasks/automations.yaml")).toBeDefined();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Ask my agent" }));
-    expect(ask).toHaveBeenCalledExactlyOnceWith({
-      kind: "collection", name: "Tasks", files: documentCollectionFiles("tasks"),
-    });
+    // The bridge has no automations.yaml yet.
+    expect(within(dialog).getByText("Made with the first automation.")).toBeDefined();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Open collection.yaml" }));
+    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("tasks/collection.yaml");
     expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
 
     // Escape returns focus to the menu's button.
@@ -583,6 +580,22 @@ describe("CollectionPage", () => {
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("says a shared Collection's automations.yaml is not made yet", async () => {
+    const bridge = makeBridge([]);
+    // A shared Collection reports the file inside its definitions.
+    bridge.listCollectionAutomations.mockResolvedValue({ status: "shared", definitions: {
+      file: { status: "missing" }, contentHash: null, canSwitch: false, sync: "accepted",
+    } } as never);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost(() => undefined, () => undefined, { onOpenFile: vi.fn() }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
+    await waitFor(() => expect(within(dialog).getByText("Made with the first automation.")).toBeDefined());
+    expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
   });
 
   it("counts the Collection's automations in the header and docks the ⚡ panel beside the view", async () => {
@@ -2107,6 +2120,34 @@ describe("CollectionRecordFieldWrite", () => {
     expect(props.onSettled).toHaveBeenCalledOnce();
     expect(props.onFailed).not.toHaveBeenCalled();
     expect(props.onHeldDurably).not.toHaveBeenCalled();
+  });
+
+  it("opens the record with its open editor's key, so the write joins that editor's session", () => {
+    act(() => publishReopenKey("ws-keyed", 4));
+    docMock.current = engineDocState({ opening: true });
+    render(<CollectionRecordFieldWrite {...writerProps()} workspaceId="ws-keyed" />);
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 4 });
+    // A version switch moves the write with its editor.
+    act(() => publishReopenKey("ws-keyed", 5));
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 5 });
+  });
+
+  it("fails a write whose session a new version key replaced before it saved", () => {
+    const first = new Y.Doc();
+    first.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: first });
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
+    docMock.current = engineDocState({ available: true, doc: first, saveState: { kind: "saving" } });
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    // The key moved. The new session never carried the edit, and it opens saved.
+    const second = new Y.Doc();
+    second.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: second });
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
+    expect(props.onSettled).not.toHaveBeenCalled();
+    expect(second.getMap("frontmatter").get("status")).toBeUndefined();
   });
 
   it("reports a save error as a failure, never a settle", () => {

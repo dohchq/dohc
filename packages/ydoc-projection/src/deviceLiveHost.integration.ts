@@ -185,7 +185,7 @@ syncBuiltinESMExports();\n`);
     const first = await active.drain(document);
     expect(first).toMatchObject({ kind: "done", terminalReceipt: { deliveryId: "delivery", updateDigest: firstDigest } });
     const firstSettlement=await control!.settle(document);
-    expect(firstSettlement.materialized).toBe(true);
+    expect(firstSettlement).toMatchObject({materialized: true});
     expect(readFileSync(join(workspace,"docs/a.md"),"utf8")).toBe(yDocToMarkdown(doc));
     results.push({ round: 1, coordinate: active.coordinate, result: first, settlement:firstSettlement });
     await closeTransport(); active = undefined;

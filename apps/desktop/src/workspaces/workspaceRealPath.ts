@@ -31,7 +31,7 @@ export async function assertResolvedWorkspacePath(input: {
   // read); "write" refuses it; "entry" is "write" plus "this renames the entry
   // itself rather than following it" — a delete, or a move's source.
   access: PathAccess;
-}): Promise<{ relative: string; resolvedAbsolute: string }> {
+}): Promise<{ relative: string; resolvedAbsolute: string; parentPresent: boolean }> {
   const target = await realRelativeInRoot(
     input.rootPath,
     input.absolutePath,
@@ -45,7 +45,7 @@ export async function assertResolvedWorkspacePath(input: {
         `${input.spelled} leads to ${target.relative}. ${refused.explain}`,
     );
   }
-  return { relative: target.relative, resolvedAbsolute: target.resolvedAbsolute };
+  return { relative: target.relative, resolvedAbsolute: target.resolvedAbsolute, parentPresent: target.parentPresent };
 }
 
 // A path the resolver could not place. Each cause gets its own next step: a

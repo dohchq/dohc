@@ -48,10 +48,52 @@ fn fixture_with_mode(
 }
 
 fn operation() -> RelayOperation {
-    RelayOperation::Pull {
+    RelayOperation::FetchPull {
         workspace_id: "ws".into(),
-        now_ms: 1_200,
+        settle_repairs: false,
     }
+}
+
+fn prepared_step(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    transport: DeferredRelayTransport,
+    operation: RelayOperation,
+    leases: &LeaseRegistry,
+    claims: &ClaimAnnouncer,
+    registrations: &mut crate::actor::live_application::Registry,
+) -> Result<RelayOperationOutcome, RuntimeError> {
+    let fetched = execute_relay_operation(
+        store,
+        cache,
+        transport,
+        operation,
+        leases,
+        claims,
+        registrations,
+    )?;
+    let RelayOperationOutcome::PullFetched(page) = fetched else {
+        return Ok(fetched);
+    };
+    let offline = DeferredRelayTransport::default();
+    let result = execute_relay_operation(
+        store,
+        cache,
+        offline.clone(),
+        RelayOperation::ApplyPull {
+            workspace_id: "ws".into(),
+            page,
+            now_ms: 1_200,
+        },
+        leases,
+        claims,
+        registrations,
+    );
+    assert!(
+        offline.take_pending().is_none(),
+        "apply must not request repairs"
+    );
+    result
 }
 
 #[derive(Default)]
@@ -67,6 +109,9 @@ impl Relay {
             RelayIoRequest::Pull(_) => {
                 self.pulls += 1;
                 RelayIoResponse::Pull(PullResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
+                    reference_has_more: false,
                     ops: Vec::new(),
                     next_cursor: 0,
                     has_more: false,
@@ -135,7 +180,7 @@ fn finish(store: &mut EngineStore, relay: &mut Relay) -> usize {
     let mut cache = WriterDocCache::new();
     let mut reruns = 0;
     loop {
-        match execute_relay_operation(
+        match prepared_step(
             store,
             &mut cache,
             transport.clone(),
@@ -144,7 +189,11 @@ fn finish(store: &mut EngineStore, relay: &mut Relay) -> usize {
             &ClaimAnnouncer::default(),
             &mut crate::actor::live_application::Registry::default(),
         ) {
-            Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
+            Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => {
+                if remaining(store) == 0 {
+                    break;
+                }
+            }
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
                 let request = transport.take_pending().unwrap();
                 if !matches!(request, RelayIoRequest::Pull(_)) {
@@ -198,6 +247,21 @@ async fn deadline_preserves_chunk(deferred: bool) {
         deferred,
         ..Relay::default()
     }));
+    let first_relay = Arc::clone(&relay);
+    actor
+        .pull_with_io_for_test(
+            false,
+            ("ws".into(), 1_200),
+            LeaseRegistry::default(),
+            CancellationToken::new(),
+            None,
+            move |request, _| {
+                let relay = Arc::clone(&first_relay);
+                async move { Ok(relay.lock().unwrap().answer(&request)) }
+            },
+        )
+        .await
+        .unwrap();
     let io_relay = Arc::clone(&relay);
     let result = actor
         .relay_with_io(
@@ -257,7 +321,7 @@ fn base_repair_group_wider_than_a_batch_commits_whole_and_chooses_lowest_sequenc
     let mut cache = WriterDocCache::new();
     let mut answered = 0;
     loop {
-        match execute_relay_operation(
+        match prepared_step(
             &mut store,
             &mut cache,
             transport.clone(),
@@ -343,7 +407,7 @@ fn base_repair_batch_reuses_answers_when_pending_groups_shift_boundaries() {
     let mut relay = Relay::default();
     let mut probes = 0;
     loop {
-        match execute_relay_operation(
+        match prepared_step(
             &mut store,
             &mut cache,
             transport.clone(),
@@ -352,19 +416,22 @@ fn base_repair_batch_reuses_answers_when_pending_groups_shift_boundaries() {
             &ClaimAnnouncer::default(),
             &mut crate::actor::live_application::Registry::default(),
         ) {
-            Ok(_) => break,
+            Ok(_) if remaining(&store) <= 1 => break,
+            Ok(_) => continue,
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
                 let request = transport.take_pending().unwrap();
                 let response = if let RelayIoRequest::Push(push) = &request {
                     assert!(push.ops.is_empty());
                     probes += 1;
                     RelayIoResponse::Push(PushResponse {
+                        registered_references: Vec::new(),
                         accepted: 0,
                         inserted: 0,
                         skipped: 0,
                         current_max_origin_seq: -1,
                         settlement_refusals: Vec::new(),
                         hosted_refusals: Vec::new(),
+                        redundant_recoveries: Vec::new(),
                     })
                 } else {
                     relay.answer(&request)
@@ -754,7 +821,7 @@ fn passive_store_base_repair_never_posts_a_confirmation() {
     let transport = DeferredRelayTransport::default();
     let mut relay = Relay::default();
     for _ in 0..8 {
-        match execute_relay_operation(
+        match prepared_step(
             &mut store,
             &mut cache,
             transport.clone(),

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
-import { createAutomationRunStore } from "./automationRunStore";
+import { AutomationStoreNotOpenedError, createAutomationRunStore } from "./automationRunStore";
 import { CollectionAutomations, type CollectionAutomationEngine, type CollectionAutomationsOptions } from "./collectionAutomations";
 import { definitionHash } from "./automationPlan";
 import { newRun } from "./collectionAutomationRun";
@@ -119,6 +119,22 @@ it("retries a busy reconcile during background open without rejecting or reporti
     await executor.dispose();
     await evaluator.close();
     vi.useRealTimers();
+  }
+});
+
+it.each([false, true])("opens once the workspace opens, after an open that came first could not read the run store (still opening: %s)", async (stillOpening) => {
+  const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-open-before-workspace-")));
+  const changed = vi.fn();
+  const { executor, evaluator } = emptyExecutor(store, { onAutomationsChanged: changed });
+  vi.spyOn(store, "readReachVerdicts").mockRejectedValueOnce(new AutomationStoreNotOpenedError("The workspace has not finished opening."));
+  try {
+    const first = executor.open();
+    if (!stillOpening) await first;
+    await executor.workspaceOpened();
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
   }
 });
 

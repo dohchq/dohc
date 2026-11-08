@@ -25,7 +25,8 @@ class Contents extends EventEmitter {
   setZoomLevel = vi.fn();
   send = vi.fn();
   isDestroyed() { return this.destroyed; }
-  isCrashed() { return false; }
+  // As in Electron, a destroyed webContents throws on use.
+  isCrashed() { if (this.destroyed) throw new TypeError("Object has been destroyed"); return false; }
   getURL() { return this.url; }
   isLoadingMainFrame() { return this.loading; }
   get native(): WebContents { return this as unknown as WebContents; }
@@ -172,7 +173,7 @@ describe("desktop workspace windows", () => {
       assertTrustedSender: () => undefined,
       app: { isPackaged: true },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      roots: createWorkspaceRootApproval(() => "C:/home"), effectiveHome: () => "C:/home",
+      roots: createWorkspaceRootApproval(() => "C:/home"), effectiveHome: () => "C:/home", stateDir: () => "C:/home/state",
       workspaceSummaries: () => rows,
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
@@ -180,6 +181,7 @@ describe("desktop workspace windows", () => {
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
+      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
       refreshNativeWorkspaceSurfaces: () => undefined,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });
@@ -208,6 +210,40 @@ describe("desktop workspace windows", () => {
     expect(registry(windowA.webContents.native)).toEqual({ workspaces: rows });
   });
 
+  it("opens the workspace that was open when dohc quit, and the first one when that is gone", async () => {
+    const home = await createTestScratch("registry-last-opened-");
+    const stateDir = await createTestScratch("registry-last-opened-state-");
+    const registryFile = join(home, "state", "workspaces.json");
+    const before = createRegistryStore(registryFile);
+    for (const workspaceId of ["personal", "ordinary"]) {
+      const { workspace: created } = await createWorkspaceFolder({
+        rootPath: join(home, workspaceId), homeDir: home, stateDir, kind: "personal",
+        computer: { installId: "install-here", label: "This Mac" }, workspaceId,
+      });
+      before.register(created);
+    }
+    before.markOpened("personal", 1_000);
+    before.markOpened("ordinary", 2_000);
+
+    // Each launch reads the file again, and its first window has no
+    // workspace of its own.
+    const launch = () => {
+      const summaries = workspaceSummariesFrom(createRegistryStore(registryFile).list());
+      return fixture("win32", () => summaries).windows
+        .prioritizePreferredWorkspace(summaries, new Contents().native)
+        .map((row) => row.workspaceId);
+    };
+    expect(launch()).toEqual(["ordinary", "personal"]);
+
+    createRegistryStore(registryFile).remove("ordinary");
+    expect(launch()).toEqual(["personal"]);
+  });
+
+  it("keeps registry order for a window with no workspace when nothing was opened", () => {
+    const f = fixture(); const rows = [workspace("a"), workspace("b")];
+    expect(f.windows.prioritizePreferredWorkspace(rows, new Contents().native)).toBe(rows);
+  });
+
   it("tracks workspace windows separately from utility windows and forgets closed windows", () => {
     const f = fixture(); const utility = new Window(); const first = new Window(); const second = new Window();
     f.all.push(utility, first, second);
@@ -223,6 +259,17 @@ describe("desktop workspace windows", () => {
     expect(f.windows.targetWindow(utility.native)).toBeUndefined();
     const manager = f.windows.showOrCreateManagerWindow();
     expect(f.windows.targetWindow(utility.native)).toBe(manager);
+  });
+
+  // A closing window loses its webContents before the window itself goes.
+  // A quit in that gap must find no renderer to ask, not throw.
+  it("leaves a closing window's destroyed renderer out of the windows that answer", () => {
+    const f = fixture(); const closing = new Window(); const open = new Window();
+    f.windows.trackWorkspaceWindow(closing.native); f.windows.trackWorkspaceWindow(open.native);
+    closing.webContents.destroyed = true;
+    expect(f.windows.workspaceWindows.answering()).toEqual([open.native]);
+    open.destroy();
+    expect(f.windows.workspaceWindows.answering()).toEqual([]);
   });
 
   it("activates the target window and prioritizes that workspace without changing the input list", async () => {
@@ -543,6 +590,7 @@ describe("desktop window zoom", () => {
 describe("desktop native menus", () => {
   it("refreshes native menu entries from registry writes by the create and attach IPC handlers", async () => {
     const home = await createTestScratch("registry-native-menu-");
+    const state = await createTestScratch("registry-native-menu-state-");
     const registryFile = join(home, "state", "workspaces.json");
     const registry = createRegistryStore(registryFile);
     const workspaceSummaries = () => workspaceSummariesFrom(registry.list());
@@ -554,12 +602,13 @@ describe("desktop native menus", () => {
       assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
       app: { isPackaged: true },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      roots, effectiveHome: () => home, workspaceSummaries,
+      roots, effectiveHome: () => home, stateDir: () => state, workspaceSummaries,
       prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
       createWorkspaceFolder, registerPhysicalWorkspace: registry.register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
+      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });
@@ -581,7 +630,7 @@ describe("desktop native menus", () => {
 
     const attachedPath = roots.usableRoot(join(root, "Attached Project"));
     const { workspace: attached } = await createWorkspaceFolder({
-      rootPath: attachedPath, homeDir: home, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
+      rootPath: attachedPath, homeDir: home, stateDir: state, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
       workspaceId: "attached-workspace",
     });
     await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);
@@ -617,9 +666,9 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
     f.setReady(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
     f.setCanInstall(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
@@ -661,7 +710,7 @@ describe("desktop native menus", () => {
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
     const f = fixture();
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
 
     const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
     f.setRows(rows);
@@ -674,7 +723,7 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     const target = new Window();
     f.windows.trackWorkspaceWindow(target.native);
     click(submenu(item(f, "File", "Open recent"))[0]!, target.native);

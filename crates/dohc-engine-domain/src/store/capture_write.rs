@@ -1276,7 +1276,9 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// Includes capture heads, eligible Y.Doc heads, and capture-owned secret tips.
 /// Other origins are excluded because their content may never have reached disk.
 /// A Y.Doc head is excluded while its matching producer write remains pending.
-/// Matching pending rollback restores also exclude their destination heads.
+/// Matching pending rollback restores also exclude their destination heads,
+/// and so do pending plaintext switch writes with no file to replace, such as
+/// one that waits for a held file in the folder at its path.
 ///
 /// Pending rollback deletes contribute transient last-known-disk entries when
 /// their target has no alias in this version. These entries keep that path out
@@ -1335,7 +1337,9 @@ pub fn capture_manifest_seed(
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
                               OR substr(j.job_id, \
                                     length('binary-rename-0-write-mat_') + 1, \
-                                    length(?3)) = ?3)) \
+                                    length(?3)) = ?3 \
+                              OR (j.job_id GLOB 'version-switch-mat_*' \
+                                  AND j.preimage_present = 0))) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
                         j.content_sha256, bb.byte_length \
@@ -1654,6 +1658,15 @@ fn write_normalized_text_in_tx(
                                 "SELECT EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                                 params![ws, input.version_id, input.object_id], |row| row.get::<_, bool>(0),
                             ).map_err(DomainError::sql_corrupt)?;
+                        if dormant_history_object && history_source.is_some() {
+                            crate::synced_deletion::refuse_synced_deletion_revival(
+                                tx,
+                                ws,
+                                input.version_id,
+                                input.object_id,
+                                None,
+                            )?;
+                        }
                         if !bare_preallocation && !dormant_history_object {
                             return Err(DomainError::InvalidInput {
                                 reason: "object_id is already bound to another object",

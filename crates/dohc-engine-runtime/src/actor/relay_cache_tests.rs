@@ -132,8 +132,10 @@ async fn push(actor: &ActorHandle) {
                 let response = match &request {
                     RelayIoRequest::Push(request) if request.ops.is_empty() => {
                         RelayIoResponse::Push(PushResponse {
+                            registered_references: Vec::new(),
                             settlement_refusals: Vec::new(),
                             hosted_refusals: Vec::new(),
+                            redundant_recoveries: Vec::new(),
                             accepted: 0,
                             inserted: 0,
                             skipped: 0,
@@ -145,8 +147,10 @@ async fn push(actor: &ActorHandle) {
                         missing: Vec::new(),
                     }),
                     RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                        registered_references: Vec::new(),
                         settlement_refusals: Vec::new(),
                         hosted_refusals: Vec::new(),
+                        redundant_recoveries: Vec::new(),
                         accepted: request.ops.len(),
                         inserted: request.ops.len(),
                         skipped: 0,
@@ -198,12 +202,9 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
         .await
         .unwrap();
     let outcome = actor
-        .relay_with_io(
+        .pull_with_io_for_test(
             false,
-            RelayOperation::Pull {
-                workspace_id: WORKSPACE.into(),
-                now_ms: 1200,
-            },
+            (WORKSPACE.into(), 1200),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
@@ -212,6 +213,9 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
                 async move {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![own_echo],
                             next_cursor: 2,
                             has_more: false,
@@ -299,12 +303,9 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
         .await
         .unwrap();
     let outcome = actor
-        .relay_with_io(
+        .pull_with_io_for_test(
             false,
-            RelayOperation::Pull {
-                workspace_id: WORKSPACE.into(),
-                now_ms: 1200,
-            },
+            (WORKSPACE.into(), 1200),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
@@ -314,6 +315,9 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
                 async move {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![own_echo, foreign],
                             next_cursor: 3,
                             has_more: false,
@@ -592,8 +596,10 @@ async fn cycle_push(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
                                     state.push(op);
                                 }
                                 Ok(RelayIoResponse::Push(PushResponse {
+                                    registered_references: Vec::new(),
                                     settlement_refusals: Vec::new(),
                                     hosted_refusals: Vec::new(),
+                                    redundant_recoveries: Vec::new(),
                                     accepted: n,
                                     inserted: n,
                                     skipped: 0,
@@ -619,12 +625,9 @@ async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
     loop {
         let rows = state.clone();
         let outcome = actor
-            .relay_with_io(
+            .pull_with_io_for_test(
                 false,
-                RelayOperation::Pull {
-                    workspace_id: WORKSPACE.into(),
-                    now_ms: 2000,
-                },
+                (WORKSPACE.into(), 2000),
                 LeaseRegistry::default(),
                 CancellationToken::new(),
                 None,
@@ -647,6 +650,9 @@ async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
                                 let has_more =
                                     rows.last().is_some_and(|op| op.relay_seq.unwrap() > next);
                                 Ok(RelayIoResponse::Pull(PullResponse {
+                                    work_references: Vec::new(),
+                                    next_reference_after: None,
+                                    reference_has_more: false,
                                     ops,
                                     next_cursor: next,
                                     has_more,
@@ -709,6 +715,7 @@ async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
             1900,
             Arc::new(NoFaults),
             CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -886,12 +893,9 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
         .await
         .unwrap();
     let outcome = actor
-        .relay_with_io(
+        .pull_with_io_for_test(
             false,
-            RelayOperation::Pull {
-                workspace_id: WORKSPACE.into(),
-                now_ms: 2000,
-            },
+            (WORKSPACE.into(), 2000),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
@@ -900,6 +904,9 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
                 async move {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![own],
                             next_cursor: 1,
                             has_more: false,
@@ -920,14 +927,72 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
     supervisor.close(&path).unwrap();
 }
 
+/// Claim one row under `report` in `table`, as a pass reporting it would.
+async fn claimed_report_row(actor: &ActorHandle, table: &'static str, report: &'static str) {
+    actor
+        .run(move |store, _| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    let sql = match table {
+                        "ydoc_drain_reports" => {
+                            "INSERT INTO ydoc_drain_reports \
+                             (workspace_id,origin_id,origin_seq,report_json,report_id) \
+                             VALUES (?1,'peer',1,'{\"conflictsOpened\":1}',?2)"
+                        }
+                        _ => {
+                            "INSERT INTO relay_deferred_ops \
+                             (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity, \
+                              envelope_json,retained_bytes,report_id) \
+                             VALUES (?1,'peer',1,'epoch','stream','{}',1,?2)"
+                        }
+                    };
+                    tx.execute(sql, rusqlite::params![WORKSPACE, report])
+                        .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
-async fn cursor_settlement_report_invalidates_writer_cache_even_without_rows() {
+async fn cursor_releasing_only_drain_reports_keeps_writer_cache() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1000).unwrap().actor;
     let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    claimed_report_row(&actor, "ydoc_drain_reports", "drain-report").await;
     let mut cursor = cycle_cursor();
-    cursor.settlement_report_id = Some("already-consumed-report".into());
+    cursor.settlement_report_id = Some("drain-report".into());
+    assert!(matches!(
+        commit_cycle(&actor, cursor).await.unwrap(),
+        RelayOperationOutcome::CursorCommitted {
+            writer_cache_changed: false,
+            ..
+        }
+    ));
+    let released = actor
+        .run(|store, _| Ok(store.table_row_count("ydoc_drain_reports").unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(released, 0, "the commit acknowledges the drain report");
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses);
+    assert_eq!(after.hits, before.hits + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_releasing_deferred_work_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    claimed_report_row(&actor, "relay_deferred_ops", "deferred-report").await;
+    let mut cursor = cycle_cursor();
+    cursor.settlement_report_id = Some("deferred-report".into());
     commit_cycle(&actor, cursor).await.unwrap();
     let after = append(&actor, producer.plaintext_insert(101, "c")).await;
     assert_eq!(after.misses, before.misses + 1);

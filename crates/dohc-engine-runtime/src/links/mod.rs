@@ -27,6 +27,18 @@ const SOURCE_SLICE: usize = 16;
 pub const ACTOR_SLICE_BUDGET: Duration = Duration::from_millis(5);
 pub const SETTLE_TO_INDEX_BUDGET: Duration = Duration::from_millis(100);
 
+#[cfg(test)]
+thread_local! { static UNBOUNDED_BATCH_SLICE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// A test can lift this bound so link-batch frame counts don't depend on the host.
+fn batch_slice() -> Duration {
+    #[cfg(test)]
+    if UNBOUNDED_BATCH_SLICE.get() {
+        return Duration::MAX;
+    }
+    ACTOR_SLICE_BUDGET / 2
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -146,7 +158,7 @@ fn prepare_batch(store: &EngineStore, limit: usize) -> Result<Vec<Prepared>, Sto
             })();
             if let Ok(Some(h)) = &h { hydrated_bytes += h.text.as_ref().map_or(0,String::len); }
             jobs.push((w,h));
-            if hydrated_bytes >= MAX_DOCUMENT_BYTES || began.elapsed() >= ACTOR_SLICE_BUDGET / 2 { break; }
+            if hydrated_bytes >= MAX_DOCUMENT_BYTES || began.elapsed() >= batch_slice() { break; }
         }
         Ok(jobs)
     })
@@ -356,7 +368,7 @@ impl Staged {
                     .map_err(sql)?;
             }
             end = ordinal + 1;
-            if began.elapsed() >= ACTOR_SLICE_BUDGET / 2 {
+            if began.elapsed() >= batch_slice() {
                 break;
             }
         }
@@ -372,7 +384,7 @@ impl Staged {
                 .execute(params![w.workspace, w.version, w.object, key, kind, value])
                 .map_err(sql)?;
             target_end += 1;
-            if began.elapsed() >= ACTOR_SLICE_BUDGET / 2 {
+            if began.elapsed() >= batch_slice() {
                 break;
             }
         }
@@ -435,7 +447,7 @@ fn stage_batch(
             };
             let certified = done && tx.query_row("SELECT EXISTS(SELECT 1 FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4)", params![item.parsed.work.workspace,item.parsed.work.version,item.parsed.work.object,item.parsed.work.index_key()], |r|r.get::<_,bool>(0)).map_err(sql)?;
             results.push((done, end, target_end, certified));
-            if !done || began.elapsed() >= ACTOR_SLICE_BUDGET / 2 { break; }
+            if !done || began.elapsed() >= batch_slice() { break; }
         }
         Ok::<_, StorageError>(results)
     });

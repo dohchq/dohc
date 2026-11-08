@@ -1,4 +1,5 @@
 import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow, withPresencePeers } from './presence-owner.mjs';
+import { linkFixtureFile, measureLinkRename, rearmLinkReceipt, readLinkRecord } from './packaged-link-rename.mjs';
 import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
@@ -14,7 +15,7 @@ import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInp
 import { snapshotMacProcesses } from './packaged-process-snapshot.mjs';
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
-import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
+import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind, showExplorer } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, automationsYaml, CASE_TIMEOUT_MS, classifyOutcome, cpuByKind, DATASET_FOLDER, DATASET_NAME, dismissToasts,
   datasetListRequest, datasetRowValues, datasetSetupRequest, DOCUMENT_FOLDER, documentAutomationFiles, journalBytes, observeAutomationRun,
   noticeForPress, outcomeTexts, peakByKind, readAutomationNotices, readDocumentCase, readRunJournal, runForPress, TRIGGER, verifyCase, waitForQuiet } from './packaged-collection-automations.mjs';
@@ -50,6 +51,7 @@ await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { metricVersion: METRIC_VERSION, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, typingTrace, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
   ...(scenario === 'collection' ? { findCap, writeCap } : {}),
+  ...(scenario === 'link-rename' ? {links: options.links} : {}),
   ...(scenario === 'presence' ? { presencePeers, selectionHz: 20, peerTypingHz: 5, presenceTiming: 'event-latency-v1' } : {}),
   ...(scenario === 'document-size' ? { documentMiB: options.documentMiB, relaySessions: options.relaySessions, updatesPerSecond: options.updatesPerSecond, churnEdits: options.churnEdits, documentMode: options.documentMode, label: options.label } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
@@ -222,7 +224,7 @@ async function fixture(runDir, documentCase) {
       }));
     }
     for (const [name, paragraphs] of [['small', 100], ['large', 5000]]) {
-      const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n`;
+      const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n` + (scenario === 'link-rename' && name === 'large' && options.links ? '\n[[link-target#part|label]]' : '');
       await writeFile(join(workspace.rootPath, `${name}.md`), content);
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
@@ -230,8 +232,8 @@ async function fixture(runDir, documentCase) {
       benchmarkSignal.throwIfAborted();
       const batch = [];
       for (let n = begin; n < Math.min(fixtureFiles, begin + 32); n++) {
-        const name = `fixture-${String(n).padStart(6, '0')}.txt`;
-        const content = `Workspace ${index}, fixture ${n}.\n`;
+        const {name, content} = scenario === 'link-rename' ? linkFixtureFile(n, options.links)
+          : {name: `fixture-${String(n).padStart(6, '0')}.txt`, content: `Workspace ${index}, fixture ${n}.\n`};
         workspaceHash.update(`${name}\0${content}\0`);
         batch.push(writeFile(join(workspace.rootPath, name), content));
       }
@@ -334,6 +336,7 @@ async function shutdown(runDir, instance) {
 // A large fixture's virtualized tree renders only the rows in view. Scroll the tree, outside the
 // timed open, until the document's row exists.
 async function revealTreeRow(page, name) {
+  await showExplorer(page, 'files');
   const row = page.getByTestId('file-tree').getByRole('treeitem', { name, exact: true });
   for (let step = 0; !(await row.count()); step++) {
     if (step > 400) throw Error(`Explorer never rendered ${name}`);
@@ -354,7 +357,7 @@ async function openDoc(page, name) {
   const surface = await page.waitForFunction(() => {
     if (document.body.innerText.includes('dohc could not open this document for editing.')) return 'refused';
     if (document.querySelector('[contenteditable="true"]')) return 'editable';
-    if (document.querySelector('[data-testid="markdown-edit-toggle"]:not(:disabled)')?.textContent === 'Edit') return 'read';
+    if (document.querySelector('[data-testid="markdown-edit-toggle"]:not(:disabled):not([aria-disabled="true"])')?.textContent === 'Edit') return 'read';
     return false;
   }, null, { timeout: 30000, polling: 50 });
   const settledSurface = await surface.jsonValue();
@@ -551,6 +554,7 @@ async function armSurface(page, observer, surfaceOptions) {
   };
 }
 async function filesListed(page, rootEntries) {
+  await showExplorer(page, 'files');
   const started = performance.now();
   await page.waitForFunction(expected => Number(document.querySelector('[data-testid="file-tree"] [data-testid="tree-row"][aria-level="1"]')?.getAttribute('aria-setsize')) >= expected, rootEntries, { timeout: 120000, polling: 100 });
   return { rootEntries, waitObservedMs: performance.now() - started };
@@ -841,7 +845,7 @@ async function automationPhase(instance, runDir, data) {
   result.dataset.seed = setup;
   await writeFile(join(workspace.rootPath, DATASET_FOLDER, 'automations.yaml'), automationsYaml(cases, 'dataset'));
   const opener = page.getByRole('region', { name: 'Collections', exact: true }).getByRole('button', { name: DATASET_NAME, exact: true });
-  const datasets = { label: TRIGGER.dataset.label, setup, open: async () => { await opener.waitFor({ timeout: 120000 }); await opener.click(); } };
+  const datasets = { label: TRIGGER.dataset.label, setup, open: async () => { await showExplorer(page, 'home'); await opener.waitFor({ timeout: 120000 }); await opener.click(); } };
   await datasets.open();
   await automationKind(instance, runDir, 'dataset', cases, datasets, result.dataset);
 }
@@ -1117,6 +1121,21 @@ async function documentRelay(runDir, documentCase, deadline) {
         algorithm: 'SHA256 of sorted canonical path,NUL,UTF8-content,NUL after normal admission; metadata excluded' });
       await json(join(runDir, 'fixture.json'), f.fixtureHashes);
       await json(join(output, 'result.json'), receipt);
+    }
+    if (scenario === 'link-rename') {
+      data.linkRename = await measureLinkRename({instance: fresh, links: options.links, typing, waitUntil, signal: benchmarkSignal});
+      await shutdown(runDir, fresh);
+      await rearmLinkReceipt(f.workspaces[0].rootPath, data.linkRename.resumeOperationId);
+      const resumedAt = performance.now(), resumed = await launch(runDir, f, 'resume');
+      const resumeReceipt = await waitUntil(async () => {
+        const record = await readLinkRecord(f.workspaces[0].rootPath, data.linkRename.resumeOperationId);
+        return record.links.state === 'done' ? record.links : false;
+      }, 300_000);
+      data.linkRename.resume = {startup: resumed.startup, receipt: resumeReceipt, launchToDoneObservedMs: performance.now() - resumedAt,
+        interruption: 'engine receipt completed before main persisted done'};
+      await shutdown(runDir, resumed);
+      await json(join(output, 'result.json'), receipt);
+      continue;
     }
     if (['go-to', 'go-to-mixed', 'command-palette', 'search', 'collection'].includes(scenario)) {
       data.listing = await filesListed(fresh.page, fixtureFiles + (scenario === 'collection' ? 1 : 0));

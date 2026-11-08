@@ -41,6 +41,7 @@ export const WORKSPACE_METHOD = {
   retainedCopiesDelete: "retainedCopies.delete",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
+  captureRetry: "capture.retry",
   captureRetryHeld: "capture.retryHeld",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
@@ -492,6 +493,7 @@ export type WorkspaceMethodParamsMap = {
   };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureRetry]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
@@ -779,6 +781,14 @@ const ConflictFileStateSchema = mutableStruct({
   metadataCorrelationId: NullableString,
 });
 
+/** A newer version another computer saved, held until the conflict resolves. */
+const ConflictWaitingVersionSchema = mutableStruct({
+  code: Schema.Literal("resolve-existing-conflict"),
+  objectId: Schema.NonEmptyString,
+  originId: Schema.NonEmptyString,
+  originSeq: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+
 const ConflictRecordSchema = mutableStruct({
   id: Schema.String,
   workspaceId: Schema.String,
@@ -800,6 +810,8 @@ const ConflictRecordSchema = mutableStruct({
   base: ConflictFileStateSchema,
   current: ConflictFileStateSchema,
   incoming: ConflictFileStateSchema,
+  /** Listings carry it; resolve answers do not. */
+  waitingVersion: Schema.optionalKey(Schema.NullOr(ConflictWaitingVersionSchema)),
 });
 
 const ReplicatedConflictResultSchema = Schema.Union([
@@ -1403,6 +1415,10 @@ const WorkspaceResultSchemas = {
   }),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
+  [WORKSPACE_METHOD.captureRetry]: mutableStruct({
+    ...CaptureFlushResultSchema.fields,
+    restarted: Schema.Boolean,
+  }),
   [WORKSPACE_METHOD.captureRetryHeld]: mutableStruct({
     ...CaptureFlushResultSchema.fields,
     retried: Schema.Boolean,

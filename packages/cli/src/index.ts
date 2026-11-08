@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCliArguments, type ParsedCliCommand } from "./args";
-import { sendCliRequest, type CliClientOptions } from "./client";
+import { sendCliRequest, VERSION_CHANGE_VERBS, type CliClientOptions } from "./client";
 import { cliErrorLine, DohcCliError } from "./errors";
 import { renderCliHelp } from "./help";
 import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
   documentEditTextSchema,
+  versionResolutionSchema,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
@@ -37,6 +38,8 @@ interface CliExecutionOptions {
   readPassword?: () => Promise<string>;
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
   client?: CliClientOptions;
+  signal?: AbortSignal;
+  writeStdout?: (text: string) => void;
 }
 
 async function bodyForCommand(
@@ -46,6 +49,12 @@ async function bodyForCommand(
   if (command.verb === "documentEdit" || command.verb === "documentCreate") {
     const text = command.stdin ? await readStdin() : command.text;
     if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
+    return text;
+  }
+  if (command.verb === "versionResolve") {
+    if (command.keep !== "combined") return undefined;
+    const text = command.stdin ? await readStdin() : command.text;
+    if (!versionResolutionSchema.safeParse({ keep: "combined", text }).success) throw new DohcCliError("combined text is at most 10 MiB as UTF-8");
     return text;
   }
   if (command.verb === "fileChatStart") {
@@ -90,6 +99,20 @@ function buildCliRequest(
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+    case "versionList":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
+    case "versionCompare":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version, ...(command.afterPath ? { afterPath: command.afterPath } : {}) } };
+    case "versionConflicts":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ...(command.afterConflictId ? { afterConflictId: command.afterConflictId } : {}) } };
+    case "versionCreate":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, name: command.name } };
+    case "versionSwitch":
+    case "versionMerge":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version } };
+    case "versionResolve":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, conflictId: command.conflictId,
+        resolution: command.keep === "combined" ? { keep: "combined", text: stdinBody ?? command.text } : { keep: command.keep } } };
     case "fileDuplicate":
       return {protocolVersion: common.protocolVersion, verb: command.verb, args: {cwd: common.cwd, actor: common.actor, path: command.path, requestId: command.requestId ?? randomUUID(), agent: command.agent}};
     case "historyUndo":
@@ -161,6 +184,11 @@ function buildCliRequest(
         protocolVersion: common.protocolVersion,
         args: { cwd: common.cwd, actor: common.actor, group: command.group },
       };
+    case "watch":
+      return { verb: "watch", protocolVersion: common.protocolVersion, args: {
+        cwd: common.cwd, actor: common.actor, cursor: command.cursor,
+        group: command.group, thread: command.thread, timeoutMs: command.timeoutMs,
+      } };
     case "inbox":
       return {
         verb: command.verb,
@@ -171,7 +199,14 @@ function buildCliRequest(
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
-        args: { cwd: common.cwd, actor: common.actor, target: command.target, peek: command.peek },
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          target: command.target,
+          peek: command.peek,
+          ...(command.before ? { before: command.before } : {}),
+          ...(command.limit ? { limit: command.limit } : {}),
+        },
       };
     case "post":
       return {
@@ -187,6 +222,7 @@ function buildCliRequest(
           needsDecision: command.needsDecision,
           ...(command.options ? { options: command.options } : {}),
           body: stdinBody ?? command.body,
+          ...(command.agent ? { agent: command.agent } : {}),
         },
       };
     case "reply":
@@ -205,6 +241,7 @@ function buildCliRequest(
           ...(command.resolve ? { resolve: command.resolve } : {}),
           ...(command.choose ? { choose: command.choose } : {}),
           body: stdinBody ?? command.body,
+          ...(command.agent ? { agent: command.agent } : {}),
         },
       };
     case "react":
@@ -333,13 +370,18 @@ function buildCliRequest(
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
 function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+  // A Collections list this computer can't give fails, as it did when main threw the refusal.
+  if (result !== null && "kind" in result && result.kind === "collections-refused") {
+    const { refusal } = result;
+    return refusal.kind === "server-unavailable" ? `${refusal.words} ${refusal.failure}` : refusal.words;
+  }
   if (result === null || !("ok" in result) || result.ok !== false) return null;
   return "notice" in result && result.notice
     ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -362,48 +404,67 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       env.DOHC_RUN_ID,
       password,
     );
-    let result: CliResultByVerb[keyof CliResultByVerb];
-    if (options.request) {
-      const rawResult = await options.request(request);
-      try {
-        result = parseCliResult(command.verb, rawResult);
-      } catch {
-        throw new DohcCliError("desktop app returned an invalid response");
-      }
-    } else {
-      result = await sendCliRequest<typeof command.verb>(request, {
-        ...options.client,
-        timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
-          // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
-          : command.verb === "saveRecoveryCopy" ? 420_000
-          : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
-        env,
-      });
-    }
-    const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
-    if (refused !== null) throw new DohcCliError(refused);
-    const output = command.json
-      ? result === null ? "null" : jsonOutput(result)
-      : renderCliResult(command.verb, result, {
-          grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
-          grepContext: command.verb === "grep" ? command.context : 0,
-          momentSide: command.verb === "moment" ? command.side : "after",
+    while (true) {
+      if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
+      let result: CliResultByVerb[keyof CliResultByVerb];
+      if (options.request) {
+        const rawResult = await options.request(request);
+        try {
+          result = parseCliResult(command.verb, rawResult);
+        } catch {
+          throw new DohcCliError("desktop app returned an invalid response");
+        }
+      } else {
+        result = await sendCliRequest<typeof command.verb>(request, {
+          ...options.client,
+          signal: options.signal ?? options.client?.signal,
+          timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
+            // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
+            : command.verb === "saveRecoveryCopy" ? 420_000
+            : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses"
+              || VERSION_CHANGE_VERBS.has(command.verb) ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          env,
         });
-    return {
-      exitCode: result !== null && (("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null)) ? 1 : 0,
-      // Markdown prints byte for byte so redirection preserves it.
-      stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
-        ? output
-        : output ? `${output.replace(/\n$/, "")}\n` : "",
-      stderr: "",
-    };
+      }
+      if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
+      const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
+      if (refused !== null) throw new DohcCliError(refused);
+      const output = command.json
+        ? result === null ? "null" : jsonOutput(result)
+        : renderCliResult(command.verb, result, {
+            grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
+            grepContext: command.verb === "grep" ? command.context : 0,
+            momentSide: command.verb === "moment" ? command.side : "after",
+          });
+      if (command.verb === "watch" && !command.once && request.verb === "watch") {
+        const batch = result as CliResultByVerb["watch"];
+        if (batch.messages.length > 0) (options.writeStdout ?? (text => { process.stdout.write(text); }))(`${output}\n`);
+        request.args.cursor = batch.cursor;
+        continue;
+      }
+      return {
+        exitCode: result !== null && (("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null)) ? 1 : 0,
+        // Markdown prints byte for byte so redirection preserves it.
+        stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
+          ? output
+          : output ? `${output.replace(/\n$/, "")}\n` : "",
+        stderr: "",
+      };
+    }
   } catch (error) {
+    if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
     return { exitCode: 1, stdout: "", stderr: cliErrorLine(error) };
   }
 }
 
 async function runCliProcess(argv = process.argv.slice(2)): Promise<void> {
-  const result = await executeCli({ argv });
+  const cancellation = new AbortController();
+  const stop = () => cancellation.abort();
+  const watching = argv[0] === "chat" && argv[1] === "watch";
+  if (watching) { process.once("SIGINT", stop); process.once("SIGTERM", stop); }
+  const result = await executeCli({ argv, ...(watching ? { signal: cancellation.signal } : {}) });
+  process.off("SIGINT", stop);
+  process.off("SIGTERM", stop);
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   process.exitCode = result.exitCode;

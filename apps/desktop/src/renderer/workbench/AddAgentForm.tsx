@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { FlaskConical } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import { firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
+import { DEFAULT_AGENT_ID, firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
@@ -20,6 +20,12 @@ const LABEL_CLASS = "text-[11px] font-medium text-muted";
 const INPUT_CLASS =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
 const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-muted";
+// Fits the dialog under Overlay's 6rem top and above its 1rem bottom and the
+// toasts, so picking a tool grows it downward and its body scrolls. A window
+// too short for the title and actions alone (a CSS viewport under about 250px)
+// is left to Overlay: the actions run past the dialog's edge and its backdrop
+// scrolls to them.
+const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
 type CheckState =
   | { status: "idle" }
@@ -48,6 +54,23 @@ export function AddAgentForm(props: {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [check, setCheck] = useState<CheckState>({ status: "idle" });
+  // While the body scrolls, the title and actions sit in bands with a rule.
+  // The bands come and go only while the body cannot scroll, so its scrollTop
+  // stays 0 and its content moves by the padding change alone. They need
+  // about 40px more than they free, so they do not flicker at the edge.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [scrolls, setScrolls] = useState(false);
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    const content = contentRef.current;
+    if (!body || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setScrolls(body.scrollHeight > body.clientHeight));
+    observer.observe(body);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     setAgentName(agent?.name ?? "");
@@ -101,9 +124,10 @@ export function AddAgentForm(props: {
     if (!(await save()) || !requests.isCurrent(token)) return;
     setCheck({ status: "running" });
     try {
-      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId });
+      // The save above made the first agent when there was none.
+      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId, agentId: firstAgent(settings)?.id ?? DEFAULT_AGENT_ID });
       if (!requests.isCurrent(token)) return;
-      if (!result.ok) props.onError(result.detail);
+      if (!result.ok) props.onError(result.logPath ? `${result.detail} Log: ${result.logPath}` : result.detail);
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
@@ -113,7 +137,7 @@ export function AddAgentForm(props: {
         detail: ipcErrorMessage(cause, "The check could not start."),
       });
     }
-  }, [props.workspaceId, props.onError, requests, save]);
+  }, [props.workspaceId, props.onError, requests, save, settings]);
 
   const submit = useCallback(
     async (event: FormEvent) => {
@@ -134,15 +158,23 @@ export function AddAgentForm(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="chats-add-agent-title"
-        className="dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
+        data-scrolls={scrolls ? "" : undefined}
+        className={`dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-4 p-5"} ${DIALOG_HEIGHT_CLASS}`}
       >
-        <div className="flex items-center gap-2">
+        <div data-testid="chats-add-agent-header" className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-6 py-4" : ""}`}>
           <ChatAvatar presentation={ownAgentPresentation} name={preview} kind="agent" size="strip" />
-          <h3 id="chats-add-agent-title" className="m-0 text-sm font-semibold text-ink">
+          <h3 id="chats-add-agent-title" className="m-0 text-base font-semibold text-ink">
             Add an agent
           </h3>
         </div>
 
+        {/* A control's halo draws inset here, where the scroller would clip it. */}
+        <div
+          ref={bodyRef}
+          data-testid="chats-add-agent-body"
+          className={`min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "p-6" : "-mx-5 -my-1 px-5 py-1"}`}
+        >
+        <div ref={contentRef} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
           <label htmlFor="chats-add-agent-agent-name" className={LABEL_CLASS}>Agent name</label>
           <input
@@ -160,7 +192,7 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy} checkLabel="Check"
+        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy}
           onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
@@ -188,7 +220,10 @@ export function AddAgentForm(props: {
         </div>
 
         </details>
+        </div>
+        </div>
 
+        <div data-testid="chats-add-agent-footer" className={`flex flex-col gap-4 ${scrolls ? "border-t border-line px-6 py-4" : ""}`}>
         {error ? (
           <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
             {error}
@@ -222,7 +257,7 @@ export function AddAgentForm(props: {
             data-testid="chats-add-agent-cancel"
             disabled={busy}
             onClick={props.onCancel}
-            className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50 dohc-focus-visible"
+            className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
           >
             Cancel
           </button>
@@ -234,6 +269,7 @@ export function AddAgentForm(props: {
           >
             {saving ? "Saving…" : "Add agent"}
           </PrimaryButton>
+        </div>
         </div>
       </form>
     </Overlay>

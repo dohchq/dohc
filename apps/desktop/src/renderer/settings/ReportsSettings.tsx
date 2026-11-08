@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReadDiagnosticsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_PRIVACY_SETTINGS, type PrivacySettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
@@ -7,7 +7,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { SettingRow, SwitchControl } from "./SettingRow";
 
 const BUTTON =
-  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink";
 
 /**
  * The report switches, which apply to this computer, and the diagnostics a
@@ -21,6 +21,8 @@ export function ReportsSettings(props: {
 }) {
   const [diagnostics, setDiagnostics] = useState<ReadDiagnosticsResult | null>(null);
   const [shown, setShown] = useState(false);
+  const usageUnavailableId = useId();
+  const errorsUnavailableId = useId();
   const onError = useRef(props.onError);
   onError.current = props.onError;
 
@@ -41,7 +43,8 @@ export function ReportsSettings(props: {
     };
   }, [props.privacy]);
 
-  const unavailable = (available: boolean | undefined) => available === false ? " Unavailable for this launch." : "";
+  const usageUnavailable = diagnostics?.available.usage === false;
+  const errorsUnavailable = diagnostics?.available.errors === false;
   const save = async () => {
     try {
       await bridge().saveDiagnostics({});
@@ -54,26 +57,34 @@ export function ReportsSettings(props: {
     <>
       <SettingRow
         title="Send usage reports"
-        description={`Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links.${unavailable(diagnostics?.available.usage)}`}
+        description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
+        aside={usageUnavailable ? (
+          <p id={usageUnavailableId} className="m-0 text-[12px] text-muted">This launch sends no usage reports.</p>
+        ) : null}
         modified={props.privacy.usageReports !== DEFAULT_PRIVACY_SETTINGS.usageReports}
         onReset={() => props.onChange({ ...props.privacy, usageReports: DEFAULT_PRIVACY_SETTINGS.usageReports })}
         testId="settings-row-usage-reports"
       >
         <SwitchControl
           label="Send usage reports"
+          describedBy={usageUnavailable ? usageUnavailableId : undefined}
           checked={props.privacy.usageReports}
           onChange={(usageReports) => props.onChange({ ...props.privacy, usageReports })}
         />
       </SettingRow>
       <SettingRow
         title="Send error reports"
-        description={`Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.${unavailable(diagnostics?.available.errors)}`}
+        description="Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths."
+        aside={errorsUnavailable ? (
+          <p id={errorsUnavailableId} className="m-0 text-[12px] text-muted">This launch sends no error reports.</p>
+        ) : null}
         modified={props.privacy.errorReports !== DEFAULT_PRIVACY_SETTINGS.errorReports}
         onReset={() => props.onChange({ ...props.privacy, errorReports: DEFAULT_PRIVACY_SETTINGS.errorReports })}
         testId="settings-row-error-reports"
       >
         <SwitchControl
           label="Send error reports"
+          describedBy={errorsUnavailable ? errorsUnavailableId : undefined}
           checked={props.privacy.errorReports}
           onChange={(errorReports) => props.onChange({ ...props.privacy, errorReports })}
         />

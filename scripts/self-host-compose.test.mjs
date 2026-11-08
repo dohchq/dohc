@@ -6,7 +6,7 @@ import { parseEnv } from 'node:util';
 import test from 'node:test';
 import { defineMappingTag, defineScalarTag, load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
-import { accountsDatabaseError, deploymentChecks, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
+import { accountsDatabaseError, deploymentChecks, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, startupWaitSeconds, supportedComposeVersion } from '../tools/self-host/config.mjs';
 import { accountsSchemaState, postgresUrl, relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
 const composeText = readFileSync('docker-compose.self-host.yml', 'utf8');
@@ -39,6 +39,11 @@ test('startup gates data services on their single-use initialization jobs', () =
   for (const name of ['workspace-api', 'sync-relay', 'share-web']) assert.equal(compose.services.gateway.depends_on[name].condition, 'service_healthy');
 });
 
+test('startup waits through the relay start period, then 180 s for its failing checks and the services after it', () => {
+  const [, start] = /^(\d+)s$/.exec(compose.services['sync-relay'].healthcheck.start_period);
+  assert.equal(startupWaitSeconds, Number(start) + 180);
+});
+
 test('an aborted relay validation process writes no core file', () => {
   assert.deepEqual(compose.services['sync-relay'].ulimits, { core: 0 });
 });
@@ -48,14 +53,16 @@ test('database readiness waits for TCP after the temporary initialization server
   assert.equal(compose.services['postgres-migrate'].depends_on.postgres.condition, 'service_healthy');
 });
 
-test('auth, relay, and share links advertise the same public origin and exchange key', () => {
+test('auth, relay, and share links advertise the same public origin and exchange key, and the relay accepts live editing from share links', () => {
   const api = compose.services['workspace-api'].environment, relay = compose.services['sync-relay'].environment;
   const viewer = compose.services['share-web'].environment;
   assert.equal(api.WORKSPACE_API_BASE_URL, api.DOHC_SERVER_RELAY_URL);
   assert.equal(api.WORKSPACE_API_BASE_URL, viewer.DOHC_SHARE_WEB_PUBLIC_ORIGIN);
   assert.equal(api.WORKSPACE_API_BASE_URL, relay.SYNC_RELAY_AUTH_BASE_URL);
   assert.equal(relay.DOHC_RELAY_EXCHANGE_KEY, viewer.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY);
-  assert.equal(relay.DOHC_RELAY_NAMED_LIVE_HOSTS, viewer.DOHC_SHARE_WEB_PUBLIC_HOSTS);
+  const liveHosts = relay.DOHC_RELAY_NAMED_LIVE_HOSTS.split(',');
+  assert.ok(liveHosts.includes(new URL(viewer.DOHC_SHARE_WEB_RELAY_URL).host), 'the relay must accept live editing that share links forward to it');
+  assert.ok(liveHosts.includes(viewer.DOHC_SHARE_WEB_PUBLIC_HOSTS), 'the relay must still accept live editing through the public address');
   assert.equal(api.DOHC_AUTH_TRUSTED_PROXIES, `${compose.services.gateway.networks.dohc.ipv4_address},${compose.services['share-web'].networks.dohc.ipv4_address}`);
 });
 

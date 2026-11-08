@@ -1,8 +1,9 @@
+import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
 import {normalizeShareLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {useEffect, useRef, useState} from "react";
 import {accountUser, namedRequest} from "./namedRecipient";
 import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
-import {AppLaunchError, launchSharedApp} from "./OpenSharedApp";
+import {AppLaunchError, LaunchFailure, launchSharedApp} from "./OpenSharedApp";
 import type {NamedAppTarget} from "./namedAppRoute";
 import "./namedRecipient.css";
 
@@ -61,7 +62,8 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
     const controller = start("open");
     // A successful launch leaves the page through the submitted form, so only a failure settles.
     void launchSharedApp({workspaceId: target.workspaceId, publicationId: target.publicationId}, controller.signal)
-      .catch((reason: unknown) => finish(controller, reason instanceof AppLaunchError && reason.status !== 503 ? LAUNCH_REFUSED : LAUNCH_UNAVAILABLE));
+      .catch((reason: unknown) => finish(controller, !(reason instanceof AppLaunchError) || reason.status === 503 ? LAUNCH_UNAVAILABLE
+        : reason.status === 410 ? LINK_REFUSALS.app_collection_missing.error : LAUNCH_REFUSED));
   };
   const busy = pending !== null;
   return <div className="viewer named-recipient">
@@ -75,7 +77,7 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
         <p>This app can use external services. Its author decides where it sends data.</p>
         <p>It opens with the access the owner gave your account.</p>
         <button className="handoff-button primary" disabled={busy} onClick={open}>{pending === "open" ? "Opening app" : "Open app"}</button>
-        {pending === "sign-out" && <p role="status">Signing out…</p>}{error && <p role="alert">{error}</p>}
+        {pending === "sign-out" && <p role="status">Signing out…</p>}{error && <LaunchFailure role="alert" message={error}/>}
       </main>}
   </div>;
 }

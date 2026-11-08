@@ -169,7 +169,8 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         accessEnded: () => false,
         credentials: {relayUrl: audience, token: overrides.token ?? tokens[index]!, userId: users[index]!.id, signal: credentials.signal},
         assertCurrent, preserveDraft: async draft => { await preserveLiveDraft(join(root, "profile"), localWorkspaceId, draft); }});
-      const ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: localWorkspaceId, generation: 1, isCurrent: () => current}),
+      const ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: localWorkspaceId, attachmentId: Symbol.for(localWorkspaceId), generation: 1, isCurrent: () => current}),
+        authorities: {isCurrentAttachment: () => true},
         acquireWorkspace: () => ({workspace: {workspaceId: localWorkspaceId, rootPath: localRoot, attachmentId: Symbol.for(localWorkspaceId)}, assertCurrent, release() {}}),
         captureFor: () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},
         ensureCaptureFor: async () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},
@@ -186,7 +187,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
           if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
         },
         onRemoteUpdate(listener) {
-          const receive = (payload: unknown) => {const value = EngineYDocRemoteUpdateEvent.parse(payload); listener(value.update, value.lineageGeneration);};
+          const receive = (payload: unknown) => {const value = EngineYDocRemoteUpdateEvent.parse(payload); listener(value.update, value.lineageGeneration, value.head);};
           sender.on(CHANNELS.engineYDocRemoteUpdate, receive); return () => {sender.off(CHANNELS.engineYDocRemoteUpdate, receive);};
         },
         onLineageReplacement: () => () => {}, acknowledgeLineageReplacement: async () => [], close: () => ipc.close(sender, {sessionId})});
@@ -242,7 +243,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       expect(ack).toMatchObject({deliveryId: application!.delivery_id, updateDigest: hash(localUpdate)});
       results.nativeAck = ack;
     } finally {engine.close();}
-    const settlement = await active.settle(document); expect(settlement.materialized).toBe(true);
+    const settlement = await active.settle(document); expect(settlement).toMatchObject({materialized: true});
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(first.mirror.doc));
     results.edit = {saveEvent, peerMarkdown: yDocToMarkdown(peer.mirror.doc), ordinaryCaptureCalls, localMarkdown: "Hello", settlement};
     const wrong = await desktop(0, "wrong-bearer", {token: tokens[1]});

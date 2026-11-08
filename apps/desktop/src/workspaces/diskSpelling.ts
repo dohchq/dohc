@@ -27,7 +27,7 @@ export async function diskSpelling(root: string, path: string): Promise<string |
     if (lookup === null) return null;
     if (!ignoresCase && /^[\x20-\x7e]+$/u.test(leaf) && !/~\d|[. ]$/u.test(leaf)) {
       const swapped = swapAsciiCase(leaf);
-      const lookAlike = leaf.replaceAll(";", "\u037e").replaceAll("`", "\u1fef").replaceAll("K", "\u212a");
+      const lookAlike = lookAlikeSpelling(leaf);
       let exact = true;
       for (const name of [swapped, lookAlike]) {
         if (name === leaf) continue;
@@ -71,6 +71,12 @@ export async function diskSpelling(root: string, path: string): Promise<string |
     stored = join(folder, name);
   }
   return stored;
+}
+
+// `name` with its `;`, `` ` `` and `K` written as the only other characters
+// Unicode normalizes to them, as the engine's `look_alike_spelling` does.
+export function lookAlikeSpelling(name: string): string {
+  return name.replaceAll(";", "\u037e").replaceAll("`", "\u1fef").replaceAll("K", "\u212a");
 }
 
 function swapAsciiCase(name: string): string {

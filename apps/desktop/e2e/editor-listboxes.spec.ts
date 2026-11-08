@@ -55,9 +55,9 @@ async function expectLastRevealed(page: Page, list: Locator): Promise<void> {
   expect(await inView(last, list)).toBe(false);
   await page.keyboard.press("ArrowUp");
   await expect(last).toHaveAttribute("aria-selected", "true");
-  expect(await inView(last, list)).toBe(true);
+  await expect.poll(() => inView(last, list)).toBe(true);
   await page.keyboard.press("ArrowDown");
-  expect(await inView(list.getByRole("option").first(), list)).toBe(true);
+  await expect.poll(() => inView(list.getByRole("option").first(), list)).toBe(true);
 }
 
 test("the editor's listboxes keep the option Enter acts on in view as the arrows move it", async () => {
@@ -251,9 +251,9 @@ test("the chat mention list keeps the option Enter acts on in view as the arrows
     expect(await inView(last, menu)).toBe(false);
     await page.keyboard.press("ArrowUp");
     await expect(last).toHaveAttribute("aria-selected", "true");
-    expect(await inView(last, menu)).toBe(true);
+    await expect.poll(() => inView(last, menu)).toBe(true);
     await page.keyboard.press("ArrowDown");
-    expect(await inView(options.first(), menu)).toBe(true);
+    await expect.poll(() => inView(options.first(), menu)).toBe(true);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

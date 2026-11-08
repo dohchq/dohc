@@ -350,7 +350,23 @@ describe("active file sharing", () => {
     expect(within(dialog).getByText("a.md")).toBeTruthy();
   });
 
-  // The palette hides Share… whenever the toolbar draws no Share file.
+  // A narrow group hides Share file and keeps it in the group's tab list.
+  it("opens the same dialog from the group's tab list", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByRole("button", { name: "All tabs in editor group 1" }));
+    await user.click(screen.getByRole("menuitem", { name: "Share file" }));
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+  });
+
+  // The palette and the tab list hide Share… whenever the toolbar draws no
+  // Share file.
   it.each<[string, Workspace | undefined, string[]]>([
     ["no editor shows a file", undefined, []],
     ["the workspace is a shared view", SHARE_VIEW, ["a.md"]],
@@ -361,6 +377,14 @@ describe("active file sharing", () => {
     renderShell(bridge, workspace);
     if (workspace) await settleShareView();
     if (tabs.length > 0) await screen.findByTestId("file-inspector");
+    // Only the shared view's tab opens: the received share's file isn't in
+    // makeBridge's listing, so its group stays empty and has no tab list.
+    if (workspace) {
+      await user.click(screen.getByRole("button", { name: "All tabs in editor group 1" }));
+      expect(screen.getByRole("menuitem", { name: "New editor group right" })).toBeTruthy();
+      expect(screen.queryByRole("menuitem", { name: "Share file" })).toBeNull();
+      await user.keyboard("{Escape}");
+    }
     expect(screen.queryByTestId("file-share")).toBeNull();
 
     await user.keyboard("{Control>}k{/Control}");
@@ -408,17 +432,17 @@ describe("active file sharing", () => {
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
 describe("shared view banner", () => {
-  it("does not offer app creation in a received share workspace", async () => {
+  it("shows no Apps section and no app creation in a received share workspace without apps", async () => {
     const user = userEvent.setup();
-    const bridge = Object.assign(makeShareBridge(), {
-      listSites: vi.fn(async () => ({ sites: [] })),
-    });
+    const bridge = makeShareBridge();
     renderShell(bridge, SHARE_VIEW);
 
-    await user.click(await screen.findByTestId("activity-sites"));
-
-    expect(await screen.findByText("No apps in this workspace yet.")).toBeTruthy();
+    await waitFor(() => expect(bridge.listSites).toHaveBeenCalled());
+    await screen.findByTestId("explorer-files-section");
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Add an app here…" })).toBeNull();
     expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
   });
@@ -623,7 +647,7 @@ describe("shared view editing", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
-    return toggle.hasAttribute("disabled");
+    return toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true";
   }
 
   for (const shareView of [
@@ -691,6 +715,7 @@ describe("shared view editing", () => {
     const toggle = await screen.findByTestId("markdown-edit-toggle");
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
       "Chats are read-only in this shared view.",
     );
@@ -1813,14 +1838,14 @@ describe("chats surface after a failed capture build", () => {
 });
 
 // #687/#589: the note's precedence and exact copy are pinned at the
-// AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
+// AgentList layer, but every test there hands
 // sessionRecorderOn and sharedView straight to SettingsDialog — bypassing
 // the shell's own derivation. A regression that severs
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)
 // would leave every other suite green. This test drives the real command
 // palette -> Settings -> Agents path through the shell itself.
-describe("runner note reaches the card through the shell's own wiring", () => {
+describe("the Check note reaches Settings › Agents through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
@@ -1835,10 +1860,10 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     await user.keyboard("mcp");
     await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
-        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+        "The workspace engine starts when dohc starts. Restart dohc to check an agent.",
       ),
     );
   });
@@ -1854,7 +1879,7 @@ describe("runner note reaches the card through the shell's own wiring", () => {
       ),
     );
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
         "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",

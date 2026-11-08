@@ -153,6 +153,33 @@ it("reopens the same recovery archive after installation was interrupted before 
   } finally { observer?.close(); }
 }, 120_000);
 
+it("finishes a restore that dohc quit partway through", async () => {
+  const sourceHost = await open(), approved = await activate(sourceHost.host);
+  await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));
+  const archive = await sourceHost.host.prepareExport(id(1));
+  const sourcePath = join(sourceHost.workspaceRoot, "quit.dohc-recovery");
+  await writeDatasetRecoveryExport({ workspaceRoots: [], path: sourcePath, stream: archive.stream(), signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+  await archive.dispose(); await sourceHost.host.close();
+  let observer: DatabaseSync | undefined;
+  // dohc stops once the restore has copied a record, so nothing after that runs, cleanup included.
+  const target = await open({ assertCurrent() {
+    if (observer?.prepare("SELECT 1 FROM dohc_dataset_import_records").get()) throw Error("dohc quit");
+  } });
+  observer = new DatabaseSync(join(target.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
+  try {
+    const first = await target.host.prepareRecovery({ sourcePath });
+    await expect(target.host.claimRecovery({ ...first, oldHostStopped: true })).rejects.toThrow("dohc quit");
+    expect(observer.prepare("SELECT phase FROM dohc_dataset_imports").all()).toEqual([{ phase: "staging" }]);
+    observer.close(); observer = undefined;
+    await target.host.close();
+    const restarted = await open({ workspaceRoot: target.workspaceRoot });
+    const again = await restarted.host.prepareRecovery({ sourcePath });
+    expect(again.transferId).not.toBe(first.transferId);
+    expect((await restarted.host.claimRecovery({ ...again, oldHostStopped: true })).targetCursor).toBeDefined();
+    expect((await restarted.host.invoke(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Preserved" }]);
+  } finally { observer?.close(); }
+}, 120_000);
+
 it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
   const first = await open(); await first.host.close();
   const path = join(first.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite");
@@ -227,6 +254,7 @@ describe("local dataset owner adapter", () => {
     secondSources.files.set("items/dataset.json",JSON.stringify({...definition,datasetId:id(20),name:"Other items"}));
     const second = await activate(first.host,secondSources);
     await first.host.action({datasetId:id(20),revision:1,revisionSha256:second.revision.revisionSha256,operationId:id(6),idempotencyKey:"other",input:{name:"Keep"}});
+    first.host.archive({datasetId:id(1)});
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     await first.host.close();
@@ -248,6 +276,7 @@ describe("local dataset owner adapter", () => {
     await first.host.action(call(approved,id(6),"delete-write",{name:"Saved",fileId:uploaded.file.fileId}));
     const archive = await first.host.prepareExport(id(1)), backupPath = join(first.workspaceRoot,"saved.dohc-recovery");
     await writeDatasetRecoveryExport({ workspaceRoots: [], path:backupPath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    first.host.archive({datasetId:id(1)});
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     expect(first.host.list({includeArchived:true}).datasets).toEqual([]);
@@ -429,7 +458,7 @@ describe("local dataset owner adapter", () => {
       expect(completed.state).toBe("imported");expect(posted).toBe(phase === "installed" ? 2 : 1);
       const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
       expect((await remote.permissions!({workspaceId:"w",datasetId:id(1),action:"permissions"})).permissions).toEqual([]);
-      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
+      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},marker:datasetId=>restarted.transferStatus(datasetId),async remote(origin){expect(origin).toBe("https://relay");return remote;}});
       expect((await routed.invoke(call(approved,id(5)))).result).toMatchObject([{name:"First"}]);
       expect(await routed.file({...upload,workspaceId:"w",action:"file",fileId:file.file.fileId})).toEqual({file:file.file,bytesBase64});
       expect(await routed.invoke(mutation)).toMatchObject({replayed:true});
@@ -604,6 +633,26 @@ describe("local dataset owner adapter", () => {
     expect(changes).toBe(3);
     // A refused change tells nothing.
     await expect(host.approve({preparationId: "gone", revisionSha256: approved.revision.revisionSha256})).rejects.toThrow(/expired/);
+    expect(changes).toBe(3);
+  });
+
+  // A read that finds a stopped move resumes it. Were a stop a change, the reads it sets off would resume the move again, without end.
+  it("tells the executor when a move fences a Collection and when it finishes, not when it stops", async () => {
+    let changes = 0, stopped = true;
+    const {host} = await open({onDatasetsChanged: () => { changes += 1; }}); await activate(host);
+    const target: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
+      for await (const _chunk of input.stream) { /* The server reads the whole archive before it answers. */ }
+      if (stopped) throw new Error("Sharing failed (502).");
+      return {transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:input.sourceCursor,
+        targetCursor:{...input.sourceCursor,hostEpoch:"server-epoch",revision:input.sourceCursor.revision+1,digest:"f".repeat(64)}};
+    } };
+    const move = () => host.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example",target});
+    await expect(move()).rejects.toThrow("Sharing failed (502).");
+    expect(changes).toBe(2);
+    await expect(move()).rejects.toThrow("Sharing failed (502).");
+    expect(changes).toBe(2);
+    stopped = false;
+    expect((await move()).state).toBe("imported");
     expect(changes).toBe(3);
   });
 

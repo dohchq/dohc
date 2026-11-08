@@ -6,6 +6,7 @@ use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
+use crate::rpc::chats::stream::with_agent_requests;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
 use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
@@ -58,6 +59,12 @@ struct ChatMessageSendParams {
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_agent_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    named_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
 
@@ -147,8 +154,6 @@ struct ChatAttachmentsListFileMentionsParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatMentionsListForHandleParams {
     handle: String,
-    #[serde(default)]
-    unread_by_agent_only: bool,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
@@ -208,7 +213,8 @@ impl<'a> From<&'a ChatMessageAutomation> for AutomationWire<'a> {
     }
 }
 
-/// A link author also names its link grant and link principal.
+/// A link author also names its link grant and link principal, and an agent
+/// that joined with the link names its agent connection.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AuthorWire<'a> {
@@ -218,6 +224,8 @@ pub(super) struct AuthorWire<'a> {
     grant_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_connection_id: Option<&'a str>,
 }
 
 impl<'a> AuthorWire<'a> {
@@ -231,6 +239,7 @@ impl<'a> AuthorWire<'a> {
             display_name,
             grant_id: link_author.map(|link| link.grant_id.as_str()),
             principal_id: link_author.map(|link| link.principal_id.as_str()),
+            agent_connection_id: link_author.and_then(|link| link.agent_connection_id.as_deref()),
         }
     }
 }
@@ -257,6 +266,10 @@ pub(super) struct MessageWire<'a> {
     origin: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     automation: Option<AutomationWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_agent_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
 }
 
 impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
@@ -283,6 +296,8 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             parent_message_id: message.parent_message_id.as_deref(),
             origin: message.origin.as_deref(),
             automation: message.automation.as_ref().map(AutomationWire::from),
+            author_agent_id: message.author_agent_id.as_deref(),
+            author_reported: message.author_reported.as_ref(),
         }
     }
 }
@@ -516,15 +531,10 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
-        let unread_filter = if params.unread_by_agent_only {
-            "unread"
-        } else {
-            "all"
-        };
         let binding = chat_cursor_binding(
             "chats.mentions.listForHandle",
             &workspace_id,
-            &[&params.handle, unread_filter],
+            &[&params.handle],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor.as_ref().map(|cursor| MentionCursor {
@@ -538,7 +548,6 @@ impl EngineService {
             open.actor.chat_mentions_list_for_handle(
                 workspace_id,
                 params.handle,
-                params.unread_by_agent_only,
                 after,
                 page_limit + 1,
             ),
@@ -608,6 +617,9 @@ impl EngineService {
                         .map(LocalAttachmentInput::from)
                         .collect(),
                     automation: params.automation.map(ChatMessageAutomation::from),
+                    author_agent_id: params.author_agent_id,
+                    author_reported: params.author_reported,
+                    named_agent_ids: params.named_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -842,7 +854,16 @@ impl EngineService {
             ),
         )
         .await?;
-        let row_values: Vec<Value> = page.messages.iter().map(message_json).collect();
+        let row_values: Vec<Value> = page
+            .messages
+            .iter()
+            .map(|message| {
+                with_agent_requests(
+                    message_json(message),
+                    page.agent_requests.get(&message.message_id),
+                )
+            })
+            .collect();
         let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         let next_after = if truncated {
@@ -881,6 +902,8 @@ mod tests {
             created_at_ms: 10,
             automation: None,
             link_author: None,
+            author_agent_id: None,
+            author_reported: None,
             attachments: Vec::new(),
         }
     }
@@ -960,6 +983,7 @@ mod tests {
             link_author: Some(ChatMessageLinkAuthor {
                 grant_id: "grant".to_owned(),
                 principal_id: "principal".to_owned(),
+                agent_connection_id: None,
             }),
             ..message()
         };
@@ -978,6 +1002,30 @@ mod tests {
                 "body": "hello",
                 "createdAtMs": 10,
                 "attachments": [],
+            })
+        );
+    }
+
+    #[test]
+    fn agent_link_message_projection_names_its_connection() {
+        let agent = ChatMessage {
+            author_kind: ChatActorKind::Link,
+            author_display_name: "Helper".to_owned(),
+            link_author: Some(ChatMessageLinkAuthor {
+                grant_id: "grant".to_owned(),
+                principal_id: "principal".to_owned(),
+                agent_connection_id: Some("connection".to_owned()),
+            }),
+            ..message()
+        };
+        assert_eq!(
+            message_json(&agent)["author"],
+            json!({
+                "kind": "link",
+                "displayName": "Helper",
+                "grantId": "grant",
+                "principalId": "principal",
+                "agentConnectionId": "connection",
             })
         );
     }

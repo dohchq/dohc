@@ -46,6 +46,25 @@ describe("splitMarkdownBlocks", () => {
     }
   });
 
+  it("keeps a table's row-height comment in the table's chunk across blank lines", () => {
+    const comment = "<!-- dohc:table row-heights=1:84 -->";
+    const table = "| A | B |\n| --- | --- |\n| a | b |";
+    // The first chunk fills up on the line above the table.
+    const doc = (above: string) => `${"x".repeat(4060)}\n\n${above}\n\n\n${table}\n\nAfter.`;
+    const holder = (chunks: string[], text: string) => chunks.find((chunk) => chunk.includes(text));
+
+    const plain = splitMarkdownBlocks(doc("a".repeat(comment.length)));
+    expect(holder(plain, "| A | B |")).not.toBe(holder(plain, "a".repeat(comment.length)));
+    const chunks = splitMarkdownBlocks(doc(comment));
+    expect(holder(chunks, "| A | B |")).toBe(holder(chunks, comment));
+    expect(holder(chunks, comment)).toContain(`${comment}\n\n\n${table}`);
+
+    // A list item reads a comment across a blank line too.
+    const item = `- ${comment}\n\n${table.replaceAll(/^/gmu, "  ")}`;
+    const listed = splitMarkdownBlocks(`${"x".repeat(4060)}\n\n${item}\n\nAfter.`);
+    expect(holder(listed, comment)).toContain(item);
+  });
+
   it("initialChunkCount selects the leading window by bytes", () => {
     const chunks = ["a".repeat(3000), "b".repeat(3000), "c".repeat(3000)];
     expect(initialChunkCount(chunks, 4000)).toBe(2);

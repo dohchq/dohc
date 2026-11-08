@@ -18,7 +18,7 @@ import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema } from "@dohc/cli/protocol";
+import { chatWatchInputSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -26,7 +26,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation,
+  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -42,11 +42,13 @@ import {
   retryAutomationRun,
   readRecord,
   setRecordFields,
+  waitForMessages,
   listFileChats,
   readChat,
   replyToChat,
   startGroupChat,
   startFileChat,
+  reportedAgent,
   createApp,
   duplicateWorkspaceFile,
   deleteWorkspacePath,
@@ -133,6 +135,7 @@ function text(structuredContent: Record<string, unknown> | null) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
+  let waits = 0;
   const level = ctx.shareAccess ?? "owner";
   function register<InputArgs extends z.ZodRawShape>(
     name: keyof typeof MCP_TOOL_CAPABILITIES,
@@ -187,18 +190,46 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
 
   register("dohc_chat_links",{description:"Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",inputSchema:ChatLinksInput.shape},async args=>text(await chatLinks(ctx,args)));
   register("dohc_chat_file_mentions", { description: "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.", inputSchema: ChatFileMentionsInput.shape }, async args => text(await chatFileMentions(ctx, args)));
-  register("dohc_links_edges", { description: "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.", inputSchema: LinksEdgesInput.shape }, async args => text(await linksEdges(ctx, args)));
+  register("dohc_links_edges", { description: "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.", inputSchema: LinksEdgesInput.shape }, async args => text(await linksEdges(ctx, args)));
   register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));
   register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
   register("dohc_duplicate_file", {description: "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.", inputSchema: {path: z.string()}}, async args => text(await duplicateWorkspaceFile(ctx, args, agentName())));
   register("dohc_read_operation", {
-    description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
+    description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.",
     inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },
   }, async args => text(await readOperation(ctx, args)));
   register("dohc_undo_operation", {
-    description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.",
+    description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.",
     inputSchema: { operationId: HistoryOperationId },
   }, async args => text(await undoOperation(ctx, args, agentName())));
+  register("dohc_list_versions", {
+    description: "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
+    inputSchema: {},
+  }, async () => text(await listVersions(ctx)));
+  register("dohc_compare_version", {
+    description: "Read one page of files that differ between a version and Main. Name the version by its name or id from dohc_list_versions. currentText is Main's text and incomingText the version's; binary files carry no text. Files History does not track and secret files are left out. Continue with afterPath set to nextAfterPath until it is null. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200), afterPath: z.string().min(1).max(4096).optional() },
+  }, async args => text(await compareVersion(ctx, args)));
+  register("dohc_list_version_conflicts", {
+    description: "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
+    inputSchema: { afterConflictId: z.string().min(1).max(200).optional() },
+  }, async args => text(await listVersionConflicts(ctx, args)));
+  register("dohc_create_version", {
+    description: "Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+    inputSchema: { name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) },
+  }, async args => text(await createVersion(ctx, args)));
+  register("dohc_switch_version", {
+    description: "Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200) },
+  }, async args => text(await switchVersion(ctx, args)));
+  register("dohc_merge_version", {
+    description: "Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.",
+    inputSchema: { version: z.string().min(1).max(200) },
+  }, async args => text(await mergeVersion(ctx, args)));
+  register("dohc_resolve_version_conflict", {
+    description: "Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.",
+    inputSchema: { conflictId: z.string().min(1).max(200), resolution: versionResolutionSchema },
+  }, async args => text(await resolveVersionConflict(ctx, args)));
 
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
   // retired workspace-api file/sync routes. Cloud sync is now automatic per
@@ -223,7 +254,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_kept_copies",
     {
       description:
-        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.",
+        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.",
       inputSchema: {},
     },
     async () => text(await listKeptCopies(ctx)),
@@ -253,7 +284,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_retry_kept_edits",
     {
       description:
-        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
+        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
     },
     async (args) => text(await retryKeptEdits(ctx, args)),
@@ -368,13 +399,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     const named = documentAgentNameSchema.safeParse(server.server.getClientVersion()?.name);
     return named.success ? named.data : undefined;
   };
+  // What the agent reports about itself on a chat write: its client's product
+  // and version from the handshake, and the model it states. It travels
+  // beside the author name and never changes it.
+  const reported = (model: string | undefined) => reportedAgent(server.server.getClientVersion(), model);
 
   register(
     "dohc_edit_document",
     {
       description:
-        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
+        "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
+        allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
         path: z.string().min(1).max(4096),
         find: documentEditTextSchema.min(1).optional(),
         replacement: documentEditTextSchema,
@@ -430,7 +466,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
+        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -530,13 +566,30 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await listFileChats(ctx, args)),
   );
 
+  register("dohc_wait_for_messages", {
+    description: "Wait for the outside-run agent inbox without marking messages read. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
+    inputSchema: chatWatchInputSchema.shape,
+  }, async (args, extra) => {
+    if (waits >= 4) return text({ ok: false, reason: "Too many chat waits. Finish an existing wait and try again." });
+    waits += 1;
+    try { return text(await waitForMessages(ctx, args, extra.signal)); }
+    finally { waits -= 1; }
+  });
+
   register(
     "dohc_read_chat",
     {
       description:
-        "Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.",
+        "Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.",
       inputSchema: {
-        threadId: z.string().min(1).max(200),
+        threadId: z.string().min(1).max(200).optional(),
+        group: z.string().min(1).max(500).optional(),
+        before: z.object({
+          createdAtMs: z.number().int().nonnegative(),
+          lane: z.enum(["posts", "chat"]),
+          id: z.string().min(1).max(200),
+        }).strict().optional(),
+        limit: z.number().int().min(1).max(100).optional(),
       },
     },
     async (args) => text(await readChat(ctx, args)),
@@ -559,43 +612,45 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     needsDecision: z.boolean().optional(),
     options: z.array(z.string().min(1).max(200)).max(12).optional(),
     runId: z.string().min(1).max(200).optional(),
+    model: reportedAgentPartSchema.optional(),
   };
 
   register(
     "dohc_start_group_chat",
     {
       description:
-        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
+        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
         group: z.string().min(1).max(200),
         title: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
       },
     },
-    async (args) => text(await startGroupChat(ctx, args)),
+    async ({ model, ...args }) => text(await startGroupChat(ctx, args, agentName(), reported(model))),
   );
 
   register(
     "dohc_start_file_chat",
     {
       description:
-        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.",
+        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         title: z.string().min(1).max(200),
         body: chatWriteInput.body,
         requestId: requestIdSchema.optional(),
         runId: chatWriteInput.runId,
+        model: chatWriteInput.model,
       },
     },
-    async (args) => text(await startFileChat(ctx, args, agentName())),
+    async ({ model, ...args }) => text(await startFileChat(ctx, args, agentName(), reported(model))),
   );
 
   register(
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, and `model` behave as in dohc_start_group_chat.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),
@@ -604,7 +659,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         ...chatWriteInput,
       },
     },
-    async (args) => text(await replyToChat(ctx, args)),
+    async ({ model, ...args }) => text(await replyToChat(ctx, args, agentName(), reported(model))),
   );
 
   register(

@@ -1,5 +1,7 @@
 import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
+import type { DatasetListRefusal } from "@dohc/cli/dataset";
+import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -45,12 +47,15 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
  * kind of item, another user's, on a disk or system dohc can't check, or, on
- * Windows, has permissions dohc can't use. The message names the reason,
- * then the path from the workspace's root: one of the paths below, and
- * nothing else.
+ * Windows, has permissions dohc can't use. On Windows the refusal can also
+ * name any item in the engine folder or `.dohc/local`. The message names the
+ * reason, then the path from the workspace's root. The pattern below accepts
+ * only those folders and paths inside the last two.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
-  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
+  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/(?:engine|local)(?:\/[^/\\]+)*)?)$/;
+const PRIVATE_FOLDERS = new Set([".dohc", ".dohc/engine", ".dohc/local"]);
+const STORE_FILE = /^\.dohc\/engine\/engine\.db(?:-wal|-shm|-journal)?$/;
 // What is there, and the fix that keeps everything in it. Only an item dohc
 // never puts there can be moved without losing anything of dohc's.
 const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>([
@@ -65,16 +70,25 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
 const OTHER_OWNER_FOLDER_FIX = "Make it and everything in it yours again, then try again.";
+// Any other item in those folders. Only an administrator can make it this
+// user's, or change permissions this user can't. Moving it out could lose
+// History, since the workspace's data key is one of them.
+const ITEM_FIXES = new Map([
+  ["other-owner", "Ask an administrator to make it yours, then try again."],
+  ["not-changeable", "Ask an administrator to give your account full control of it, then try again."],
+]);
 
 /** What keeps a workspace's History, or this computer's own data, from being private, and what to do. */
 function engineFolderNotPrivateWords(message: string): string | null {
-  const [, reason = "", path] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
+  const [, reason = "", path = ""] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
   const words = NOT_PRIVATE_WORDS.get(reason);
-  if (words === undefined) return null;
+  if (words === undefined || path.split("/").some((name) => name === "." || name === "..")) return null;
   const [fact, fix] = words;
-  const folder = path === ".dohc" || path === ".dohc/engine" || path === ".dohc/local";
-  const fixed = reason === "other-owner" && folder ? OTHER_OWNER_FOLDER_FIX : fix;
-  const kept = path === ".dohc/local" ? "this computer's own data" : "its History";
+  let fixed = ITEM_FIXES.get(reason) ?? fix;
+  if (PRIVATE_FOLDERS.has(path)) fixed = reason === "other-owner" ? OTHER_OWNER_FOLDER_FIX : fix;
+  // A store file another user owns keeps the words a Mac sends for it.
+  else if (STORE_FILE.test(path) && reason === "other-owner") fixed = fix;
+  const kept = path.startsWith(".dohc/local") ? "this computer's own data" : "its History";
   return `This workspace's ${path} ${fact}, so dohc can't keep ${kept} private. ${fixed}`;
 }
 
@@ -206,6 +220,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "newer-version": NEWER_DOHC,
     "*": null,
   },
+  // A file from another person that dohc could not prepare to open in
+  // another app. Its message is the system's own, for Copy details only.
+  MarkedCopyError: { "*": null },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
@@ -310,6 +327,9 @@ function parse(error: unknown) {
 }
 
 export interface ReadError {
+  canRetry?: false;
+  refusal?: "synced-deletion";
+  details?: string;
   title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
@@ -324,6 +344,11 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "SyncedDeletionRevivalError" || name === "SyncedDeletionStaleError" || (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")) {
+    const path = error instanceof SyncedDeletionRevivalError ? error.path : "this file";
+    return { ...SYNCED_DELETION_REVIVAL_WORDS(path, name === "SyncedDeletionStaleError", error instanceof SyncedDeletionRevivalError && error.restore), mapped: false, cause: text, canRetry: false,
+      ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}) };
+  }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
   }
@@ -333,9 +358,16 @@ export function readError(error: unknown): ReadError {
   }
   const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
   if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
+  if (name === "LiveFolderError" || name === "HistoryOffError" || name === "LivePageOwnedError") {
+    const [title = "", ...body] = message.split("\n");
+    return { title, words: body.join("\n"), mapped: false, cause: null };
+  }
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
+  // The merge dialog words a merge that stopped partway, since only it knows
+  // the version. The message is the failure's own text, for Copy details.
+  if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
   if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
     "Each choice is one line of at most 200 characters.",
     "Each choice appears once.",
@@ -359,12 +391,25 @@ export function readError(error: unknown): ReadError {
   return { words: message, mapped: false, cause: plain ? null : text };
 }
 
+export function isConflictStaleTarget(error: unknown): boolean {
+  const { name, message } = parse(error);
+  return (name === "DaemonRefusalError" || name === "VersionedTextStoreError") && message === "conflict-stale-target";
+}
+
 /** A caller's sentence, then the error's words when they add to it. */
 export function withErrorWords(sentence: string, error: unknown): string {
   const { words } = readError(error);
   return words && words !== sentence && !words.startsWith(`${sentence} `)
     ? `${sentence} ${words}`
     : words || sentence;
+}
+
+/** The class of a save refused because an agent it adds is in the settings file by then. */
+export const AGENT_ID_TAKEN_ERROR = "AgentIdTakenError";
+
+/** Whether a settings save was refused because an agent it adds is in the file by then. */
+export function isAgentIdTaken(error: unknown): boolean {
+  return parse(error).name === AGENT_ID_TAKEN_ERROR;
 }
 
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
@@ -405,23 +450,6 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
 export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
 
 /**
- * The code of a Collections list this computer's server didn't give, where
- * another computer keeps the workspace's own Collections.
- */
-export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
-
-/**
- * main's words for that list: on the first line, where the workspace's
- * Collections are. After it, the server's error, which reads as it would alone.
- */
-export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string | null; failure: string } | null {
-  const { name, code, computer, message } = parse(error);
-  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
-  const [elsewhere = "", ...failure] = message.split("\n");
-  return elsewhere ? { elsewhere, computer, failure: failure.join("\n") } : null;
-}
-
-/**
  * main's refusal to use a workspace's Collections here, with its words.
  * Another computer's refusal names it, or null when the error named none.
  */
@@ -429,12 +457,105 @@ export type CollectionsRefusalRead =
   | { kind: Exclude<CollectionsRefusalKind, "elsewhere">; words: string }
   | { kind: "elsewhere"; words: string; computer: string | null };
 
+/** A moved Collection whose server dohc can't reach, with no saved copy on this computer. */
+export class CollectionServerUnreachableError extends Error {
+  override name = "CollectionServerUnreachableError";
+}
+
+/**
+ * A Collection's move to a server that stopped after this computer stopped
+ * changing it. `waited`: the request only waited for a move another request
+ * started, which reports the stop itself.
+ */
+export class CollectionMoveUnfinishedError extends Error {
+  override name = "CollectionMoveUnfinishedError";
+  readonly code: "waited" | undefined;
+  constructor(host: string, options: { cause: unknown; waited?: boolean }) {
+    super(`This Collection didn't finish moving to ${host}. Its records are kept on this computer.`, { cause: options.cause });
+    this.code = options.waited ? "waited" : undefined;
+  }
+}
+
+/** A request that failed only because it waited for another request's Collection move, which stopped. */
+export function waitedForCollectionMove(error: unknown): boolean {
+  const { name, code } = parse(error);
+  return name === "CollectionMoveUnfinishedError" && code === "waited";
+}
+
+/**
+ * A stopped Collection move's error with the Collection's name in place of "This Collection", for a row among others in Notices.
+ * The name goes in quotes, so a name such as "CRM: Accounts" never reads as a code that hides the words.
+ */
+export function namingCollectionMove(error: unknown, collection: string): unknown {
+  const { name, text } = parse(error);
+  return name === "CollectionMoveUnfinishedError" ? text.replace(": This Collection ", () => `: "${collection.replace(/\s+/g, " ")}" `) : error;
+}
+
+/** The words a Collection's page shows in place of its records when its server is out of reach and it has no saved copy. */
+export function readCollectionServerUnreachable(error: unknown): string | null {
+  const { name, message } = parse(error);
+  return name === "CollectionServerUnreachableError" && message ? message : null;
+}
+
 export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
   const { name, code, computer, message } = parse(error);
   if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
   const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
   if (kind === "elsewhere") return { kind, words: message, computer };
   return kind === undefined ? null : { kind, words: message };
+}
+
+/** A list main refused, as the error a report reads it from. */
+export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
+  if (refusal.kind === "server-unavailable") return Object.assign(new Error(`${refusal.words}\n${refusal.failure}`), { name: "ServerCollectionsUnavailableError" });
+  return Object.assign(new Error(refusal.words), { name: "CollectionsRefusalError", code: `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`,
+    computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null });
+}
+
+const LIVE_EDITING_STOPPED = "live-editing-stopped";
+const LIVE_EDITING_STOPPED_LEAD = "History is still paused. Live editing stopped on ";
+
+/**
+ * Try again on History that stopped recording, refused because it is still
+ * paused. `paths`: the pages whose live editing stopped, which keep History
+ * paused until they close; empty when something else keeps it paused. The
+ * message carries them as a JSON array, so any path survives Electron's one
+ * string whole.
+ */
+export class HistoryStillPausedError extends Error {
+  override name = "HistoryStillPausedError";
+  readonly code: typeof LIVE_EDITING_STOPPED | undefined;
+  constructor(readonly paths: readonly string[]) {
+    super(paths.length === 0 ? "History is still paused." : `${LIVE_EDITING_STOPPED_LEAD}${JSON.stringify(paths)}`);
+    this.code = paths.length === 0 ? undefined : LIVE_EDITING_STOPPED;
+  }
+}
+
+/** The pages whose live editing stopped, when that is what kept History paused after Try again; empty otherwise. */
+export function liveEditingStoppedPaths(error: unknown): readonly string[] {
+  const { name, code, message } = parse(error);
+  if (name !== "HistoryStillPausedError" || code !== LIVE_EDITING_STOPPED || !message.startsWith(LIVE_EDITING_STOPPED_LEAD)) return [];
+  let paths: unknown;
+  try { paths = JSON.parse(message.slice(LIVE_EDITING_STOPPED_LEAD.length)); } catch { return []; }
+  return Array.isArray(paths) && paths.length > 0 && paths.every((path): path is string => typeof path === "string" && path !== "")
+    ? paths : [];
+}
+
+/**
+ * Try again on History found it still taking in files: the engine refused
+ * while it reads the folder, or capture outlasted its settle budget.
+ */
+export function isHistoryCatchingUp(error: unknown): boolean {
+  return isWorkspaceUpdatingError(error) || parse(error).name === "EngineCaptureNotSettledError";
+}
+/** Main's code for a 404 from a Collection route on the server. The server sends it for a Collection the caller can't change, too. */
+export const DATASET_SERVER_NOT_FOUND = "dataset_not_found";
+export function isDatasetServerNotFound(error: unknown): boolean {
+  return parse(error).code === DATASET_SERVER_NOT_FOUND;
+}
+/** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
+export function markDatasetServerNotFound(failure: Error, status: number, body: { code?: unknown } | null | undefined): Error {
+  return status === 404 && body?.code === "not_found" ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND }) : failure;
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
@@ -450,6 +571,11 @@ export function isVolumeSharesNewFiles(error: unknown): boolean {
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
+}
+
+/** The code an error carries, read back from the string main's IPC boundary sends. */
+export function refusalCode(error: unknown): string | undefined {
+  return parse(error).code;
 }
 
 /** The engine refuses reads this way while it reads a new workspace's files. */
@@ -469,6 +595,18 @@ export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
 }
 
+/** A merge failed after some of the version's files were already in Main. */
+export function isMergeStoppedPartway(error: unknown): boolean {
+  return parse(error).name === "MergeStoppedPartwayError";
+}
+
+/** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */
+export function versionNameRefusal(error: unknown): "taken" | "invalid" | null {
+  const { name, code } = parse(error);
+  if (name !== "VersionedTextStoreError") return null;
+  return code === "version-name-conflict" ? "taken" : code === "invalid-version-name" ? "invalid" : null;
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
@@ -479,6 +617,69 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 export function isRestorePolicyRefusal(error: unknown): boolean {
   return parse(error).name === "RestorePolicyRefusalError";
 }
+
+/** A folder move or delete refused while a page in it has live editing on. Try again reruns it. */
+export function isLiveFolderRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveFolderError";
+}
+
+/** A change refused for live editing, or because History is off to check it. Each carries a title and a body. */
+export function isLiveEditingRefusal(error: unknown): boolean {
+  const { name } = parse(error);
+  return name === "LiveFolderError" || name === "HistoryOffError" || name === "LivePageOwnedError";
+}
+
+/** A page this computer owns live can't be moved, deleted or restored, or have such a change undone. */
+export function isLivePageOwnedRefusal(error: unknown): boolean {
+  return parse(error).name === "LivePageOwnedError";
+}
+
+/** "replace" is a move or rename onto a page that the move would replace. */
+export type LivePageAction = "move" | "rename" | "delete" | "restore" | "replace" | "archive";
+
+export function livePageTitle(path: string, action: LivePageAction): string {
+  return `dohc can't ${action} "${path}" while it has live editing on`;
+}
+
+/** The body for an Undo, and for a move that would replace the page. */
+export const LIVE_PAGE_TRY_AGAIN_BODY = "In Live documents, stop live editing for this page, then try again.";
+
+export function livePageBody(action: LivePageAction): string {
+  if (action === "replace") return LIVE_PAGE_TRY_AGAIN_BODY;
+  return `In Live documents, stop live editing for this page, then ${action} it again.`;
+}
+
+/** Up to three quoted names, then how many more. */
+export function namedList(names: readonly string[]): string {
+  const shown = names.slice(0, 3).map((name) => `"${name}"`);
+  const more = names.length - shown.length;
+  if (more > 0) return `${shown.join(", ")} and ${more} more`;
+  return shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
+/** Several pages one move or delete could not change, for live editing. */
+export function livePagesTitle(paths: readonly string[], action: "move" | "delete"): string {
+  return `dohc can't ${action} ${namedList(paths)} while they have live editing on`;
+}
+
+export function livePagesBody(action: "move" | "delete"): string {
+  return `In Live documents, stop live editing for these pages, then ${action} them again.`;
+}
+
+/** The change an Undo would reverse: a rename, a move, or a copy's creation. */
+export type LivePageUndone = "renaming" | "moving" | "creating";
+
+export function livePageUndoTitle(path: string, undone: LivePageUndone): string {
+  return `dohc can't undo ${undone} "${path}" while it has live editing on`;
+}
+
+// Without capture, dohc can't check a page or folder for live editing.
+export function historyOffTitle(path: string, action: "move" | "rename" | "delete"): string {
+  return `dohc can't ${action} "${path}" while History is off`;
+}
+
+export const HISTORY_OFF_PAGE_BODY = "Without History, dohc can't check whether this page has live editing on. Restart dohc to try again.";
+export const HISTORY_OFF_FOLDER_BODY = "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
 
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {

@@ -307,6 +307,16 @@ export function frontmatterValueYaml(value: unknown): string {
   })
 }
 
+/** One frontmatter value as YAML on one line: a list in brackets, a map in braces. */
+export function frontmatterValueFlowYaml(value: unknown): string {
+  return yaml.dump(value, {
+    schema: losslessFrontmatterSchema,
+    lineWidth: -1,
+    sortKeys: false,
+    flowLevel: 0,
+  }).trimEnd()
+}
+
 type FrontmatterBlock = {
   open: string
   /** The lines between the delimiters, each with its line break. */

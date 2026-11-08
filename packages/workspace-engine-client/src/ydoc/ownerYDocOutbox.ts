@@ -18,6 +18,7 @@ export type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 const OWNER_YDOC_OUTBOX_METHOD = {
   append: "ydoc.ownerOutbox.append",
   readPending: "ydoc.ownerOutbox.readPending",
+  listRestoreFenced: "ydoc.ownerOutbox.listRestoreFenced",
   acknowledge: "ydoc.ownerOutbox.acknowledge",
   quarantine: "ydoc.ownerOutbox.quarantine",
   retry: "ydoc.ownerOutbox.retry",
@@ -26,6 +27,12 @@ const OWNER_YDOC_OUTBOX_METHOD = {
 interface OwnerYDocOutboxLimits {
   readonly maxPendingBytes: number;
   readonly maxPendingAgeMs: number;
+}
+
+export interface OwnerYDocOutboxRestoreFenced {
+  readonly outboxId: string;
+  readonly binding: LiveObjectBinding;
+  readonly pendingBytes: number;
 }
 
 export interface OwnerYDocOutboxAppendInput {
@@ -309,6 +316,40 @@ export class OwnerYDocOutbox {
         { workspace: this.workspace },
       ),
     );
+  }
+
+  async listRestoreFenced(input: { readonly after?: string; readonly limit?: number } = {}): Promise<{
+    readonly queues: readonly OwnerYDocOutboxRestoreFenced[];
+    readonly next: string | null;
+  }> {
+    this.assertLive();
+    const limit = input.limit ?? 64;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) throw new TypeError("Invalid recovery page size.");
+    if (input.after !== undefined) stringField({ after: input.after }, "after");
+    const raw = record(await this.requester.request(
+      OWNER_YDOC_OUTBOX_METHOD.listRestoreFenced,
+      { after: input.after ?? null, limit },
+      { workspace: this.workspace },
+    ), "owner outbox recovery list");
+    if (Object.keys(raw).sort().join() !== "next,queues" || !Array.isArray(raw.queues) || raw.queues.length > limit) {
+      throw new TypeError("Invalid owner outbox recovery list.");
+    }
+    let previous = input.after ?? "";
+    const queues = raw.queues.map(value => {
+      const row = record(value, "owner outbox recovery descriptor");
+      if (Object.keys(row).sort().join() !== "binding,outboxId,pendingBytes") {
+        throw new TypeError("Invalid owner outbox recovery descriptor.");
+      }
+      const outboxId = stringField(row, "outboxId");
+      if (outboxId <= previous) throw new TypeError("Owner outbox recovery cursor did not advance.");
+      previous = outboxId;
+      return { outboxId, binding: parseLiveObjectBinding(row.binding), pendingBytes: wireInteger(row, "pendingBytes", 1) };
+    });
+    const next = raw.next === null ? null : stringField(raw, "next");
+    if (next !== null && (queues.length === 0 || next !== previous)) {
+      throw new TypeError("Invalid owner outbox recovery continuation.");
+    }
+    return { queues, next };
   }
 
   async readPending(outboxId: string): Promise<OwnerYDocOutboxPending> {

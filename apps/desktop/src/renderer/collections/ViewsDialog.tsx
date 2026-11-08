@@ -125,7 +125,7 @@ export function ViewsDialog(props: {
         className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
-          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Views</h2>
+          <h2 className="m-0 flex-1 text-base font-semibold text-ink">Views</h2>
           <IconButton aria-label="Close" title="Close" onClick={props.onClose}>
             <X size={14} aria-hidden />
           </IconButton>
@@ -158,7 +158,6 @@ export function ViewsDialog(props: {
                   Cancel
                 </SecondaryButton>
                 <PrimaryButton
-                  className="px-3 py-1.5 text-xs"
                   disabled={pending}
                   onClick={() => void saveRename(view.name)}
                 >
@@ -189,7 +188,6 @@ export function ViewsDialog(props: {
                   // its focus. Fixed height: the row's secondaries are 30px.
                   <DangerButton
                     aria-label={`Delete view ${view.name}`}
-                    className="h-[30px] text-xs"
                     autoFocus
                     disabled={pending}
                     onClick={() => void remove(view.name)}

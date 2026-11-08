@@ -108,14 +108,36 @@ impl Ydoc {
     /// Build the editor's native inline nodes for single-paragraph fixtures.
     pub fn richdoc_wikilinks_for_test(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
         assert!(!markdown.contains(['\n', '\r']));
-        self.stage_source_preserving_edit(markdown, |staged| {
+        self.richdoc_wikilinks_after_markdown_for_test("", markdown)
+    }
+
+    pub fn richdoc_wikilinks_after_markdown_for_test(
+        &self,
+        prefix: &str,
+        markdown: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        assert!(!markdown.contains(['\n', '\r']));
+        let source = if prefix.is_empty() {
+            markdown.to_owned()
+        } else {
+            format!("{prefix}\n\n{markdown}")
+        };
+        self.stage_source_preserving_edit(&source, |staged| {
+            if !prefix.is_empty() {
+                staged.rewrite_content_to_markdown(ContentKind::Richdoc, prefix)?;
+            }
             let body = staged.doc.get_or_insert_xml_fragment(ROOT_BODY);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
             let mut txn = staged.doc.transact_mut();
             meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
             let len = body.len(&txn);
-            body.remove_range(&mut txn, 0, len);
-            let paragraph = body.insert(&mut txn, 0, XmlElementPrelim::empty("paragraph"));
+            let index = if prefix.is_empty() {
+                body.remove_range(&mut txn, 0, len);
+                0
+            } else {
+                len
+            };
+            let paragraph = body.insert(&mut txn, index, XmlElementPrelim::empty("paragraph"));
             let mut rest = markdown;
             while let Some(start) = rest.find("[[") {
                 if start > 0 {

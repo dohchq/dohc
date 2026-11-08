@@ -167,7 +167,7 @@ export function UsageRecordCard(props: {
   );
   return (
     <section data-testid="usage-record" data-state={readable ? (readable.enabled ? "on" : "off") : view.status}
-      aria-labelledby={titleId} className="mt-4 overflow-hidden rounded-lg border border-line bg-panel">
+      aria-labelledby={titleId} className="mt-8 overflow-hidden rounded-lg border border-line bg-panel">
       <header className="flex items-center gap-2 border-b border-line px-4 py-3 text-[13px]">
         <Shield size={14} aria-hidden className="shrink-0 text-muted" />
         <h3 id={titleId} className="m-0 text-[13px] font-medium text-ink">What dohc records about use</h3>
@@ -276,13 +276,15 @@ export function UsageRecordClearConfirm(props: { record: Readable; card?: boolea
   return (
     <Dialog intent="danger" title="Clear the usage record?" confirmLabel="Clear record"
       testId="usage-record-clear-confirm" cancelTestId="usage-record-clear-cancel" confirmTestId="usage-record-clear-action"
-      onCancel={props.onCancel} onConfirm={props.onConfirm}>
+      onCancel={props.onCancel} onConfirm={props.onConfirm}
+      details={
+        <div className="mt-3">
+          <CopyButton label="Copy the record" testId="usage-record-clear-copy" getText={() => usageRecordText(props.record)} />
+        </div>
+      }>
       <p className="mt-2 text-[13px] text-muted">
         This deletes every saved count on this computer. dohc cannot restore them. Copy the record first to keep it.
       </p>
-      <div className="mt-3">
-        <CopyButton label="Copy the record" testId="usage-record-clear-copy" getText={() => usageRecordText(props.record)} />
-      </div>
     </Dialog>
   );
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { createRequire } from 'node:module';
@@ -19,10 +19,11 @@ for (const files of [5000, 30000]) test('Go to receipts require every fixture ki
 });
 
 test('the dedicated relay admits seven peer DMs, scoped agent claims and the mounted file grant', { timeout: 180_000 }, async () => {
-  const scratch = await mkdtemp(join(tmpdir(), 'dohc-goto-fixture-'));
+  // The relay's deployment refuses a path through a symlink, such as macOS's /var.
+  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dohc-goto-fixture-')));
   let relay;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(scratch, 'relay.sqlite') });
+    relay = await spawnSyncRelay({ dbPath: join(scratch, 'relay', 'relay.sqlite') });
     const seeded = await seedGoToPeers(relay.baseUrl, 'goto-owner', AbortSignal.timeout(120_000));
     assert.equal(seeded.admissions.length, 7);
     const accounts = new Set(), agents = new Set();
@@ -59,7 +60,7 @@ test('the dedicated relay admits seven peer DMs, scoped agent claims and the mou
     assert.ok(mounted.ops.some(op => op.payload.payloadAfterPath === 'mounted.txt'));
   } finally {
     await relay?.stop();
-    const owned = relative(resolve(tmpdir()), resolve(scratch));
+    const owned = relative(await realpath(tmpdir()), resolve(scratch));
     assert.ok(!isAbsolute(owned) && !owned.startsWith('..') && owned.startsWith('dohc-goto-fixture-'));
     await rm(scratch, { recursive: true, force: true });
   }

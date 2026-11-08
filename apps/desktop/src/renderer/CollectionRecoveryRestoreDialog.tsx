@@ -36,7 +36,7 @@ export function CollectionRecoveryRestoreDialog(props: {
   }
   return <Overlay onClose={busy?undefined:() => { void cancel(); }} panelProps={{role:"dialog","aria-modal":true,"aria-labelledby":"collection-recovery-restore-title"}}>
     <div className="dohc-elevated w-110 max-w-[85vw] rounded-xl border border-line bg-panel p-5">
-      <h2 id="collection-recovery-restore-title" className="m-0 text-sm font-semibold text-ink">Restore a Collection</h2>
+      <h2 id="collection-recovery-restore-title" className="m-0 text-base font-semibold text-ink">Restore a Collection</h2>
       {recovery ? <>
         <p className="text-[13px] text-ink">{recovery.revision.definition.name}</p>
         <p className="text-[13px] text-muted">This restores records, uploaded files, rules, and history on this computer. Existing Collections stay unchanged.</p>
@@ -44,7 +44,7 @@ export function CollectionRecoveryRestoreDialog(props: {
         <label className="my-4 flex items-start gap-2 text-[13px] text-ink"><input type="checkbox" checked={stopped} disabled={busy} onChange={event => setStopped(event.target.checked)} />I stopped the old host and will not restart it for this Collection.</label>
       </> : <p className="text-[13px] text-muted">Choose a private .dohc-recovery file for this workspace. Review it before restoring the Collection.</p>}
       <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => { void cancel(); }}>Cancel</SecondaryButton>
-        {recovery ? <PrimaryButton disabled={busy||!stopped} onClick={() => { void restore(); }}>{busy?"Restoring…":"Restore Collection"}</PrimaryButton> : <PrimaryButton disabled={busy} onClick={() => { void choose(); }}>{busy?"Checking recovery…":"Choose recovery file"}</PrimaryButton>}
+        {recovery ? <PrimaryButton disabled={busy||!stopped} onClick={() => { void restore(); }}>{busy?"Restoringâ€¦":"Restore Collection"}</PrimaryButton> : <PrimaryButton disabled={busy} onClick={() => { void choose(); }}>{busy?"Checking recoveryâ€¦":"Choose recovery file"}</PrimaryButton>}
       </div>
     </div>
   </Overlay>;

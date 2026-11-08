@@ -10,6 +10,7 @@ import { BUTTON_INSPECTION_HOST_LIVE_MS } from "./automationButtonInspections";
 import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED } from "@dohc/automation-executor/button-presser";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import type { StorageContext } from "./storage/context";
 import {
   AUTOMATION_PRESS_LIST_LIMIT,
   AUTOMATION_PRESS_PRUNE_BATCH,
@@ -523,13 +524,18 @@ describe("relayed Button presses", () => {
   it("keeps every press for the whole retention window, so an old press id never runs twice", async () => {
     const roomy = () => new TokenBucketLimiter(10_000, 1, 10);
     const r = await relay({ overrides: { automationPressRateLimiters: { ...createAutomationPressRateLimiters(), press: roomy(), host: roomy() } } });
+    // 750 commits, one each. None tests crash durability, so skip the per-commit disk flush.
+    (r.storage as unknown as StorageContext).db.exec("PRAGMA synchronous = OFF");
     await host(r);
+    const firstPressMs = clock;
     for (let index = 0; index < 250; index += 1) {
       await press(r, { pressId: `p-${index}` });
       const [listed] = await list(r);
       await post(r, "accept", { hostPressIds: [listed!.hostPressId] });
       await post(r, "settle", { hostPressId: listed!.hostPressId, outcome: "done", error: null });
     }
+    // The last moment p-0 is inside its retention window.
+    clock = firstPressMs + AUTOMATION_PRESS_RETENTION_MS;
     expect(await (await press(r, { pressId: "p-0" })).json()).toMatchObject({ pressId: "p-0", state: "settled", outcome: "done" });
     expect(await list(r)).toEqual([]);
   });

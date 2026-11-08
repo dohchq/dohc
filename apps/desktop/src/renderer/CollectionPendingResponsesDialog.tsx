@@ -45,7 +45,7 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
   }
   useEffect(() => { void load(); return () => request.current?.abort(); }, []);
   return <Overlay onClose={props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Pending responses", className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(720px,92vw)] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink" }}>
-    <div className="flex items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold">Pending responses · {props.name}</h2><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="m-0 text-base font-semibold">Pending responses · {props.name}</h2><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
     <p className="m-0 text-[12px] text-muted">These responses may have been saved before the participant lost confirmation. Review each result before clearing or cancelling it.</p>
     {/* Lines stand in only for a page not yet shown; a refresh or a change keeps its page and says so. */}
     {busy && (selected || page ? <p role="status" className="m-0 text-[12px] text-muted">{selected ? selected.outcome === "committed" ? "Clearing retry…" : "Cancelling response…" : "Loading pending responses…"}</p> : <SkeletonRows label="Loading pending responses…" />)}
@@ -57,7 +57,7 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
     </div>)}</div>
     <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => void load()}>Refresh</SecondaryButton><SecondaryButton disabled={busy || !page?.nextAfter} onClick={() => { if (page?.nextAfter) void load(page.nextAfter); }}>More responses</SecondaryButton></div>
     {selected && <Overlay onClose={() => { if (!busy) setSelected(null); }} panelProps={{ role: "alertdialog", "aria-modal": true, "aria-label": "Clear pending response", className: "dohc-elevated dohc-pop-in flex w-[min(480px,92vw)] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink" }}>
-      <h2 className="m-0 text-sm font-semibold">{selected.outcome === "committed" ? "Clear retry" : "Cancel response"} for {selected.operation}?</h2><p className="m-0 text-[13px] text-muted">{selected.outcome === "committed" ? "The response is saved. The participant may not have seen its confirmation. Clearing lets them submit again. This cannot be undone." : "Cancellation stops this response and prevents its old retry from saving later. The participant must start again. This cannot be undone."}</p>
+      <h2 className="m-0 text-base font-semibold">{selected.outcome === "committed" ? "Clear retry" : "Cancel response"} for {selected.operation}?</h2><p className="m-0 text-[13px] text-muted">{selected.outcome === "committed" ? "The response is saved. The participant may not have seen its confirmation. Clearing lets them submit again. This cannot be undone." : "Cancellation stops this response and prevents its old retry from saving later. The participant must start again. This cannot be undone."}</p>
       <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => setSelected(null)}>Keep retry</SecondaryButton><DangerButton disabled={busy} onClick={() => void reconcile()}>{selected.outcome === "committed" ? "Clear retry" : "Cancel response"}</DangerButton></div>
     </Overlay>}
   </Overlay>;

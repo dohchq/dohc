@@ -9,6 +9,11 @@ use dohc_engine_collab::{
 };
 
 pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
+    fixture_at("owner.md")
+}
+
+/// The owner fixture with its page at `path`.
+fn fixture_at(path: &str) -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let (dir, _, mut store) = open_store();
     seed_identity(&mut store);
     VersionedTextStore::new(&mut store)
@@ -22,7 +27,7 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     seed_text_head(
         &mut store,
         "owner",
-        "owner.md",
+        path,
         fixture["markdown"].as_str().unwrap(),
     );
     let key = DocKey::new("ws", "main", "owner").unwrap();
@@ -49,8 +54,8 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
             main_version_id: "main".into(),
             object_id: "owner".into(),
             lineage_claim_id: dohc_engine_storage::hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            current_path: path.into(),
+            selector_paths: vec![path.into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -65,8 +70,7 @@ pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     };
     store
         .write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE ydoc_docs SET path='owner.md'", [])
-                .unwrap();
+            tx.execute("UPDATE ydoc_docs SET path=?1", [path]).unwrap();
             install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
         })
         .unwrap();
@@ -93,10 +97,10 @@ fn candidate(
         json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":digest}),
     )
 }
-#[test]
-fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
+#[tokio::test]
+async fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     use dohc_engine_collab::owner_outbox::release;
-    let (_dir, mut store, observed, checkpoint) = fixture();
+    let (dir, mut store, observed, checkpoint) = fixture();
     let key = DocKey::new("ws", "main", "owner").unwrap();
     store
         .write_with(&NoFaults, |tx| {
@@ -117,14 +121,22 @@ fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     let mut op = candidate(&mut store, &observed, &update, 0);
     op.origin_id = "peer".into();
     op.relay_seq = Some(2);
-    let result = apply_ydoc_envelope(
-        &mut store,
-        &mut dohc_engine_collab::WriterDocCache::new(),
-        &op,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    cache.reader_resolver = Some(std::sync::Arc::new(
+        dohc_engine_collab::reader_resolver::ReaderResolver::new(std::sync::Arc::new(
+            dohc_engine_reader::Reader::new(Some(super::markdown_write_hold::witness_reader(
+                &dir,
+                "witness-safe",
+            ))),
+        )),
+    ));
+    let result = loop {
+        match apply_ydoc_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases) {
+            Ok(result) => break result,
+            Err(SyncError::MarkdownWitnessCheckPending { pending, .. }) => pending.resolve().await,
+            Err(error) => panic!("{error:?}"),
+        }
+    };
     assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
     assert!(result.refusals.is_empty());
     store
@@ -780,4 +792,315 @@ fn reused_accepted_state_charges_a_fresh_read_and_drops_refused_bytes() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
+}
+
+fn folder_check(store: &EngineStore, folder: &str) -> Option<crate::LivePageUnderFolder> {
+    store
+        .read_with(|conn| crate::live_page_under_folder(conn, "ws", "main", folder))
+        .unwrap()
+}
+
+/// A page this computer owns refuses a move of any folder above it, before
+/// any edit arrives, but not a move of the page itself or of a sibling that
+/// shares the folder's name as a prefix.
+#[test]
+fn an_owned_page_refuses_a_move_of_each_folder_above_it() {
+    let (_dir, store, _, _) = fixture_at("notes/box/inner/owner.md");
+    for folder in ["notes/box/inner", "notes/box", "notes"] {
+        assert_eq!(
+            folder_check(&store, folder),
+            Some(crate::LivePageUnderFolder::Owned),
+            "{folder}"
+        );
+    }
+    for path in [
+        "notes/box/inner/owner.md",
+        "notes/bo",
+        "notes/box/in",
+        "other",
+    ] {
+        assert_eq!(folder_check(&store, path), None, "{path}");
+    }
+    let (_dir, store, _, _) = fixture_at("notes/box2/owner.md");
+    assert_eq!(folder_check(&store, "notes/box"), None);
+}
+
+/// The page's head is where the folder check looks, so a binding's stale
+/// `currentPath` neither hides the page nor refuses a folder it left.
+#[test]
+fn an_owned_page_is_found_by_its_head_not_its_binding_path() {
+    let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','elsewhere/owner.md')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        folder_check(&store, "notes/box"),
+        Some(crate::LivePageUnderFolder::Owned)
+    );
+    assert_eq!(folder_check(&store, "elsewhere"), None);
+}
+
+/// An accepted edit installed in the owned page, but not yet settled into
+/// its file, leaves the folder move refused.
+#[test]
+fn an_owned_page_with_an_unsaved_accepted_edit_refuses_a_folder_move() {
+    let (_dir, mut store, observed, checkpoint) = fixture_at("notes/box/owner.md");
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let update = doc.richdoc_append_paragraph("collaborator edit");
+    store
+        .write_with(&NoFaults, |tx| {
+            apply_frame_in_tx(
+                tx,
+                "ws",
+                &OwnerAcceptedFrameInput {
+                    binding: observed.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: 1,
+                    expected_native_head_sequence: observed.native_head_sequence,
+                    previous_accepted_cursor: 0,
+                    journal_cursor: 1,
+                    update_bytes: update,
+                },
+                3,
+            )
+        })
+        .unwrap();
+    let accepted: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT accepted_cursor FROM ydoc_owner_bindings",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(accepted, 1, "the edit is installed");
+    assert_eq!(
+        folder_check(&store, "notes/box"),
+        Some(crate::LivePageUnderFolder::Owned)
+    );
+}
+
+/// A folder with no live page moves, and a single-path move of the owned page
+/// keeps its own check, which reads only the host's activations.
+#[test]
+fn a_folder_without_a_live_page_moves_and_the_page_check_is_unchanged() {
+    let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
+    seed_text_head(&mut store, "plain", "drafts/plain.md", "plain");
+    assert_eq!(folder_check(&store, "drafts"), None);
+    store
+        .read_with(|conn| {
+            crate::ensure_no_adopted_owner_under_path(conn, "ws", "main", "notes/box/owner.md")
+        })
+        .unwrap();
+}
+
+fn page_check(store: &EngineStore, path: &str) -> bool {
+    store
+        .read_with(|conn| crate::live_page_owned(conn, "ws", "main", path))
+        .unwrap()
+}
+
+/// A page this computer owns refuses its own move, and only its own: an
+/// unbound page beside it, its folder and a prefix of its path move.
+#[test]
+fn an_owned_page_refuses_its_own_move() {
+    let (_dir, mut store, _, _) = fixture_at("notes/box/owner.md");
+    seed_text_head(&mut store, "plain", "notes/box/plain.md", "plain");
+    assert!(page_check(&store, "notes/box/owner.md"));
+    for path in [
+        "notes/box/plain.md",
+        "notes/box",
+        "notes/box/owner",
+        "other.md",
+    ] {
+        assert!(!page_check(&store, path), "{path}");
+    }
+    assert_eq!(
+        folder_check(&store, "notes/box"),
+        Some(crate::LivePageUnderFolder::Owned)
+    );
+}
+
+/// The page check reads the head's path, as the folder check does, so a
+/// binding's stale `currentPath` neither hides the page nor refuses its old path.
+#[test]
+fn an_owned_page_move_is_found_by_its_head_not_its_binding_path() {
+    let (_dir, mut store, _, _) = fixture_at("notes/owner.md");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','elsewhere/owner.md')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert!(page_check(&store, "notes/owner.md"));
+    assert!(!page_check(&store, "elsewhere/owner.md"));
+}
+
+/// Once Stop releases the owner binding, the page and its folder move.
+#[test]
+fn a_released_owned_page_moves() {
+    use dohc_engine_collab::owner_outbox::release;
+    let (_dir, mut store, observed, _) = fixture_at("notes/owner.md");
+    let key = DocKey::new("ws", "main", "owner").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            release::request_in_tx(tx, &key, 20)?;
+            release::release_in_tx(
+                tx,
+                &observed.binding,
+                Some(observed.accepted_cursor),
+                None,
+                21,
+                |_, _, _, _, _| Ok(()),
+            )
+        })
+        .unwrap();
+    assert!(!page_check(&store, "notes/owner.md"));
+    assert_eq!(folder_check(&store, "notes"), None);
+}
+
+/// A 167.1 build deleted an owner-bound page and its lineage but kept its
+/// owner rows. The queued delete waited for owner admission and held back the
+/// moments after it. The writable open's sweep closes the binding, and then
+/// the delete, B and C publish.
+#[test]
+fn a_stuck_167_1_delete_and_the_moments_after_it_publish_after_the_sweep() {
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxError,
+        retirement::{close_retired_in_tx, stranded_in},
+    };
+    let (_dir, mut store, _observed, _checkpoint) = fixture();
+    let owner_text: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256 FROM snapshots WHERE object_id='owner'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let journal = |store: &mut EngineStore, payload: serde_json::Value, now_ms: i64| {
+        let TxnOutcome::Committed(seq) = journal_local_replication_op(
+            store,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "moment.append",
+            &payload,
+            now_ms,
+            &NoFaults,
+        )
+        .unwrap() else {
+            panic!("the moment must commit")
+        };
+        seq
+    };
+    let delete = journal(
+        &mut store,
+        json!({
+            "versionId": "main", "objectId": "owner", "path": "owner.md", "operation": "delete",
+            "payloadBeforePath": "owner.md", "payloadBeforeBlobSha256": owner_text,
+            "payloadAfterPath": "owner.md", "payloadAfterBlobSha256": owner_text,
+            "beforePath": "owner.md", "beforeBlobSha256": owner_text,
+        }),
+        10,
+    );
+    let mut later = Vec::new();
+    for (object, path, text) in [("b", "notes/b.md", "# B\n"), ("c", "notes/c.md", "# C\n")] {
+        let digest = seed_text_head(&mut store, object, path, text);
+        later.push((
+            digest.clone(),
+            journal(
+                &mut store,
+                json!({
+                    "versionId": "main", "objectId": object, "path": path, "operation": "write",
+                    "payloadBeforePath": null, "payloadBeforeBlobSha256": null,
+                    "payloadAfterBlobSha256": digest, "beforeBlobSha256": "",
+                }),
+                11,
+            ),
+        ));
+    }
+    // What the 167.1 delete left: the page and its lineage gone, its owner rows kept.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "DELETE FROM ydoc_updates WHERE object_id='owner';
+                 DELETE FROM ydoc_snapshots WHERE object_id='owner';
+                 DELETE FROM ydoc_deferred_updates WHERE object_id='owner';
+                 DELETE FROM ydoc_base_relay_candidates WHERE object_id='owner';
+                 DELETE FROM ydoc_docs WHERE object_id='owner';
+                 DELETE FROM snapshots WHERE object_id='owner';",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let push = |store: &mut EngineStore| {
+        let SyncPassOutcome::Complete {
+            owner_admission_pending,
+            ..
+        } = client
+            .push_workspace(store, "ws", &NoFaults, &crate::NoLiveLeases, 12, 1_000_000)
+            .unwrap()
+        else {
+            panic!("push failed")
+        };
+        owner_admission_pending
+    };
+    let stuck = push(&mut store);
+    assert_eq!(
+        stuck
+            .iter()
+            .map(|pending| (pending.object_id.as_str(), pending.origin_seq))
+            .collect::<Vec<_>>(),
+        vec![("owner", delete)]
+    );
+    assert!(read_pushed_seq(&store, "ws", "local").unwrap() < delete);
+
+    store
+        .write_with(&NoFaults, |tx| {
+            for key in stranded_in(tx)? {
+                close_retired_in_tx(tx, &key, 20)?;
+            }
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(push(&mut store).is_empty());
+    assert_eq!(
+        read_pushed_seq(&store, "ws", "local").unwrap(),
+        later.last().unwrap().1
+    );
+    let pushes = client.transport().pushes.lock().unwrap();
+    let published = |digest: &str| {
+        pushes.iter().flat_map(|push| &push.ops).any(|op| {
+            op.payload
+                .get("payloadAfterBlobSha256")
+                .and_then(|value| value.as_str())
+                == Some(digest)
+        })
+    };
+    assert!(
+        pushes
+            .iter()
+            .flat_map(|push| &push.ops)
+            .any(|op| op.origin_seq == delete)
+    );
+    for (digest, _) in &later {
+        assert!(published(digest), "{digest} reaches the relay");
+    }
 }

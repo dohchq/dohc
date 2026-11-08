@@ -3,25 +3,29 @@ import { AgentLaunch, AgentLaunchProfile, agentProfileArguments, launchCommand, 
 import { tokenizeRunnerCommand } from "./chatRunnerProcess";
 
 describe("agent launch profiles", () => {
-  it("requires Claude's noninteractive permission flag version", () => {
-    for (const version of [null, "2.1.258", "2.0.999", "1.9.999", "2.1.259-beta", "unknown"]) {
+  it("requires Claude Code 2.1.316 or later", () => {
+    for (const version of [null, "2.1.315", "2.1.295", "2.1.259", "2.0.999", "1.9.999", "2.1.316-beta", "unknown"]) {
       expect(supportsAgentProfile("claude", version)).toBe(false);
     }
-    for (const version of ["2.1.259", "2.1.278", "2.2.0", "3.0.0"]) {
+    for (const version of ["2.1.316", "2.1.317", "2.2.0", "3.0.0"]) {
       expect(supportsAgentProfile("claude", version)).toBe(true);
     }
     expect(supportsAgentProfile("codex", "0.155.1")).toBe(true);
     expect(supportsAgentProfile("opencode", "1.18.31")).toBe(false);
   });
-  it("uses stdin, workspace writes, no Git requirement, and no persistent Codex session", () => {
+  it("uses stdin, the run's own sandbox, no Git requirement, and no persistent Codex session", () => {
     const profile = { tool: "codex", executable: "C:\\Program Files\\Codex\\codex.exe" } as const;
-    expect(agentProfileArguments(profile)).toEqual(["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"]);
+    expect(agentProfileArguments(profile)).toEqual(["exec", "--config", "approval_policy=never", "--skip-git-repo-check", "--ephemeral", "-"]);
+    expect(agentProfileArguments(profile, ["--config", "x=1"])).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--skip-git-repo-check", "--ephemeral", "-"]);
+    // A reply-only run loads none of the person's saved command rules.
+    expect(agentProfileArguments(profile, ["--config", "x=1"], true)).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--ignore-rules", "--skip-git-repo-check", "--ephemeral", "-"]);
     expect(tokenizeRunnerCommand(launchCommand(profile))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
     expect(AgentLaunch.parse(profile)).toEqual(profile);
   });
   it("allows workspace edits and chat replies while denying unattended prompts", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
-    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]);
+    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]);
+    expect(agentProfileArguments(profile, [], true)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
     expect(tokenizeRunnerCommand(launchCommand(profile))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
   });
   it("starts a chosen tool over a typed command, and needs one of them", () => {

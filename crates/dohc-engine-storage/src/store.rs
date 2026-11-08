@@ -38,6 +38,15 @@ pub struct EngineStore {
     passive: bool,
     completed_batch: CompletionBatch,
     flushes: crate::flush::Flushes,
+    opening: u64,
+    wal_pressure: Arc<crate::checkpoint::WalPressure>,
+}
+
+/// The number of the next open of any store in this process.
+static NEXT_OPENING: AtomicU64 = AtomicU64::new(1);
+
+fn next_opening() -> u64 {
+    NEXT_OPENING.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The outcome of a transactional unit run through
@@ -91,11 +100,13 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 
 impl EngineStore {
     /// A bounded wait for the next checkpoint cycle, run off the writer.
-    pub fn checkpoint_cycle(&self) -> impl Fn() + Send + Sync + use<> {
+    pub fn checkpoint_cycle(&self) -> impl Fn() -> crate::CheckpointWait + Send + Sync + use<> {
         let wait = self.checkpoints.as_ref().map(|c| c.next_cycle());
         move || {
             if let Some(wait) = &wait {
-                wait();
+                wait()
+            } else {
+                crate::CheckpointWait::Finished
             }
         }
     }
@@ -121,6 +132,8 @@ impl EngineStore {
             passive: true,
             completed_batch: Arc::default(),
             flushes,
+            opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -157,6 +170,8 @@ impl EngineStore {
             harness_commits: 0,
             completed_batch: Arc::default(),
             flushes,
+            opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -181,6 +196,8 @@ impl EngineStore {
             passive: false,
             completed_batch: Arc::default(),
             flushes,
+            opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -207,6 +224,8 @@ impl EngineStore {
             passive: false,
             completed_batch: Arc::default(),
             flushes,
+            opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -241,6 +260,8 @@ impl EngineStore {
             passive,
             completed_batch: Arc::default(),
             flushes: crate::flush::Flushes::read_only(),
+            opening: next_opening(),
+            wal_pressure: Arc::default(),
         }
     }
 
@@ -316,13 +337,18 @@ impl EngineStore {
             .map_or((0, 0), |c| c.startup_work_for_test())
     }
 
-    #[cfg(test)]
-    pub(crate) fn checkpoint_completed_for_test(&self) -> u64 {
+    /// How many checkpoint requests the background worker has finished.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn checkpoint_completed_for_test(&self) -> u64 {
         self.checkpoints.as_ref().unwrap().completed_for_test()
     }
 
-    #[cfg(test)]
-    pub(crate) fn wait_for_checkpoint_completion_for_test(&self, before: u64) {
+    /// Returns once the background worker finished a checkpoint request
+    /// after the `before`th, which it must within a minute.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn wait_for_checkpoint_completion_for_test(&self, before: u64) {
         self.checkpoints
             .as_ref()
             .unwrap()
@@ -332,10 +358,15 @@ impl EngineStore {
     fn prepare_write(&mut self, background: bool) -> Result<(), StorageError> {
         #[cfg(feature = "fault-injection")]
         let _admission = crate::capture_phase::Measure::new("prepare_write");
-        if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
-            let replacement = crate::checkpoint::Checkpoints::start(&self.database_path)?;
+        if let Some(stopped) = self.checkpoints.as_ref().filter(|c| c.has_stopped()) {
+            let replacement = stopped.restart(&self.database_path)?;
             replacement.request();
             self.checkpoints.replace(replacement);
+        }
+        if self.wal_pressure.held() {
+            self.wal_pressure
+                .measure(&self.conn)
+                .map_err(StorageError::persist)?;
         }
         if let Some(checkpoints) = &self.checkpoints {
             checkpoints.prepare_for_write(&self.conn, background)?;
@@ -369,6 +400,42 @@ impl EngineStore {
     /// filesystem-backed policy reads.
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    /// This open's number. No other open of any store in this process shares
+    /// it, so what a caller keeps for one open never reaches another, even of
+    /// the same file after a restore.
+    pub fn opening(&self) -> u64 {
+        self.opening
+    }
+
+    /// What this open's held readers stop for: the writer measures the WAL
+    /// before each write while one is counted, so writes keep their room.
+    pub fn wal_pressure(&self) -> Arc<crate::checkpoint::WalPressure> {
+        Arc::clone(&self.wal_pressure)
+    }
+
+    /// Measure the WAL now, for a held reader about to start; whether it
+    /// presses, which refuses the reader. With no held reader counted, a WAL
+    /// that presses first gets the writer's bounded checkpoint, and the
+    /// background worker is asked for the rest, before it is measured again:
+    /// an idle store whose last held reader gave way admits the next once
+    /// its WAL is backfilled, with no write needed to start that.
+    pub fn measure_wal_pressure(&self) -> Result<bool, StorageError> {
+        let pressed = self
+            .wal_pressure
+            .measure(&self.conn)
+            .map_err(StorageError::persist)?;
+        if !pressed || self.wal_pressure.held() {
+            return Ok(pressed);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+            checkpoints.request();
+        }
+        self.wal_pressure
+            .measure(&self.conn)
+            .map_err(StorageError::persist)
     }
 
     /// Flush `file` so that it persists before every later commit of this

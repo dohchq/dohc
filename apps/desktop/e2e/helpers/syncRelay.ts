@@ -1,8 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 
 // Spawns the real sync-relay service (services/sync-relay) as a child
 // process for the 0P sync E2E specs — the same pattern as the relay's own
@@ -28,6 +31,11 @@ export interface SyncRelayLinkBoundary {
 }
 
 export async function spawnSyncRelay(input: {
+  /**
+   * The relay database, in a folder of its own. Every relay runs from a deployment, as a
+   * self-hosted relay does, and the deployment's files sit beside that folder. A restart
+   * passes the same path and keeps the deployment.
+   */
   dbPath: string;
   // A suite may reuse freshly built code while keeping each process and store separate.
   compiledMain?: string;
@@ -37,23 +45,24 @@ export async function spawnSyncRelay(input: {
   linkBoundary?: SyncRelayLinkBoundary;
   appPublications?: boolean;
   /**
-   * Releases Edit share links the way a self-hosted relay does: a deployment
-   * whose live host runs this engine. Needs the link boundary, and a database
-   * path in a folder of its own, which the deployment's files sit beside.
+   * Releases Edit share links the way a self-hosted relay does: the deployment's
+   * live host runs this engine. Needs the link boundary.
    */
   editLinks?: { engineExecutable: string; publicOrigin: string; trustEnv?: Record<string, string> };
 }): Promise<SyncRelayHandle> {
   const started = performance.now();
-  const deployment = input.editLinks ? join(dirname(dirname(input.dbPath)), "relay-deployment") : null;
+  const deployment = `${dirname(input.dbPath)}-deployment`;
   // A restart keeps the deployment and live host stores the first start made.
-  if (deployment && !existsSync(join(deployment, "deployment.json"))) {
+  if (!existsSync(join(deployment, "deployment.json"))) {
     const command = input.compiledMain
       ? [join(dirname(input.compiledMain), "relay-deployment.js")]
       : ["--import", "tsx/esm", "src/relayDeploymentCommand.ts"];
     await initializeRelayDeployment([...command, "initialize",
       "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")]);
-    mkdirSync(join(deployment, "live-host"));
+    if (input.editLinks) mkdirSync(join(deployment, "live-host"));
   }
+  // share-web reaches the relay's live routes at its loopback address, and they accept only listed hosts.
+  const listenPort = input.port ?? (input.editLinks ? await reserveRelayPort() : 0);
   const child: ChildProcess = spawn(
     process.execPath,
     [
@@ -70,13 +79,13 @@ export async function spawnSyncRelay(input: {
       cwd: relayRoot,
       env: {
         ...process.env,
-        DOHC_RELAY_DEPLOYMENT_CONFIG: undefined,
         DOHC_RELAY_SERVICE_HOST_CONFIG: undefined,
         DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined,
         NODE_ENV: "test",
         SYNC_RELAY_TEST_AUTH: "1",
-        SYNC_RELAY_PORT: String(input.port ?? 0),
-        SYNC_RELAY_DB_PATH: deployment ? undefined : input.dbPath,
+        SYNC_RELAY_PORT: String(listenPort),
+        SYNC_RELAY_DB_PATH: undefined,
+        DOHC_RELAY_DEPLOYMENT_CONFIG: join(deployment, "deployment.json"),
         ...(input.appPublications ? { DOHC_RELAY_APP_PUBLICATIONS: "1" } : {}),
         ...(input.linkBoundary
           ? {
@@ -86,15 +95,16 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_SHARE_WEB_URL: input.linkBoundary.publicViewerOrigin,
             }
           : {}),
-        ...(deployment && input.editLinks
+        ...(input.editLinks
           ? {
               DOHC_SELF_HOST_LIVE: "1",
-              DOHC_RELAY_DEPLOYMENT_CONFIG: join(deployment, "deployment.json"),
               DOHC_RELAY_SERVICE_HOST_ROOT: join(deployment, "live-host"),
               DOHC_RELAY_ENGINE_EXECUTABLE: input.editLinks.engineExecutable,
               DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
               DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin,
-              DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(input.editLinks.publicOrigin).host,
+              DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(input.editLinks.publicOrigin).host, `127.0.0.1:${listenPort}`].join(","),
+              // The self-host image gives the live host a Markdown reader. Without one it holds every lossy rewrite.
+              DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
               ...input.editLinks.trustEnv,
             }
           : {}),
@@ -170,6 +180,12 @@ export async function spawnSyncRelay(input: {
     await stop();
     throw error;
   });
+  try {
+    await requireOwnerRestoreList(baseUrl);
+  } catch (error) {
+    await stop();
+    throw new Error(`sync relay failed its startup check ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`, { cause: error });
+  }
 
   const port = Number(new URL(baseUrl).port);
   return {
@@ -179,6 +195,30 @@ export async function spawnSyncRelay(input: {
     diagnostics: () => ({ stdout, stderr }),
     stop,
   };
+}
+
+async function reserveRelayPort(): Promise<number> {
+  const listener = createServer();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolve);
+  });
+  const address = listener.address();
+  await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+  if (!address || typeof address === "string") throw new Error("No relay port reserved.");
+  return address.port;
+}
+
+// An owner's list of unfinished restores reads the deployment's history. A relay without one answers 500.
+async function requireOwnerRestoreList(baseUrl: string): Promise<void> {
+  const workspaceId = randomUUID();
+  const headers = { authorization: "Bearer test:relay-startup-check", "content-type": "application/json" };
+  // A hang guard: a relay that takes the requests and never answers fails startup, which stops it.
+  const signal = AbortSignal.timeout(60_000);
+  const claim = await fetch(`${baseUrl}/sync/workspaces`, { method: "POST", headers, body: JSON.stringify({ workspaceId }), signal });
+  if (!claim.ok) throw new Error(`Claiming a workspace answered ${claim.status}: ${await claim.text()}`);
+  const restores = await fetch(`${baseUrl}/sync/${workspaceId}/live-restores/unfinished`, { headers, signal });
+  if (restores.status !== 200) throw new Error(`Unfinished restores answered ${restores.status}: ${await restores.text()}`);
 }
 
 async function initializeRelayDeployment(args: string[]): Promise<void> {

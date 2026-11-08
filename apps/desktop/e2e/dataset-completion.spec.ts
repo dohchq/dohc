@@ -9,7 +9,7 @@ import { orderFormDefinition } from "./helpers/datasetCompletion";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
-import { cleanupDesktopWorkspace, createTempWorkspace, keepCollectionsHere, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, keepCollectionsHere, openExplorerHome, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, waitForWorkspaceFile } from "./helpers/workspace";
 
 async function dragBoardCard(page: Page, card: Locator, column: Locator): Promise<void> {
   const source = await card.boundingBox(), target = await column.boundingBox();
@@ -34,7 +34,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
   let relayDiagnostics: SyncRelayHandle["diagnostics"] | undefined;
   let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay.sqlite"), appPublications: true,
+    relay = await spawnSyncRelay({ dbPath: join(workspace.baseDir, "relay", "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
     relayDiagnostics = relay.diagnostics;
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
@@ -91,12 +91,16 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(formDialog).toBeHidden();
     await page.getByRole("button", { name: "Review and open app", exact: true }).click();
     const publication = page.getByTestId("app-publication-dialog");
-    await publication.getByRole("button", { name: "Prepare for this device", exact: true }).click();
-    await expect(publication.getByRole("heading", { name: "Review app for this device", exact: true })).toBeVisible();
-    await expect(publication.getByTestId("app-publication-source-paths")).toContainText("registrations-form/frontend.js");
-    await expect(publication.getByTestId("app-publication-capability")).toContainText("Link actions:");
-    await publication.getByRole("button", { name: "Approve for this device", exact: true }).click();
-    await expect(publication.getByRole("button", { name: /^Open in browser / })).toBeVisible();
+    const approve = publication.getByTestId("app-publication-approve");
+    await expect(approve).toHaveText("Approve and open");
+    await expect(approve).toBeEnabled();
+    await publication.getByRole("button", { name: /^\d+ files?$/ }).click();
+    await expect(publication.getByTestId("app-publication-source-paths")).toContainText("frontend.js");
+    await expect(publication.getByTestId("app-access")).toContainText("Changes");
+    await approve.click();
+    await expect(publication).toBeHidden();
+    await page.getByTestId("app-view-review").click();
+    await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
     await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
     const share = page.getByTestId("share-dialog");
     await share.getByRole("radio", { name: "Anyone with the link", exact: true }).click();
@@ -111,7 +115,8 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     });
     await share.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Open in browser", exact: true })).toBeVisible();
-    await page.getByTestId("site-preview-publish").click();
+    await page.getByTestId("app-view-review").click();
+    await publication.getByRole("button", { name: "Publish on a link", exact: true }).click();
     const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
     await expect(shareLink.locator("option")).toHaveCount(2);
     await shareLink.selectOption({ index: 1 });
@@ -127,7 +132,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     // The publication list reloads behind the notice, so its loading status can show beside it.
     await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
     await expect(publication.getByRole("button", { name: /^Unpublish / })).toBeVisible();
-    await publication.getByRole("button", { name: "Close publication", exact: true }).click();
+    await publication.getByRole("button", { name: "Close", exact: true }).click();
     const listed = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!, table = dataset.tables[0]!;
@@ -406,6 +411,7 @@ test("@dataset-completion generated form saves two files and an explicitly publi
     await desktop.close();
     desktop = await launchDesktopApp({ workspace }); page = desktop.page;
     await openWorkspaceFromFirstRun(page, workspace);
+    await openExplorerHome(page);
     await page.getByRole("region", { name: "Collections", exact: true }).getByRole("button", { name: "Orders", exact: true }).click();
     const collection = page.getByRole("region", { name: "Orders", exact: true });
     await collection.getByLabel("Manage Collection", { exact: true }).click();
@@ -417,9 +423,9 @@ test("@dataset-completion generated form saves two files and an explicitly publi
     await expect(formDialog).toBeHidden();
     await page.getByRole("button", { name: "Review and open app", exact: true }).click();
     const publication = page.getByTestId("app-publication-dialog");
-    await publication.getByRole("button", { name: "Prepare for this device", exact: true }).click();
+    await expect(publication.getByTestId("app-publication-approve")).toBeEnabled();
     await publication.getByTestId("app-publication-approve").click();
-    await expect(publication.getByRole("button", { name: /^Open in browser / })).toBeVisible();
+    await expect(publication).toBeHidden();
     const publications = await page.evaluate(async workspaceId => window.dohcDesktop!.publishOwnerApp({ action: "listLocal", workspaceId, appRoot: "orders-form" }), workspaceId);
     if (publications.kind !== "localListed" || !publications.publications[0]) throw Error("Expected local generated form.");
     const launched = await page.evaluate(async input => window.dohcDesktop!.publishOwnerApp({ action: "launchLocal", ...input }), { workspaceId, publicationId: publications.publications[0].publicationId });

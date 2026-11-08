@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
@@ -8,7 +8,7 @@ import { settingsOperations } from "./settingsOperations";
 import { registerOperations } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import { WorkspaceUiState } from "./bridgeContract";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type DesktopUserSettingsResult, type ThemeMode } from "../settings/userSettings";
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
@@ -19,7 +19,7 @@ import { RendererWorkspaceSessionOwner, type RendererWorkspaceSession } from "..
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
-import { settingsWithAgent } from "../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
@@ -29,6 +29,7 @@ const state = WorkspaceUiState.parse({
 });
 const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS };
 const workspacePayload = { workspaceId: "workspace-a" };
+const policyPayload = { ...workspacePayload, file: ".dohc/visibility.toml" };
 const patchPayload = { ...workspacePayload, patch: { privacy: { confirmExternalLinks: false } } };
 const uiPayload = { ...workspacePayload, state };
 const localState = fakeLocalStateOpens();
@@ -37,11 +38,13 @@ const settingsRequests = [
   [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
+  [settingsOperations.orderAgents.channel, { order: ["default"] }],
   [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
   [settingsOperations.resetUserSettings.channel, undefined],
   [settingsOperations.getUserSettingsFilePath.channel, undefined],
   [settingsOperations.openUserSettingsFile.channel, undefined],
   [settingsOperations.openWorkspaceSettingsFile.channel, workspacePayload],
+  [settingsOperations.openWorkspacePolicyFile.channel, policyPayload],
   [settingsOperations.getWorkspaceSettings.channel, workspacePayload],
   [settingsOperations.setWorkspaceSettings.channel, patchPayload],
   [settingsOperations.resetWorkspaceSettings.channel, workspacePayload],
@@ -92,7 +95,7 @@ async function harness() {
   let preferredName: string | undefined = "Before";
   const effects: Array<{ kind: string; value: unknown; persisted: DesktopUserSettings }> = [];
   const persisted = () => JSON.parse(readFileSync(join(stateDirectory, userSettingsStore.USER_SETTINGS_FILE), "utf8")) as DesktopUserSettings;
-  const setCachedPreferredName = vi.fn((value: string | undefined) => {
+  const setCachedNames = vi.fn((value: string | undefined) => {
     preferredName = value;
     effects.push({ kind: "name", value, persisted: persisted() });
   });
@@ -108,7 +111,7 @@ async function harness() {
   const openPath = vi.fn<(path: string) => Promise<string>>(async () => "");
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const capability = createSettingsIpc<Sender, Event, Operation>({
-    stateDir: () => stateDirectory, setCachedPreferredName,
+    stateDir: () => stateDirectory, setCachedNames,
     applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath,
@@ -128,7 +131,7 @@ async function harness() {
   });
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
-    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
+    zoom: capability.stepWindowZoom, setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, broadcastAgentColor, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
@@ -245,7 +248,7 @@ describe("registered settings IPC", () => {
       // the file rather than saving into it.
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2]);
       // Every change puts the whole file into effect, the zoom step included.
-      expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], ["Next", undefined], [undefined, undefined]]);
+      expect(h.setCachedNames.mock.calls).toEqual([["First", []], ["Next", []], ["Next", []], [undefined, []]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
       expect(h.applyThemeMode.mock.calls).toEqual([["dark"], ["light"], ["light"], ["system"]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
@@ -334,6 +337,34 @@ describe("registered settings IPC", () => {
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
     expect(h.effects).toHaveLength(3);
     expect(h.scanWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("scans when any agent dohc starts changes, not only the first", async () => {
+    const h = await harness();
+    const one = settingsWithAgent({ name: "Nova", launch: { command: "agent run" } });
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: one, base: DEFAULT_USER_SETTINGS });
+    await vi.waitFor(() => expect(h.scanWorkspace).toHaveBeenCalledTimes(2));
+    h.scanWorkspace.mockClear();
+    const off = { ...one, agents: { ...one.agents, codex: testAgent({ name: "Codex", enabled: false }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: one });
+    // An agent that is off does not change what dohc starts.
+    expect(h.scanWorkspace).not.toHaveBeenCalled();
+    const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
+    await vi.waitFor(() => expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]));
+  });
+
+  it("tells every window and the tray when only the agents' order changes", async () => {
+    const h = await harness();
+    const two = { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Claude Code" }), codex: testAgent({ name: "Codex" }) } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: two, base: DEFAULT_USER_SETTINGS });
+    h.broadcastUserSettings.mockClear();
+    h.refreshDispatchTray.mockClear();
+    await h.invoke(settingsOperations.orderAgents.channel, { order: ["codex"] });
+    expect(h.broadcastUserSettings).toHaveBeenCalledOnce();
+    const [sent] = h.broadcastUserSettings.mock.lastCall as [DesktopUserSettingsResult];
+    expect(Object.keys(sent.settings.agents)).toEqual(["codex", "default"]);
+    expect(h.refreshDispatchTray).toHaveBeenCalledOnce();
   });
 
   it("applies a hand edit of the settings file as a save does, and finds nothing new after dohc's own save", async () => {
@@ -455,6 +486,56 @@ describe("registered settings IPC", () => {
     expect(h.openPath).toHaveBeenCalledExactlyOnceWith(join(h.root, ".dohc", "local", workspaceSettingsFile.WORKSPACE_SETTINGS_FILE));
     await expect(h.invoke(settingsOperations.openWorkspaceSettingsFile.channel, workspacePayload, h.second)).rejects.toThrow("this window changed workspaces");
     expect(h.openPath).toHaveBeenCalledOnce();
+  });
+
+  it("opens only History's two rules files, in the workspace that asked", async () => {
+    const h = await harness();
+    await mkdir(join(h.root, ".dohc"), { recursive: true });
+    await writeFile(join(h.root, ".dohc", "visibility.toml"), "[[rules]\n");
+    await writeFile(join(h.root, ".dohc", "files.toml"), "");
+    await h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload);
+    await h.invoke(settingsOperations.openWorkspacePolicyFile.channel, { ...workspacePayload, file: ".dohc/files.toml" });
+    expect(h.openPath.mock.calls).toEqual([
+      [join(h.root, ".dohc", "visibility.toml")],
+      [join(h.root, ".dohc", "files.toml")],
+    ]);
+    // The renderer chooses one of the two files, never a path.
+    for (const file of [".dohc", ".dohc/settings.json", "notes/a.md", "../outside.toml", join(h.root, ".dohc", "files.toml")]) {
+      await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, { ...workspacePayload, file })).rejects.toThrow();
+    }
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload, h.second))
+      .rejects.toThrow("History's rules file stopped opening because this window changed workspaces.");
+    expect(h.openPath).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a rules file only when it is a regular file", async () => {
+    const h = await harness();
+    const path = join(h.root, ".dohc", "visibility.toml");
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload))
+      .rejects.toThrow(`dohc could not open ${path}. The file doesn't exist.`);
+    await mkdir(path, { recursive: true });
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload))
+      .rejects.toThrow(`dohc could not open ${path}. It isn't a regular file.`);
+    expect(h.openPath).not.toHaveBeenCalled();
+    const files = join(h.root, ".dohc", "files.toml");
+    await writeFile(files, "");
+    h.openPath.mockResolvedValueOnce("No application is associated with this file.");
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, { ...workspacePayload, file: ".dohc/files.toml" }))
+      .rejects.toThrow(`dohc could not open ${files}. No application is associated with this file. Open the file in a text editor.`);
+  });
+
+  it("refuses a rules file or a .dohc folder that links outside the workspace", async () => {
+    const h = await harness();
+    const outside = await createTestScratch("settings-ipc-outside-");
+    await writeFile(join(outside, "visibility.toml"), "");
+    await mkdir(join(h.root, ".dohc"), { recursive: true });
+    await symlink(join(outside, "visibility.toml"), join(h.root, ".dohc", "visibility.toml"));
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload))
+      .rejects.toThrow("It isn't a regular file.");
+    await rm(join(h.root, ".dohc"), { recursive: true });
+    await symlink(outside, join(h.root, ".dohc"), "junction");
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload)).rejects.toThrow();
+    expect(h.openPath).not.toHaveBeenCalled();
   });
 
   it("creates the settings file before opening it, and never replaces one that exists", async () => {

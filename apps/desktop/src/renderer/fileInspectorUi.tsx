@@ -5,15 +5,17 @@ import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Lock, Play, Share2 } from "lucide-react";
-import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
-import { useTabRowActionsSlot } from "./workbench/tabRowActions";
+import { NARROW_GROUP_HIDDEN, useTabRowActionsSlot } from "./workbench/tabRowActions";
 import { useShownAfter } from "./ui/useShownAfter";
+import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
+import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 
 // A file view's actions, at the right end of its editor group's tab row: the
 // tab already names the file, so no header repeats it above the page. They
@@ -24,10 +26,11 @@ import { useShownAfter } from "./ui/useShownAfter";
 // shrink. `status` (a save state that needs the person, a slow open's
 // "Opening…") sits left of them and gives way first, before the tab names:
 // its words can change width without moving a control, and in a narrow pane
-// it ends in an ellipsis. A status with nothing visible, such as a calm save
+// a state mark shows only its mark. A narrow group moves Share into its tab
+// list (NARROW_GROUP_HIDDEN). A status with nothing visible, such as a calm save
 // state or a quick open kept for screen readers, draws no box, so loading,
-// ready and failed views take the same width. Outside an editor group, as on the states page, they draw
-// in a row of their own.
+// ready and failed views take the same width. Outside an editor group, they
+// draw in a row of their own.
 //
 // `onRun` is for an app's entry file: Run opens the app's local preview. It
 // stands left of Share, so when it arrives nothing right of it moves.
@@ -70,7 +73,7 @@ export function ViewActions(props: {
           aria-label="Share file"
           title="Share file"
           onClick={props.onShare}
-          className="shrink-0"
+          className={`shrink-0 ${NARROW_GROUP_HIDDEN}`}
         >
           <Share2 size={14} aria-hidden />
         </IconButton>
@@ -83,6 +86,8 @@ export function ViewActions(props: {
   }
   return slot ? createPortal(content, slot) : null;
 }
+
+export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
 
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
@@ -103,7 +108,7 @@ export function OpeningState() {
       data-state="opening"
       role="status"
       title={OPENING_TITLE}
-      className={slow ? "min-w-0 truncate font-mono text-[11px] text-subtle" : "sr-only"}
+      className={slow ? "min-w-0 truncate text-[11px] leading-4 text-subtle" : "sr-only"}
     >
       Opening…
     </span>
@@ -134,10 +139,14 @@ export function DocumentControls(props: {
         type="button"
         data-testid={toggle.testId}
         aria-pressed={toggle.pressed}
-        disabled={toggle.disabled}
+        disabled={toggle.disabled && !toggle.title}
+        aria-disabled={toggle.disabled && !!toggle.title || undefined}
         title={toggle.title}
-        onClick={toggle.onClick}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        onClick={() => {
+          if (toggle.disabled) return;
+          toggle.onClick?.();
+        }}
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
       >
         {toggle.label}
       </button>
@@ -157,7 +166,7 @@ export function DocumentControls(props: {
 export function EngineMayHoldDocumentNotice(props: {
   onRetry: () => void;
   // Is the document's content on screen? When the read failed too, it is
-  // not — and "It is read-only for now" would promise read access to
+  // not — and "You can still read it" would promise read access to
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
@@ -180,7 +189,7 @@ export function EngineMayHoldDocumentNotice(props: {
           the retry is the same either way. */}
       <span>
         {props.message ?? "dohc could not open this document for editing."}
-        {!props.message && props.contentShown ? " It is read-only for now." : ""}
+        {!props.message && props.contentShown ? " You can still read it." : ""}
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}
@@ -196,24 +205,114 @@ export function EngineMayHoldDocumentNotice(props: {
   );
 }
 
-// Opens a read-only note in the system's app for the file.
-export function OpenExternallyLink(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
+// An Open externally control, then a lock and "Read-only copy" when the file
+// is from someone else. Main answers by the open's own rule. Until it answers
+// for this file, or when it can't, no words show, and the open decides alone.
+export function OpenExternallyControl(props: {
+  workspaceId: string;
+  path: string;
+  className?: string;
+  children: (describedBy: string | undefined) => ReactNode;
+}) {
+  const id = useId();
+  const asked = `${props.workspaceId}\u0000${props.path}`;
+  const [answer, setAnswer] = useState<{ asked: string; readOnlyCopy: boolean } | null>(null);
+  useEffect(() => {
+    let live = true;
+    void Promise.resolve()
+      .then(() => bridge().readExternalOpen({ workspaceId: props.workspaceId, relativePath: props.path }))
+      .then(({ readOnlyCopy }) => {
+        if (live) setAnswer({ asked, readOnlyCopy });
+      }, () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [asked, props.workspaceId, props.path]);
+  const readOnlyCopy = answer?.asked === asked && answer.readOnlyCopy;
+  return (
+    <span className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap ${props.className ?? ""}`}>
+      {props.children(readOnlyCopy ? id : undefined)}
+      {readOnlyCopy ? (
+        <span className="inline-flex items-center gap-1 text-subtle">
+          <Lock aria-hidden size={12} className="shrink-0" />
+          <span id={id}>Read-only copy</span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+// The file Open externally opens, and where a failed open is reported.
+export type OpenExternallyTarget = { workspaceId: string; path: string; onError?: ReportButtonError };
+
+// Opens a read-only note in the system's app for the file. A surface that can
+// show beside a lossy note's notice gives the link its own test ID.
+export function OpenExternallyLink(props: OpenExternallyTarget & { testId?: string }) {
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
       .catch((error: unknown) =>
-        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
+        props.onError?.("dohc could not open this note externally.", error, openExternally, `lossy-note-open:${props.path}`),
       );
   };
   return (
-    <button
-      type="button"
-      data-testid="lossy-note-open-externally"
-      onClick={openExternally}
-      className="whitespace-nowrap text-subtle hover:text-ink"
+    <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+      {(describedBy) => (
+        <button
+          type="button"
+          data-testid={props.testId ?? "lossy-note-open-externally"}
+          aria-describedby={describedBy}
+          onClick={openExternally}
+          className="whitespace-nowrap text-muted hover:text-ink"
+        >
+          Open externally
+        </button>
+      )}
+    </OpenExternallyControl>
+  );
+}
+
+// Properties above a note that dohc can show but not save one at a time,
+// with the lossy note's way forward: the system's app for the file.
+export function ReadOnlyPropertiesFlag(props: {
+  label: string;
+  file?: OpenExternallyTarget;
+  testId?: string;
+  role?: "status";
+  className?: string;
+}) {
+  return (
+    <span
+      data-testid={props.testId}
+      role={props.role}
+      className={`flex min-w-0 max-w-full items-center gap-2 text-[11px] ${props.className ?? ""}`}
     >
-      Open externally
-    </button>
+      <span className="flex min-w-0 items-center gap-1">
+        <Lock aria-hidden size={12} className="shrink-0 text-warning" />
+        <span className={TOPMATTER_READ_ONLY_FLAG} title={PROPERTIES_READ_ONLY_REASON}>
+          {props.label}
+        </span>
+      </span>
+      {props.file ? <OpenExternallyLink {...props.file} /> : null}
+    </span>
+  );
+}
+
+export function LossyNoteNoticeView(props: { held?: boolean; children: ReactNode }) {
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className={`flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] ${props.held ? "text-warning" : "text-muted"}`}
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        {props.held
+          ? "dohc held a change, because saving it would rewrite parts it can't show."
+          : LOSSY_NOTE_TITLE}
+      </span>
+      <span className="flex shrink-0 items-center gap-3">{props.children}</span>
+    </div>
   );
 }
 
@@ -224,6 +323,8 @@ export function LossyNoteNotice(props: {
   path: string;
   // The hash of the bytes the note was read from, which saving would rewrite.
   contentHash: string | null;
+  // A change to the note waits for Edit anyway.
+  held?: boolean;
   onError?: ReportButtonError;
   // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
@@ -256,16 +357,8 @@ export function LossyNoteNotice(props: {
     : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
     : "dohc could not confirm that History can restore the original.";
   return (
-    <div
-      data-testid="lossy-note-notice"
-      role="status"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
-    >
-      <span className="flex min-w-0 items-center gap-1.5">
-        <Lock aria-hidden size={12} className="shrink-0" />
-        dohc can't edit this document yet without changing parts it can't show.
-      </span>
-      <span className="flex shrink-0 items-center gap-3">
+    <>
+      <LossyNoteNoticeView held={props.held}>
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
         {props.onEditAnyway ? (
           <button
@@ -275,15 +368,15 @@ export function LossyNoteNotice(props: {
               setOpened((count) => count + 1);
               setConfirming(true);
             }}
-            className="whitespace-nowrap text-subtle hover:text-ink"
+            className="whitespace-nowrap text-muted hover:text-ink"
           >
             Edit anyway
           </button>
         ) : null}
-      </span>
+      </LossyNoteNoticeView>
       {confirming && props.onEditAnyway ? (
         <ConfirmDialog
-          title="Edit this document anyway?"
+          title="Edit this note anyway?"
           intent="danger"
           confirmLabel="Edit anyway"
           testId="lossy-note-edit-anyway-dialog"
@@ -301,7 +394,7 @@ export function LossyNoteNotice(props: {
           </p>
         </ConfirmDialog>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -326,9 +419,20 @@ async function historyKeeps(workspaceId: string, path: string, contentHash: stri
   return hex === contentHash ? "kept" : "not-recorded";
 }
 
+// Opens a file in the system's app for it. A failure goes to the shell's
+// toasts and Notices, with Try again.
+export function openExternally(props: { workspaceId: string; path: string; onError?: ReportButtonError }): void {
+  void bridge()
+    .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+    .catch((error: unknown) =>
+      props.onError?.("dohc could not open this file externally.", error, () => openExternally(props), `open-externally:${props.path}`),
+    );
+}
+
 export function EngineArtifactAssetsInvalidNotice(props: {
   workspaceId: string;
   path: string;
+  onError?: ReportButtonError;
 }) {
   return (
     <div
@@ -338,36 +442,33 @@ export function EngineArtifactAssetsInvalidNotice(props: {
       <span>
         dohc could not verify this drawing's images. The drawing is read-only.
       </span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }
 
 // The next step in a file view that cannot show its file: the system's app
 // for it.
-export function OpenExternallyButton(props: { workspaceId: string; path: string }) {
+export function OpenExternallyButton(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
-    <SecondaryButton
-      onClick={() =>
-        void bridge().openFileExternally({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-        })
-      }
-    >
-      Open externally
-    </SecondaryButton>
+    <OpenExternallyControl workspaceId={props.workspaceId} path={props.path} className="text-xs">
+      {(describedBy) => (
+        <SecondaryButton aria-describedby={describedBy} onClick={() => openExternally(props)}>
+          Open externally
+        </SecondaryButton>
+      )}
+    </OpenExternallyControl>
   );
 }
 
@@ -376,6 +477,8 @@ export const REPLACED_HISTORY_DRAFT_NOTICE =
   "This document changed while you were editing. Your earlier edits are set aside here.";
 // So does the notice for a save refused because the file is gone.
 export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your text to keep it.";
+// The row for an edit dohc refused to save for good, in either editor.
+export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE = "dohc could not save this document. Copy your text to keep it.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
@@ -392,38 +495,56 @@ export function OrphanedDraftNotices(props: {
   return (
     <div>
       {drafts.map((draft) => (
-        <div
+        <SetAsideEditRow
           key={draft.id}
-          data-testid="orphaned-draft-notice"
-          className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
-        >
-          <span className="text-danger">
-            {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
-              (draft.recovery?.reason === "deleted"
-                ? DELETED_FILE_DRAFT_NOTICE
-                // Until storage keeps the draft, a copy is still the way to keep it.
-                : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
-                  ? REPLACED_HISTORY_DRAFT_NOTICE
-                  : "This document reopened before your last edit saved. Copy your text to keep it.")}
-          </span>
-          <div className="flex items-center gap-2">
-            {/* Same rule as the recovery list's Copy: a draft the projection
-                never refined carries the document inside an encoded comment,
-                and the decode runs at the click. */}
-            <CopyButton
-              testId="orphaned-draft-copy"
-              getText={() => restoreRecoveryDraftText(draft.text)}
-            />
-            {/* Deleting the only copy needs the explicit confirm step (#579
-                review, r6) — the same control the recovery list uses. */}
-            <DismissDraftControls
-              onDismiss={() =>
-                dismissOrphanedDraft(props.workspaceId, props.path, draft.id)
-              }
-            />
-          </div>
-        </div>
+          message={
+            (props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
+            (draft.recovery?.reason === "deleted"
+              ? DELETED_FILE_DRAFT_NOTICE
+              // Until storage keeps the draft, a copy is still the way to keep it.
+              : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
+                ? REPLACED_HISTORY_DRAFT_NOTICE
+                : "This document reopened before your last edit saved. Copy your text to keep it.")
+          }
+          // Same rule as the recovery list's Copy: a draft the projection
+          // never refined carries the document inside an encoded comment,
+          // and the decode runs at the click.
+          getText={() => restoreRecoveryDraftText(draft.text)}
+          onDismiss={() => dismissOrphanedDraft(props.workspaceId, props.path, draft.id)}
+        />
       ))}
+    </div>
+  );
+}
+
+// One set-aside edit above the page, with its Copy and Dismiss.
+export function SetAsideEditRow(props: {
+  message: string;
+  getText: ComponentProps<typeof CopyButton>["getText"];
+  onDismiss: ComponentProps<typeof DismissDraftControls>["onDismiss"];
+}) {
+  return (
+    <div
+      data-testid="orphaned-draft-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+    >
+      <span className="text-danger">{props.message}</span>
+      <div className="flex items-center gap-2">
+        <CopyButton testId="orphaned-draft-copy" getText={props.getText} />
+        {/* Deleting the only copy needs the explicit confirm step (#579
+            review, r6) — the same control the recovery list uses. */}
+        <DismissDraftControls onDismiss={props.onDismiss} />
+      </div>
+    </div>
+  );
+}
+
+// The strip over the markdown source view, with the source's Copy.
+export function MarkdownSourceStrip(props: { words: string; getText: ComponentProps<typeof CopyButton>["getText"] }) {
+  return (
+    <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
+      <span>{props.words}</span>
+      <CopyButton testId="markdown-source-copy" getText={props.getText} />
     </div>
   );
 }

@@ -2,7 +2,7 @@
 //
 // Two managers split the relay's listing: chat grants belong to the
 // Chats surface (`listChatChannelShares`), path and version shares belong to
-// Settings → Cloud. The split has to be exhaustive for granted rows, because
+// the Sharing view. The split has to be exhaustive for granted rows, because
 // ending a share is only possible from the manager that lists it.
 //
 // That is what makes a damaged row awkward. The chat manager scopes by

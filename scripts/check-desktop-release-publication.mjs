@@ -5,9 +5,25 @@ import { desktopReleaseTargets } from "./resolve-desktop-release.mjs";
 
 // The rules a release must meet before it publishes. Dry runs skip them.
 // A nightly ships every platform this workflow builds, and at most one nightly
-// publishes per UTC day, counted by when each release published. Any release
-// keeps every platform its channel already publishes, so no installation loses
-// its update feed.
+// publishes per nightly day, counted by when each release published. Any
+// release keeps every platform its channel already publishes, so no
+// installation loses its update feed.
+
+// A nightly day starts at 18:00 UTC. The scheduled nightly starts at 20:00 UTC
+// (04:00 on the Mac mini), so a nightly published by hand earlier that UTC day
+// doesn't hold it back.
+const NIGHTLY_DAY_STARTS_AT_UTC_HOUR = 18;
+
+/** When the nightly day holding `time` ends: the first time the next nightly can publish. */
+export function nextNightlyDay(time) {
+  const next = new Date(time);
+  next.setUTCHours(NIGHTLY_DAY_STARTS_AT_UTC_HOUR, 0, 0, 0);
+  if (next <= new Date(time)) next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
+export const utcMinute = (time) => `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
 export function checkDesktopReleasePublication({ channel, platforms, releases, now = new Date() }) {
   if (!["latest", "nightly"].includes(channel)) {
     throw new Error(`Invalid release channel '${channel}'. Expected latest or nightly.`);
@@ -31,11 +47,10 @@ export function checkDesktopReleasePublication({ channel, platforms, releases, n
     if (platforms !== "windows-linux") {
       throw new Error("A nightly publishes every platform this workflow builds. Select platforms=windows-linux, or use dry_run=true to test fewer platforms.");
     }
-    const today = now.toISOString().slice(0, 10);
     const todays = published.find((release) =>
-      release.tag_name.includes("-nightly.") && new Date(release.published_at).toISOString().slice(0, 10) === today);
+      release.tag_name.includes("-nightly.") && nextNightlyDay(release.published_at) > now);
     if (todays) {
-      throw new Error(`${todays.tag_name} published at ${todays.published_at}, so ${today} (UTC) already has its nightly. Publish the next nightly after 00:00 UTC, or use dry_run=true.`);
+      throw new Error(`${todays.tag_name} published at ${utcMinute(todays.published_at)}, and one nightly publishes per nightly day, which starts at 18:00 UTC. The next nightly can publish from ${utcMinute(nextNightlyDay(todays.published_at))}. Before then, use dry_run=true.`);
     }
   }
 

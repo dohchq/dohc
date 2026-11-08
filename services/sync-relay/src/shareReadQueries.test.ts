@@ -151,7 +151,7 @@ it.each([null, "reset", { path: "docs/plan.md", blobSha256: "a".repeat(64), cont
       relaySeq, opKind: "moment.append", recordedAtMs: 1,
       payloadJson: JSON.stringify({ ...moment(undefined), objectId: "object", momentId: "moment-" + relaySeq }),
     }));
-    const storage = { currentObjectFile, fetchLogPage: () => ({ rows, nextCursor: 2, hasMore: false }) };
+    const storage = { currentObjectFile, fetchLogPage: () => ({ rows, nextCursor: 2, hasMore: false }), indexReceivedWorkTargets: () => {} };
     const queries = createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0], 500, "current-query-test-key-at-least-32");
     const read = () => queries.filteredLogPage("workspace", "share", selector, 0, 500, "accountless", undefined, ["link", "grant"], true, 7);
     const first = read();

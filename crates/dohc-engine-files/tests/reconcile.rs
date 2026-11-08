@@ -263,7 +263,9 @@ fn a_case_variant_hard_link_is_not_another_spelling() {
             "{probed}"
         );
         assert_eq!(
-            dohc_engine_files::disk_spelling(ws.path(), probed).as_deref(),
+            dohc_engine_files::disk_spelling(ws.path(), probed)
+                .unwrap()
+                .as_deref(),
             Some(probed)
         );
     }
@@ -276,7 +278,7 @@ fn a_case_variant_hard_link_is_not_another_spelling() {
 fn disk_spelling_names_each_entry_as_the_disk_stores_it() {
     let ws = Scratch::new();
     ws.write("Notes/a.md", b"a");
-    let stored = |path| dohc_engine_files::disk_spelling(ws.path(), path);
+    let stored = |path| dohc_engine_files::disk_spelling(ws.path(), path).unwrap();
     assert_eq!(stored("Notes/a.md").as_deref(), Some("Notes/a.md"));
     let ignores_case = ws.path().join("notes/A.md").exists();
     assert_eq!(
@@ -286,12 +288,11 @@ fn disk_spelling_names_each_entry_as_the_disk_stores_it() {
     assert_eq!(stored("missing.md"), None);
 }
 
-/// A folder that can be searched but not listed still has a spelling, so
-/// spellings that resolve to one file still share it. Root lists any folder,
-/// so there the test has nothing to prove.
+/// Only macOS can name an entry without listing its folder. Root can list
+/// any folder, so this test skips there.
 #[cfg(unix)]
 #[test]
-fn disk_spelling_passes_through_a_folder_it_cannot_list() {
+fn disk_spelling_is_unknown_in_an_unlistable_folder_except_on_macos() {
     use std::os::unix::fs::PermissionsExt;
     let ws = Scratch::new();
     ws.write("private/docs/Notes.md", b"a");
@@ -300,9 +301,78 @@ fn disk_spelling_passes_through_a_folder_it_cannot_list() {
     let unlistable = std::fs::read_dir(&private).is_err();
     let stored = dohc_engine_files::disk_spelling(ws.path(), "private/docs/Notes.md");
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
-    if unlistable {
-        assert_eq!(stored.as_deref(), Some("private/docs/Notes.md"));
+    if !unlistable {
+        eprintln!("SKIP: this user can list the private folder");
+        return;
     }
+    if cfg!(target_os = "macos") {
+        assert_eq!(stored.unwrap().as_deref(), Some("private/docs/Notes.md"));
+    } else {
+        assert!(stored.is_err());
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn may_share_entry_distinguishes_unknown_hard_links_from_different_files() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let ws = Scratch::new();
+    ws.write("private/a.md", b"a");
+    ws.write("private/c.md", b"a");
+    std::fs::hard_link(
+        ws.path().join("private/a.md"),
+        ws.path().join("private/b.md"),
+    )
+    .unwrap();
+    assert!(!dohc_engine_files::may_share_entry(
+        ws.path(),
+        "private/a.md",
+        "private/b.md"
+    ));
+    let private = ws.path().join("private");
+    #[cfg(unix)]
+    let permissions = std::fs::metadata(&private).unwrap().permissions();
+    #[cfg(unix)]
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+    #[cfg(windows)]
+    let icacls = |args: &[&str]| {
+        std::process::Command::new("icacls")
+            .arg(&private)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    #[cfg(windows)]
+    let denied = icacls(&["/deny", "*S-1-1-0:(RD)", "/q"]);
+    let unlistable = std::fs::read_dir(&private).is_err();
+    #[cfg(windows)]
+    let unknown = ["private/a.md", "private/b.md", "private/c.md"]
+        .map(|path| dohc_engine_files::disk_spelling(ws.path(), path).is_err());
+    let linked = dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/b.md");
+    let separate = dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/c.md");
+    let missing =
+        dohc_engine_files::may_share_entry(ws.path(), "private/a.md", "private/missing.md");
+    #[cfg(unix)]
+    std::fs::set_permissions(&private, permissions).unwrap();
+    #[cfg(windows)]
+    {
+        let restored = icacls(&["/remove:d", "*S-1-1-0", "/q"]);
+        assert!(restored.status.success(), "{restored:?}");
+        assert!(denied.status.success(), "{denied:?}");
+    }
+    if !unlistable {
+        eprintln!("SKIP: this user can list the private folder");
+        return;
+    }
+    #[cfg(windows)]
+    assert_eq!(
+        unknown, [true; 3],
+        "stored names must be unknown while listing is denied"
+    );
+    assert_eq!(linked, !cfg!(target_os = "macos"));
+    assert!(!separate);
+    assert!(!missing);
 }
 
 /// A link to a folder whose name differs only in case is not a rename, even

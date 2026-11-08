@@ -1,7 +1,7 @@
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
-import { Link, Link2Off } from "lucide-react";
+import { Link2Off } from "lucide-react";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ipcErrorMessage } from "../ipcError";
+import { withErrorWords } from "../../ipc/errorWords";
 import { RetryRow } from "../ui/controls";
 import { Ref } from "../ui/Ref";
 import { SkeletonLines } from "../ui/SkeletonRows";
@@ -84,9 +84,15 @@ export type ConversationLinksView =
   | { status: "unlisted" }
   | { status: "ready"; files: MentionedFile[]; more: boolean; building: boolean; partial: boolean };
 
-const LINKS_FAILED = "dohc could not load the files this conversation mentions.";
+// The row says the sentence. Its toast adds the error's words when it has any.
+const LINKS_FAILED = "dohc could not load the links.";
 
-const authorKey = (author: Author) => `${author.kind}\0${author.presentation.group}\0${author.displayName}`;
+// What a screen reader hears before a name in the strip: an agent that joined
+// with a link is an agent, then a link holder, as beside its posts.
+const authorKindLabel = (author: Author) =>
+  author.kind !== "link" ? author.kind : author.linkAgent ? "agent link holder" : "link holder";
+const authorKey = (author: Author) =>
+  `${author.kind}\0${author.linkAgent ? "agent" : ""}\0${author.presentation.group}\0${author.displayName}`;
 
 // Each entry is one mention, newest first. A file shows once, where it was
 // last mentioned, with everyone who mentioned it in the pages read so far.
@@ -119,7 +125,7 @@ function AboutConversationLinks(props: {
   const retry = useRef(() => {});
   const onError = useCallback((error: unknown) => {
     setFailed(key);
-    notices.report({ identity, message: ipcErrorMessage(error, LINKS_FAILED), cause: error, retry: () => retry.current() });
+    notices.report({ identity, message: withErrorWords(LINKS_FAILED, error), cause: error, retry: () => retry.current() });
   }, [identity, key, notices]);
   const { pages, status, load, loadMore } = useChatLinks({ workspaceId, channelWireId, onError });
   const read = useCallback(() => {
@@ -197,13 +203,14 @@ export function AboutConversationLinksView(props: {
   const toggleRef = props.toggleRef ?? ownToggle;
   const focusAdded = useFocusAddedRow(ready?.files ?? null, fileKey, toggleRef, '[data-testid="about-conversation-link"]');
   return (
-    <AboutSection id="links" icon={Link} label="Links"
+    <AboutSection id="links" label="Links"
       count={ready ? `${ready.files.length}${ready.more || ready.building ? "+" : ""}` : undefined}
+      empty={ready !== null && ready.files.length === 0 && !ready.more && !ready.building && !ready.partial}
       expanded={props.expanded} onToggle={props.onToggle} toggleRef={toggleRef}>
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
-        <RetryRow testId="about-conversation-links-failed" onRetry={props.onRetry} />
+        <RetryRow testId="about-conversation-links-failed" onRetry={props.onRetry}>{LINKS_FAILED}</RetryRow>
       ) : view.status === "unlisted" ? (
         <AboutNote testId="about-conversation-links-unlisted" icon={Link2Off}>
           dohc does not list links in this conversation yet.
@@ -225,12 +232,6 @@ export function AboutConversationLinksView(props: {
             <AboutGathering testId="about-conversation-links-gathering" />
           ) : view.partial ? (
             <AboutNote testId="about-conversation-links-partial">This list may not include every file mentioned here.</AboutNote>
-          ) : view.files.length === 0 && !view.more ? (
-            <AboutNote testId="about-conversation-links-empty">
-              No files mentioned here yet. Type{" "}
-              <kbd className="rounded border border-line bg-bg px-1 font-mono text-[11px] text-muted">/</kbd> in a message
-              to add one.
-            </AboutNote>
           ) : null}
         </>
       )}
@@ -271,7 +272,7 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
         <span className="flex min-w-0 max-w-full items-center gap-1.5 text-[12px] leading-4">
           <span className="flex shrink-0">
             {file.authors.slice(0, 3).map((author) => (
-              <ChatAvatar key={authorKey(author)} name={author.displayName} kind={author.kind}
+              <ChatAvatar key={authorKey(author)} name={author.displayName} kind={author.kind} linkAgent={author.linkAgent === true}
                 presentation={author.presentation} size="strip" className="-ml-1 first:ml-0" />
             ))}
           </span>
@@ -280,8 +281,8 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
-                {author.kind === "human" ? null : <span className="sr-only">{author.kind === "link" ? "link holder" : author.kind} </span>}
-                <AgentName kind={author.kind} presentation={author.presentation}>{author.displayName}</AgentName>
+                {author.kind === "human" ? null : <span className="sr-only">{authorKindLabel(author)} </span>}
+                <AgentName kind={author.kind} presentation={author.presentation} linkAgent={author.linkAgent === true}>{author.displayName}</AgentName>
               </Fragment>
             ))}
           </span>

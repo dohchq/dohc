@@ -1,4 +1,4 @@
-import { TriangleAlert } from "lucide-react";
+import { CloudOff, TriangleAlert } from "lucide-react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 // A pass in flight is syncing, never saving: the files are already on disk.
@@ -8,14 +8,27 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   "local-changes": "Local changes",
   conflict: "Conflict",
   "sync-failed": "Sync failed",
-  "cloud-disconnected": "Server disconnected",
+  "not-connected": "Connect server to sync",
+  "account-unconfirmed": "Couldn't confirm account",
+  "sign-in-expired": "Sign in again to sync",
+  // The update the title bar names replaces it.
+  "update-required": "Sync stopped",
+};
+
+// The tooltip and accessible name, where the words beside the dot can't say
+// enough.
+const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
+  "not-connected": "Not syncing. Connect your server to sync this workspace.",
+  "account-unconfirmed": "Not syncing. dohc couldn't confirm this workspace's account.",
+  "sign-in-expired": "Not syncing. Your sign-in expired.",
 };
 
 // The dot's shape says the kind of state before its color does: filled is
-// settled, a ring is still working or waiting, a triangle needs the person.
-// Only a state that needs the person shows its words; the rest keep them for
-// the accessible name and the tooltip.
-type DotKind = "saved" | "working" | "waiting" | "attention";
+// settled, a ring is still working or waiting, a crossed-out cloud is sync
+// off until the person connects, and a triangle needs the person. The cloud
+// and the triangle show their words; the rest keep them for the accessible
+// name and the tooltip.
+type DotKind = "saved" | "working" | "waiting" | "off" | "attention";
 
 const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
   synced: "saved",
@@ -23,7 +36,11 @@ const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
   "local-changes": "working",
   conflict: "attention",
   "sync-failed": "attention",
-  "cloud-disconnected": "waiting",
+  // Disconnecting is a choice, not a fault, and it won't change by itself.
+  "not-connected": "off",
+  "account-unconfirmed": "attention",
+  "sign-in-expired": "attention",
+  "update-required": "attention",
 };
 
 function Dot(props: { kind: DotKind }) {
@@ -34,6 +51,8 @@ function Dot(props: { kind: DotKind }) {
       return <span aria-hidden data-dot="working" className="size-2 shrink-0 rounded-full border-[1.5px] border-warning" />;
     case "waiting":
       return <span aria-hidden data-dot="waiting" className="size-2 shrink-0 rounded-full border-[1.5px] border-subtle" />;
+    case "off":
+      return <CloudOff aria-hidden data-dot="off" size={12} className="shrink-0 text-subtle" />;
     case "attention":
       return <TriangleAlert aria-hidden data-dot="attention" size={12} className="shrink-0 text-danger" />;
   }
@@ -56,10 +75,26 @@ function liveDeliveryLabel(
   if (delivery === "active") return "Live editing active";
   // A named reason is a state that stays until someone acts on it; an
   // unnamed one is a connection dohc is still dialling.
-  if (reason === "session-host-refused" || reason === "session-host-diverged") return "Live editing stopped";
+  if (reason === "session-host-refused" || reason === "session-host-diverged" || reason === "live-edit-unadmitted") return "Live editing stopped";
   if (reason === "live-document-without-lineage") return "Live editing can't start";
-  if (reason === "live-edit-unadmitted") return "Live editing can't resume";
+  if (reason === "conflict-parent-withheld") return "Live editing can't resume";
   return reason ? "Live editing paused" : "Live editing retrying";
+}
+
+// The sync state names the server as the problem. No server connection, an
+// account dohc can't confirm, or an expired sign-in is not the server's
+// fault, so none of them does.
+export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
+  return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable";
+}
+
+// The title bar says "Server unreachable". Features that need the server
+// then add no indicator, toast or row of their own, since the server's
+// report covers them. A failed save or a required update takes the title
+// bar's words, and then they show again.
+export function titleBarNamesServer(syncStatus: SyncStatusResult | null | undefined, failedSaves: number): boolean {
+  return syncNamesServer(syncStatus) && !syncStatus?.updateRequired &&
+    saveFailedLabel(syncStatus ?? null, failedSaves) === null;
 }
 
 // A file that couldn't save outranks every state but those that stop sync
@@ -82,8 +117,7 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
   // A failed sync names the server when the server is what failed.
   const stateLabel =
-    state === "sync-failed" &&
-    syncStatus?.syncFailure?.cause === "server-unreachable"
+    state === "sync-failed" && syncNamesServer(syncStatus)
       ? "Server unreachable"
       : state
         ? SYNC_LABEL[state]
@@ -97,27 +131,32 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
     : state === "syncing" && syncStatus?.claimingIdentity
       ? "Setting up sync…"
       : label);
+  const description = (shownLabel === label && state ? SYNC_DESCRIPTION[state] : undefined) ?? shownLabel;
   const dot: DotKind = saveFailed || syncStatus?.updateRequired
     ? "attention"
     : state
       ? SYNC_DOT[state]
       : "waiting";
-  // A state that needs the person says so in words beside the dot.
-  const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
+  // A state that needs the person, or waits on the person to connect, says
+  // so in words beside the mark.
+  const worded = dot === "attention" || dot === "off";
   // Absent means this workspace has nothing to say about live delivery, so
-  // the title bar says nothing either.
-  const liveDelivery = syncStatus?.ownerLiveDelivery;
+  // the title bar says nothing either. Live editing waits on a server the
+  // title bar already names.
+  const liveDelivery = titleBarNamesServer(syncStatus, failedSaves) ? undefined : syncStatus?.ownerLiveDelivery;
   const liveLabel = liveDelivery
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;
+  // A retry with no reason is dohc still dialling by itself, so it is a ring.
+  const liveDialling = liveDelivery === "retrying" && !syncStatus?.ownerLiveDeliveryReason;
   return (
     <>
       <span
         data-testid="sync-status"
         data-state={saveFailed ? "save-failed" : state ?? "unknown"}
         role="status"
-        aria-label={shownLabel}
-        title={shownLabel}
+        aria-label={description}
+        title={description}
         // The dot's box keeps a 20x24 hover target for its tooltip.
         className={`flex h-6 shrink-0 items-center gap-1.5 text-[11px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
       >
@@ -134,12 +173,16 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
           // Shorten live delivery before local save status; retain its full tooltip.
           className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted"
         >
-          <span
-            aria-hidden
-            className={`inline-block size-1.5 shrink-0 rounded-full ${
-              liveDelivery === "active" ? "bg-success" : "bg-warning"
-            }`}
-          />
+          {liveDialling ? (
+            <Dot kind="working" />
+          ) : (
+            <span
+              aria-hidden
+              className={`inline-block size-1.5 shrink-0 rounded-full ${
+                liveDelivery === "active" ? "bg-success" : "bg-warning"
+              }`}
+            />
+          )}
           <span className="truncate">{liveLabel}</span>
         </span>
       ) : null}

@@ -1,7 +1,7 @@
 use super::error::{map_runtime, workspace_unavailable};
 use super::workspace::{OpenWorkspace, WorkspaceOpenMode};
 use crate::EngineService;
-use dohc_engine_collab::live_update_application::passive::ReplicaJournalRow;
+use dohc_engine_collab::live_update_application::passive::ReplicaJournalEntry;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::{RequestContext, ServiceResponse};
 use dohc_engine_protocol::wire::{Request, Response, WorkspaceHandle};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub struct ReplicaInput {
     pub(crate) after: i64,
     pub(crate) epoch_log_floor: i64,
-    pub(crate) rows: Vec<ReplicaJournalRow>,
+    pub(crate) rows: Vec<ReplicaJournalEntry>,
     pub(crate) reservation: Arc<dyn Send + Sync>,
 }
 

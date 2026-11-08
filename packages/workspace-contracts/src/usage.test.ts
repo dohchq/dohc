@@ -4,7 +4,7 @@ import {
   UsageCount, UsageBuildPair, UsageInvocation, UsageQuery, UsageSnapshot,
   USAGE_ACTION_IDS, USAGE_MAX_COUNT, calendarDays, localUsageDay, queryUsage, decodeUsageSnapshot,
 } from "./usage";
-const pair = { capabilityId: "version.try", door: "renderer" } as const;
+const pair = { capabilityId: "version.merge", door: "renderer" } as const;
 const day = "2026-10-07";
 const snapshot: UsageSnapshot = { version: 1, enabled: true, cleanExit: true,
   days: [{ day, appVersions: ["0.1.0"], complete: true }], counts: [],
@@ -14,7 +14,7 @@ describe("local usage contracts", () => {
   it("pins a unique explicit list of issued deliberate actions", () => {
     expect(new Set(USAGE_ACTION_IDS).size).toBe(USAGE_ACTION_IDS.length);
     for (const id of USAGE_ACTION_IDS) expect(Object.hasOwn(CAPABILITIES, id)).toBe(true);
-    for (const id of ["version.list", "notice.list", "version.try.read", "workspace.open.failures.take",
+    for (const id of ["version.list", "notice.list", "version.conflicts.list", "workspace.open.failures.take",
       "file.list", "file.read", "file.search", "workspace.list", "document.read"]) {
       expect(UsageInvocation.safeParse({ capabilityId: id, door: "renderer" }).success).toBe(false);
     }

@@ -76,6 +76,22 @@ export function hashLinkHandoffCode(code: string, key: BinaryLike): string {
     .digest("base64url");
 }
 
+// Each kind of agent sign-in value hashes in its own domain, so one kind can
+// never stand in for another.
+export type AgentCredentialKind = "request" | "code" | "access" | "refresh" | "resource" | "profile";
+
+export function hashAgentCredential(kind: AgentCredentialKind, value: string, key: BinaryLike): string {
+  return createHmac("sha256", key)
+    .update(`agent-${kind}\n`)
+    .update(value)
+    .digest("base64url");
+}
+
+// RFC 7636 S256: the challenge is the verifier's SHA-256 in base64url.
+export function pkceS256Challenge(verifier: string): string {
+  return createHash("sha256").update(verifier, "ascii").digest("base64url");
+}
+
 export function constantTimeHashEqual(
   computedHash: string,
   storedHash: string,

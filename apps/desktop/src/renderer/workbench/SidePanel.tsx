@@ -18,6 +18,8 @@ const KEYBOARD_RESIZE_PAGE_STEP = KEYBOARD_RESIZE_STEP * 8;
 // drag commits the final width to durable workbench state.
 export function SidePanel(props: {
   title: string;
+  // Drawn in the title's place, such as the Explorer's Home | Files.
+  heading?: React.ReactNode;
   width: number;
   actions?: React.ReactNode;
   onWidthChange: (width: number) => void;
@@ -43,7 +45,7 @@ export function SidePanel(props: {
       {/* h-9: one header band height across panel, tab strip, and history
           rail — all three bottom hairlines land on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-3">
-        <SectionLabel>{props.title}</SectionLabel>
+        {props.heading ?? <SectionLabel>{props.title}</SectionLabel>}
         <span className="ml-auto flex items-center gap-0.5">{props.actions}</span>
       </header>
       <div className="flex min-h-0 flex-1 flex-col">{props.children}</div>
@@ -93,7 +95,7 @@ export function SidePanel(props: {
         onPointerUp={(event) => resize.commit(event.pointerId)}
         onPointerCancel={(event) => resize.commit(event.pointerId)}
         onLostPointerCapture={(event) => resize.commit(event.pointerId)}
-        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
+        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 keyboard:focus-visible:bg-focus"
       />
     </aside>
   );

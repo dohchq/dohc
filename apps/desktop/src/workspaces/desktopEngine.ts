@@ -15,7 +15,7 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import {
-  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement,
+  CAPTURE_INITIAL_SETTLED_EVENT, COLLECTIONS_PROJECTED_EVENT, bridgeCaptureEventsToRenderer, bridgeNoAtomicPlacement, bridgeWriteDeferred,
 } from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
@@ -32,7 +32,8 @@ import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOw
 import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
 import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
-import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
+import {catchUpOwnerDocuments, listedOwnerDeliveryPaths, readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
+import type {LiveDocumentPath} from "./moveAcceptedEditsGuard";
 import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, readServerKeptEditsQueue, retryOwnerLiveQuarantine, sameGeneration, ServerKeptEditsConflict,
   type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
 import type {JsonValue} from "@dohc/workspace-engine-client";
@@ -81,7 +82,7 @@ export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
 }
 
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "restart-required";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "restart-required";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -109,7 +110,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath">;
   dialog: Pick<Dialog, "showErrorBox">;
-  process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
+  process: { env: NodeJS.ProcessEnv; resourcesPath?: string; platform: NodeJS.Platform };
   createRustEngineDaemon: typeof createRustEngineDaemonImplementation;
   defaultEngineBinaryPath: typeof defaultEngineBinaryPathImplementation;
   isQuitting(): boolean;
@@ -128,7 +129,10 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // The engine announced that a workspace's drive has no rename that refuses
   // to replace a file.
   noteNoAtomicPlacement(workspaceId: string): void;
+  noteWriteDeferred(workspaceId: string, path: string): void;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
+  // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
+  notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
@@ -161,7 +165,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   let ownerHostGeneration = 0;
   let ownerWorkspaceCloses = 0;
-  let ownerDelivery: (ReturnType<typeof startDesktopOwnerDelivery> & {retry?(workspaceId: string): void}) | undefined;
+  let ownerDelivery: (ReturnType<typeof startDesktopOwnerDelivery> & {retry?(workspaceId: string): void;
+    catchUp?(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean>}) | undefined;
   let ownerDeliveryConfig: DesktopOwnerDeliveryConfig | undefined;
   let ownerDeliveryModule: typeof import("./desktopOwnerDelivery") | undefined;
   let nativeOwnerDeliveryModule: typeof import("./nativeOwnerDelivery") | undefined;
@@ -176,7 +181,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
-  const ownerStopFailures = new Map<string, Map<string,{path:string;detail:string}>>();
+  const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
+  // The ready documents from each workspace's last complete live-host list, for the move guard.
+  const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();
   // Documents whose edits the server refused for good, read from the engine's
   // durable queues, so a restart shows them again. Each Try again the owner
   // asked for counts by queue, so a refusal after it is a new incident.
@@ -249,8 +256,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
     // Only the queue of the generation this release takes. If the engine refuses
     // to read this document's queue head, the release fails: nothing would keep its edits.
-    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle, queue => queue.objectId === binding.objectId))
-      .find(row => row.objectId === binding.objectId && row.outboxId !== null && sameGeneration(row.binding, binding));
+    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle,
+      queue => queue.objectId === binding.objectId && sameGeneration(queue, binding)))
+      .find(row => row.objectId === binding.objectId && !row.saveOnly && row.outboxId !== null && sameGeneration(row.binding, binding));
     if (kept?.recovery === "unreadable") throw new Error(`dohc could not read the edits it kept for ${kept.path}.`);
     let keptSnapshot: string | undefined;
     if (kept?.outboxId) {
@@ -296,10 +304,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // A refusal starts or renews a quarantine; one already read as waiting stays
   // as read. An acceptance can end only a quarantine already read.
   const quarantinesMayChange = (workspaceId: string, objectId: string, outcome: string) => {
-    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId)?.recovery;
+    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId && !row.saveOnly)?.recovery;
     return outcome === "frozen" ? recovery === undefined || recovery === "retrying" : outcome === "acknowledged" && recovery !== undefined;
   };
-  const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).map(row => row.path));
+  const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).filter(row => !row.saveOnly).map(row => row.path));
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
     if (status) ownerDeliveryStatus.set(workspaceId, status); else ownerDeliveryStatus.delete(workspaceId);
@@ -312,6 +320,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     failedOwnerDocuments.clear();
     frozenOwnerDocuments.clear();
     ownerStopFailures.clear();
+    liveDocumentPaths.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
     if (previous) ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(() => undefined);
@@ -352,10 +361,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     stopsChanged=true;
                     const failures=ownerStopFailures.get(workspaceId) ?? new Map();
                     const detail=error instanceof Error ? error.message : String(error);
-                    failures.set(row.document.objectId,{path:row.document.currentPath,detail});
+                    failures.set(row.document.objectId,{objectId:row.document.objectId,path:row.document.currentPath,detail});
                     ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
                   },
-                  onComplete:row => {stopsChanged=true;if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
+                  onComplete:row => {stopsChanged=true;dependencies.notifyOwnerLiveStopped?.(workspaceId,row.document.objectId);if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
                   retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
                 // A Stop that finished or failed in the background changes what the
                 // notices say, even when no live document remains to deliver.
@@ -372,6 +381,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               } catch (error) {check(); console.error("[desktop] server kept edits list failed:", error);}
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
+              liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, documents));
               const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
               // The server reports a diverged copy even after its owner stopped every document.
@@ -379,16 +389,17 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
               // One it cannot start goes before it: the owner must open it before a Resume can help.
-              // One that changed while live editing was off follows both: no Resume continues it.
+              // One whose server copy is missing an owner edit follows both: its Resume retries that edit.
               // A diverged server copy goes first: only the server's operator can continue it.
               const reason = diverged === true ? "session-host-diverged" :
                 unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
+                unavailableFor("conflict-parent-withheld") ? "conflict-parent-withheld" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :
                 unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
               const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||
-                reason === "session-host-refused" || reason === "live-edit-unadmitted";
+                reason === "session-host-refused" || reason === "live-edit-unadmitted" || reason === "conflict-parent-withheld";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
@@ -413,7 +424,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 assertCurrent();
                 const outcome = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                   document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent,
+                  onEnrolled: async () => {await readQuarantinesAfterPass(workspaceId, client, binding.workspace);}});
                 if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
                 return outcome;
               });
@@ -434,6 +446,36 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 }
                 throw error;
               }
+            });} finally {activeOwnerWorkspace = undefined;}
+          },
+          runTargetedPass: async (workspaceId, objectIds, lifetime) => {
+            if (!workspaceAuthorities.withOperation) return false;
+            activeOwnerWorkspace = workspaceId;
+            try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
+              const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
+              if (!session) return false;
+              const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
+              const check = () => {
+                signal.throwIfAborted(); operation.assertCurrent(); session.assertCurrent();
+                if (generation !== ownerDeliveryGeneration || isQuitting()) throw new Error("This live editing session ended.");
+              };
+              const documents = readyOwnerDeliveryDocuments(await session.documents(signal), workspaceId);
+              check();
+              const native = nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
+              return await catchUpOwnerDocuments(documents, objectIds, document => sessions.run(operation.workspace, async binding => {
+                const client = daemon.currentClient();
+                if (!(client instanceof EngineClient)) return "retry";
+                const assertCurrent = () => {
+                  check(); sessions.assertCurrentBinding(operation.workspace, binding);
+                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended.");
+                };
+                assertCurrent();
+                const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
+                  document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent, observedOnly: true});
+                if (quarantinesMayChange(workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                return result;
+              }), check);
             });} finally {activeOwnerWorkspace = undefined;}
           },
         });
@@ -462,7 +504,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                 document, config, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
-                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
+                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent,
+                onEnrolled: async () => {await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);}});
               assertCurrent();
               if (quarantinesMayChange(document.binding.workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
@@ -640,6 +683,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         startupSmoke: startupSmoke.promise,
+        // On Linux, Ctrl+C or a stop sent to dohc's process group reaches dohc
+        // only. dohc quits and stops the engine at the end of its quit.
+        ownProcessGroup: process.platform === "linux",
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
@@ -714,6 +760,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
       bridgeNoAtomicPlacement(rustEngineDaemon, dependencies.noteNoAtomicPlacement);
+      bridgeWriteDeferred(rustEngineDaemon, dependencies.noteWriteDeferred);
+      rustEngineDaemon.onEvent(event => {
+        if (event.name === "sync.refusalsChanged") dependencies.onRefusalsChanged?.();
+      });
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning
       // workspace's executors to drain the durable claim table, and a claim
@@ -797,6 +847,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   }
 
   return {
+    /** The move guard's view of which pages are live. Undefined until a complete list arrives. */
+    liveDocumentPaths(workspaceId: string): readonly LiveDocumentPath[] | undefined {
+      return liveDocumentPaths.get(workspaceId);
+    },
+    /** True only when an owner sync answered for every listed page, or this device is not bound to it. */
+    ownerCatchUp(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean> {
+      return ownerDelivery?.catchUp?.(workspaceId, objectIds, signal) ?? Promise.resolve(false);
+    },
     retryOwnerDelivery(workspaceId: string): void {
       if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId);
     },
@@ -808,8 +866,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // keeps. A record that can only be saved leaves the server's row its own.
     ownerLiveQuarantines(workspaceId: string): OwnerLiveQuarantine[] {
       const local: OwnerLiveQuarantine[] = (ownerQuarantines.get(workspaceId) ?? []).map(row => ({objectId: row.objectId, path: row.path, reason: row.reason,
-        storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery}));
-      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId && kept.recovery !== "cannot-write"))
+        storedOn: "this-computer", incident: quarantineIncident(row), recovery: row.recovery, ...(row.saveOnly ? {saveOnly: true} : {})}));
+      return [...local, ...serverQuarantinesOf(workspaceId).filter(row => !local.some(kept => kept.objectId === row.objectId && kept.recovery !== "cannot-write" && !kept.saveOnly))
         .map((row): OwnerLiveQuarantine => ({objectId: row.objectId, path: row.path, reason: row.reason, storedOn: "server",
           incident: serverIncident(row), recovery: row.recovery, ...(row.earlier ? {earlier: true} : {})}))];
     },
@@ -836,8 +894,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       }
       await withEngineClient(workspace, async (client, handle) => {
         // Read again, so a Try again never names a queue that already changed.
-        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.objectId === objectId);
-        if (!row || row.outboxId === null || row.recovery !== "paused" || quarantineIncident(row) !== incident) {
+        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle))
+          .find(candidate => candidate.objectId === objectId && quarantineIncident(candidate) === incident);
+        if (row?.saveOnly) throw new Error("These edits were kept after a restore and cannot be sent again. Save a recovery copy using this path and incident.");
+        if (!row || row.outboxId === null || row.recovery !== "paused") {
           throw new Error("This document changed. Open Live documents to check it.");
         }
         const outboxId = row.outboxId;

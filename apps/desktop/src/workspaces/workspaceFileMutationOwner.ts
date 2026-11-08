@@ -10,6 +10,8 @@ import {
   DeleteWorkspacePathPayload,
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
+  ReadHistoryOperationPayload,
+  ReadHistoryOperationResult,
   MoveWorkspacePathPayload,
   MoveWorkspacePathResult,
   WriteWorkspaceAssetPayload,
@@ -42,7 +44,7 @@ import {
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
-import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
+import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { beginPendingRecovery, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 import { assertMoveDocumentKind, deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import {
@@ -72,6 +74,7 @@ export interface WorkspaceFileMutationOwner<Event> {
     DeleteWorkspacePathResult
   >;
   undoHistoryOperation: WorkspaceFileMutationIpcHandler<Event, DeleteUndoResult>;
+  readHistoryOperation: WorkspaceFileMutationIpcHandler<Event, import("zod").infer<typeof ReadHistoryOperationResult>>;
   writeText: WorkspaceFileMutationIpcHandler<Event, WriteWorkspaceTextResult>;
   writeAsset: WorkspaceFileMutationIpcHandler<Event>;
 }
@@ -138,6 +141,8 @@ export function createWorkspaceFileMutationOwner<
   /** This computer's person, read when a request arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   notifyRenderer(workspaceId: string): void;
+  /** Catches a live page, or a folder holding one, up with the server before it moves. */
+  beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   // A file in a share view was created or saved, and its change is in the
   // share view's journal. The shell answers with a direct push.
   shareViewEdited(workspaceId: string): void;
@@ -320,8 +325,14 @@ export function createWorkspaceFileMutationOwner<
       const recording = runAdmittedMutation(event, request, async ({ input, workspace, signal, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
         if (!receivedShare) {
           assertWritableWorkspace(workspace);
+          const history = dependencies.historyFor(workspace);
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+            ...(dependencies.beforeMove ? { beforeMove: (storedSpelling: () => Promise<string>) => dependencies.beforeMove!(workspace.workspaceId, storedSpelling) } : {}),
+            linkRewrites: history.rewriteHistoryLinks ? {
+              workspaceId: workspace.workspaceId, signal,
+              history: {rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history)},
+            } : undefined,
             onRecorded: (path, operationId) => {
               const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });
               const release = beginPendingRecovery(operationId, { signal, waitForReads: true });
@@ -348,6 +359,12 @@ export function createWorkspaceFileMutationOwner<
         reject(error);
       });
       return result;
+    },
+
+    readHistoryOperation: async (event, payload) => {
+      const request = admitMutation(event, payload, ReadHistoryOperationPayload.parse);
+      return runAdmittedMutation(event, request, ({ input, workspace, signal, assertCurrent }) =>
+        readWorkspaceHistoryOperation({ workspace, signal, assertCurrent }, input, dependencies.historyFor(workspace), { agent: false }));
     },
 
     undoHistoryOperation: async (event, payload) => {

@@ -158,7 +158,7 @@ describe("Chats in the left side panel", () => {
     // list stays.
     const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
     expect(tab.dataset.active).toBe("true");
-    expect(tab.textContent).toContain("#General");
+    expect(tab.textContent).toContain("General");
     const channelView = await screen.findByTestId("chats-channel-view");
     expect(channelView.dataset.variant).toBe("page");
     expect(within(channelView).queryByRole("button", { name: "Back" })).toBeNull();
@@ -177,8 +177,8 @@ describe("Chats in the left side panel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
-    expect(tab.textContent).toContain("#General");
-    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent).toContain("#random");
+    expect(tab.textContent).toContain("General");
+    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent).toContain("random");
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     await user.type(screen.getByTestId("chats-new-thread-composer"), "Random draft");
     await user.click(within(panel).getByTestId("chats-feed-link"));

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -11,12 +10,13 @@ import { stageEngineReader, requireEngineReader } from "./stage-engine-reader.mj
 import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.ts";
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 import signReader from "./sign-engine-reader-macos.mjs";
+import { useCachedNodeDownloads } from "./pinned-node-downloads.testSupport.mjs";
+import { builderLog, builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builder = createRequire(require.resolve("electron-builder/package.json"));
-builder("app-builder-lib");
+builderRequire("app-builder-lib");
 const desktop = fileURLToPath(new URL("..", import.meta.url));
-const { resolveFunction } = builder("app-builder-lib/out/util/resolve.js");
+useCachedNodeDownloads();
+const { resolveFunction } = builderRequire("app-builder-lib/out/util/resolve.js");
 const config = load(await readFile(new URL("../electron-builder.yml", import.meta.url), "utf8"));
 
 async function removeLayout(path) {
@@ -26,7 +26,17 @@ async function removeLayout(path) {
   await rm(path, { recursive: true, force: true });
 }
 
-test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
+// ShipIt clears quarantine from every file of a macOS update, which needs the owner's write bit.
+async function assertOwnerWritable(base) {
+  for (const entry of await readdir(base, { recursive: true, withFileTypes: true })) {
+    const path = join(entry.parentPath, entry.name);
+    if (entry.isFile()) assert.ok((await stat(path)).mode & 0o200, `${path} is owner-writable`);
+  }
+}
+
+// Each case copies the packaged layout with its two Node binaries. On a slow
+// disk the cases take about 180 s in all, where a normal one takes 80 s.
+test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-signing-")), source = join(root, "source");
   t.after(async () => { await removeLayout(source); await rm(root, { recursive: true, force: true }); });
   const staged = await stageEngineReader({ resources: source, platform: "darwin", arch: "arm64" });
@@ -71,14 +81,15 @@ test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
     assert.deepEqual((await readdir(sourceBase)).sort(), sourceEntries);
     for (const name of stale.slice(0, 2)) assert.equal(await readFile(join(sourceBase, name, "node"), "utf8"), "unselected executable");
   });
-  await t.test("keeps packaged folders owner-writable and files read-only", async sub => {
+  await t.test("keeps packaged folders and files owner-writable", async sub => {
     const f = await fixture(sub);
     await f.prepare();
     const base = join(f.resources, "engine-reader");
-    for (const [path, mode] of [[base, 0o755], [dirname(f.original.node), 0o755], [join(base, "selection.json"), 0o444], [f.original.manifest, 0o444]]) {
+    for (const [path, mode] of [[base, 0o755], [dirname(f.original.node), 0o755], [join(base, "selection.json"), 0o644], [f.original.manifest, 0o644], [f.original.bundle, 0o644], [f.original.node, 0o755]]) {
       assert.equal(f.modes.get(path), mode, `requested POSIX mode for ${path}`);
       if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
     }
+    await assertOwnerWritable(base);
     await rm(f.app, { recursive: true, force: true });
   });
   await t.test("plain rm deletes an unsigned packaged layout without mode repair", async sub => {
@@ -112,11 +123,6 @@ test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
         ignore: file => file.endsWith("already-ignored") };
       const operation = signReader(options, {}, {
         chmod: f.setMode,
-        rename: async (from, to) => {
-          // Model POSIX replacement: Windows cannot replace a read-only destination.
-          if (process.platform === "win32" && (await stat(to).catch(() => null))?.isFile()) await chmod(to, 0o644);
-          await rename(from, to);
-        },
         wait: async ms => { waits.push(ms); },
         run: async (command, args) => {
           assert.equal(command, "/usr/bin/codesign");
@@ -167,10 +173,11 @@ test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
             assert.deepEqual(await readFile(join(sourceBase, "selection.json")), sourceSelection, "signing must not rewrite the staged selection through a hard link");
             assert.equal(createHash("sha256").update(await readFile(staged.node)).digest("hex"), sourceNodeHash, "signing must not rewrite the staged Node through a hard link");
           }
-          for (const [path, mode] of [[join(f.resources, "engine-reader"), 0o755], [dirname(final.node), 0o755], [join(f.resources, "engine-reader/selection.json"), 0o444], [final.manifest, 0o444]]) {
-            assert.equal(f.modes.get(path === final.manifest ? f.original.manifest : path), mode);
+          for (const [path, mode] of [[join(f.resources, "engine-reader"), 0o755], [dirname(final.node), 0o755], [join(f.resources, "engine-reader/selection.json"), 0o644], [final.manifest, 0o644], [final.node, 0o755]]) {
+            assert.equal(f.modes.get(path === final.manifest ? f.original.manifest : path === final.node ? f.original.node : path), mode);
             if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
           }
+          await assertOwnerWritable(join(f.resources, "engine-reader"));
           if (scenario === "outer reader mutation" || scenario === "outer compiler mutation") {
             const node = scenario === "outer reader mutation" ? final.node : compilerNode;
             await chmod(node, 0o755);
@@ -220,10 +227,10 @@ for (const [name, force, identity, signature, failure] of [
   ["explicit null identity permits unsigned development", false, null, "missing", undefined],
   ["explicit null identity refuses required signing", true, null, "missing", /forceCodeSigning/],
 ]) test(`electron-builder sign path: ${name}`, async t => {
-  const { MacPackager } = builder("app-builder-lib/out/macPackager.js");
-  const { MacTargetHelper } = builder("app-builder-lib/out/mac/MacTargetHelper.js");
-  const { PlatformPackager } = builder("app-builder-lib/out/platformPackager.js");
-  const codesign = builder("app-builder-lib/out/codeSign/macCodeSign.js");
+  const { MacPackager } = builderRequire("app-builder-lib/out/macPackager.js");
+  const { MacTargetHelper } = builderRequire("app-builder-lib/out/mac/MacTargetHelper.js");
+  const { PlatformPackager } = builderRequire("app-builder-lib/out/platformPackager.js");
+  const codesign = builderRequire("app-builder-lib/out/codeSign/macCodeSign.js");
   t.mock.method(codesign, "isSignAllowed", () => true);
   t.mock.method(codesign, "findIdentity", async () => null);
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-sign-path-"));
@@ -264,4 +271,12 @@ for (const [name, force, identity, signature, failure] of [
   if (identity !== null) assert.equal(afterSign, 1, "the real signApp return emits afterSign even without an identity");
   if (!force) assert.equal(checks, 0, "development needs no signature tools or accounts");
   else if (identity !== null) assert.equal(checks, 1, "one designated-requirement verification, without display-name matching");
+});
+
+test("electron-builder logs to stderr, not to the stream node:test reads results from", t => {
+  const written = [];
+  t.mock.method(process.stderr, "write", chunk => { written.push(String(chunk)); return true; });
+  builderLog.info({ reason: "identity explicitly is set to null" }, "skipped macOS code signing");
+  t.mock.restoreAll();
+  assert.match(written.join("").replace(/\x1b\[[0-9;]*m/g, ""), /^ {2}• skipped macOS code signing +reason=identity explicitly is set to null\n$/);
 });

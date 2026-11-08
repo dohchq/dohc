@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { revealInFileManagerLabel } from "../src/workspaces/explorerMenu";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
 
-test("workspace manager creates another window and forgets a workspace without deleting its files", async ({}, testInfo) => {
+test("workspace manager creates another window and removes a workspace from the list without deleting its files", async ({}, testInfo) => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -82,7 +82,7 @@ test("workspace manager creates another window and forgets a workspace without d
     const reopenedManager = await reopened;
     await expect(reopenedManager.getByTestId("workspace-manager-row")).toHaveCount(2);
     await reopenedManager.getByRole("button", { name: "More for second", exact: true }).click();
-    await reopenedManager.getByRole("menuitem", { name: "Forget", exact: true }).click();
+    await reopenedManager.getByRole("menuitem", { name: "Remove from list", exact: true }).click();
     await expect(reopenedManager.getByTestId("workspace-manager-row")).toHaveCount(1);
     await expect.poll(async () => second.evaluate(async () => {
       if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
@@ -136,10 +136,10 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
     await trigger.focus();
     await manager.keyboard.press("Enter");
     const reveal = manager.getByRole("menuitem", { name: revealInFileManagerLabel(process.platform), exact: true });
-    const forget = manager.getByRole("menuitem", { name: "Forget", exact: true });
+    const remove = manager.getByRole("menuitem", { name: "Remove from list", exact: true });
     await expect(reveal).toBeFocused();
-    await expect(forget).toBeInViewport();
-    await forget.click({ trial: true });
+    await expect(remove).toBeInViewport();
+    await remove.click({ trial: true });
     await manager.screenshot({ path: testInfo.outputPath("bottom-row-menu.png") });
     await manager.keyboard.press("Escape");
     await expect(reveal).not.toBeVisible();
@@ -148,6 +148,41 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
     await manager.keyboard.press("Tab");
     await manager.keyboard.press("Tab");
     await expect(reveal).not.toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
+});
+
+test("workspace manager refuses a listed workspace inside dohc's state folder and leaves it as it was", async () => {
+  test.setTimeout(120_000);
+  const workspace = await createTempWorkspace();
+  // Listed before dohc refused such folders: a workspace inside the test
+  // home, which is dohc's state folder.
+  const rootPath = join(workspace.homeDir, "notes");
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest({ rootPath }, "notes-in-state");
+    await seedWorkspaceRegistry(workspace, [{ workspaceId: "notes-in-state", rootPath }]);
+    const files = () => readdir(rootPath, { recursive: true });
+    const before = await files();
+    desktop = await launchDesktopApp({ workspace });
+    // dohc reopens the listed workspace at startup and refuses it there.
+    await expect(desktop.page.getByTestId("workspace-open-failed")).toContainText(
+      "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace. In Manage workspaces, choose Remove from list on its row.",
+    );
+    expect(await files()).toEqual(before);
+
+    await desktop.page.getByTestId("workspace-switcher").click();
+    const managerOpened = desktop.app.waitForEvent("window");
+    await desktop.page.getByTestId("workspace-switcher-manage").click();
+    const manager = await managerOpened;
+    const row = manager.getByTestId("workspace-manager-row");
+    await expect(row).toHaveCount(1);
+    await row.getByRole("button", { name: /^More for / }).click();
+    // A plain row leaves the list at once, without asking first.
+    await manager.getByRole("menuitem", { name: "Remove from list", exact: true }).click();
+    await expect(row).toHaveCount(0);
+    expect(await files()).toEqual(before);
   } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
   }

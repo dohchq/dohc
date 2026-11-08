@@ -82,13 +82,12 @@ test("search finds file content and a chat message; .env.local content never sur
     await revealExplorerPath(page, "notes/roadmap.md");
     await explorerRow(page, "notes/roadmap.md").click();
     await openAboutPanel(page);
+    // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
-    const titleInput = page.getByTestId("linked-chat-new-title");
-    await titleInput.fill("Roadmap sync");
-    await titleInput.press("Enter");
-    const composer = page.getByTestId("linked-chat-composer");
-    await composer.fill("Let's settle the quasar sync cadence this week.");
-    await composer.press("Enter");
+    const comment = page.getByTestId("linked-chat-new-composer");
+    await comment.fill("Roadmap sync\nLet's settle the quasar sync cadence this week.");
+    await comment.press("Enter");
+    await expect(page.getByTestId("linked-chat-title")).toContainText("Roadmap sync");
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(
       "quasar sync cadence",
     );

@@ -42,7 +42,7 @@ export interface DaemonWireError extends Omit<WireError, "code"> {
 }
 
 export interface DaemonRequesterClient {
-  sendRequest(request: Request): Promise<Response>;
+  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response>;
   readonly helloAck?: {
     readonly capabilities: readonly string[];
   };
@@ -234,7 +234,8 @@ export function isLiveSettlementCapacityRefusal(error: unknown): boolean {
 }
 
 // Refusals that clear on their own: a program holding the artifact, busy
-// SQLite writers, occupied live or egress capacity, or pending author coverage. MEMBERSHIP of
+// SQLite writers, occupied live or egress capacity, pending author coverage, or
+// a Markdown reader that is starting again. MEMBERSHIP of
 // that class lives here, at the protocol boundary, because three layers ask
 // the question — the settle ladder that re-arms, the journal write that must
 // be resent, and the session that must not be quarantined for one.
@@ -252,8 +253,15 @@ function isBlobEgressCapacityRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "blob-egress-capacity";
 }
 
+// The Markdown reader failed in a way that clears on its own, and the engine
+// has retries left for this proof. The engine bounds them, then answers with a
+// terminal INTERNAL refusal that no ladder retries.
+function isMarkdownReaderRetryableRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "markdown-reader-retryable";
+}
+
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error) || isBlobEgressCapacityRefusal(error);
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error) || isBlobEgressCapacityRefusal(error) || isMarkdownReaderRetryableRefusal(error);
 }
 
 // Retryability does not prove non-admission: cancellation or an internal
@@ -305,6 +313,10 @@ export function engineStoreRefusalOf(error: unknown): EngineStoreRefusal | null 
 // terminal and cancels a write that would have landed.
 export function isYdocRemoteUpdatesPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-remote-updates-pending";
+}
+
+export function isMarkdownWriteHeldRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "CONFLICT") === "markdown-write-held";
 }
 
 const REFUSAL_DETAIL_DELIMITER = ": ";
@@ -493,6 +505,7 @@ export class WorkspaceDaemonRequester {
       workspace?: WorkspaceHandle;
       idempotencyKey?: string;
       deadlineMs?: number;
+      cancelSignal?: AbortSignal;
     },
   ): Promise<Response["result"]> {
     const id = this.allocateRequestId();
@@ -557,6 +570,7 @@ export class WorkspaceDaemonRequester {
       workspace?: WorkspaceHandle;
       idempotencyKey?: string;
       deadlineMs?: number;
+      cancelSignal?: AbortSignal;
     },
   ): Promise<Response["result"]> {
     let response: Response;
@@ -574,7 +588,7 @@ export class WorkspaceDaemonRequester {
           ? { deadlineMs: options.deadlineMs }
           : {}),
         params,
-      });
+      }, undefined, undefined, options?.cancelSignal);
     } catch (error) {
       const refusal = wireErrorFrom(error);
       if (refusal !== null) throw new DaemonRefusalError(refusal, error);

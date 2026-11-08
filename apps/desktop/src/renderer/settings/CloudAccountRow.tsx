@@ -5,6 +5,7 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { SecondaryButton } from "../ui/controls";
+import { Menu } from "../ui/Menu";
 import { useRequestSequence } from "../useRequestSequence";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
@@ -76,6 +77,8 @@ export function CloudAccountRow(props: {
   onDelete?: (account: { email: string; server: string }) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const onDelete = props.onDelete;
   // Bumped when the row unmounts, so an answer after that paints nothing.
   const requests = useRequestSequence();
   const latest = useRef(props);
@@ -127,29 +130,34 @@ export function CloudAccountRow(props: {
         {({ show: _show, ...target }) => (
           <SecondaryButton
             {...target}
-            size="compact"
             data-testid="cloud-disconnect"
             disabled={busy}
             onClick={() => void disconnect()}
-            className="flex items-center gap-1.5"
+            className="flex items-center gap-2"
           >
             <LogOut size={12} aria-hidden />
             {busy ? "Disconnecting…" : "Disconnect"}
           </SecondaryButton>
         )}
       </Explained>
-      {props.onDelete ? (
-        // The compact secondary recipe in the danger color: it ends the account.
-        <button
-          type="button"
-          data-testid="cloud-delete-account"
+      {onDelete ? (
+        <Menu
+          label="More actions"
+          testId="cloud-account-more"
           disabled={busy}
-          onClick={() => props.onDelete?.({ email: props.email, server })}
-          className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-line px-2.5 text-[11px] text-danger hover:bg-hover dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
-        >
-          <Trash2 size={12} aria-hidden />
-          Delete account…
-        </button>
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          items={[
+            {
+              id: "delete-account",
+              label: "Delete account…",
+              danger: true,
+              icon: <Trash2 size={14} aria-hidden />,
+              testId: "cloud-delete-account",
+              onSelect: () => onDelete({ email: props.email, server }),
+            },
+          ]}
+        />
       ) : null}
     </SettingRow>
   );

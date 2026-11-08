@@ -133,6 +133,16 @@ export type JournalCutForProjectionResult =
     }
   | OrderedLiveUpdateCutRefusal
 
+/**
+ * Projects each prefix that ends at input `from` or later, before the
+ * candidate, in the same pass that validates the cut. `project` reads the
+ * prefix's document without changing it and returns a refusal or nothing.
+ */
+export interface JournalPrefixProjection {
+  readonly from: number
+  readonly project: (document: Y.Doc, topology: ProjectionTopology, index: number) => OrderedLiveUpdateCutRefusalReason | undefined
+}
+
 const POLICY_FIELDS = [
   'maxStructVisits',
   'maxValueNodeVisits',
@@ -3611,8 +3621,9 @@ export function validateJournalCutForProjection(
   input: Extract<OwnedLiveUpdateCutInput, { mode: 'journal-candidate' }>,
   policy: OrderedLiveUpdateCutPolicy,
   fatalUnexpectedErrors = false,
+  prefixes?: JournalPrefixProjection,
 ): JournalCutForProjectionResult {
-  return validateCut(input, policy, 'journal-candidate', fatalUnexpectedErrors) as JournalCutForProjectionResult
+  return validateCut(input, policy, 'journal-candidate', fatalUnexpectedErrors, prefixes) as JournalCutForProjectionResult
 }
 
 function validateCut(
@@ -3620,6 +3631,7 @@ function validateCut(
   policy: OrderedLiveUpdateCutPolicy,
   projectionMode?: OwnedLiveUpdateCutInput['mode'],
   fatalUnexpectedErrors = false,
+  prefixes?: JournalPrefixProjection,
 ): OrderedLiveUpdateCutResult | RegistrationCutForProjectionResult | JournalCutForProjectionResult {
   const hostileInput: unknown = input
   const hostilePolicy: unknown = policy
@@ -3636,11 +3648,13 @@ function validateCut(
     let candidateCoverage: {firstSeen: readonly LiveUpdateStructRange[]; firstSeenDeletes: readonly LiveUpdateStructRange[]} | undefined
     const evidenceDeltas: CappedUsage[] = []
     const applyForecasts: DecoderUsage[] = []
+    const prefixInputs: NormalizedInput[] = []
 
     for (let index = 0; index < snapshot.entries.length; index += 1) {
       const entry = snapshot.entries[index] as InputBytes
       const before = budget.cappedSnapshot()
       const decoded = decodeOwnedInput(entry, budget, index === 0)
+      if (prefixes !== undefined) prefixInputs.push(decoded.normalized)
       if (entry.stage.kind === "input" && entry.stage.role === "candidate") candidateCoverage = frontier.newCoverage(decoded.normalized, budget, entry.stage)
       frontier.apply(decoded.normalized, budget, entry.stage)
       const after = budget.cappedSnapshot()
@@ -3698,13 +3712,31 @@ function validateCut(
     document.getXmlFragment('body')
     document.getMap('frontmatter')
     document.getMap('meta')
+    // Each prefix's own frontier proves its document, which its projection
+    // must leave unchanged. Every prefix shares this cut's work budget.
+    const prefixFrontier = new ReplayFrontier()
     for (let index = 0; index < snapshot.entries.length; index += 1) {
+      const entry = snapshot.entries[index] as InputBytes
       applyOwnedInput(
-        snapshot.entries[index] as InputBytes,
+        entry,
         applyForecasts[index] as DecoderUsage,
         document,
         budget,
       )
+      if (prefixes === undefined || index === snapshot.entries.length - 1) continue
+      prefixFrontier.apply(prefixInputs[index] as NormalizedInput, budget, entry.stage)
+      if (index < prefixes.from) continue
+      const prefixTopology: ProjectionTopologyCapture = {}
+      completeProof(document, prefixFrontier, budget, entry.stage, prefixTopology)
+      if (prefixTopology.value === undefined) fail('invalid-update', entry.stage)
+      let mutated = false
+      const latch = () => { mutated = true }
+      document.on('beforeTransaction', latch)
+      let reason: OrderedLiveUpdateCutRefusalReason | undefined
+      try { reason = prefixes.project(document, prefixTopology.value, index) }
+      finally { document.off('beforeTransaction', latch) }
+      if (mutated) fail('projection-mutated', entry.stage)
+      if (reason !== undefined) fail(reason, entry.stage)
     }
 
     const topology: ProjectionTopologyCapture | undefined = projectionMode !== undefined ? {} : undefined

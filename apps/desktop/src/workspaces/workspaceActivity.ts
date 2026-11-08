@@ -55,6 +55,9 @@ interface WatchedWorkspace {
   // True once the check finds the root on a network share.
   onNetworkShare: boolean;
   recoveryUnavailable: boolean;
+  // Null until this capture first reads the list.
+  outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
+  outsideWriteCopyReadError: string | null | undefined;
   keptFiles: readonly (readonly [string, string])[];
   // Old file copies the engine keeps on a drive that cannot tell it whether
   // a program still uses one. Null until the engine first reports.
@@ -93,9 +96,11 @@ export interface WorkspaceActivityOptions {
   onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
-  // Live facts main owns: whether this workspace has cloud sync enabled
-  // (registry remote identity) and whether a cloud session exists right now.
-  cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
+  // Live facts main owns: why a synced workspace can't sync on this
+  // computer's session (absent when it can, or when the workspace doesn't
+  // sync), and the workspace's saved pause.
+  cloudStateFor?: (workspaceId: string) => {
+    syncBlocked?: "not-connected" | "account-unconfirmed";
     syncPause?: SyncStatusResult["syncPause"];
   };
   // Builds a sync engine for a workspace when it is enabled and connected;
@@ -159,6 +164,7 @@ export interface WorkspaceCaptureHooks {
   ) => void;
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
+  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
@@ -176,6 +182,23 @@ export async function closeWorkspaceActivityAndRelay(options: {
   } catch (error) {
     options.onRelayCloseError(error);
   }
+}
+
+// The activity's last file read and saves go through the workspace's engine
+// session, which the rest close, so the activity closes first. Every step
+// runs, then the first failure is thrown.
+export async function closeActivityFirst(
+  closeActivity: () => Promise<unknown>,
+  closeRest: () => readonly Promise<unknown>[],
+): Promise<void> {
+  const results = [
+    ...(await Promise.allSettled([closeActivity()])),
+    ...(await Promise.allSettled(closeRest())),
+  ];
+  const failed = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failed) throw failed.reason;
 }
 
 export async function settleYDocsAfterFileObservation(
@@ -246,10 +269,7 @@ export function createWorkspaceActivity(
   ): SyncStatusResult {
     const { workspaceId } = workspace;
     const liveSessionsGeneration = state.liveSessionsGeneration;
-    const cloud = options.cloudStateFor?.(workspaceId) ?? {
-      enabled: false,
-      connected: false,
-    };
+    const cloud = options.cloudStateFor?.(workspaceId) ?? {};
     const syncPause = cloud.syncPause;
     const preserved = state.preservedStatus;
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
@@ -266,12 +286,12 @@ export function createWorkspaceActivity(
       hasConflict: conflictCount > 0,
       // A retry someone asked for shows as syncing until it ends.
       syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
-      cloudEnabled: cloud.enabled,
-      // A confirmed-401 engine reads as disconnected (the existing
-      // "cloud-disconnected" surface) so the UI stops saying "connected" and
-      // prompts re-login, instead of spinning on a dead token. An engine
-      // stopped on the relay API version reads the same way.
-      cloudConnected: cloud.connected && !(snap?.authExpired ?? false) && !snap?.updateRequired,
+      // An engine stopped on the relay API version names the side to update.
+      // One whose sign-in the server refused stops too. Neither records a
+      // pause, so sync runs again once a new sign-in rebuilds the engine.
+      syncBlocked: snap?.updateRequired
+        ? "update-required"
+        : cloud.syncBlocked ?? (snap?.authExpired ? "sign-in-expired" : null),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -285,12 +305,17 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
+      ...(snap?.authExpired ? { signInExpired: true } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
+      ...(w && w.outsideWriteCopies !== null ? {
+        outsideWriteCopies: w.outsideWriteCopies.map(([original, copy, id]): [string, string, string] => [original, copy, id]),
+      } : {}),
+      ...(w?.outsideWriteCopyReadError !== undefined ? { outsideWriteCopyReadError: w.outsideWriteCopyReadError } : {}),
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
@@ -389,6 +414,8 @@ export function createWorkspaceActivity(
         atomicPlacementUnavailable: false,
         onNetworkShare: false,
         recoveryUnavailable: false,
+        outsideWriteCopies: null,
+        outsideWriteCopyReadError: undefined,
         keptFiles: [],
         retainedCopies: null,
         heldFiles: [],
@@ -416,6 +443,12 @@ export function createWorkspaceActivity(
               onRecoveryUnavailable: (unavailable) => {
                 if (state.entry !== entry || entry.recoveryUnavailable === unavailable) return;
                 entry.recoveryUnavailable = unavailable;
+                notify({ workspaceId: workspace.workspaceId });
+              },
+              onOutsideWriteCopies: (paths, readError) => {
+                if (state.entry !== entry) return;
+                entry.outsideWriteCopies = paths === null ? null : [...paths];
+                entry.outsideWriteCopyReadError = readError;
                 notify({ workspaceId: workspace.workspaceId });
               },
               onKeptFiles: (paths) => {
@@ -809,11 +842,26 @@ export function createWorkspaceActivity(
     if (snapshot.authExpired || snapshot.updateRequired || snapshot.syncFailure) throw new Error(unsynced);
   }
 
+  // Pushes everything the workspace recorded so far. Rejects when a pass fails.
+  async function pushRecorded(state: WorkspaceActivityState): Promise<void> {
+    await state.entry?.engine?.pushRecorded();
+  }
+
   // Pulls the workspace's own relay log for the Chats polls, where members'
   // replies to the DMs and Groups this workspace owns land. Records no local
   // change. No-op when the workspace has no engine.
   function queueCloudPull(state: WorkspaceActivityState): void {
     state.entry?.engine?.queuePull();
+  }
+
+  // The move guard's pull. A workspace without an engine counts as offline,
+  // so the guard skips its catch-up.
+  function cloudSyncOffline(state: WorkspaceActivityState): boolean {
+    const snapshot = state.entry?.engine?.snapshot();
+    return !snapshot || snapshot.syncFailure !== null;
+  }
+  async function catchUpCloudSync(state: WorkspaceActivityState, signal: AbortSignal): Promise<void> {
+    await state.entry?.engine?.catchUp({ signal });
   }
 
   function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
@@ -916,10 +964,20 @@ export function createWorkspaceActivity(
     return state.agentRun?.run.depth ?? 0;
   }
 
-  // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
-  // the CLI drops any name a write claims and the run stays one actor.
-  function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
-    return state.agentRun?.run.dispatch !== undefined;
+  // The agent of a run dohc dispatched while it holds the slot, or null. The
+  // CLI writes as that agent whatever name a write claims, so the run stays
+  // one actor.
+  function dispatchedAgent(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run?.dispatch !== undefined ? run.agentId : null;
+  }
+
+  // The engine's id for the run dohc dispatched while it holds the slot, or
+  // null. The engine reads that run's agent from its record to choose whose
+  // place in a thread the CLI reads and moves. A self-test has no record.
+  function dispatchedRunId(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run?.dispatch === "run" ? run.agentRunId : null;
   }
 
   // The agent run holding the slot, as a local app's invocation is
@@ -993,7 +1051,10 @@ export function createWorkspaceActivity(
     queueCloudSync,
     retryCloudSync,
     syncNow,
+    pushRecorded,
     queueCloudPull,
+    cloudSyncOffline,
+    catchUpCloudSync,
     pullStarting,
     retryFileObservation,
     pullFinished,
@@ -1004,7 +1065,8 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
-    dispatchedAgentRun,
+    dispatchedAgent,
+    dispatchedRunId,
     agentRun,
     agentRunState,
     engineCaptureFor,

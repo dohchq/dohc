@@ -16,7 +16,6 @@ export const VIEW_IDS = [
   "chats",
   "search",
   "graph",
-  "sites",
   "history",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
@@ -128,6 +127,8 @@ const INTERNAL_TAB_SCHEME = "tab://";
 const V2_TAB_SCHEME = "dohc://";
 export const GRAPH_TAB_PATH = "tab://graph";
 export const HISTORY_TAB_PATH = "tab://history";
+// Every version in the workspace, one tab per workspace.
+export const VERSIONS_TAB_PATH = "tab://versions";
 // Home and each conversation have their own workspace-scoped tab identity.
 export const CHATS_TAB_PATH = "tab://chats";
 const APP_TAB_PREFIX = "tab://app/";
@@ -190,6 +191,7 @@ export type ParsedTab = { path: string } & (
   | { kind: "removed" }
   | { kind: "graph" }
   | { kind: "history" }
+  | { kind: "versions" }
   | { kind: "chat"; target: ChatTabTarget }
   | { kind: "site"; siteRoot: string | null }
   | { kind: "momentDiff"; momentId: string | null }
@@ -215,6 +217,7 @@ export function parseTab(path: string | null): ParsedTab | null {
   }
   if (path === GRAPH_TAB_PATH) return { kind: "graph", path };
   if (path === HISTORY_TAB_PATH) return { kind: "history", path };
+  if (path === VERSIONS_TAB_PATH) return { kind: "versions", path };
   if (path === CHATS_TAB_PATH) return { kind: "chat", path, target: { kind: "home" } };
   if (path === CHATS_TAB_PATH + "/new") return { kind: "chat", path, target: { kind: "new" } };
   if (path.startsWith(CHATS_TAB_PATH + "/")) {
@@ -253,6 +256,7 @@ export function tabPath(tab: ParsedTab): string {
     case "transactionalCollection": return transactionalCollectionTabPath(tab.datasetPath, tab.tableId);
     case "graph": return GRAPH_TAB_PATH;
     case "history": return HISTORY_TAB_PATH;
+    case "versions": return VERSIONS_TAB_PATH;
     case "file": case "removed": case "newPage": return tab.path;
   }
 }
@@ -277,8 +281,9 @@ const diffTitle: TabTitle = (_tab, label) => {
   return name ? `Diff: ${name}` : "History change";
 };
 const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
-// An app's folder, as typed. A folder that cannot be decoded keeps its address.
-const appTitle: TabTitle = tab => basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
+// The app's title once its page reads it, and until then its folder, as typed. A folder that cannot be decoded keeps
+// its address. The tooltip names the folder.
+const appTitle: TabTitle = (tab, label) => label ?? basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
 const collectionFolder = (tab: ParsedTab) => tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection";
 export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
   file: {
@@ -308,6 +313,15 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     tooltip: () => "Workspace history",
     explorerTitle: () => "History",
     glyph: () => "history",
+  },
+  versions: {
+    virtual: true,
+    singleton: false,
+    title: () => "Versions",
+    tooltip: () => "Every version in this workspace",
+    explorerTitle: () => "Versions",
+    // The Layers glyph, as the versions menu draws it.
+    glyph: () => "compare",
   },
   chat: {
     virtual: true,
@@ -384,6 +398,9 @@ export interface EditorGroup {
   size: number;
 }
 
+export const EXPLORER_MODES = ["home", "files"] as const;
+export type ExplorerMode = (typeof EXPLORER_MODES)[number];
+
 export interface WorkbenchState {
   activeView: ActivityViewId;
   sidebarVisible: boolean;
@@ -407,6 +424,9 @@ export interface WorkbenchState {
   // Recently opened files, most recent first, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
+  // The Explorer's view: Home groups the workspace by kind, Files is the
+  // folder tree. Saved per workspace with the rest of the ui-state.
+  explorerMode: ExplorerMode;
   // Which view each collection tab shows, keyed by the collection's folder
   // path (Phase 2 collections). Per-user local state: closing the tab or
   // restarting the app must not reset the open view.
@@ -458,6 +478,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
+    explorerMode: "home",
     collectionViews: {},
   };
 }
@@ -562,6 +583,66 @@ function evictFirstInactiveTab(state: WorkbenchState): WorkbenchState | null {
   return null;
 }
 
+// Closes saved tabs, first group first, until `count` more fit under the cap:
+// inactive tabs, then a second copy of a file open in two groups, then the
+// tab a group shows. A path in `keep` stays open in one group.
+function makeRoomForTabs(state: WorkbenchState, count: number, keep: ReadonlySet<string>): WorkbenchState {
+  let excess = allTabs(state).length + count - MAX_OPEN_TABS;
+  if (excess <= 0) return state;
+  const copies = new Map<string, number>();
+  for (const tab of allTabs(state)) copies.set(tab.path, (copies.get(tab.path) ?? 0) + 1);
+  const closable: ((group: EditorGroup, path: string) => boolean)[] = [
+    (group, path) => path !== group.activeTab && !keep.has(path),
+    (group, path) => path !== group.activeTab && copies.get(path)! > 1,
+    (_group, path) => copies.get(path)! > 1 || !keep.has(path),
+  ];
+  let next = state;
+  for (const canClose of closable) {
+    for (const { id } of state.editorGroups) {
+      const group = () => next.editorGroups.find((candidate) => candidate.id === id)!;
+      for (const { path } of group().tabs) {
+        if (excess === 0) return next;
+        if (!canClose(group(), path)) continue;
+        next = closeTab(next, id, path);
+        copies.set(path, copies.get(path)! - 1);
+        excess -= 1;
+      }
+    }
+  }
+  return next;
+}
+
+// The saved layout with every tab open in `shown` beside it, the one in view
+// still in view. A file open in both keeps its saved place. An app open in
+// `shown` stays in its group, where the person put it. Past the tab limit,
+// saved tabs close to make room, so no tab in `shown` closes.
+export function mergeSavedTabs(saved: WorkbenchState, shown: WorkbenchState): WorkbenchState {
+  const holder = (state: WorkbenchState, path: string) =>
+    state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;
+  const shownPaths = new Set(allTabs(shown).map((tab) => tab.path));
+  const appGroups = new Map<string, string>();
+  for (const group of shown.editorGroups) {
+    if (!saved.editorGroups.some((candidate) => candidate.id === group.id)) continue;
+    for (const { path } of group.tabs) if (parseTab(path).kind === "site") appGroups.set(path, group.id);
+  }
+  let next = saved;
+  for (const [path, groupId] of appGroups) {
+    const savedGroup = holder(next, path);
+    if (savedGroup !== undefined && savedGroup !== groupId) next = closeTab(next, savedGroup, path);
+  }
+  const adding = [...shownPaths].filter((path) => !holder(next, path)).length;
+  next = makeRoomForTabs(next, adding, shownPaths);
+  for (const path of shownPaths) {
+    if (holder(next, path)) continue;
+    const groupId = appGroups.get(path);
+    // An app joins its group without taking its place or the focus. Room was made above.
+    next = groupId === undefined ? openTab(next, path) : replaceGroup(next, groupId, (group) =>
+      ({ ...group, tabs: [...group.tabs, { path }], activeTab: group.activeTab ?? path }));
+  }
+  const active = activeTabPath(shown);
+  return active === null ? next : openTab(next, active, holder(next, active));
+}
+
 export function focusEditorGroup(
   state: WorkbenchState,
   groupId: string,
@@ -573,6 +654,22 @@ export function focusEditorGroup(
     return state;
   }
   return { ...state, activeEditorGroup: groupId };
+}
+
+// Open a tab whose second copy shows nothing new, such as Versions. A copy open
+// in any group takes focus, and only a missing one opens in the requested
+// group. A split still makes a copy, because the person asked for one.
+export function openTabOnce(
+  state: WorkbenchState,
+  path: string,
+  targetGroupId: string = state.activeEditorGroup,
+): WorkbenchState {
+  const holds = (group: EditorGroup) => group.tabs.some((tab) => tab.path === path);
+  if (state.editorGroups.some((group) => group.id === targetGroupId && holds(group))) {
+    return openTab(state, path, targetGroupId);
+  }
+  const open = state.editorGroups.find(holds);
+  return open ? activateTab(state, open.id, path) : openTab(state, path, targetGroupId);
 }
 
 // Open or reactivate a tab in the requested group, or in the focused group.
@@ -1001,6 +1098,10 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
 }
 
+export function setExplorerMode(state: WorkbenchState, mode: ExplorerMode): WorkbenchState {
+  return mode === state.explorerMode ? state : { ...state, explorerMode: mode };
+}
+
 export function setAboutWidth(state: WorkbenchState, width: number): WorkbenchState {
   const clamped = clampAboutWidth(width);
   return clamped === state.aboutWidth ? state : { ...state, aboutWidth: clamped };
@@ -1218,6 +1319,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
+    explorerMode: state.explorerMode,
     collectionViews: state.collectionViews,
   };
 }
@@ -1400,6 +1502,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
+    explorerMode: EXPLORER_MODES.find((mode) => mode === own("explorerMode")) ?? defaults.explorerMode,
     collectionViews: collectCollectionViews(own("collectionViews")),
   };
 }

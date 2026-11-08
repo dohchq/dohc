@@ -51,6 +51,13 @@ export function formatShortTime(atMs: number, now = Date.now()): string {
   return sameChatDay(atMs, now) ? formatClock(atMs) : shortDayFormat.format(new Date(atMs));
 }
 
+// A day and a time for a list with no day headings: "Today, 11:42 AM",
+// "Yesterday, 4:30 PM", else "Oct 27, 2:12 PM".
+export function formatDayClock(atMs: number, now = Date.now()): string {
+  const day = formatChatDay(atMs, now);
+  return day === "Today" || day === "Yesterday" ? `${day}, ${formatClock(atMs)}` : chatTimeFormat.format(new Date(atMs));
+}
+
 export function formatChatTime(createdAtMs: number): { label: string; iso: string } {
   const createdAt = new Date(createdAtMs);
   return {

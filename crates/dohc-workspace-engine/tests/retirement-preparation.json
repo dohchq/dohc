@@ -1,0 +1,47 @@
+{
+  "params": {
+    "objectId": "document",
+    "activationId": "retiring",
+    "lineageClaimId": "0713f136ea316c8f3e274d55012e3bf10d05b5263837187a39593ff0d8838dfa",
+    "restoreFenceGeneration": 0
+  },
+  "prepared": {
+    "status": "prepared"
+  },
+  "nativePending": {
+    "status": "pending",
+    "reason": "native-pending"
+  },
+  "retryOutstanding": {
+    "status": "pending",
+    "reason": "retry-outstanding"
+  },
+  "released": {
+    "released": true
+  },
+  "notReleased": {
+    "released": false
+  },
+  "errors": {
+    "conflict": {
+      "code": "CONFLICT",
+      "message": "live-application-conflict",
+      "retry": "no"
+    },
+    "sessionExpired": {
+      "code": "SESSION_EXPIRED",
+      "message": "live host connection is not current",
+      "retry": "afterReconnect"
+    },
+    "workspaceUnavailable": {
+      "code": "WORKSPACE_UNAVAILABLE",
+      "message": "workspace handle is unavailable",
+      "retry": "afterReconnect"
+    },
+    "invalidParams": {
+      "code": "INVALID_PARAMS",
+      "message": "invalid-retirement-preparation",
+      "retry": "no"
+    }
+  }
+}

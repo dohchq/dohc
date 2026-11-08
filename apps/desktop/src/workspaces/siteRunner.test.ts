@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as windowsSpawn from "../process/windowsSpawn";
 import * as posixSpawn from "../process/posixSpawn";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GetSitePreviewLogsResult,
@@ -12,6 +13,7 @@ import {
 import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
+  AppCommandStillRunningError,
   assertLoopbackOnlyDevServerCommand,
   buildSite,
   detectBuildOutput,
@@ -25,6 +27,17 @@ import {
   startStaticSitePreview,
   type SiteLogEntry,
 } from "./siteRunner";
+
+// What each pid a still-running answer holds is now, for a failure message
+// (#3455): the app, a late exit ("gone"), or another program.
+async function describePids(pids: readonly number[]): Promise<string> {
+  const read = (pid: number) => process.platform === "win32"
+    ? promisify(execFile)("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true })
+    : promisify(execFile)("ps", ["-o", "pid=,ppid=,comm=", "-p", String(pid)]);
+  const rows = await Promise.all(pids.map(pid =>
+    read(pid).then(({ stdout }) => stdout.trim().includes(String(pid)) ? stdout.trim() : `${pid} gone`, () => `${pid} gone`)));
+  return rows.join("; ");
+}
 
 let root: string;
 const workspaceAuthority = { kind: "workspace" } as const;
@@ -1319,7 +1332,11 @@ describe("startSiteDevServer", () => {
     });
     setTimeout(() => controller.abort(), 50);
 
-    await expect(starting).rejects.toThrow(/cancelled/);
+    const error = await starting.then(() => undefined, (cause: unknown) => cause);
+    if (error instanceof AppCommandStillRunningError) {
+      expect.fail(`The cancel answered that the app is still running: ${await describePids(error.pids)}`);
+    }
+    expect(error instanceof Error ? error.message : error).toMatch(/cancelled/);
     expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
 });

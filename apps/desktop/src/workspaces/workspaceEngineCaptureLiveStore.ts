@@ -58,6 +58,15 @@ import {
 const FLUSH_SETTLE_BUDGET_MS = 30_000;
 const FLUSH_SETTLE_ATTEMPTS = 50;
 const FLUSH_SETTLE_POLL_MS = 20;
+
+/** Capture was still working when its settle budget ran out. */
+export class EngineCaptureNotSettledError extends Error {
+  constructor(workspaceId: string) {
+    super(`Engine capture for ${workspaceId} did not settle.`);
+    this.name = "EngineCaptureNotSettledError";
+  }
+}
+
 const ShareDeliveryStatus = z.object({ state: z.enum(["accepted", "pending", "refused"]) });
 
 // Every `VersionedTextStoreErrorCode`. The engine writes its domain code
@@ -158,7 +167,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   resolveLinks: VersionedLiveAdapter["resolveLinks"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
-  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
+  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; change?: "movePage" | "moveFolder" | "delete" }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -174,8 +183,11 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
     versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
   }>;
-  flushCapture?(): Promise<void>;
+  // `signal` replaces the store's own cancel for this flush.
+  flushCapture?(options?: { signal?: AbortSignal }): Promise<void>;
   reconcileCapture?(): Promise<void>;
+  // Restart capture that stopped, then flush until it settles.
+  retryCapture?(): Promise<void>;
   watcherStatus?(): Promise<WatcherStatusResult>;
   // Files dohc moved aside while saving because another program changed
   // them meanwhile, and the step that moves one to a visible copy.
@@ -410,6 +422,7 @@ function momentFromWire(
 function momentSummaryFromWire(
   workspaceId: string,
   moment: HistoryMomentMetadata,
+  sha256?: string,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -424,6 +437,7 @@ function momentSummaryFromWire(
     ...(moment.afterByteLength !== null
       ? { byteLength: moment.afterByteLength }
       : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
     metadata: momentMetadataFromOrigin(moment.metadataOrigin, {
       origin: publicOrigin(moment.metadataOrigin),
       ...(moment.metadataSummary != null
@@ -440,9 +454,11 @@ function momentSummaryFromWire(
 }
 
 function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord {
-  const { resolution, ...record } = conflict;
+  const { resolution, waitingVersion, ...record } = conflict;
   return {
     ...record,
+    // An older engine and a resolve answer send none.
+    waitingVersion: waitingVersion ?? null,
     base: conflictStateFromWire(conflict.base),
     current: conflictStateFromWire(conflict.current),
     incoming: conflictStateFromWire(conflict.incoming),
@@ -677,8 +693,7 @@ export function createCaptureLiveStores(
     );
   }
 
-  async function waitForCapture<T>(operation: () => Promise<T>): Promise<T> {
-    const signal = captureWaitSignal;
+  async function waitForCapture<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
     signal?.throwIfAborted();
     if (!signal) return await operation();
     let rejectAbort!: (reason: unknown) => void;
@@ -961,7 +976,7 @@ export function createCaptureLiveStores(
       return value === null ? null : snapshotFromWire(value);
     },
 
-    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
+    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; change?: "movePage" | "moveFolder" | "delete" }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
     linkEdges: input => runRead(adapter => adapter.linkEdges(input)),
@@ -1213,7 +1228,8 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null}),
+          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null},
+            moment.afterBinarySha256 ?? moment.afterBlobSha256 ?? undefined),
         ),
       };
     },
@@ -1443,15 +1459,14 @@ export function createCaptureLiveStores(
       return { kind: "resolved", conflict };
     },
 
-    async flushCapture() {
-      captureWaitSignal?.throwIfAborted();
+    async flushCapture(options: { signal?: AbortSignal } = {}) {
+      const signal = options.signal ?? captureWaitSignal;
+      signal?.throwIfAborted();
       const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
       let finished = false;
-      const didNotSettle = () => new Error(
-        `Engine capture for ${workspace.workspaceId} did not settle.`,
-      );
+      const didNotSettle = () => new EngineCaptureNotSettledError(workspace.workspaceId);
       const assertActive = () => {
-        captureWaitSignal?.throwIfAborted();
+        signal?.throwIfAborted();
         if (finished) throw didNotSettle();
       };
       const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
@@ -1482,9 +1497,9 @@ export function createCaptureLiveStores(
           assertActive();
           // Do not leave a poll scheduled beyond the total deadline.
           await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
-            signal: captureWaitSignal,
+            signal,
           }).catch(error => {
-            captureWaitSignal?.throwIfAborted();
+            signal?.throwIfAborted();
             throw error;
           });
           outcome = await request(adapter => adapter.flushCapture());
@@ -1497,9 +1512,9 @@ export function createCaptureLiveStores(
         timer = setTimeout(() => reject(didNotSettle()), Math.max(0, deadline - performance.now()));
       });
       try {
-        await waitForCapture(() => Promise.race([settle(), expired]));
+        await waitForCapture(signal, () => Promise.race([settle(), expired]));
       } catch (error) {
-        captureWaitSignal?.throwIfAborted();
+        signal?.throwIfAborted();
         if (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED") {
           throw didNotSettle();
         }
@@ -1518,6 +1533,13 @@ export function createCaptureLiveStores(
 
     async reconcileCapture() {
       const first = await runRead(async (adapter) => await adapter.reconcileCapture());
+      if (!first.settled) {
+        await this.flushCapture?.();
+      }
+    },
+
+    async retryCapture() {
+      const first = await runRead(async (adapter) => await adapter.retryCapture());
       if (!first.settled) {
         await this.flushCapture?.();
       }

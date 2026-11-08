@@ -2268,7 +2268,6 @@ export function useRelayShareLinkPane(props: {
                               <SecondaryButton
                                 disabled={ownerMutationBusy !== null}
                                 onClick={() => setOwnerConfirmation(null)}
-                                className="h-8 py-0"
                               >
                                 Cancel
                               </SecondaryButton>

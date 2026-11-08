@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 pub(super) mod restore;
 
@@ -7,7 +7,10 @@ pub(super) mod restore;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveSettlementResult {
-    pub settlement_id: String,
+    /// Absent when nothing was accepted since the owner's handover or the
+    /// first baseline: such a settlement is not published, and only its
+    /// projection is kept locally.
+    pub settlement_id: Option<String>,
     pub previous_cursor: i64,
     pub terminal_cursor: i64,
     pub application_count: usize,
@@ -50,25 +53,61 @@ pub struct LiveSettlementAudit {
     first: bool,
     restore: Option<Box<restore::RestoreAudit>>,
     replay_anchor: Option<restore::PriorAnchor>,
+    /// No settlement is stored and the relay accepted nothing since the
+    /// owner's handover or the first baseline.
+    empty: bool,
 }
 
 fn audit_error(error: ApplicationError) -> ApplicationError {
     match error {
         ApplicationError::Storage(_)
         | ApplicationError::Collab(
-            CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable,
+            CollabError::MarkdownReaderPending(_)
+            | CollabError::MarkdownReaderUnavailable
+            | CollabError::MarkdownReaderRetryable,
         ) => error,
         _ => StorageError::StateCorrupt { source: None }.into(),
     }
 }
 
 impl LiveSettlementAudit {
-    /// A compensated filesystem marker can be restored only for this retained projection.
+    pub fn markdown_retry_inputs(&self) -> serde_json::Value {
+        serde_json::to_value(crate::markdown_write_obligations::AuditedRetry {
+            namespace: self.namespace.clone(),
+            binding: self.binding.clone(),
+            terminal_cursor: self.terminal_cursor,
+            head_update_seq: self.observed_head,
+        })
+        .expect("audited retry inputs are serializable")
+    }
+
+    pub fn markdown_operation_id(&self) -> String {
+        crate::markdown_write_obligations::AuditedRetry {
+            namespace: self.namespace.clone(),
+            binding: self.binding.clone(),
+            terminal_cursor: self.terminal_cursor,
+            head_update_seq: self.observed_head,
+        }
+        .operation_id()
+    }
+
+    /// A compensated filesystem marker can be restored only for this retained
+    /// projection: the lineage's latest recorded settlement, or else its
+    /// latest empty one.
     pub fn covers_projection_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
+    ) -> Result<bool, ApplicationError> {
+        self.saved_projection_in(conn, moment, markdown, true)
+    }
+    fn saved_projection_in(
+        &self,
+        conn: &Connection,
+        moment: &str,
+        markdown: &str,
+        empty: bool,
     ) -> Result<bool, ApplicationError> {
         if let Some(restore) = &self.restore {
             return restore
@@ -81,6 +120,7 @@ impl LiveSettlementAudit {
             namespace: self.namespace.clone(),
             coordinate: self.coordinate.clone(),
             binding: b.clone(),
+            activation_id: None,
             live: true,
         };
         require_workspace(conn, &registration).map_err(audit_error)?;
@@ -92,14 +132,14 @@ impl LiveSettlementAudit {
         {
             return Err(StorageError::StateCorrupt { source: None }.into());
         }
-        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
-            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
+        let saved:Option<(String,String,i64,String)>=conn.query_row("SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json FROM (SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,terminal_cursor FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 UNION ALL SELECT moment_id,markdown_digest,local_ydoc_sequence,binding_json,-1 FROM live_empty_settlements WHERE ?6 AND relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5) ORDER BY terminal_cursor DESC LIMIT 1",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,empty],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::persist_public)?;
         let Some((saved_moment, saved_markdown, sequence, binding)) = saved else {
             return Ok(false);
         };
         let binding: LiveObjectBinding =
             serde_json::from_str(&binding).map_err(StorageError::persist_public)?;
-        validate_historical_binding(&binding, b).map_err(audit_error)?;
+        validate_crossed_binding(conn, &self.namespace, &binding, b).map_err(audit_error)?;
         Ok(saved_moment == moment && saved_markdown == markdown && sequence <= self.sequence)
     }
     /// An unchanged projection may name the current head moment only when that
@@ -107,13 +147,17 @@ impl LiveSettlementAudit {
     /// head, such as a pre-live imported projection, would publish its own
     /// historical before-image. A restore reuses only its own saved settlement,
     /// so its first settlement records the restore transition. Replay keeps its
-    /// exact record-time checks.
+    /// exact record-time checks. An empty settlement publishes nothing, so any
+    /// head holding its projection stands.
     pub fn reuses_head_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
     ) -> Result<bool, ApplicationError> {
+        if self.empty {
+            return Ok(true);
+        }
         if self.terminal_source {
             return Ok(false);
         }
@@ -128,15 +172,23 @@ impl LiveSettlementAudit {
         if self.replay_anchor.is_some() {
             return Ok(true);
         }
-        self.covers_projection_in(conn, moment, markdown)
+        self.saved_projection_in(conn, moment, markdown, false)
     }
     pub fn binding(&self) -> &LiveObjectBinding {
         &self.binding
     }
+    /// The settlement covers no accepted edit. It still projects the file,
+    /// but it is not published: the relay accepts only a settlement whose
+    /// interval holds an accepted edit. Only its projection is kept locally.
+    pub fn is_empty(&self) -> bool {
+        self.empty
+    }
     /// The accepted document this settlement projects instead of the native
-    /// head. Present only while this owner's own native edits wait for the
-    /// relay: the moment, file, and published record then hold accepted
-    /// content alone, and the native settled boundary does not advance.
+    /// head. Present while the native head holds an update this owner answers
+    /// for and has not applied: its own pending, refused, or acknowledged
+    /// edits, and what its released chain left it. The moment, file, and
+    /// published record then hold accepted content alone, and the native
+    /// settled boundary does not advance.
     pub fn accepted_prefix(&self) -> Option<&crate::Ydoc> {
         self.accepted.as_ref()
     }
@@ -152,6 +204,23 @@ impl LiveSettlementAudit {
         let b = &self.binding;
         store.read_with(|conn| conn.query_row("SELECT settlement_id FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND moment_id=?7 AND markdown_digest=?8",
             params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,moment,markdown],|row| row.get(0))).map_err(StorageError::persist_public)
+    }
+    /// An empty settlement publishes nothing, but its lineage keeps the
+    /// projection it committed, so a conflicted file write can be restored.
+    pub fn record_empty_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        moment: &str,
+        markdown: &str,
+    ) -> Result<(), ApplicationError> {
+        if !self.empty {
+            return Err(StorageError::StateCorrupt { source: None }.into());
+        }
+        let b = &self.binding;
+        let binding = serde_json::to_string(b).map_err(StorageError::persist_public)?;
+        tx.execute("INSERT OR REPLACE INTO live_empty_settlements(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,moment_id,markdown_digest,local_ydoc_sequence,binding_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,moment,markdown,self.sequence,binding]).map_err(StorageError::persist_public)?;
+        Ok(())
     }
     pub fn permits_absent_bootstrap(&self, moment: &str, digest: &str) -> bool {
         self.first && moment == self.bootstrap_moment && digest == self.bootstrap_digest
@@ -177,6 +246,7 @@ impl LiveSettlementAudit {
                 namespace: self.namespace.clone(),
                 coordinate: self.coordinate.clone(),
                 binding: b.clone(),
+                activation_id: None,
                 live: true,
             };
             require_workspace(tx, &registration).map_err(audit_error)?;
@@ -222,6 +292,7 @@ impl LiveSettlementAudit {
                 namespace: self.namespace.clone(),
                 coordinate: self.coordinate.clone(),
                 binding: b.clone(),
+                activation_id: None,
                 live: true,
             };
             if restore::restored_origin(tx, &held)
@@ -268,6 +339,10 @@ impl LiveSettlementAudit {
                 return Err(corrupt());
             }
             return Ok(id);
+        }
+        // Stored settlements may start where they end. A new one must not.
+        if self.previous_cursor >= self.terminal_cursor {
+            return Err(invalid("a new settlement must cover an accepted edit"));
         }
         tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
@@ -397,7 +472,7 @@ impl LiveSettlementAudit {
 
     pub fn result(
         &self,
-        settlement_id: String,
+        settlement_id: Option<String>,
         moment_id: String,
         markdown_digest: String,
         materialized: bool,
@@ -434,12 +509,6 @@ pub fn with_settlement<E, T>(
 where
     E: From<ApplicationError> + From<StorageError>,
 {
-    if max_applications == 0 || max_applications >= i64::MAX as usize {
-        return Err(E::from(invalid("invalid settlement application limit")));
-    }
-    if let Some(receipt) = &terminal {
-        receipt.validate().map_err(E::from)?;
-    }
     let held = handle
         .registration
         .lock()
@@ -447,26 +516,91 @@ where
     if !held.live {
         return Err(E::from(ApplicationError::Interrupted));
     }
+    settle_held(
+        store,
+        &held,
+        terminal,
+        max_applications,
+        reconstruction,
+        settle,
+    )
+}
+
+/// The retirement form of [`with_settlement`]: settle the activation a
+/// retirement names through its own durable binding, with no live
+/// registration. Its terminal is its latest application through F, and the
+/// deliveries the relay accepted from it after that terminal, which it never
+/// applied, wait like its private edits.
+#[allow(clippy::too_many_arguments)]
+pub fn with_retirement_settlement<E, T>(
+    store: &mut EngineStore,
+    scope: &super::RetirementScope<'_>,
+    key: &super::RetirementKey,
+    host: &ApplicationHostCoordinate,
+    terminal: Option<LiveUpdateReceipt>,
+    max_applications: usize,
+    reconstruction: NativeHistoryReconstruction,
+    settle: impl FnOnce(&mut EngineStore, &LiveSettlementAudit) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<ApplicationError> + From<StorageError>,
+{
+    let held = store
+        .read_with(|conn| super::retirement::retiring_registration(conn, scope, key, host))
+        .map_err(E::from)?;
+    if terminal
+        .as_ref()
+        .is_some_and(|receipt| receipt.journal_cursor > key.accepted_through)
+    {
+        return Err(E::from(ApplicationError::Conflict));
+    }
+    settle_held(
+        store,
+        &held,
+        terminal,
+        max_applications,
+        reconstruction,
+        settle,
+    )
+}
+
+fn settle_held<E, T>(
+    store: &mut EngineStore,
+    held: &Registration,
+    terminal: Option<LiveUpdateReceipt>,
+    max_applications: usize,
+    reconstruction: NativeHistoryReconstruction,
+    settle: impl FnOnce(&mut EngineStore, &LiveSettlementAudit) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<ApplicationError> + From<StorageError>,
+{
+    if max_applications == 0 || max_applications >= i64::MAX as usize {
+        return Err(E::from(invalid("invalid settlement application limit")));
+    }
+    if let Some(receipt) = &terminal {
+        receipt.validate().map_err(E::from)?;
+    }
     let audit = store.read_with(|conn| -> Result<LiveSettlementAudit, ApplicationError> {
-        require_workspace(conn, &held)?;
-        if !read_binding(conn,&held)?.is_some_and(|(binding,coordinate,available)| available && binding == held.binding && coordinate == held.coordinate) { return Err(ApplicationError::Interrupted); }
+        require_workspace(conn, held)?;
+        if !read_binding(conn,held)?.is_some_and(|(binding,coordinate,available)| available && binding == held.binding && coordinate == held.coordinate) { return Err(ApplicationError::Interrupted); }
         let b = &held.binding;
         validate_historical_binding(b,b)?;
         let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
         let marker = durable::read_marker_in(conn,&key)?.ok_or(ApplicationError::Corrupt)?;
         if marker.regime != Regime::Replicated || marker.lineage_claim_status != durable::LineageClaimStatus::Exact || marker.content_kind != crate::ContentKind::Richdoc || marker.lineage_claim_id.as_deref()!=Some(b.lineage_claim_id.as_str()) || marker.path.as_deref()!=Some(b.current_path.as_str()) { return Err(ApplicationError::Conflict); }
-        let owner_origin = adoption::read_origin(conn,&held)?;
-        let restored_origin = restore::restored_origin(conn,&held)?;
+        let owner_origin = adoption::read_origin(conn,held)?;
+        let restored_origin = restore::restored_origin(conn,held)?;
         let (original_binding,origin_moment,origin_digest,origin_cursor,origin_sequence) = if let Some(origin) = &restored_origin {
             (origin.binding.clone(),origin.moment.clone(),origin.markdown.clone(),origin.cursor,origin.sequence)
         } else if let Some(origin) = &owner_origin {
             (origin.binding.clone(),origin.source_moment.clone(),origin.source_digest.clone(),origin.terminal.as_ref().map_or(0,|r|r.journal_cursor),origin.sequence)
         } else {
-            let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,&held)?.ok_or(ApplicationError::Corrupt)?;
+            let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,held)?.ok_or(ApplicationError::Corrupt)?;
             (original_binding,bootstrap.bootstrap_moment_id,bootstrap.projected_markdown_digest,0,0)
         };
-        validate_historical_binding(&original_binding,b)?;
-        let latest = latest_receipt(conn,&held)?;
+        validate_crossed_binding(conn,&held.namespace,&original_binding,b)?;
+        let latest = latest_receipt(conn,held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
         let previous: Option<(i64,i64,i64,i64,Option<i64>)> = conn.query_row(
@@ -496,14 +630,21 @@ where
             Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
             Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
-                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end};
-                (cursor,end_sequence,None)
+                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor,max_applications)? } else {end};
+                // A successor's adoption verified its captured head, which
+                // holds the rows ordinary sync added after its predecessor's
+                // last settlement. Its first settlement covers from there.
+                // Every row through that head is in accepted(B) or the seed,
+                // and an abandoned seed allows no later application, so it
+                // never moves the terminal past B into this branch.
+                let floor = owner_origin.as_ref().filter(|origin| origin.successor).map_or(end_sequence,|origin| end_sequence.max(origin.sequence));
+                (cursor,floor,None)
             },
             Some(_) => return Err(ApplicationError::Corrupt),
             None => (origin_cursor,origin_sequence,None),
         };
         if replayed.is_some_and(|sequence| sequence < previous_sequence || sequence > head) { return Err(ApplicationError::Corrupt); }
-        let receipts = read_interval(conn,&held,previous_cursor,terminal_cursor,max_applications)?;
+        let receipts = read_interval(conn,held,previous_cursor,terminal_cursor,max_applications)?;
         let mut sequences=HashSet::new();
         for (delivery,hash,cursor,epoch,sequence,_) in &receipts {
             LiveUpdateReceipt { delivery_id:delivery.clone(),update_digest:hash.clone(),journal_cursor:*cursor,accepting_host_epoch:*epoch }.validate()?;
@@ -512,17 +653,32 @@ where
         }
         if head < previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
         // Every native sequence since the last settlement is an accepted
-        // application or one of this owner's own updates still waiting for
-        // the relay. Its own later application counts by journal cursor.
-        let tail = private_tail(conn,&held,previous_sequence,head)?;
+        // application or an update this owner answers for and has not
+        // applied. Its later application counts by journal cursor.
+        let tail = private_tail(conn,held,previous_sequence,head,terminal_cursor)?;
         sequences.extend(tail.sequences.iter().copied());
+        sequences.extend(tail.accepted_sequences.iter().copied());
+        // A private boundary can retain accepted receipts across several intervals.
+        // Bound distinct native sequences by the uncovered native gap.
+        if (sequences.len() as i64) < head-previous_sequence {
+            let mut query = conn.prepare("SELECT DISTINCT local_ydoc_sequence FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor<=?6 AND local_ydoc_sequence>?7 ORDER BY journal_cursor DESC LIMIT ?8").map_err(read_sql)?;
+            let mut rows = query.query(params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,previous_cursor,previous_sequence,head-previous_sequence]).map_err(read_sql)?;
+            while let Some(row) = rows.next().map_err(read_sql)? {
+                let sequence: i64 = row.get(0).map_err(read_sql)?;
+                integer(sequence,1,head)?;
+                if sequence>previous_sequence { sequences.insert(sequence); }
+                if sequences.len() as i64 == head-previous_sequence { break; }
+            }
+        }
         if sequences.len() as i64 != head-previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
+        let covered_sequence = tail.sequences.iter().min().map_or(head, |sequence| sequence - 1);
         let accepted = if tail.any {
-            // Accepting the pending seed must not roll back the owner's file
-            // to an accepted state that lacks its pre-adoption head.
+            // A pending seed refuses settlement. Once acknowledged, the seed
+            // stays private like any edit until it applies, and the file
+            // holds accepted state without it.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
             // A settlement still answers a missing dependency as a conflict.
-            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction).map_err(|error| match error {
+            Some(accepted_history::read_state(conn,held,terminal_cursor,reconstruction).map_err(|error| match error {
                 ApplicationError::AcceptedStateIncomplete => ApplicationError::Conflict,
                 error => error,
             })?)
@@ -531,9 +687,11 @@ where
         };
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
-        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(head),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
+        // With nothing stored, the next settlement again starts at the origin.
+        let empty = previous.is_none() && restored_origin.is_none() && previous_cursor == terminal_cursor;
+        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(covered_sequence),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
             bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
-            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
+            replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor),empty })
     }).map_err(E::from)?;
     settle(store, &audit)
 }
@@ -589,66 +747,121 @@ type ReceiptIdentity = (String, String, i64, i64, i64, String);
 /// A native source names one binding and its origin. A larger one is corrupt.
 const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 
-/// This owner's own native updates that the relay has not accepted: pending
-/// adopted entries of the current outbox with no application of their
-/// delivery.
+/// The native updates this owner answers for and has not applied, which a
+/// settlement keeps out of what it projects: the current activation's own
+/// adopted entries of the current outbox, pending, refused, or accepted, and
+/// the Carried deliveries and refusals its released chain left it. A saved
+/// receipt proves acceptance, never application.
 #[derive(Default)]
-struct PrivateTail {
-    /// Their native sequences after `previous_sequence`, each verified
-    /// against its own journal row.
-    sequences: Vec<i64>,
+pub(super) struct PrivateTail {
+    /// Their distinct native sequences after `previous_sequence`, each entry
+    /// verified on its own. A seed names its captured head, which another
+    /// entry's update can hold too.
+    pub(super) sequences: BTreeSet<i64>,
+    accepted_sequences: BTreeSet<i64>,
     /// Whether any exists at all, before or after `previous_sequence`.
-    any: bool,
+    pub(super) any: bool,
     /// Whether the adoption seed is among them.
     seed: bool,
     terminal: bool,
 }
 
-fn private_tail(
+pub(super) fn private_tail(
     conn: &Connection,
     held: &Registration,
     previous_sequence: i64,
     head: i64,
+    terminal_cursor: i64,
 ) -> Result<PrivateTail, ApplicationError> {
     let b = &held.binding;
-    let adoption: Option<String> = conn.query_row("SELECT adoption_id FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|row.get(0)).optional().map_err(read_sql)?;
-    let Some(adoption) = adoption else {
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let Some((activation, _)) = owner_activations::current_activation(
+        conn,
+        Some(&held.namespace),
+        &key,
+        &b.lineage_claim_id,
+    )?
+    else {
         return Ok(PrivateTail::default());
     };
-    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
-    let any: bool = conn
+    let adoption = activation.activation_id;
+    let chain = activation.predecessor_activation_id.as_deref();
+    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL) OR (e.pending=0 AND e.terminal_reason IS NULL AND e.accepted_receipt_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?9)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
+    let bound = params![
+        b.workspace_id,
+        b.main_version_id,
+        b.object_id,
+        b.lineage_claim_id,
+        b.restore_fence_generation,
+        b.current_path,
+        held.namespace,
+        previous_sequence,
+        adoption,
+        terminal_cursor
+    ];
+    let mut any: bool = conn
         .query_row(
             &format!("SELECT EXISTS(SELECT 1 {tail})"),
-            params![
-                b.workspace_id,
-                b.main_version_id,
-                b.object_id,
-                b.lineage_claim_id,
-                b.restore_fence_generation,
-                b.current_path,
-                held.namespace
-            ],
+            &bound[..9],
             |row| row.get(0),
         )
         .map_err(read_sql)?;
-    let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,held.namespace],|row|row.get(0)).map_err(read_sql)?;
-    let gap = head - previous_sequence;
-    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
-    let mut rows = query
-        .query(params![
-            b.workspace_id,
-            b.main_version_id,
-            b.object_id,
-            b.lineage_claim_id,
-            b.restore_fence_generation,
-            b.current_path,
-            held.namespace,
-            previous_sequence,
-            gap + 2
-        ])
-        .map_err(read_sql)?;
-    let mut sequences = Vec::new();
+    let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),&bound[..9],|row|row.get(0)).map_err(read_sql)?;
+    let mut sequences = BTreeSet::new();
+    let mut accepted_sequences = BTreeSet::new();
+    // Coverage counts native sequences, never entries. Seeds may share a
+    // sequence with each other and one native update, never two updates.
+    let mut updates = BTreeSet::new();
+    let mut count = |source: &crate::owner_outbox::OwnerOutboxNativeSource, accepted: bool| {
+        if !matches!(
+            source.origin,
+            crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
+        ) && !updates.insert(source.native_sequence)
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        if source.native_sequence > previous_sequence {
+            if accepted {
+                accepted_sequences.insert(source.native_sequence);
+            } else {
+                sequences.insert(source.native_sequence);
+            }
+        }
+        Ok(())
+    };
+    // Each validated by the shared resolution, and private until applied
+    // even below the coverage floor.
+    for inherited in super::retirement::inherited_entries(
+        conn,
+        &held.namespace,
+        &key,
+        &b.lineage_claim_id,
+        chain,
+    )? {
+        if inherited.entry.source.native_sequence > head {
+            return Err(ApplicationError::Corrupt);
+        }
+        if super::retirement::applied(
+            conn,
+            &held.namespace,
+            &key,
+            &b.lineage_claim_id,
+            &inherited.receipt,
+        )? {
+            if inherited.receipt.journal_cursor <= terminal_cursor {
+                count(&inherited.entry.source, true)?;
+            }
+            continue;
+        }
+        any = true;
+        count(&inherited.entry.source, false)?;
+    }
+    // Compaction may move an applied delivery to a newer native append. Its
+    // retained source still covers the original sequence, without hiding it.
+    let accepted = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND e.native_source_json IS NOT NULL AND json_extract(e.native_source_json,'$.adoptionId')=?9 AND EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id AND a.update_digest=e.update_digest AND a.workspace_id=o.workspace_id AND a.main_version_id=o.main_version_id AND a.object_id=o.object_id AND a.lineage_claim_id=o.lineage_claim_id AND a.journal_cursor<=?10)";
+    let columns = "e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending,e.accepted_receipt_json IS NOT NULL,e.outbox_id,e.sequence";
+    let mut query = conn.prepare(&format!("SELECT {columns},0 {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) UNION ALL SELECT {columns},1 {accepted} AND json_extract(e.native_source_json,'$.nativeSequence')>?8 ORDER BY 7,8")).map_err(read_sql)?;
+    let mut rows = query.query(bound).map_err(read_sql)?;
     let mut terminal = false;
     while let Some(row) = rows.next().map_err(read_sql)? {
         let length: i64 = row.get(2).map_err(read_sql)?;
@@ -658,7 +871,11 @@ fn private_tail(
         let append_key: String = row.get(0).map_err(read_sql)?;
         let digest: String = row.get(1).map_err(read_sql)?;
         let json: String = row.get(3).map_err(read_sql)?;
-        let pending: bool = row.get(4).map_err(read_sql)?;
+        let accepted: bool = row.get(8).map_err(read_sql)?;
+        // A refused entry is terminal; a pending or carried one still waits.
+        let refused = !accepted
+            && !row.get::<_, bool>(4).map_err(read_sql)?
+            && !row.get::<_, bool>(5).map_err(read_sql)?;
         let source: crate::owner_outbox::OwnerOutboxNativeSource =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
         source
@@ -667,10 +884,22 @@ fn private_tail(
         source
             .verify_retained_row(conn)
             .map_err(|_| ApplicationError::Corrupt)?;
+        // Another activation's entry is private only as a refusal its
+        // released chain left: its content never reaches accepted state.
         if source.binding != *b
-            || source.adoption_id != adoption
             || source.update_digest != digest
             || source.native_sequence > head
+            || source.adoption_id != adoption
+                && !(refused
+                    && super::retirement::chain_refusal(
+                        conn,
+                        &held.namespace,
+                        &key,
+                        &b.lineage_claim_id,
+                        chain,
+                        &row.get::<_, String>(6).map_err(read_sql)?,
+                        row.get(7).map_err(read_sql)?,
+                    )?)
         {
             return Err(ApplicationError::Corrupt);
         }
@@ -678,18 +907,17 @@ fn private_tail(
             source.origin,
             crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
         );
-        terminal |= !pending
+        // Only this adoption's own refusal leaves the settlement without
+        // attribution; its chain's settlements already covered theirs.
+        terminal |= refused
+            && source.adoption_id == adoption
             && (source.native_sequence > previous_sequence
                 || adoption_seed && previous_sequence == source.native_sequence);
-        if source.native_sequence > previous_sequence {
-            if sequences.len() as i64 >= gap {
-                return Err(ApplicationError::Corrupt);
-            }
-            sequences.push(source.native_sequence);
-        }
+        count(&source, accepted)?;
     }
     Ok(PrivateTail {
         sequences,
+        accepted_sequences,
         any,
         seed,
         terminal,
@@ -718,6 +946,28 @@ pub(super) fn validate_historical_binding(
         return Err(ApplicationError::Conflict);
     }
     Ok(())
+}
+
+/// [`validate_historical_binding`] across restores cancelled after their
+/// fences: `historical` may name an earlier generation than `current` when
+/// only cancellations of its lineage lie between. A cancellation is not a
+/// restore, so the history before it, and its origin, stay `current`'s.
+fn validate_crossed_binding(
+    conn: &Connection,
+    namespace: &str,
+    historical: &LiveObjectBinding,
+    current: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let from = historical.restore_fence_generation;
+    let same = LiveObjectBinding {
+        restore_fence_generation: current.restore_fence_generation,
+        ..historical.clone()
+    };
+    validate_historical_binding(&same, current)?;
+    if from > current.restore_fence_generation {
+        return Err(ApplicationError::Conflict);
+    }
+    restore_fence::require_crossed_since(conn, namespace, current, from)
 }
 
 pub(super) fn latest_receipt(
@@ -783,6 +1033,10 @@ fn read_interval(
         ])
         .map_err(read_sql)?;
     let mut receipts = Vec::new();
+    // An interval can hold applications from before restores cancelled after
+    // their fences. Each step between applications, and from the last to the
+    // binding, crosses only cancellations; fence admission bounds each step.
+    let mut previous_generation: Option<i64> = None;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if receipts.len() == max {
             return Err(invalid("settlement application limit exceeded"));
@@ -792,13 +1046,30 @@ fn read_interval(
         let selectors: Vec<String> =
             serde_json::from_str(&selectors).map_err(|_| ApplicationError::Corrupt)?;
         let generation: i64 = row.get(7).map_err(read_sql)?;
-        let historical = LiveObjectBinding {
+        let same = LiveObjectBinding {
             current_path: path,
             selector_paths: selectors,
-            restore_fence_generation: generation,
             ..b.clone()
         };
-        validate_historical_binding(&historical, b)?;
+        validate_historical_binding(&same, b)?;
+        if generation > b.restore_fence_generation {
+            return Err(ApplicationError::Conflict);
+        }
+        let historical = LiveObjectBinding {
+            restore_fence_generation: generation,
+            ..same
+        };
+        match previous_generation {
+            Some(previous) if previous > generation => return Err(ApplicationError::Conflict),
+            Some(previous) if previous < generation => restore_fence::require_crossed(
+                conn,
+                &registration.namespace,
+                &historical,
+                previous,
+            )?,
+            _ => {}
+        }
+        previous_generation = Some(generation);
         let binding_digest =
             hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
         receipts.push((
@@ -809,6 +1080,9 @@ fn read_interval(
             row.get(4).map_err(read_sql)?,
             binding_digest,
         ));
+    }
+    if let Some(last) = previous_generation.filter(|last| *last != b.restore_fence_generation) {
+        restore_fence::require_crossed(conn, &registration.namespace, b, last)?;
     }
     Ok(receipts)
 }
@@ -868,6 +1142,7 @@ mod publication_state_tests {
             first: false,
             restore: None,
             replay_anchor: None,
+            empty: false,
         };
         (dir, store, audit)
     }

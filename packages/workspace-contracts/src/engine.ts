@@ -281,6 +281,17 @@ type VersionedTextConflictResolution =
   | "kept-current";
 type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
+/**
+ * A newer version of a conflict's file that another computer saved. dohc
+ * holds it until the conflict is resolved.
+ */
+interface VersionedTextConflictWaitingVersion {
+  code: "resolve-existing-conflict";
+  objectId: string;
+  originId: string;
+  originSeq: number;
+}
+
 export interface VersionedTextConflictRecord {
   id: VersionedTextConflictId;
   workspaceId: WorkspaceId;
@@ -296,6 +307,8 @@ export interface VersionedTextConflictRecord {
   chosenFrom: VersionedTextConflictChoice;
   metadata: ActorNeutralWriteMetadata;
   resolution?: VersionedTextConflictResolution;
+  /** Read from conflict listings; `null` elsewhere. */
+  waitingVersion: VersionedTextConflictWaitingVersion | null;
 }
 
 type VersionedTextMergeResult =
@@ -418,9 +431,25 @@ export interface ChatMessageAppendPayload {
   // message carries no `authorUserId`, `authorOwnerDisplayName` or `origin`.
   linkGrantId?: string;
   linkPrincipalId?: string;
+  // The agent connection that wrote a link message. Only the relay sets it.
+  agentConnectionId?: string;
+  // The agent that wrote an agent message in one of its runs.
+  authorAgentId?: string;
+  // What an agent reported about itself.
+  authorReported?: ChatReportedAgent;
   body: string;
   createdAtMs: number;
 }
+
+// What an agent says about itself: the product and version its MCP client
+// names in the handshake, and the model the agent states. dohc can't check
+// any of it, so it is only ever shown as reported. Absent means unknown, and
+// a version always comes with its product.
+export type ChatReportedAgent = {
+  product?: string;
+  version?: string;
+  model?: string;
+};
 
 type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
 type ChatFollowState = "following" | "unfollowed";
@@ -458,6 +487,8 @@ export interface VersionedTextMomentSummary {
   operation: "write" | "rename" | "delete";
   contentKind?: VersionedFileContentKind;
   byteLength?: number;
+  // Present on listMoments rows; history.page does not send it.
+  sha256?: string;
   metadata: MomentMetadata;
   // Present only when the moment recorded who made it.
   authors?: MomentAuthor[];
@@ -708,7 +739,9 @@ type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string }
   | { kind: "automation"; displayName: string }
-  | { kind: "link"; displayName: string; grantId: string; principalId: string };
+  // `agentConnectionId` marks an agent that joined with the link and posted
+  // through its sign-in; the link principal stays the authority.
+  | { kind: "link"; displayName: string; grantId: string; principalId: string; agentConnectionId?: string };
 type ChatWriteActor = Exclude<ChatActor, { kind: "link" }>;
 
 // The automation executor's claim on a message it writes. Stays on this computer.
@@ -746,6 +779,8 @@ export interface ChatChannel {
   // The workspace-relative folder the group's files live in. Absent for
   // dm and agent channels and for channels older than the groups migration.
   folderPath?: string;
+  // The agent whose chat this is. Present on, and only on, an agent chat.
+  agentId?: string;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -813,9 +848,57 @@ export interface ChannelThreadSummary {
     createdAtMs: number;
     bodySnippet: string;
     automation?: ChatMessageAutomation;
+    authorReported?: ChatReportedAgent;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
+}
+
+// Where an item sits in a group's stream. Items sort by time, then lane (a
+// post before a conversation message in the same millisecond), then id: the
+// thread id for a post, the message id for a conversation message.
+interface ChatStreamPosition {
+  createdAtMs: number;
+  lane: ChatThreadLane;
+  id: string;
+}
+
+// What a post's thread holds beyond its first message.
+interface ChatStreamPost {
+  replyCount: number;
+  // Distinct repliers, newest first, at most three.
+  repliers: Array<{ author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }>;
+  lastReplyAtMs?: number;
+  // The latest agent reply, cut to its first 280 characters.
+  latestAgentReply?: {
+    id: ChatMessageId;
+    author: ChatActor;
+    authorOwnerDisplayName?: string;
+    authorUserId?: string;
+    authorAgentId?: string;
+    createdAtMs: number;
+    bodyExcerpt: string;
+  };
+  openDecisionCount: number;
+}
+
+// One top-level item: a post's first message, or a conversation message.
+export interface ChatStreamItem {
+  position: ChatStreamPosition;
+  message: ChatMessage;
+  reactions: ChatReaction[];
+  // Set for, and only for, a post.
+  post?: ChatStreamPost;
+}
+
+// A page of a group's stream, oldest first.
+interface ChatStreamPage {
+  items: ChatStreamItem[];
+  // Pass as `before` to read the older page. Null at the oldest item.
+  nextBefore: ChatStreamPosition | null;
+  // The newest item the person has read: a post whose thread they have read
+  // into, or a conversation message under the conversation's read cursor.
+  readPosition: ChatStreamPosition | null;
 }
 
 type ChatDecisionState = "open" | "resolved";
@@ -866,7 +949,26 @@ export interface ChatMessage {
   body: string;
   createdAtMs: number;
   automation?: ChatMessageAutomation;
+  // The agent that wrote the message in one of its runs. Provenance only.
+  authorAgentId?: string;
+  // What the agent reported about itself. Only an agent message has one.
+  authorReported?: ChatReportedAgent;
   attachments: ChatAttachment[];
+  // Thread and stream reads name each open agent request: one per agent that
+  // was asked to answer this message and has not finished. Absent when none.
+  agentRequests?: ChatStreamAgentRequest[];
+}
+
+// Where one agent's request to answer a message stands. A failure carries its
+// run's reason, exit code and log as recorded; it holds no wording.
+interface ChatStreamAgentRequest {
+  agentId: string;
+  state: "waiting" | "running" | "failed";
+  runId?: string;
+  startedAtMs?: number;
+  failureReason?: string;
+  exitCode?: number;
+  logPath?: string;
 }
 
 interface ChatAgentReadState {
@@ -876,6 +978,14 @@ interface ChatAgentReadState {
   lastReadMessageId: ChatMessageId;
   revision: number;
   updatedAtMs: number;
+}
+
+// A message that asked one agent, which that agent has not read.
+interface ChatAgentRequestRecord {
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  authorKind: ChatActor["kind"];
+  createdAtMs: number;
 }
 
 interface ChatMentionRecord {
@@ -1024,7 +1134,13 @@ export interface LinkedChatStore {
   // Idempotent: creates the workspace's default "general" channel on first
   // chat use, returns the existing one afterwards.
   ensureGeneralChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
-  ensureAgentChannel(input: { workspaceId: WorkspaceId }): Promise<ChatChannel>;
+  // Idempotent: one chat per agent. The default agent's chat is "My agent";
+  // another agent's chat takes `name` when it is created.
+  ensureAgentChannel(input: {
+    workspaceId: WorkspaceId;
+    agentId: string;
+    name: string;
+  }): Promise<ChatChannel>;
   listChannels(input: { workspaceId: WorkspaceId }): Promise<ChatChannelSummary[]>;
   // Slug is a lookup ALIAS only; durable state keys on channelId.
   findChannelBySlug(input: {
@@ -1059,8 +1175,19 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    // The agent writing in one of its runs. Only an agent author has one.
+    authorAgentId?: string;
+    // What the agent reported about itself. Only an agent author has one.
+    authorReported?: ChatReportedAgent;
+    // The author's own agents the message names, resolved on this computer.
+    // Each one wakes, as does the agent whose chat this is. Never journaled.
+    namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
+    // Desktop's own thread in an agent DM, an automation's wake thread or the
+    // runner self-test, stays its own post instead of joining the DM's
+    // conversation. People, the CLI and MCP never set it.
+    ownThread?: boolean;
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -1099,6 +1226,18 @@ export interface LinkedChatStore {
     upToSequence: number;
     expectedRevision?: number;
   }): Promise<ChatThreadReadState>;
+  // A group's posts and conversation messages in one order, read a page at a
+  // time from the newest end. The limit defaults to 50, at most 100.
+  listGroupStream(input: {
+    workspaceId: WorkspaceId;
+    channelId: ChatChannelId;
+    before?: ChatStreamPosition;
+    limit?: number;
+  }): Promise<ChatStreamPage>;
+  getThread(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+  }): Promise<{ thread: ChatThread; channel: ChatChannel | null; messageCount: number }>;
   listThreads(input: { workspaceId: WorkspaceId }): Promise<ChatThread[]>;
   listThreadsForFile(input: {
     workspaceId: WorkspaceId;
@@ -1114,6 +1253,13 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
+    // The agent writing in one of its runs. Only an agent author has one.
+    authorAgentId?: string;
+    // What the agent reported about itself. Only an agent author has one.
+    authorReported?: ChatReportedAgent;
+    // The author's own agents the message names, resolved on this computer.
+    // Each one wakes, as does the agent whose chat this is. Never journaled.
+    namedAgentIds?: string[];
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -1140,6 +1286,14 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  // One page of a thread's messages in order. Message orders count from zero;
+  // the page starts after `afterMessageOrder`, or at the first message.
+  listMessagesPage(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+    afterMessageOrder?: number;
+    limit: number;
+  }): Promise<{ messages: ChatMessage[]; nextAfterMessageOrder: number | null }>;
   getThreadRevision(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -1162,17 +1316,21 @@ export interface LinkedChatStore {
   ): Promise<ChatAttachment[]>;
   linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
   fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
+  // An agent's place in each thread. A run dohc dispatched names itself and
+  // reads as its agent; without a run, the reads are those of agents outside
+  // a run. The engine refuses a run that is not running.
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
+    runId?: string;
     threadId: ChatThreadId;
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  listAgentUnreadThreads(workspaceId: WorkspaceId): Promise<ChatThread[]>;
+  listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, runId?: string): Promise<ChatAgentRequestRecord[]>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMentionRecord[]>;
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
@@ -1289,6 +1447,13 @@ export interface LinkedChatStore {
     generation: number;
     failureReason: string;
   }): Promise<ChatBookmarkTransitionResult>;
+  // Queues a failed projection again at the same generation.
+  retryFailedBookmark(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+  }): Promise<ChatBookmarkTransitionResult>;
   markBookmarkStale(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;
@@ -1312,6 +1477,8 @@ type AgentDispatchState = "pending" | "running" | "done" | "failed";
 export interface AgentDispatchRecord {
   workspaceId: WorkspaceId;
   triggerMessageId: ChatMessageId;
+  // The agent the trigger message wakes.
+  agentId: string;
   threadId: ChatThreadId;
   state: AgentDispatchState;
   runId?: string;
@@ -1324,6 +1491,8 @@ export interface AgentDispatchRecord {
 export interface AgentRunRecord {
   workspaceId: WorkspaceId;
   runId: string;
+  // The agent that runs.
+  agentId: string;
   threadId: ChatThreadId;
   triggerMessageId: ChatMessageId;
   command: string;
@@ -1353,22 +1522,21 @@ export interface ThreadDispatchPauseState {
 }
 
 export interface AgentDispatchStore {
-  recordEligibleTriggers(input: {
-    workspaceId: WorkspaceId;
-    verifiedUserId?: string;
-  }): number;
   recordTrigger(input: {
     workspaceId: WorkspaceId;
     triggerMessageId: ChatMessageId;
+    agentId: string;
     threadId: ChatThreadId;
   }): boolean;
   claimNextPending(
     workspaceId: WorkspaceId,
     options?: { command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
+  // Fails one agent's pending requests in the thread.
   failPendingForThread(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
+    agentId: string;
     reason: string;
   }): number;
   completeRun(input: { runId: string; exitCode: number }): AgentRunRecord;
@@ -1394,7 +1562,12 @@ export interface AgentDispatchStore {
     options?: { limit?: number },
   ): Record<ChatMessageId, AgentRunRecord>;
   getRunRecord(runId: string): AgentRunRecord | null;
-  latestRunForThread(workspaceId: WorkspaceId, threadId: ChatThreadId): AgentRunRecord | null;
+  /** The thread's latest run, or that agent's latest run in it. */
+  latestRunForThread(
+    workspaceId: WorkspaceId,
+    threadId: ChatThreadId,
+    agentId?: string,
+  ): AgentRunRecord | null;
   setThreadDispatchPaused(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

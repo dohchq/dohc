@@ -1,14 +1,15 @@
-import { formatChatTime, formatClock } from "../time";
+import { formatChatDay, formatChatTime, formatClock, formatDayClock } from "../time";
 import { basenameOf, dirnameOf } from "../path";
-import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, HardDrive, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
-import { EmptyState } from "../ui/controls";
+import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, FilePen, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
+import { EmptyState, SecondaryButton } from "../ui/controls";
 import { EMPTY_ART } from "./EmptyArt";
-import { Ref } from "../ui/Ref";
-import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
+import { NameLine } from "../ui/NameLine";
+import { useCallback, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type SyncStatusResult, type TimelineEntry } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./chatMessages";
-import { AgentName, ChatAvatar, LinkMark } from "./ChatAvatar";
+import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 
 // The History timeline: file moments, version markers and Collection
@@ -16,7 +17,7 @@ import { neutralPresentation } from "./actorPresentation";
 // their summaries ("Saved latest edits", "Merged version X into Main",
 // "Changed while dohc was closed", ...) and a multi-file pass (reconcile, switch,
 // merge, restore) groups into one expandable item via its correlationId.
-// An agent's consecutive edits to one file fold into one row, a run.
+// One author's consecutive edits to one file fold into one row, a run.
 // Product vocabulary only, no git terms.
 
 interface EngineHistoryGroup {
@@ -133,9 +134,13 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // restore names this computer's person who made it; their other edits read as a local file
 // edit or a live edit. A live edit the relay admitted from an account or link
 // holder names them. Everything else keeps its actor-neutral origin label.
-export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">,
-): string {
+export function engineMomentSourceLabel(moment: SourcedMoment): string {
+  return sourceName(moment) ?? engineOriginLabel(moment.origin);
+}
+
+type SourcedMoment = Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
+
+function sourceName(moment: SourcedMoment): string | undefined {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
   if (moment.authorLabels) {
     const [first, second, third, ...rest] = moment.authorLabels;
@@ -152,36 +157,7 @@ export function engineMomentSourceLabel(
   if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
-    : engineOriginLabel(moment.origin);
-}
-
-// Where a moment came from, as one line of History. An automation's name
-// and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
-export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
-  testId: string;
-  id?: string;
-}) {
-  const { moment } = props;
-  if (moment.automationAuthor) {
-    return (
-      <span id={props.id} data-testid={props.testId} className="inline-flex items-center gap-1 text-muted">
-        <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-        <span className="sr-only">Automation </span>
-        {engineMomentSourceLabel(moment)}
-      </span>
-    );
-  }
-  // Agent-authored moments speak in the olive attribution voice; everything
-  // else is a neutral origin in ink.
-  return (
-    <span
-      data-testid={props.testId}
-      className={moment.agentAuthorName !== undefined ? "text-agent" : "text-muted"}
-    >
-      {engineMomentSourceLabel(moment)}
-    </span>
-  );
+    : undefined;
 }
 
 // The group-level author: the shared agent author name when every moment in
@@ -197,31 +173,63 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
-// The one agent that made a moment, by its stable id. Two agents can share a
-// name, so a run never compares names.
-function soleAgentId(moment: EngineMomentRecord): string | undefined {
+// The one agent or person that made a moment, by their stable id. Two agents
+// can share a name, so a run never compares names.
+function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
-  return author?.kind === "agent" && others.length === 0 ? author.agentId : undefined;
+  if (author === undefined || others.length > 0) return undefined;
+  if (author.kind === "agent") return `agent:${author.agentId}`;
+  // A person the owner shared with, writing directly.
+  if (author.kind === "named") return `named:${author.userId}`;
+  return author.kind === "human" ? `human:${author.humanId}` : undefined;
 }
 
-// Whether `older` continues the run `newer` is in: the same agent editing the
-// same file, on the same day.
+// An edit a run can hold. A restore and kept typing each keep a row of
+// their own, so they are never folded out of sight.
+function runEdit(moment: EngineMomentRecord): boolean {
+  return moment.operation === "write" && moment.origin !== "restore" && !isCaptureRecoveryOrigin(moment.origin);
+}
+
+// Whether `older` continues the run `newer` is in: the same agent or person
+// editing the same file, on the same day.
 function continuesRun(newer: EngineMomentRecord, older: EngineMomentRecord): boolean {
-  const agentId = soleAgentId(newer);
-  return agentId !== undefined && agentId === soleAgentId(older) &&
-    newer.path === older.path && newer.operation === "write" && older.operation === "write" &&
+  const author = soleAuthorKey(newer);
+  return author !== undefined && author === soleAuthorKey(older) &&
+    newer.path === older.path && runEdit(newer) && runEdit(older) &&
     dayKey(newer.recordedAtMs) === dayKey(older.recordedAtMs);
 }
 
-// Keeps the order main merged and groups consecutive file moments that share
-// a correlationId (one pass records its per-file moments contiguously on the
+// When a change happened. Only a Collection change can be undated.
+function ownTime(entry: TimelineEntry): number | null {
+  if (entry.kind === "file") return entry.moment.recordedAtMs;
+  if (entry.kind === "version") return entry.version.createdAtMs;
+  return entry.change.recordedAtMs;
+}
+
+// Main merges each Collection's changes newest revision first. An undated
+// change takes its neighbour's time to sort by, or sorts last and holds its
+// Collection's older dated changes back behind it. A stable sort of every
+// loaded page by each change's own time keeps main's order elsewhere, puts
+// those dated changes under their own day, and puts undated changes last.
+function byOwnTime(entries: readonly TimelineEntry[]): TimelineEntry[] {
+  return [...entries].sort((a, b) => {
+    const at = ownTime(a), bt = ownTime(b);
+    if (at === bt) return 0;
+    if (at === null) return 1;
+    return bt === null ? -1 : bt - at;
+  });
+}
+
+// Orders entries by their own time, then groups consecutive file moments that
+// share a correlationId (one pass records its per-file moments contiguously on the
 // capture chain). A version or Collection row between them ends the group.
-// An agent's consecutive edits to one file fold into a run, keyed by its
-// oldest edit so a new edit on top keeps the row. Each edit may carry its own
-// one-moment operation; a moment of a multi-file pass never joins a run.
-// Other moments stay single.
-export function groupTimeline(entries: readonly TimelineEntry[]): TimelineItem[] {
+// One agent's or person's consecutive edits to one file fold into a run,
+// keyed by its oldest edit so a new edit on top keeps the row. Each edit may
+// carry its own one-moment operation; a moment of a multi-file pass never
+// joins a run. Other moments stay single.
+export function groupTimeline(loaded: readonly TimelineEntry[]): TimelineItem[] {
   const items: TimelineItem[] = [];
+  const entries = byOwnTime(loaded);
   for (const [index, entry] of entries.entries()) {
     if (entry.kind === "version") {
       items.push({ kind: "version", key: `version:${entry.version.id}`, version: entry.version });
@@ -322,7 +330,7 @@ function timelineSearchText(item: TimelineItem, labelOf: (entry: CollectionEntry
     ...item.group.moments.flatMap((moment) => [
       moment.path,
       engineMomentSummary(moment),
-      engineMomentSourceLabel(moment),
+      momentAuthorLabel(moment),
       ...(moment.authorLabels ?? []),
     ]),
   ]
@@ -330,14 +338,21 @@ function timelineSearchText(item: TimelineItem, labelOf: (entry: CollectionEntry
     .toLowerCase();
 }
 
-// Which day heading an item sits under. A Collection change main could not
-// date sits where main placed it, under its neighbours' day; its row says
-// the date is unknown. Only an item with no placement time either gets the
-// "Date unknown" heading.
+// Which day heading an item sits under. Undated Collection changes come
+// last, under the one "Date unknown" heading.
 function itemPlacement(item: TimelineItem): number | null {
   if (item.kind === "files") return item.group.recordedAtMs;
   if (item.kind === "version") return item.version.createdAtMs;
-  return item.entry.sortAtMs;
+  return item.entry.change.recordedAtMs;
+}
+
+// The oldest item with a time. A page that follows it lists older dated
+// changes, which sort in after it; undated ones stay last.
+function oldestDated(items: readonly TimelineItem[]): TimelineItem | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (itemPlacement(items[index]!) !== null) return items[index];
+  }
+  return undefined;
 }
 
 function dayKey(recordedAtMs: number): string {
@@ -347,18 +362,11 @@ function dayKey(recordedAtMs: number): string {
   return `${recordedAt.getFullYear()}-${month}-${day}`;
 }
 
-const dayFormat = new Intl.DateTimeFormat(undefined, {
-  weekday: "short",
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-});
-
+// Today, Yesterday, then the date, as chat's day dividers say it.
 function formatDay(recordedAtMs: number | null): { label: string; dateTime: string | null } {
   if (recordedAtMs === null) return { label: "Date unknown", dateTime: null };
-  const recordedAt = new Date(recordedAtMs);
   return {
-    label: dayFormat.format(recordedAt),
+    label: formatChatDay(recordedAtMs),
     dateTime: dayKey(recordedAtMs),
   };
 }
@@ -373,6 +381,15 @@ export function collectionListPhrase(names: readonly string[], total: number): s
   return shown.length === 1 ? shown[0]! : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
 }
 
+// What a partial timeline's warning row shows; its sentence is the tooltip.
+function missingSourcesShort(
+  unavailable: readonly { datasetId: string }[],
+  nameOf: (datasetId: string) => string | undefined,
+): string | null {
+  const names = unavailable.flatMap((source) => nameOf(source.datasetId) ?? []);
+  return unavailable.length ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}` : null;
+}
+
 // The sentences that say what a partial timeline is missing.
 export function missingSourcesWords(
   unavailable: readonly { datasetId: string }[],
@@ -385,22 +402,46 @@ export function missingSourcesWords(
       ? `dohc could not load changes from ${collectionListPhrase(names, unavailable.length)}.`
       : null,
     omitted: omitted > 0
-      ? `History includes up to ${HISTORY_MAX_SOURCES} Collections. ${omitted} more ${omitted === 1 ? "is" : "are"} left out. To see a Collection's changes, open it and choose History.`
+      ? `History includes ${countFormat.format(HISTORY_MAX_SOURCES)} of ${countFormat.format(HISTORY_MAX_SOURCES + omitted)} Collections. For another Collection, open it and choose History.`
       : null,
   };
 }
 
-// One timeline row: 30px, inset, with no rule between rows. Hover and the
-// open change take the list ladder's fills. A mark takes an avatar's 18px.
+// One timeline row. A change is two lines, 48px, as Notion's page history
+// reads: when, then who made it and what changed, beside their face. A file
+// under a pass or an edit under a run is one line, 28px, its words starting
+// where the names above it do. Rows touch; hover and the open change take
+// the list ladder's fills. A mark takes an avatar's 18px slot, so every name
+// starts on one edge.
 export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
-const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
-const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
-const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
+const TWO_LINES = `grid h-12 w-full min-w-0 grid-cols-[18px_minmax(0,1fr)] content-center gap-x-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-row`;
+const WHEN = "col-span-2 min-w-0 truncate text-[13px] font-medium leading-5 tabular-nums text-ink";
+const LINE_TWO = "flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted";
+const ONE_LINE = `flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row`;
+const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink font-medium" : "text-muted hover:bg-hover hover:text-ink");
+const countFormat = new Intl.NumberFormat();
+
+// A count of what has loaded: "3,029", or "49+" read as "49 or more" while
+// earlier changes remain.
+function LoadedCount(props: { count: number; more?: boolean; noun: string }) {
+  const count = countFormat.format(props.count);
+  if (!props.more) return <span className="tabular-nums">{count} {props.noun}</span>;
+  return (
+    <span className="tabular-nums">
+      <span aria-hidden>{count}+ {props.noun}</span>
+      <span className="sr-only">{count} or more {props.noun}</span>
+    </span>
+  );
+}
 
 // Who made a change, as chats draw them: an agent's square, a person's face,
 // an automation's mark, a share link's ring. A change with no one author,
 // or several, draws the caller's `fallback`.
-export function MomentAuthor(props: { moment: EngineMomentRecord; fallback: ReactNode }) {
+// A change as a face and a name credit it. A change's diff page reads it
+// without its place in the list.
+type CreditedMoment = Omit<EngineMomentRecord, "momentOrder">;
+
+export function MomentAuthor(props: { moment: CreditedMoment; fallback: ReactNode }) {
   const { moment } = props;
   const presentation = moment.authorPresentations?.[0] ?? neutralPresentation;
   if (moment.agentAuthorName !== undefined) {
@@ -417,7 +458,7 @@ export function MomentAuthor(props: { moment: EngineMomentRecord; fallback: Reac
 // Where a change with no one author came from, as a mark the size of an
 // avatar. Its title names the origin; an unknown origin is a dot.
 const ORIGIN_MARKS: Partial<Record<EngineMomentRecord["origin"], LucideIcon>> = {
-  "local-file": HardDrive,
+  "local-file": FilePen,
   ydoc: PenLine,
   sync: Cloud,
   restore: RotateCcw,
@@ -425,7 +466,7 @@ const ORIGIN_MARKS: Partial<Record<EngineMomentRecord["origin"], LucideIcon>> = 
   "capture-recovery-cleared": Keyboard,
 };
 
-function OriginMark(props: { moment: EngineMomentRecord }) {
+export function OriginMark(props: { moment: CreditedMoment }) {
   const Icon = ORIGIN_MARKS[props.moment.origin];
   return (
     <span aria-hidden title={engineMomentSourceLabel(props.moment)} className={`${MARK_BOX} text-subtle`}>
@@ -434,17 +475,24 @@ function OriginMark(props: { moment: EngineMomentRecord }) {
   );
 }
 
-// A row's title: the engine's own summary, else the file's name. The
-// operation stays in the title only when it is not an edit.
-export function momentRowTitle(moment: EngineMomentRecord): string {
-  return moment.summary || moment.operation !== "write" ? engineMomentSummary(moment) : basenameOf(moment.path);
+// What a change did, in one file's History, where the file goes without
+// saying: its own summary, else its operation.
+export function fileMomentSummary(moment: Pick<EngineMomentRecord, "summary" | "operation" | "path">): string {
+  if (moment.summary) return moment.summary;
+  if (moment.operation === "rename") return `Renamed to ${basenameOf(moment.path)}`;
+  return moment.operation === "delete" ? "Deleted" : "Edited";
 }
 
-// Where the file is, after a title, so the row names it once: its folder
-// after its name, its path after a summary that does not name it.
-function momentRowPlace(moment: EngineMomentRecord, title: string): string {
-  if (title.includes(moment.path)) return "";
-  return title.includes(basenameOf(moment.path)) ? dirnameOf(moment.path) : moment.path;
+// Who a row names beside its face. A change by this computer's person shows
+// their face, so it names them too, unless it holds kept typing, which says
+// so instead. Everyone else is named as History sources name them.
+function momentAuthorLabel(moment: CreditedMoment): string {
+  return engineMomentAuthorName(moment) ?? engineOriginLabel(moment.origin);
+}
+
+/** The name a History row gives whoever made a change, or undefined when the row says only where it came from. */
+export function engineMomentAuthorName(moment: SourcedMoment): string | undefined {
+  return (isCaptureRecoveryOrigin(moment.origin) ? undefined : moment.personAuthorName) ?? sourceName(moment);
 }
 
 // One author in words: an agent and an automation say what they are, so
@@ -466,41 +514,110 @@ export function momentDescription(moment: EngineMomentRecord): string {
     ? moment.authorLabels.map((label, index) => authorWords(agentOrAutomation(moment.authors?.[index]?.kind), label)).join(", ")
     : authorWords(
       moment.agentAuthorName !== undefined ? "agent" : moment.automationAuthor ? "automation" : undefined,
-      engineMomentSourceLabel(moment),
+      momentAuthorLabel(moment),
     );
   return `${engineMomentSummary(moment)}, ${who}, ${formatChatTime(moment.recordedAtMs).label}`;
 }
 
-// Who made a top-level change, after its title. An agent's or an
-// automation's name shows; anyone else shows the file's folder, and their
-// avatar's title and the hidden source name them. Each gives way before the
-// title does. An agent's name keeps at least its ellipsis (9.5px of 11px
-// Inter), as the save state does, so a squeezed name never shows a sliver.
-function MomentDetail(props: { moment: EngineMomentRecord }) {
+// Who made a change, beside their face. The face carries an agent's hue, so
+// the name stays in the line's ink; an automation says what it is to a
+// screen reader.
+export function MomentName(props: { moment: CreditedMoment; testId?: string; className?: string; title?: string; style?: CSSProperties }) {
   const { moment } = props;
-  const label = engineMomentSourceLabel(moment);
-  if (moment.agentAuthorName !== undefined) {
-    return (
-      <span data-testid="engine-moment-source" className="min-w-[13px] shrink-[999] truncate text-[11px]">
-        <AgentName kind="agent" presentation={moment.authorPresentations?.[0] ?? neutralPresentation}>{label}</AgentName>
-      </span>
-    );
-  }
-  if (moment.automationAuthor) {
-    return (
-      <span data-testid="engine-moment-source" className="min-w-0 flex-1 basis-0 truncate text-[11px] text-muted">
-        <span className="sr-only">Automation </span>
-        {label}
-      </span>
-    );
-  }
   return (
-    <>
-      <span className="min-w-0 flex-1 basis-0 truncate text-[11px] text-subtle">
-        {momentRowPlace(moment, momentRowTitle(moment))}
+    <span data-testid={props.testId ?? "engine-moment-source"} title={props.title} style={props.style}
+      className={`min-w-0 truncate ${props.className ?? ""}`}>
+      {moment.automationAuthor ? <span className="sr-only">Automation </span> : null}
+      {momentAuthorLabel(moment)}
+    </span>
+  );
+}
+
+// A protected file's change shows no contents; a binary one shows bytes.
+function ContentMark(props: { moment: EngineMomentRecord }) {
+  if (props.moment.protected) {
+    return <Lock size={12} aria-hidden data-testid="engine-moment-lock" className="shrink-0 text-subtle" />;
+  }
+  return props.moment.contentKind === "binary"
+    ? <FileArchive size={12} aria-hidden data-testid="engine-moment-binary" className="shrink-0 text-subtle" />
+    : null;
+}
+
+// Origins whose label already says what happened, such as "Local file edit".
+const ACTION_ORIGINS = new Set<EngineMomentRecord["origin"]>(["local-file", "ydoc", "restore", "capture-recovery", "capture-recovery-cleared"]);
+
+// What changed, in one file's History, where the file goes without saying.
+// A bare "Edited" goes unsaid after a name that already says it.
+function FileMomentWhat(props: { moment: EngineMomentRecord }) {
+  const { moment } = props;
+  const saysIt = !moment.summary && moment.operation === "write" && ACTION_ORIGINS.has(moment.origin)
+    && momentAuthorLabel(moment) === engineOriginLabel(moment.origin);
+  return saysIt ? null : <span className="min-w-0 truncate">{fileMomentSummary(moment)}</span>;
+}
+
+// How narrow a part of a History line cuts. A shorter part keeps its own
+// width. The actor stops at 48px beside its face. The words before a file's
+// name stop there too, or at half their summary, so the name keeps room. A
+// Collection's parts stop at a share of their line, so all of them fit at
+// the sidebar's narrowest. Inline, so no CSS tool rewrites them.
+const ACTOR_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px))" };
+const LEAD_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 50%))" };
+const PART_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 25%))" };
+const COLLECTION_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 72px, 35%))" };
+// How soon a part gives way. A line shares its shortfall by each part's width
+// times its factor and rounds each share to 1/64 px, so each step is a
+// million times the next: the part that should hold rounds to no loss.
+const GIVES_FIRST = "shrink-[1000000000000000000]";
+const GIVES_SECOND = "shrink-[1000000000000]";
+const GIVES_THIRD = "shrink-[1000000]";
+
+// A summary that names the file, around its name: the words before it cut at
+// their end, down to their floor; the name cuts in its middle and keeps its
+// extension, in the ink a name takes; what follows it gives way first.
+function NamedSummary(props: { summary: string; name: string }) {
+  const at = props.summary.lastIndexOf(props.name);
+  const before = props.summary.slice(0, at);
+  const after = props.summary.slice(at + props.name.length);
+  return (
+    <span data-testid="engine-moment-summary" className="flex min-w-0">
+      {before ? <span className={`min-w-0 ${GIVES_THIRD} overflow-hidden text-ellipsis whitespace-pre`} style={LEAD_FLOOR}>{before}</span> : null}
+      <NameLine name={props.name} className="text-ink" />
+      {after ? <span className={`min-w-0 ${GIVES_SECOND} overflow-hidden text-ellipsis whitespace-pre`}>{after}</span> : null}
+    </span>
+  );
+}
+
+// Who made a change and what it changed, on one line of the workspace's
+// History. The file's name wins. As the line runs short, a summary that
+// does not name the file gives way first, cut at its end; the folder gives
+// way and drops once it would show only an ellipsis; then the actor cuts
+// down to its floor; then the name cuts in its middle and keeps its
+// extension. A summary that names the file takes the name's place and keeps
+// the name whole as long as it can. The folder takes only the room the rest
+// leaves; below its 24px basis it wraps onto a second line that the line
+// clips. The row's tooltip keeps the path.
+function WorkspaceMomentLine(props: { moment: EngineMomentRecord; fileOnly?: boolean }) {
+  const { moment } = props;
+  const name = basenameOf(moment.path);
+  const summary = props.fileOnly || (!moment.summary && moment.operation === "write") ? null : engineMomentSummary(moment);
+  const namesFile = summary !== null && summary.includes(name);
+  const folder = summary === null ? dirnameOf(moment.path) : "";
+  return (
+    <span data-testid="engine-moment-line" className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-2 overflow-hidden text-[12px] leading-4 text-muted">
+      <span className="flex min-w-0 items-center gap-2">
+        <MomentName moment={moment} title={momentAuthorLabel(moment)} style={ACTOR_FLOOR} className={GIVES_THIRD} />
+        {namesFile
+          ? <NamedSummary summary={summary} name={name} />
+          : <NameLine name={name} className="text-ink" />}
+        {summary !== null && !namesFile
+          ? <span data-testid="engine-moment-summary" className={`min-w-0 ${GIVES_SECOND} truncate`}>{summary}</span>
+          : null}
+        <ContentMark moment={moment} />
       </span>
-      <span data-testid="engine-moment-source" className="sr-only">{label}</span>
-    </>
+      {folder ? (
+        <span data-testid="engine-moment-folder" className="min-w-0 max-w-max grow basis-6 truncate text-subtle">{folder}</span>
+      ) : null}
+    </span>
   );
 }
 
@@ -513,17 +630,20 @@ function HiddenWords(props: { id: string; children: string }) {
 // What a collapsed run or pass says when the open change is inside it.
 const HOLDS_OPEN = "Includes the open change";
 
-// One change in the timeline. The states page renders it too. A run's head
+// One change, in the workspace's History or in one file's. Selecting it
+// opens that change. The states page and About render it too. A run's head
 // carries `fold`: its count opens the run's earlier edits, and `holdsOpen`
 // marks a collapsed run whose open change is one of them.
-export function MomentRow(props: {
+export function HistoryRow(props: {
   moment: EngineMomentRecord;
-  // A file in a multi-file pass, or an earlier edit in an agent's run.
+  // One file's History leaves the file's name out and dates each row.
+  context: "workspace" | "file";
+  // A file in a multi-file pass, or an earlier edit in a run.
   nested?: "pass" | "run";
   // The change open in the focused editor group.
   selected?: boolean;
-  fold?: { count: number; expanded: boolean; holdsOpen?: boolean; onToggle: () => void };
-  onOpenMoment: (momentId: string, filePath: string) => void;
+  fold?: { count: number; more?: boolean; expanded: boolean; holdsOpen?: boolean; onToggle: () => void };
+  onOpen: (momentId: string, filePath: string) => void;
 }) {
   const { moment, nested, fold } = props;
   const selected = props.selected === true;
@@ -531,77 +651,92 @@ export function MomentRow(props: {
   // The row's name says what it opens; the change itself is its description.
   const descriptionId = useId();
   const holdsOpenId = useId();
+  const time = (className: string) => (
+    <time data-testid="engine-moment-recorded-at" dateTime={recordedAt.iso} title={recordedAt.label} className={className}>
+      {/* The workspace's History heads each day; one file's dates each row. */}
+      {props.context === "file" ? formatDayClock(moment.recordedAtMs) : formatClock(moment.recordedAtMs)}
+    </time>
+  );
+  const shared = {
+    type: "button",
+    "aria-describedby": descriptionId,
+    "aria-current": selected ? "true" : undefined,
+    "data-testid": "engine-moment-open",
+    "data-moment-id": moment.id,
+    "data-moment-path": moment.path,
+    title: `Open diff for ${moment.path}`,
+    "aria-label": `Open diff for ${moment.path}`,
+    onClick: () => props.onOpen(moment.id, moment.path),
+  } as const;
+  const description = <HiddenWords id={descriptionId}>{momentDescription(moment)}</HiddenWords>;
+  if (nested) {
+    return (
+      <>
+        <button {...shared} className={`${ONE_LINE} ${rowTone(selected)}`}>
+          <span aria-hidden className={MARK_BOX} />
+          {nested === "pass" ? (
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="min-w-0 max-w-[70%] shrink-0 truncate text-ink">{basenameOf(moment.path)}</span>
+              <span className="min-w-0 truncate text-[12px] text-subtle">{dirnameOf(moment.path)}</span>
+            </span>
+          ) : (
+            // An earlier edit in a run leads with its time, as its head
+            // does; the head already names who made them all.
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              {time("shrink-0 font-medium tabular-nums text-ink")}
+              <span className="min-w-0 truncate text-[12px] text-muted">{fileMomentSummary(moment)}</span>
+            </span>
+          )}
+          <ContentMark moment={moment} />
+          {/* A pass's files share their group's time. Most passes change
+              files, so only a rename or a delete says what it did. */}
+          {nested === "pass" && moment.operation !== "write" ? (
+            <span className="shrink-0 text-[12px] text-subtle">{engineOperationLabel(moment)}</span>
+          ) : null}
+        </button>
+        {description}
+      </>
+    );
+  }
   const open = (
-    <button
-      type="button"
-      aria-describedby={descriptionId}
-      aria-current={selected ? "true" : undefined}
-      data-testid="engine-moment-open"
-      data-moment-id={moment.id}
-      data-moment-path={moment.path}
-      title={`Open diff for ${moment.path}`}
-      aria-label={`Open diff for ${moment.path}`}
-      onClick={() => props.onOpenMoment(moment.id, moment.path)}
-      // A run's head lays out on its row's grid, so the count sits between
-      // the name and the time, as a button beside this one.
-      className={`${ROW} ${fold ? "col-span-full row-start-1 grid grid-cols-subgrid" : `flex ${rowTone(selected)}`} ${nested ? "pl-8" : ""}`}
-    >
-      <span className="flex min-w-0 flex-1 items-center gap-1.5">
-        {nested ? null : <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />}
-        {nested === "pass" ? (
-          <span className="flex min-w-0">
-            <Ref path={moment.path} folder />
+    <button {...shared} className={`${TWO_LINES} ${fold ? "" : rowTone(selected)}`}>
+      {/* A run's count sits at the end of the time's line. */}
+      {time(`${WHEN} ${fold ? "pr-24" : ""}`)}
+      <MomentAuthor moment={moment} fallback={<OriginMark moment={moment} />} />
+      {props.context === "workspace" ? (
+        <WorkspaceMomentLine moment={moment} fileOnly={fold !== undefined} />
+      ) : (
+        <span className={LINE_TWO}>
+          <MomentName moment={moment} className="max-w-[45%] shrink-0" />
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            <FileMomentWhat moment={moment} />
+            <ContentMark moment={moment} />
           </span>
-        ) : (
-          // A run is one file's edits, so its head names the file; each
-          // edit's own summary is under it.
-          <span className={`min-w-0 truncate ${nested ? "" : "text-ink"}`}>{fold ? basenameOf(moment.path) : momentRowTitle(moment)}</span>
-        )}
-        {moment.protected ? (
-          // Secret-backed file moment: the lock is the affordance —
-          // the row is metadata-only and its page shows no contents.
-          <Lock size={12} aria-hidden data-testid="engine-moment-lock" className="shrink-0 text-subtle" />
-        ) : moment.contentKind === "binary" ? (
-          <FileArchive size={12} aria-hidden data-testid="engine-moment-binary" className="shrink-0 text-subtle" />
-        ) : null}
-        {nested === "pass" ? (
-          <span className="shrink-0 text-[11px] text-subtle">{engineOperationLabel(moment)}</span>
-        ) : nested ? null : (
-          <MomentDetail moment={moment} />
-        )}
-      </span>
-      {/* A pass's files share their group's time. */}
-      {nested === "pass" ? null : (
-        <time
-          data-testid="engine-moment-recorded-at"
-          dateTime={recordedAt.iso}
-          title={recordedAt.iso}
-          className={`shrink-0 text-[11px] tabular-nums text-subtle ${fold ? "col-start-3" : ""}`}
-        >
-          {formatClock(moment.recordedAtMs)}
-        </time>
+        </span>
       )}
     </button>
   );
-  const description = <HiddenWords id={descriptionId}>{momentDescription(moment)}</HiddenWords>;
   if (!fold) return <>{open}{description}</>;
   // A collapsed run holding the open change takes the selected ink; the
   // change keeps aria-current for itself, and the count says where it is.
   const holdsOpen = fold.holdsOpen === true;
+  const countWords = `${countFormat.format(fold.count)}${fold.more ? " or more" : ""} changes`;
+  const Chevron = fold.expanded ? ChevronDown : ChevronRight;
   return (
-    <div className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-1.5 rounded-md transition-colors duration-75 ${rowTone(selected || holdsOpen)}`}>
+    <div className={`relative rounded-md transition-colors duration-75 ${rowTone(selected || holdsOpen)}`}>
       {open}
       <button
         type="button"
         data-testid="engine-moment-run-toggle"
         aria-expanded={fold.expanded}
-        aria-label={`${fold.count} changes`}
+        aria-label={countWords}
         aria-describedby={holdsOpen ? holdsOpenId : undefined}
-        title={`${fold.count} changes`}
+        title={countWords}
         onClick={fold.onToggle}
-        className="relative col-start-2 row-start-1 grid h-6 min-w-6 place-items-center rounded-md px-0.5 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        className={`absolute right-1 top-[5px] flex h-5 items-center gap-1 rounded-md px-1 text-[12px] text-subtle hover:bg-hover hover:text-ink focus-visible:-outline-offset-2`}
       >
-        <span className={COUNT}>{fold.count}</span>
+        <LoadedCount count={fold.count} more={fold.more} noun="changes" />
+        <Chevron size={12} aria-hidden />
       </button>
       {description}
       {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
@@ -609,10 +744,11 @@ export function MomentRow(props: {
   );
 }
 
-// An agent's run of edits to one file: its newest edit, with the count that
+// One author's run of edits to one file: its newest edit, with the count that
 // lists the earlier ones under it.
 function RunRow(props: {
   group: EngineHistoryGroup;
+  more: boolean;
   expanded: boolean;
   onToggle: () => void;
   openMomentId: string | null;
@@ -622,21 +758,23 @@ function RunRow(props: {
   const holdsOpen = !props.expanded && earlier.some((moment) => moment.id === props.openMomentId);
   return (
     <div data-testid="engine-moment-run">
-      <MomentRow
+      <HistoryRow
         moment={newest!}
+        context="workspace"
         selected={newest!.id === props.openMomentId}
-        fold={{ count: props.group.moments.length, expanded: props.expanded, holdsOpen, onToggle: props.onToggle }}
-        onOpenMoment={props.onOpenMoment}
+        fold={{ count: props.group.moments.length, more: props.more, expanded: props.expanded, holdsOpen, onToggle: props.onToggle }}
+        onOpen={props.onOpenMoment}
       />
       {props.expanded ? (
         <div data-testid="engine-moment-run-earlier">
           {earlier.map((moment) => (
-            <MomentRow
+            <HistoryRow
               key={moment.id}
               moment={moment}
+              context="workspace"
               nested="run"
               selected={moment.id === props.openMomentId}
-              onOpenMoment={props.onOpenMoment}
+              onOpen={props.onOpenMoment}
             />
           ))}
         </div>
@@ -645,8 +783,11 @@ function RunRow(props: {
   );
 }
 
+// A pass over many files, such as Changed while dohc was closed: what it
+// did, then how many files, opening in place to list them.
 function GroupRow(props: {
   group: EngineHistoryGroup;
+  more: boolean;
   expanded: boolean;
   onToggle: () => void;
   openMomentId: string | null;
@@ -670,36 +811,37 @@ function GroupRow(props: {
         aria-expanded={expanded}
         aria-describedby={holdsOpen ? holdsOpenId : undefined}
         onClick={props.onToggle}
-        className={`${ROW} flex ${rowTone(holdsOpen)}`}
+        className={`${TWO_LINES} ${rowTone(holdsOpen)}`}
       >
+        <time dateTime={recordedAt.iso} title={recordedAt.label} className={WHEN}>
+          {formatClock(group.recordedAtMs)}
+        </time>
         <span className={`${MARK_BOX} text-subtle`}>
           <Chevron size={14} aria-hidden />
         </span>
-        <span className="min-w-0 truncate text-ink">{group.summary}</span>
-        {agentAuthorName !== undefined ? (
-          <span data-testid="engine-moment-group-source" className="min-w-0 shrink-[999] truncate text-[11px] text-agent">
-            {chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}
+        <span className={LINE_TWO}>
+          {agentAuthorName !== undefined ? (
+            <span data-testid="engine-moment-group-source" className="min-w-0 max-w-[45%] shrink-0 truncate">
+              {chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}
+            </span>
+          ) : null}
+          <span className="min-w-0 truncate">{group.summary}</span>
+          <span className="shrink-0 text-subtle">
+            <LoadedCount count={group.moments.length} more={props.more} noun="files" />
           </span>
-        ) : null}
-        <span className="min-w-0 flex-1" />
-        <span className={COUNT}>
-          {group.moments.length}
-          <span className="sr-only"> files</span>
         </span>
-        <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
-          {formatClock(group.recordedAtMs)}
-        </time>
       </button>
       {holdsOpen ? <HiddenWords id={holdsOpenId}>{HOLDS_OPEN}</HiddenWords> : null}
       {expanded ? (
         <div data-testid="engine-moment-group-files">
           {group.moments.map((moment) => (
-            <MomentRow
+            <HistoryRow
               key={moment.id}
               moment={moment}
+              context="workspace"
               nested="pass"
               selected={moment.id === props.openMomentId}
-              onOpenMoment={props.onOpenMoment}
+              onOpen={props.onOpenMoment}
             />
           ))}
         </div>
@@ -708,122 +850,151 @@ function GroupRow(props: {
   );
 }
 
-// A version starting, as a marker between changes. It opens nothing, so it
-// reads lighter than the changes around it.
+// A version starting, as a marker between changes. It reads as a change
+// does, its time first, but it opens nothing.
 function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   const createdAt = formatChatTime(props.version.createdAtMs);
   return (
-    <div className="flex h-[30px] min-w-0 items-center gap-1.5 px-2 text-[13px]">
+    <div className={TWO_LINES}>
+      <time dateTime={createdAt.iso} title={createdAt.label} className={WHEN}>
+        {formatClock(props.version.createdAtMs)}
+      </time>
       <span className={`${MARK_BOX} text-subtle`}>
         <Layers size={14} aria-hidden />
       </span>
-      <span className="min-w-0 flex-1 truncate text-muted">{versionMarkerTitle(props.version)}</span>
-      <time dateTime={createdAt.iso} title={createdAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
-        {formatClock(props.version.createdAtMs)}
-      </time>
+      <span className={LINE_TWO}>
+        {/* The version's name takes the ink a file's name does. */}
+        <span className="min-w-0 truncate">
+          {props.version.kind === "main"
+            ? versionMarkerTitle(props.version)
+            : <>Created version <span className="text-ink">{props.version.name}</span></>}
+        </span>
+      </span>
     </div>
   );
 }
 
 // One saved Collection change. Like a file's row opens its diff, it opens its
 // Collection's History, where the change and its Undo are, when this
-// computer can open that Collection.
+// computer can open that Collection. A Collection change has no face, so
+// what changed follows the time, beside the Collection's mark; who made it
+// and where come after. As the line runs short, an operation's name gives
+// way first; then who made it cuts to its floor; then what changed; the
+// Collection's name stays whole up to its own floor.
 function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
   const { name, change } = props.entry;
-  const recordedAt = change.recordedAtMs === null ? null : formatChatTime(change.recordedAtMs);
   const agent = approvalAgentName(change);
+  const title = collectionChangeTitle(props.entry, props.label);
   // Only a record change with no label names its Collection in its title,
   // and only it needs its operation's own name to say which change it was.
   const unlabelled = !change.schema && props.label === undefined;
-  // The row's name says what it opens, so the change is its description.
-  const metaId = useId();
+  // The row's name says what it opens, so the change is its description:
+  // the line as it reads, then when, as a file's change says it.
+  const descriptionId = useId();
+  const description = [
+    title,
+    agent === undefined ? undefined : authorWords("agent", agent),
+    change.automation ? authorWords("automation", automationName(change.automation)) : undefined,
+    unlabelled ? change.operation : name,
+    change.recordedAtMs === null ? undefined : formatChatTime(change.recordedAtMs).label,
+  ].filter((part) => part !== undefined).join(", ");
+  // An undated change sits under the Date unknown heading, so it is one
+  // line with no time.
+  const frame = change.recordedAtMs === null ? ONE_LINE : TWO_LINES;
   const body = (
-    <span className="flex min-w-0 items-start gap-1.5">
+    <>
+      {change.recordedAtMs === null ? null : (
+        <time dateTime={formatChatTime(change.recordedAtMs).iso} title={formatChatTime(change.recordedAtMs).label} className={WHEN}>
+          {formatClock(change.recordedAtMs)}
+        </time>
+      )}
       <span className={`${MARK_BOX} text-subtle`}>
         <Database size={14} aria-hidden />
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium text-ink">
-          {collectionChangeTitle(props.entry, props.label)}
+      {/* An undated row is one line, and this takes all of it beside the mark. */}
+      <span data-testid="history-collection-line" className={`${LINE_TWO} flex-1 overflow-hidden`}>
+        <span data-testid="history-collection-title" className={`min-w-0 ${GIVES_THIRD} truncate`} style={PART_FLOOR}>
+          {title}
         </span>
-        <span id={metaId} className="mt-0.5 block truncate text-[11px] text-subtle">
-          {agent !== undefined ? (
-            <>
-              <span data-testid="history-collection-agent" className="text-agent">{agent}</span>
-              {" · "}
-            </>
-          ) : null}
-          {change.automation ? (
-            <>
-              <span className="inline-flex items-center gap-1 text-muted">
-                <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-                <span className="sr-only">Automation </span>
-                {automationName(change.automation)}
-              </span>
-              {" · "}
-            </>
-          ) : null}
-          {recordedAt ? (
-            <time dateTime={recordedAt.iso} title={recordedAt.iso} className="tabular-nums">
-              {recordedAt.label}
-            </time>
-          ) : (
-            <span data-testid="history-collection-date-unknown">Date unknown</span>
-          )}
-          {" · "}
-          {unlabelled ? <span className="font-mono">{change.operation}</span> : <span>{name}</span>}
-        </span>
+        {agent !== undefined ? (
+          <span data-testid="history-collection-agent" className={`min-w-0 ${GIVES_SECOND} truncate`} style={PART_FLOOR}>{agent}</span>
+        ) : null}
+        {change.automation ? (
+          <span className={`inline-flex min-w-0 ${GIVES_SECOND} items-center gap-1`} style={PART_FLOOR}>
+            <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+            <span className="sr-only">Automation </span>
+            <span className="truncate">{automationName(change.automation)}</span>
+          </span>
+        ) : null}
+        {unlabelled ? (
+          <span data-testid="history-collection-operation" className={`min-w-0 ${GIVES_FIRST} truncate text-subtle`}>{change.operation}</span>
+        ) : (
+          <span data-testid="history-collection-name" className="min-w-0 truncate text-subtle" style={COLLECTION_FLOOR}>{name}</span>
+        )}
       </span>
-    </span>
+    </>
   );
   return props.openHistory ? (
-    <button
-      type="button"
-      data-testid="history-collection-open"
-      aria-describedby={metaId}
-      aria-label={`Open Collection history for ${name}`}
-      title={`Open Collection history for ${name}`}
-      onClick={props.openHistory}
-      className="block w-full rounded-md px-2 py-1.5 text-left transition-colors duration-75 hover:bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-    >
-      {body}
-    </button>
+    <>
+      <button
+        type="button"
+        data-testid="history-collection-open"
+        aria-describedby={descriptionId}
+        aria-label={`Open Collection history for ${name}`}
+        title={`Open Collection history for ${name}`}
+        onClick={props.openHistory}
+        className={`${frame} text-muted hover:bg-hover`}
+      >
+        {body}
+      </button>
+      <HiddenWords id={descriptionId}>{description}</HiddenWords>
+    </>
   ) : (
-    <div className="px-2 py-1.5">{body}</div>
+    <div className={frame}>{body}</div>
   );
 }
 
-// What a partial timeline is missing, above its rows. Try again starts a new
-// source chain; a source left out by the limit stays out, so only the
-// Collections that did not load offer it.
+// What a partial timeline is missing, above its rows. Collections that did
+// not load take a warning row: its words in ink wrap rather than cut a
+// name, beside Try again; the full sentence is its tooltip and what a
+// screen reader hears. Collections left out by the limit take a filled
+// band, so the limit doesn't read as one more change, and its whole
+// sentence says how to see the rest. Try again starts a new source chain;
+// a source left out by the limit stays out, so only the Collections that
+// did not load offer it. Every mark sits where a row's face does.
 function HistorySourcesNotice(props: {
-  words: { unavailable: string | null; omitted: string | null };
+  words: ReturnType<typeof missingSourcesWords>;
+  short: string | null;
   onRetry: () => void;
 }) {
-  const { words } = props;
+  const { words, short } = props;
   return (
-    <div
-      data-testid="history-sources-notice"
-      className="flex shrink-0 items-start gap-2 border-b border-line bg-panel px-3 py-2 text-[12px] text-muted"
-    >
+    <div data-testid="history-sources-notice" className="flex shrink-0 flex-col gap-1 px-1 pb-1">
       {words.unavailable ? (
-        <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-      ) : (
-        <Info size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-      )}
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        {words.unavailable ? <span data-testid="history-sources-unavailable">{words.unavailable}</span> : null}
-        {words.omitted ? <span data-testid="history-sources-omitted">{words.omitted}</span> : null}
-      </span>
-      {words.unavailable ? (
-        <button
-          type="button"
-          data-testid="history-sources-retry"
-          onClick={props.onRetry}
-          className="h-6 shrink-0 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-        >
-          Try again
-        </button>
+        <p title={words.unavailable} className="m-0 flex min-w-0 items-start gap-2 px-2 py-1 text-[12px] leading-4 text-ink">
+          {/* The mark and the words' first line center on Try again. */}
+          <span aria-hidden className="flex h-6 shrink-0 items-center">
+            <span className={MARK_BOX}>
+              <TriangleAlert size={12} className="text-warning" />
+            </span>
+          </span>
+          <span aria-hidden data-testid="history-sources-unavailable-words" className="min-w-0 flex-1 break-words py-1">{short}</span>
+          <span data-testid="history-sources-unavailable" className="sr-only">{words.unavailable}</span>
+          <SecondaryButton size="row" data-testid="history-sources-retry" onClick={props.onRetry} className="shrink-0">
+            Try again
+          </SecondaryButton>
+        </p>
+      ) : null}
+      {words.omitted ? (
+        <p data-testid="history-sources-limit" className="m-0 flex min-w-0 items-start gap-2 rounded-md bg-panel-2 px-2 py-1.5 text-[12px] leading-4 text-muted">
+          {/* The mark centers on the first line. */}
+          <span aria-hidden className="flex h-4 shrink-0 items-center">
+            <span className={MARK_BOX}>
+              <Info size={12} className="text-subtle" />
+            </span>
+          </span>
+          <span data-testid="history-sources-omitted" className="min-w-0 flex-1 break-words">{words.omitted}</span>
+        </p>
       ) : null}
     </div>
   );
@@ -853,6 +1024,10 @@ export function EngineHistoryView(props: {
   const normalizedQuery = query.trim().toLowerCase();
   const { collections, entries } = props;
   const items = useMemo(() => groupTimeline(props.entries), [props.entries]);
+  // While earlier changes remain, the oldest dated row may continue on the
+  // next page, so its count is only a lower bound. Undated changes list
+  // after it.
+  const moreKey = props.hasMore ? oldestDated(items)?.key ?? null : null;
   const labelOf = useCallback(
     (entry: CollectionEntry) => collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
     [collections],
@@ -878,12 +1053,13 @@ export function EngineHistoryView(props: {
     }
     return result;
   }, [filteredItems]);
-  const words = useMemo(
-    () => missingSourcesWords(props.unavailableSources ?? [], props.omittedSources ?? 0, (datasetId) =>
-      collections?.get(datasetId)?.name ??
-        entries.find((entry): entry is CollectionEntry => entry.kind === "collection" && entry.datasetId === datasetId)?.name),
-    [props.unavailableSources, props.omittedSources, collections, entries],
-  );
+  const [words, shortWords] = useMemo(() => {
+    const nameOf = (datasetId: string) => collections?.get(datasetId)?.name ??
+      entries.find((entry): entry is CollectionEntry => entry.kind === "collection" && entry.datasetId === datasetId)?.name;
+    const unavailable = props.unavailableSources ?? [];
+    const omitted = props.omittedSources ?? 0;
+    return [missingSourcesWords(unavailable, omitted, nameOf), missingSourcesShort(unavailable, nameOf)] as const;
+  }, [props.unavailableSources, props.omittedSources, collections, entries]);
   const retry = props.onRetry ?? (() => undefined);
   const stickyHeaderIndices = useMemo(
     () => rows.flatMap((row, index) => (row.day ? [index] : [])),
@@ -898,8 +1074,8 @@ export function EngineHistoryView(props: {
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const openMomentId = props.openMomentId ?? null;
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId }),
-    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId],
+    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId, moreKey }),
+    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId, moreKey],
   );
   const toggleGroup = (key: string) => setExpandedGroups((current) => {
     const next = new Set(current);
@@ -915,26 +1091,31 @@ export function EngineHistoryView(props: {
   // Neither may a page that is missing Collections, or one read while
   // History is paused: their changes are unknown, not absent.
   if (props.entries.length === 0 && !props.hasMore) {
+    // With no rows, the Collections that did not load are all the page can
+    // show, so it takes History's failed state, as when its rules can't be
+    // read: the danger mark, the words, then Try again. Collections left out
+    // by the limit failed nothing, so alone they take the plain mark and no
+    // button.
     if (partial) {
       return (
-        <div
+        <EmptyState
           data-testid="history-collections-unavailable"
-          className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-xs text-muted"
+          icon={words.unavailable ? TriangleAlert : Info}
+          tone={words.unavailable ? "danger" : "ghost"}
+          title={words.unavailable ? (
+            <>
+              {words.unavailable}
+              {words.omitted ? <span className="mt-1 block text-[11px] text-subtle">{words.omitted}</span> : null}
+            </>
+          ) : words.omitted}
         >
           {props.paused ? <HistoryPaused testId="history-paused" /> : null}
-          {words.unavailable ? <span>{words.unavailable}</span> : null}
-          {words.omitted ? <span>{words.omitted}</span> : null}
           {words.unavailable ? (
-            <button
-              type="button"
-              data-testid="history-sources-retry"
-              onClick={retry}
-              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-            >
+            <SecondaryButton data-testid="history-sources-retry" onClick={retry}>
               Try again
-            </button>
+            </SecondaryButton>
           ) : null}
-        </div>
+        </EmptyState>
       );
     }
     if (props.paused) {
@@ -949,35 +1130,35 @@ export function EngineHistoryView(props: {
 
   return (
     <>
-      <div className="shrink-0 border-b border-line bg-panel-2 px-2 py-2">
-        <label className="flex h-7 min-w-0 items-center gap-1.5 rounded-md border border-line bg-bg px-2 text-[11px] text-muted focus-within:border-ink">
-          <Search size={12} aria-hidden className="shrink-0 text-subtle" />
-          <input
-            type="search"
-            data-testid="engine-history-search"
-            aria-label="Search history"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search history"
-            className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
-          />
-          {query.length > 0 ? (
-            <button
-              type="button"
-              aria-label="Clear history search"
-              title="Clear history search"
-              onClick={() => setQuery("")}
-              className="grid size-5 shrink-0 place-items-center rounded-md text-subtle hover:bg-hover hover:text-ink"
-            >
-              <X size={12} aria-hidden />
-            </button>
-          ) : null}
-        </label>
+      {/* Search reads as one more row until it is used: its mark in the
+          avatar slot, its words where the names start. */}
+      <div className="relative shrink-0 px-1 pb-1">
+        <span aria-hidden className={`${MARK_BOX} pointer-events-none absolute left-3 top-[5px] text-subtle`}>
+          <Search size={14} />
+        </span>
+        <input
+          type="search"
+          data-testid="engine-history-search"
+          aria-label="Search history"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search"
+          className="h-7 w-full min-w-0 rounded-md bg-transparent pl-[34px] pr-8 text-[13px] text-ink transition-colors duration-75 placeholder:text-subtle hover:bg-hover focus:bg-hover [&::-webkit-search-cancel-button]:hidden"
+        />
+        {query.length > 0 ? (
+          <button
+            type="button"
+            aria-label="Clear history search"
+            title="Clear history search"
+            onClick={() => setQuery("")}
+            className="absolute right-2 top-1 grid size-5 place-items-center rounded-md text-subtle hover:bg-hover hover:text-ink"
+          >
+            <X size={12} aria-hidden />
+          </button>
+        ) : null}
       </div>
-      {partial ? <HistorySourcesNotice words={words} onRetry={retry} /> : null}
-      {props.paused ? (
-        <HistoryPaused testId="history-paused" className="shrink-0 border-b border-line bg-panel px-3 py-2" />
-      ) : null}
+      {partial ? <HistorySourcesNotice words={words} short={shortWords} onRetry={retry} /> : null}
+      {props.paused ? <HistoryPaused testId="history-paused" className="h-7 shrink-0 px-3" /> : null}
       <LegendList
         role="list"
         data-testid="engine-history-list"
@@ -986,7 +1167,7 @@ export function EngineHistoryView(props: {
         className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
-        estimatedItemSize={30}
+        estimatedItemSize={48}
         getItemType={(row) => (row.day ? "day" : row.item.kind)}
         stickyHeaderIndices={stickyHeaderIndices}
         recycleItems={false}
@@ -1006,7 +1187,9 @@ export function EngineHistoryView(props: {
             role="listitem"
             aria-posinset={headerItemCount + index + 1}
             aria-setsize={listItemCount}
-            className="border-b border-line bg-panel-2 px-3 py-1"
+            // The day's label sits over its first row, on the panel, so a
+            // stuck label covers the rows that scroll under it.
+            className="flex h-8 items-end bg-panel px-3 pb-1"
           >
             {item.day.dateTime === null ? (
               <span data-testid="engine-history-day-heading" className="dohc-section-label">
@@ -1044,6 +1227,7 @@ export function EngineHistoryView(props: {
               item.item.group.run ? (
                 <RunRow
                   group={item.item.group}
+                  more={item.key === moreKey}
                   expanded={expandedGroups.has(item.key)}
                   onToggle={() => toggleGroup(item.key)}
                   openMomentId={openMomentId}
@@ -1052,6 +1236,7 @@ export function EngineHistoryView(props: {
               ) : (
                 <GroupRow
                   group={item.item.group}
+                  more={item.key === moreKey}
                   expanded={expandedGroups.has(item.key)}
                   onToggle={() => toggleGroup(item.key)}
                   openMomentId={openMomentId}
@@ -1059,10 +1244,11 @@ export function EngineHistoryView(props: {
                 />
               )
             ) : (
-              <MomentRow
+              <HistoryRow
                 moment={item.item.group.moments[0]}
+                context="workspace"
                 selected={item.item.group.moments[0].id === openMomentId}
-                onOpenMoment={props.onOpenMoment}
+                onOpen={props.onOpenMoment}
               />
             )}
           </li>
@@ -1079,7 +1265,7 @@ export function EngineHistoryView(props: {
               data-testid="engine-history-load-more"
               disabled={props.loadingMore}
               onClick={props.onLoadMore}
-              className="block h-[30px] w-full cursor-pointer rounded-md px-2 text-center text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              className="dohc-focus-row block h-8 w-full cursor-pointer rounded-md px-2 text-center text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
             >
               {props.loadingMore ? "Loading…" : "Show earlier changes"}
             </button>

@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Check, Minus, Plus, RotateCcw } from "lucide-react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import { Check, LoaderCircle, Minus, Plus, RotateCcw } from "lucide-react";
 import { AGENT_HUES, IDENTITY_HUES, palette, type AgentHue, type IdentityHue } from "../tokens";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
@@ -20,13 +20,19 @@ export function SettingRow(props: {
   // Its title needs less room than a description, so the value stays beside it
   // in a narrower pane.
   compact?: boolean;
+  // For a control that is a list of 32 px rows: the title and Reset sit
+  // beside its first row, not its middle.
+  top?: boolean;
 }) {
   // The controls keep their size and the text takes what is left, from a
   // readable width: 15rem, or 8rem for a compact row's title. Controls that
   // don't fit beside that wrap under the text.
-  const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
+  // mr-4 and the row's gap-x-2 keep 24 px between the text and what follows it.
+  const first = props.compact ? "mr-4 min-w-0 flex-[1_1_8rem]" : "mr-4 min-w-0 flex-[1_1_15rem]";
+  // Reset and the place a row keeps for it share one footprint.
+  const resetPlace = `size-6 shrink-0 ${props.top ? "mt-1" : ""}`;
   const text = (
-    <div className={props.lead ? "min-w-0 flex-1" : first}>
+    <div className={`${props.lead ? "min-w-0 flex-1" : first}${props.top ? " pt-1.5" : ""}`}>
       {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
       <div className="relative flex items-center">
         {props.modified ? (
@@ -37,7 +43,7 @@ export function SettingRow(props: {
         <span className="text-[13px] font-medium text-ink">{props.title}</span>
       </div>
       {props.description ? (
-        <p className="m-0 mt-0.5 text-[11px] text-muted">{props.description}</p>
+        <p className="m-0 mt-1 text-[12px] text-muted">{props.description}</p>
       ) : null}
       {props.aside ? <div className="mt-2">{props.aside}</div> : null}
     </div>
@@ -48,9 +54,9 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
-        props.compact ? "min-h-9 py-1.5" : "min-h-14 py-2.5"
-      } ${props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""}`}
+      className={`flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-2 gap-y-2 border-b border-line last:border-b-0 ${
+        props.compact ? "py-2" : "py-4"
+      } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
       {props.lead ? (
         <div className={`flex items-center gap-3 ${first}`}>
@@ -60,25 +66,36 @@ export function SettingRow(props: {
       ) : (
         text
       )}
-      <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
+      {/* A row that can reset keeps Reset's place left of the controls, so
+          they never move or wrap when it appears. The place is its own item:
+          when the controls wrap under the text, it stays at the end of the
+          text's line and the controls start at the text's left edge. */}
+      {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
+      {props.onReset && props.modified ? (
+        <button
+          type="button"
+          aria-label="Reset"
+          title="Reset"
+          onClick={props.onReset}
+          className={`grid place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
+        >
+          <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
+        </button>
+      ) : null}
+      <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
         {props.children}
-        {/* Every row keeps the reset's place, so controls share a right edge
-            and stay under the pointer when a reset appears. */}
-        {props.modified && props.onReset ? (
-          <button
-            type="button"
-            aria-label="Reset"
-            title="Reset"
-            onClick={props.onReset}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-          >
-            <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
-          </button>
-        ) : (
-          <span aria-hidden className="size-6 shrink-0" />
-        )}
       </div>
     </div>
+  );
+}
+
+/** A named group of settings: its heading over a card of rows. A page with one group leaves out the heading. */
+export function SettingsSection(props: { title?: string; children: ReactNode }) {
+  return (
+    <section aria-label={props.title} className="mt-8 first:mt-0">
+      {props.title ? <h4 className="m-0 mb-2 text-sm font-semibold text-ink">{props.title}</h4> : null}
+      <div className="rounded-lg border border-line bg-panel px-4">{props.children}</div>
+    </section>
   );
 }
 
@@ -120,13 +137,13 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
           <button
             key={option.value}
             {...group.radio(index)}
-            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors focus-visible:outline-offset-4 ${
-              checked ? "text-ink" : "text-muted hover:text-ink"
+            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors ${
+              checked ? "text-ink" : "text-muted"
             }`}
           >
             <span
               aria-hidden
-              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-line ${
+              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] transition-colors group-hover:border-muted ${
                 checked ? "outline-2 outline-offset-2 outline-accent" : ""
               }`}
             >
@@ -216,7 +233,7 @@ export function StepperControl(props: {
               setDismissed(name);
             }
           }}
-          className={`grid h-[26px] place-items-center transition-colors focus-visible:-outline-offset-2 enabled:hover:bg-hover enabled:hover:text-ink disabled:opacity-50 ${className}`}
+          className={`grid h-[26px] place-items-center transition-colors focus-visible:-outline-offset-2 enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle disabled:opacity-50 ${className}`}
         >
           {content}
         </button>
@@ -239,9 +256,9 @@ export function StepperControl(props: {
   };
   return (
     <div className="flex h-7 items-center rounded-md border border-line">
-      {part("decrease", "w-7 rounded-l-[5px] text-subtle", <Minus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part("decrease", "w-7 rounded-l-[5px] text-muted", <Minus size={14} strokeWidth={1.9} aria-hidden />)}
       {part("reset", "w-[52px] border-x border-line font-mono text-[12px] text-ink", props.value)}
-      {part("increase", "w-7 rounded-r-[5px] text-subtle", <Plus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part("increase", "w-7 rounded-r-[5px] text-muted", <Plus size={14} strokeWidth={1.9} aria-hidden />)}
     </div>
   );
 }
@@ -267,43 +284,70 @@ export function TextControl(props: {
       maxLength={props.maxLength}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink"
+      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink"
     />
   );
 }
 
 export function SwitchControl(props: {
   label: string;
+  // An element whose words name the switch. Its name then wins over `label`
+  // while that element exists.
+  labelledBy?: string;
+  // The hover words, such as what a click does.
+  tooltip?: string;
+  // What a screen reader says after the name, in place of the tooltip, so a
+  // tooltip that repeats the name is not read twice.
+  description?: string;
+  describedBy?: string | undefined;
   checked: boolean;
   disabled?: boolean;
-  // The change it asked for is still running.
+  // The change it asked for is still running. A caller that can be busy
+  // passes false while idle, so the spinner's place is kept.
   busy?: boolean;
   onChange: (checked: boolean) => void;
+  ref?: Ref<HTMLButtonElement>;
 }) {
+  // While busy, a spinner sits left of the switch. A switch that can be busy
+  // keeps the spinner's place while idle, so the switch does not move when it
+  // shows, even in a row whose controls wrap to the left edge. Under reduced
+  // motion the global rule stops the spin, so it shows a still ring.
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-label={props.label}
-      aria-checked={props.checked}
-      aria-busy={props.busy || undefined}
-      disabled={props.disabled}
-      onClick={() => {
-        if (!props.disabled) props.onChange(!props.checked);
-      }}
-      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
-        props.checked ? "border-accent bg-accent" : "border-line bg-line"
-      }`}
-    >
-      {/* Anchored at the track's left edge: without left-0.5 the thumb
-          started from the button's centered content and slid off the end. */}
-      <span
-        aria-hidden
-        className={`absolute left-0.5 top-0.5 size-3.5 rounded-full transition-transform ${
-          props.checked ? "translate-x-4 bg-bg" : "translate-x-0 bg-muted"
+    <>
+      {props.busy ? (
+        <LoaderCircle data-testid="switch-busy" size={12} aria-hidden className="shrink-0 animate-spin text-subtle" />
+      ) : props.busy === false ? (
+        <span aria-hidden className="size-3 shrink-0" />
+      ) : null}
+      <button
+        ref={props.ref}
+        type="button"
+        role="switch"
+        aria-label={props.label}
+        aria-labelledby={props.labelledBy}
+        title={props.tooltip}
+        aria-description={props.description}
+        aria-describedby={props.describedBy}
+        aria-checked={props.checked}
+        aria-busy={props.busy || undefined}
+        disabled={props.disabled}
+        onClick={() => {
+          if (!props.disabled) props.onChange(!props.checked);
+        }}
+        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
+          props.checked ? "border-accent bg-accent" : "border-line bg-line"
         }`}
-      />
-    </button>
+      >
+        {/* Anchored at the track's left edge: without left-0.5 the thumb
+            started from the button's centered content and slid off the end. */}
+        <span
+          aria-hidden
+          className={`absolute left-0.5 top-0.5 size-3.5 rounded-full transition-transform ${
+            props.checked ? "translate-x-4 bg-bg" : "translate-x-0 bg-muted"
+          }`}
+        />
+      </button>
+    </>
   );
 }
 
@@ -412,7 +456,7 @@ export function ColorControl(props: {
         type="color"
         aria-label={props.label}
         defaultValue={props.value}
-        className="h-6 w-8 cursor-pointer rounded-md border border-line bg-bg p-0.5"
+        className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] bg-bg p-0.5"
       />
       <span className="font-mono text-[11px] text-muted">{props.value}</span>
     </label>

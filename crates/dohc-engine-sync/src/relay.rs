@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
 use dohc_engine_storage::text;
@@ -18,6 +19,11 @@ use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::references::{MomentRefs, VersionCreateRefs, YdocRefs, conflict_open_sides};
+pub use dohc_engine_domain::work_references::WorkReferenceMapping;
+use dohc_engine_domain::work_references::{
+    acknowledge_work_references, defer_work_reference_registrations, learn_work_reference_page,
+    pending_work_references, work_reference_page_after,
+};
 
 mod direct_write;
 mod share_authors;
@@ -45,6 +51,7 @@ const CLAIM_REFUSALS: [(&str, RelayError); 5] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushRequest {
+    pub work_references: Vec<dohc_engine_domain::work_references::WorkReferenceMapping>,
     pub workspace_id: String,
     pub replication_epoch: String,
     pub stream_identity: String,
@@ -55,9 +62,13 @@ pub struct PushRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
+    pub registered_references: Vec<String>,
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
     /// Ops the scoped feed refused one at a time. Only a hosted push has any.
     pub hosted_refusals: Vec<HostedPushRefusal>,
+    /// Copies of retained work another device had already published. Only
+    /// the owner's log names any.
+    pub redundant_recoveries: Vec<crate::RedundantRecovery>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -87,6 +98,8 @@ pub struct HostedPushRefusal {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
+    pub include_work_references: bool,
+    pub reference_after: Option<String>,
     pub workspace_id: String,
     pub replication_epoch: String,
     pub stream_identity: String,
@@ -96,6 +109,9 @@ pub struct PullRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullResponse {
+    pub work_references: Vec<WorkReferenceMapping>,
+    pub next_reference_after: Option<String>,
+    pub reference_has_more: bool,
     pub ops: Vec<ReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -159,6 +175,11 @@ pub struct HostedPassOutcome {
     /// holds each. None of them can be edited live until a later pass
     /// settles it ready.
     pub held: BTreeMap<String, crate::HostedHold>,
+    /// The path its scope names each held document at, by object id.
+    pub held_paths: BTreeMap<String, String>,
+    /// The held documents this pass moved from ready: ready in the replica
+    /// it fetched, held now. What it read bounds them.
+    pub newly_held: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +332,8 @@ pub struct ShareReplicationEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelRequest {
+    pub include_work_references: bool,
+    pub reference_after: Option<String>,
     pub share_id: String,
     pub channel_wire_id: String,
     pub origin_id: String,
@@ -320,6 +343,9 @@ pub struct SharedChannelRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelResponse {
+    pub work_references: Vec<WorkReferenceMapping>,
+    pub next_reference_after: Option<String>,
+    pub reference_has_more: bool,
     pub own_origin_id: Option<String>,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
@@ -336,6 +362,8 @@ pub struct ShareLogPushRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewRequest {
+    pub include_work_references: bool,
+    pub reference_after: Option<String>,
     pub share_id: String,
     pub cursor: i64,
     pub limit: usize,
@@ -343,6 +371,9 @@ pub struct ShareViewRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewResponse {
+    pub work_references: Vec<WorkReferenceMapping>,
+    pub next_reference_after: Option<String>,
+    pub reference_has_more: bool,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -648,6 +679,9 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
+    fn request_pending(&self) -> bool {
+        false
+    }
     /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
@@ -768,10 +802,302 @@ pub enum SyncPassOutcome {
 
 pub struct RelaySyncClient<T> {
     transport: T,
+    pending_preparation:
+        std::sync::Mutex<Option<dohc_engine_collab::markdown_write_safety::PendingPreparation>>,
     /// Group automation claims this client's applies committed and nobody
     /// took yet. A pass that fails after an apply committed leaves them here:
     /// its retry finds the message stored and claims nothing again.
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
+    continuation: PullContinuation,
+}
+
+/// A pull pass that stopped for released-tail validation
+/// ([`RelayError::ValidationPending`]), kept for the request that ran it.
+/// That request's next run applies the rest of what the pass fetched, from
+/// the row that waited, with every count, change and fact the pass had
+/// gathered: a fresh pass would skip the rows already applied and report
+/// none of it. A new request starts empty.
+#[derive(Clone, Default)]
+pub struct PullContinuation(
+    std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>,
+    std::sync::Arc<std::sync::Mutex<Option<FetchPullToken>>>,
+);
+
+struct FetchPullToken {
+    identity: crate::SyncIdentity,
+    token: String,
+    previous: Option<String>,
+}
+
+struct SuspendedPull {
+    workspace_id: String,
+    fetched: Fetched,
+    progress: ApplyProgress,
+}
+
+enum Fetched {
+    Ordinary(Box<OrdinaryFetch>),
+    Hosted(Box<HostedFetch>),
+}
+
+/// One bounded network read under the token that keeps Collections work owed.
+#[derive(Debug)]
+pub struct PreparedOrdinaryPull {
+    identity: crate::SyncIdentity,
+    current: Option<RelayCursor>,
+    ops: std::sync::Mutex<Vec<ReplicationEnvelope>>,
+    cursor: i64,
+    has_more: bool,
+    reference_page: (Vec<WorkReferenceMapping>, Option<String>, bool),
+    repairs: BaseRepairAnswers,
+    pull_token: String,
+    previous_pull_token: Option<String>,
+    apply_began: AtomicBool,
+}
+
+impl PreparedOrdinaryPull {
+    pub fn pull_token(&self) -> &str {
+        &self.pull_token
+    }
+
+    pub fn previous_pull_token(&self) -> Option<&str> {
+        self.previous_pull_token.as_deref()
+    }
+
+    pub fn apply_began(&self) -> bool {
+        self.apply_began.load(Ordering::SeqCst)
+    }
+}
+
+fn ordinary_pull_token(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Option<String>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|error| local(SyncError::corrupt(error)))
+}
+
+fn replace_ordinary_pull_token(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    token: &str,
+    replacement: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RelayError> {
+    match store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET ordinary_pull_token=?3 \
+                 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
+                params![workspace_id, token, replacement],
+            )
+            .map(|changed| changed > 0)
+            .map_err(SyncError::persist)
+        })
+        .map_err(local)?
+    {
+        TxnOutcome::Committed(changed) => Ok(changed),
+        TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+    }
+}
+
+fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
+    fn collect(value: &serde_json::Value, objects: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(object) = fields.get("objectId").and_then(|value| value.as_str()) {
+                    objects.insert(object.to_owned());
+                }
+                for value in fields.values() {
+                    collect(value, objects);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect(value, objects);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut objects = BTreeSet::new();
+    for op in page {
+        collect(&op.payload, &mut objects);
+    }
+    objects
+}
+
+#[cfg(test)]
+#[path = "tests/prepared_base_repairs.rs"]
+mod prepared_base_repair_tests;
+
+#[derive(Debug, Default)]
+struct BaseRepairAnswers {
+    decisions: Vec<(String, BaseRepairDecision)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BaseRepairDecision {
+    Unchanged,
+    Base {
+        version_id: String,
+        object_id: String,
+        lineage_claim_id: String,
+        origin_id: String,
+        origin_seq: i64,
+        relay_seq: Option<i64>,
+        recorded_at_ms: i64,
+    },
+    Deferred {
+        origin_id: String,
+        origin_seq: i64,
+        relay_seq: i64,
+    },
+}
+
+impl BaseRepairAnswers {
+    fn keep(&mut self, signature: String, decision: BaseRepairDecision) -> bool {
+        if self.decisions.len() == MAX_BASE_REPAIR_LOOKUPS {
+            return false;
+        }
+        self.decisions.push((signature, decision));
+        true
+    }
+
+    fn by_signature(&self) -> BTreeMap<&str, &BaseRepairDecision> {
+        self.decisions
+            .iter()
+            .map(|(signature, decision)| (signature.as_str(), decision))
+            .collect()
+    }
+}
+
+fn base_repair_signature<'a>(
+    pushed_seq: i64,
+    repairs: impl Iterator<Item = &'a PendingBaseRelayRepair>,
+) -> String {
+    let rows: Vec<_> = repairs.map(|repair| serde_json::json!({
+        "version": repair.key.version_id, "object": repair.key.object_id,
+        "claim": repair.lineage_claim_id, "origin": repair.origin_id, "seq": repair.origin_seq,
+        "kind": repair.op_kind, "payload": repair.payload, "time": repair.recorded_at_ms,
+    })).collect();
+    dohc_engine_storage::hex_sha256(serde_json::json!([pushed_seq, rows]).to_string().as_bytes())
+}
+
+fn deferred_repair_signature(pushed_seq: i64, repair: &PendingDeferredRelayRepair) -> String {
+    dohc_engine_storage::hex_sha256(
+        serde_json::json!([
+            pushed_seq,
+            repair.origin_id,
+            repair.origin_seq,
+            repair.op_kind,
+            repair.payload,
+            repair.recorded_at_ms
+        ])
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+impl BaseRepairDecision {
+    fn apply(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), RelayError> {
+        match store.write_with(faults, |tx| {
+            match self {
+                Self::Unchanged => {}
+                Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, recorded_at_ms } => {
+                    let key = dohc_engine_collab::DocKey::new(workspace_id, version_id, object_id)
+                        .map_err(base_repair_collab_error)?;
+                    dohc_engine_collab::record_base_coordinate_in_tx(tx, dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key, lineage_claim_id, origin_id, origin_seq: *origin_seq,
+                        relay_seq: *relay_seq, now_ms: *recorded_at_ms,
+                    }).map_err(base_repair_collab_error)?;
+                    if relay_seq.is_none() {
+                        dohc_engine_collab::mark_base_coordinate_absent_in_tx(tx, &key, lineage_claim_id,
+                            origin_id, *origin_seq, *recorded_at_ms).map_err(base_repair_collab_error)?;
+                    }
+                    tx.execute("DELETE FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        params![workspace_id, version_id, object_id]).map_err(SyncError::persist)?;
+                }
+                Self::Deferred { origin_id, origin_seq, relay_seq } => {
+                    let changed = tx.execute("UPDATE ydoc_deferred_updates SET relay_seq=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND relay_seq IS NULL",
+                        params![workspace_id, origin_id, origin_seq, relay_seq]).map_err(SyncError::persist)?;
+                    if changed != 1 { return Err(SyncError::CoordinateDiverged); }
+                }
+            }
+            Ok(())
+        }).map_err(local)? {
+            TxnOutcome::Committed(()) => Ok(()),
+            TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+        }
+    }
+}
+
+enum BaseRepairPhase<'a> {
+    Immediate,
+    Fetch(&'a mut BaseRepairAnswers),
+    Apply(&'a BaseRepairAnswers),
+}
+
+/// What an ordinary pass fetched and read before it applied.
+struct OrdinaryFetch {
+    reference_page: (Vec<WorkReferenceMapping>, Option<String>, bool),
+    identity: crate::SyncIdentity,
+    queued: Vec<ReplicationEnvelope>,
+    ordered: Vec<ReplicationEnvelope>,
+    cursor: i64,
+    fetched: usize,
+    has_more: bool,
+    bootstrap_complete: bool,
+    /// The token [`crate::cursor::begin_ordinary_pull`] gave this pass; only
+    /// its own terminal cursor finishes the pull.
+    pull_token: String,
+}
+
+/// What a hosted pass fetched and read before it applied.
+struct HostedFetch {
+    replica: crate::HostedReplicaState,
+    identity: crate::SyncIdentity,
+    backfill: Option<(String, i64)>,
+    reads: BTreeMap<String, (i64, bool)>,
+    has_more: bool,
+    fetched: usize,
+    cursor: i64,
+    queued: Vec<ReplicationEnvelope>,
+    ordered: Vec<ReplicationEnvelope>,
+}
+
+impl PullContinuation {
+    fn take(&self, workspace_id: &str) -> Option<(Fetched, ApplyProgress)> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .filter(|suspended| suspended.workspace_id == workspace_id)
+            .map(|suspended| (suspended.fetched, suspended.progress))
+    }
+
+    fn keep(&self, workspace_id: &str, fetched: Fetched, progress: ApplyProgress) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SuspendedPull {
+            workspace_id: workspace_id.to_owned(),
+            fetched,
+            progress,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -790,6 +1116,9 @@ const PUSH_PRE_APPEND_BUDGET: std::time::Duration = std::time::Duration::from_se
 /// One push request's preparation, retained while its transport yields for I/O.
 /// A new request starts from the durable cursor, never from this cache.
 pub struct PushWorkspaceProgress {
+    work_references: Option<Vec<WorkReferenceMapping>>,
+    reference_probe: Option<Vec<WorkReferenceMapping>>,
+    registered_references: BTreeSet<String>,
     started: std::time::Instant,
     acknowledged: usize,
     confirmed_identity: Option<crate::SyncIdentity>,
@@ -829,6 +1158,9 @@ impl PushWorkspaceProgress {
 impl Default for PushWorkspaceProgress {
     fn default() -> Self {
         Self {
+            work_references: None,
+            reference_probe: None,
+            registered_references: BTreeSet::new(),
             started: std::time::Instant::now(),
             acknowledged: 0,
             confirmed_identity: None,
@@ -917,6 +1249,7 @@ impl BaseRelayRepairChunk {
 }
 
 struct PendingDeferredRelayRepair {
+    object_id: String,
     origin_id: String,
     origin_seq: i64,
     op_kind: String,
@@ -926,10 +1259,51 @@ struct PendingDeferredRelayRepair {
 
 impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn new(transport: T) -> Self {
+        Self::resuming(transport, PullContinuation::default())
+    }
+
+    /// A client for one run of a request, resuming the pull pass
+    /// `continuation` kept from that request's earlier run.
+    pub fn resuming(transport: T, continuation: PullContinuation) -> Self {
         Self {
             transport,
+            pending_preparation: std::sync::Mutex::new(None),
             automation_claims: std::sync::Mutex::new(Vec::new()),
+            continuation,
         }
+    }
+
+    pub fn take_pending_preparation(
+        &self,
+    ) -> Option<dohc_engine_collab::markdown_write_safety::PendingPreparation> {
+        self.pending_preparation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn local(&self, error: SyncError) -> RelayError {
+        use dohc_engine_collab::markdown_write_safety::PendingPreparation;
+        let pending = match &error {
+            SyncError::MarkdownReaderPending(pending) => {
+                Some(PendingPreparation::Reader(pending.clone()))
+            }
+            SyncError::MarkdownWitnessCheckPending { key, path, pending } => {
+                Some(PendingPreparation::Witness {
+                    key: key.clone(),
+                    path: path.clone(),
+                    pending: pending.clone(),
+                })
+            }
+            _ => None,
+        };
+        if let Some(pending) = pending {
+            *self
+                .pending_preparation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+        }
+        local(error)
     }
 
     /// The Group automation claims this client's applies committed since the
@@ -970,6 +1344,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::journal::SyncIdentity,
         faults: &dyn FaultInjector,
         page: &[ReplicationEnvelope],
+    ) -> Result<(), RelayError> {
+        self.repair_base_orders(
+            store,
+            workspace_id,
+            identity,
+            faults,
+            page,
+            BaseRepairPhase::Immediate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn repair_base_orders(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        identity: &crate::journal::SyncIdentity,
+        faults: &dyn FaultInjector,
+        page: &[ReplicationEnvelope],
+        mut phase: BaseRepairPhase<'_>,
     ) -> Result<(), RelayError> {
         let passive = store.is_passive();
         let local_pushed_seq =
@@ -1085,7 +1479,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let mut statement = conn
                     .prepare(
                         "SELECT deferred.origin_id,deferred.origin_seq,log.op_kind,
-                                log.payload_json,log.recorded_at_ms
+                                log.payload_json,log.recorded_at_ms,deferred.object_id
                            FROM ydoc_deferred_updates AS deferred
                            JOIN replication_log AS log
                              ON log.workspace_id=deferred.workspace_id
@@ -1105,6 +1499,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
                         ))
                     })
                     .map_err(SyncError::corrupt)?;
@@ -1120,7 +1515,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }) || deferred.iter().any(|(origin_id, origin_seq, ..)| {
             origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
         });
-        let relay_origin_max = if needs_confirmation && !passive {
+        let relay_origin_max = if matches!(&phase, BaseRepairPhase::Apply(_)) {
+            local_pushed_seq
+        } else if needs_confirmation && !passive {
             let hosted = store
                 .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
                 .map_err(local)?;
@@ -1147,8 +1544,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let deferred = deferred
             .into_iter()
             .map(
-                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)| {
+                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, object_id)| {
                     Ok(PendingDeferredRelayRepair {
+                        object_id,
                         origin_id,
                         origin_seq,
                         op_kind,
@@ -1170,9 +1568,53 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .or_default()
                 .push(repair);
         }
+        if let BaseRepairPhase::Apply(answers) = &phase {
+            let decisions = answers.by_signature();
+            let touched = pull_objects(page);
+            let mut missing = false;
+            for group in groups.values() {
+                let signature = base_repair_signature(local_pushed_seq, group.iter());
+                if let Some(decision) = decisions.get(signature.as_str()) {
+                    decision.apply(store, workspace_id, faults)?;
+                } else if touched.contains(&group[0].key.object_id) {
+                    missing = true;
+                }
+            }
+            for repair in &deferred {
+                let signature = deferred_repair_signature(local_pushed_seq, repair);
+                if let Some(decision) = decisions.get(signature.as_str()) {
+                    decision.apply(store, workspace_id, faults)?;
+                } else if touched.contains(&repair.object_id) {
+                    missing = true;
+                }
+            }
+            return if missing {
+                Err(RelayError::RepairPending)
+            } else {
+                Ok(())
+            };
+        }
+        let touched = pull_objects(page);
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by_key(|group| !touched.contains(&group[0].key.object_id));
+        let mut deferred = deferred;
+        deferred.sort_by_key(|repair| !touched.contains(&repair.object_id));
         let mut chunks = Vec::new();
         let mut chunk = BaseRelayRepairChunk::default();
-        for group in groups.into_values() {
+        let mut append_deferred =
+            |chunk: &mut BaseRelayRepairChunk, chunks: &mut Vec<BaseRelayRepairChunk>| {
+                for repair in deferred.drain(..) {
+                    if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                        chunks.push(std::mem::take(chunk));
+                    }
+                    chunk.deferred.push(repair);
+                }
+            };
+        // Finish page dependencies before unrelated repair work.
+        for group in groups {
+            if !touched.contains(&group[0].key.object_id) {
+                append_deferred(&mut chunk, &mut chunks);
+            }
             if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
                 chunks.push(std::mem::take(&mut chunk));
             }
@@ -1181,17 +1623,40 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 chunks.push(std::mem::take(&mut chunk));
             }
         }
-        for repair in deferred {
-            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
-                chunks.push(std::mem::take(&mut chunk));
-            }
-            chunk.deferred.push(repair);
-        }
+        append_deferred(&mut chunk, &mut chunks);
         if chunk.len() > 0 {
             chunks.push(chunk);
         }
 
-        for BaseRelayRepairChunk { repairs, deferred } in chunks {
+        for BaseRelayRepairChunk {
+            mut repairs,
+            mut deferred,
+        } in chunks
+        {
+            if let BaseRepairPhase::Fetch(answers) = &phase {
+                let mut available = MAX_BASE_REPAIR_LOOKUPS - answers.decisions.len();
+                if available == 0 {
+                    break;
+                }
+                let mut selected = BTreeSet::new();
+                repairs.retain(|repair| {
+                    let key = (
+                        repair.key.version_id.clone(),
+                        repair.key.object_id.clone(),
+                        repair.lineage_claim_id.clone(),
+                    );
+                    if selected.contains(&key) {
+                        return true;
+                    }
+                    if available == 0 {
+                        return false;
+                    }
+                    selected.insert(key);
+                    available -= 1;
+                    true
+                });
+                deferred.truncate(available);
+            }
             let mut coordinates = BTreeSet::new();
             coordinates.extend(
                 repairs
@@ -1218,7 +1683,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 })
                 .collect::<Vec<_>>();
             let mut responses = BTreeMap::new();
-            // A group wider than one batch retains its answers across replay and commits whole.
+            // Validate a complete base group before retaining its one decision.
             for requests in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
                 let answers = self.transport.lookup_log_coordinates(requests.to_vec())?;
                 if answers.len() != requests.len() {
@@ -1244,6 +1709,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
             };
             let mut deferred_repairs = Vec::new();
+            let mut prepared_deferred = Vec::new();
             for repair in deferred {
                 let response = lookup(&repair.origin_id, repair.origin_seq)?;
                 let relay_seq = match response {
@@ -1271,7 +1737,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     LogCoordinateResponse::Absent => None,
                 };
                 if let Some(relay_seq) = relay_seq {
+                    if matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                        prepared_deferred.push((
+                            deferred_repair_signature(local_pushed_seq, &repair),
+                            BaseRepairDecision::Deferred {
+                                origin_id: repair.origin_id.clone(),
+                                origin_seq: repair.origin_seq,
+                                relay_seq,
+                            },
+                        ));
+                    }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
+                } else if matches!(&phase, BaseRepairPhase::Fetch(_))
+                    && touched.contains(&repair.object_id)
+                {
+                    prepared_deferred.push((
+                        deferred_repair_signature(local_pushed_seq, &repair),
+                        BaseRepairDecision::Unchanged,
+                    ));
                 }
             }
             let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
@@ -1320,13 +1803,61 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .push((repair, relay_seq, unresolved_local_coordinate));
             }
 
-            grouped.retain(|_, candidates| {
-                candidates
-                    .iter()
-                    .any(|(_, relay_seq, _)| relay_seq.is_some())
-                    || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
-            });
-            if grouped.is_empty() && deferred_repairs.is_empty() {
+            if !matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                grouped.retain(|_, candidates| {
+                    candidates
+                        .iter()
+                        .any(|(_, relay_seq, _)| relay_seq.is_some())
+                        || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
+                });
+            }
+            if grouped.is_empty() && deferred_repairs.is_empty() && prepared_deferred.is_empty() {
+                continue;
+            }
+            if let BaseRepairPhase::Fetch(answers) = &mut phase {
+                for candidates in grouped.values() {
+                    let signature = base_repair_signature(
+                        local_pushed_seq,
+                        candidates.iter().map(|(repair, ..)| repair),
+                    );
+                    let resolved = candidates
+                        .iter()
+                        .filter_map(|(repair, seq, _)| seq.map(|seq| (repair, seq)))
+                        .min_by_key(|(_, seq)| *seq);
+                    let (chosen, relay_seq) = match resolved {
+                        Some((repair, seq)) => (repair, Some(seq)),
+                        None => (&candidates[0].0, None),
+                    };
+                    if relay_seq.is_none()
+                        && candidates.iter().any(|(_, _, unresolved)| *unresolved)
+                    {
+                        if touched.contains(&chosen.key.object_id)
+                            && !answers.keep(signature, BaseRepairDecision::Unchanged)
+                        {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    if !answers.keep(
+                        signature,
+                        BaseRepairDecision::Base {
+                            version_id: chosen.key.version_id.clone(),
+                            object_id: chosen.key.object_id.clone(),
+                            lineage_claim_id: chosen.lineage_claim_id.clone(),
+                            origin_id: chosen.origin_id.clone(),
+                            origin_seq: chosen.origin_seq,
+                            relay_seq,
+                            recorded_at_ms: chosen.recorded_at_ms,
+                        },
+                    ) {
+                        return Ok(());
+                    }
+                }
+                for (signature, decision) in prepared_deferred {
+                    if !answers.keep(signature, decision) {
+                        return Ok(());
+                    }
+                }
                 continue;
             }
             match store
@@ -1499,6 +2030,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut owner_admission_pending = Vec::new();
         let mut publication_refusals = Vec::new();
         let mut resume_needed = false;
+        if progress.work_references.is_none() {
+            progress.work_references = Some(if hosted {
+                Vec::new()
+            } else {
+                pending_work_references(store, workspace_id).map_err(reference_error)?
+            });
+        }
 
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
@@ -1680,9 +2218,54 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 while batch_start < ops.len() {
                     let batch =
                         &ops[batch_start..(batch_start + progress.batch_size).min(ops.len())];
+                    if let Some(chunk) = progress.reference_probe.clone() {
+                        register_reference_probe(
+                            &self.transport,
+                            workspace_id,
+                            &identity,
+                            &chunk,
+                            &mut progress.registered_references,
+                        )?;
+                        progress.reference_probe = None;
+                    }
+                    let mut references = if hosted {
+                        Vec::new()
+                    } else {
+                        references_for_batch(
+                            store,
+                            workspace_id,
+                            batch,
+                            progress.work_references.as_deref().unwrap_or_default(),
+                            &progress.registered_references,
+                        )?
+                    };
+                    if references.len() > dohc_engine_domain::work_references::WORK_REFERENCE_BATCH
+                    {
+                        if batch.len() > 1 {
+                            progress.batch_size = (batch.len() / 2).max(1);
+                            continue;
+                        }
+                        // A large message's targets precede it in the log. Register them in
+                        // bounded probes before admitting that one message.
+                        for chunk in references
+                            .chunks(dohc_engine_domain::work_references::WORK_REFERENCE_BATCH)
+                        {
+                            progress.reference_probe = Some(chunk.to_vec());
+                            register_reference_probe(
+                                &self.transport,
+                                workspace_id,
+                                &identity,
+                                chunk,
+                                &mut progress.registered_references,
+                            )?;
+                            progress.reference_probe = None;
+                        }
+                        references.clear();
+                    }
                     let response = match self.push_log(
                         hosted,
                         PushRequest {
+                            work_references: references.clone(),
                             workspace_id: workspace_id.to_owned(),
                             replication_epoch: identity.replication_epoch.clone(),
                             stream_identity: identity.stream_identity.clone(),
@@ -1703,10 +2286,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         Err(error) => return Err(error),
                     };
                     validate_push_response(&response, batch, local_max, hosted)?;
+                    confirm_reference_registration(
+                        &references,
+                        &mut progress.registered_references,
+                        &response,
+                    )?;
                     if response.current_max_origin_seq > local_max {
                         return Err(RelayError::OriginDiverged);
                     }
                     if crashes(faults, FaultPoint::SyncAfterPushBeforeCursorPersist) {
+                        return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
+                    }
+                    if !response.redundant_recoveries.is_empty()
+                        && let TxnOutcome::Crashed { .. } =
+                            crate::ydoc_recovery::record_redundant_publication(
+                                store,
+                                workspace_id,
+                                &response.redundant_recoveries,
+                                faults,
+                            )
+                            .map_err(local)?
+                    {
                         return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                     }
                     match crate::cursor::write_pushed_seq_with_refusals(
@@ -1818,6 +2418,42 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         }
 
+        if let Some(references) = &progress.work_references
+            && !references.is_empty()
+        {
+            let mut request = push_probe_request(workspace_id, &identity, &identity.origin_id, -1);
+            request.work_references = references
+                .iter()
+                .filter(|mapping| !progress.registered_references.contains(&mapping.reference))
+                .cloned()
+                .collect();
+            if !request.work_references.is_empty() {
+                let response = self.transport.push(request.clone())?;
+                validate_probe_response(&response)?;
+                confirm_reference_registration(
+                    &request.work_references,
+                    &mut progress.registered_references,
+                    &response,
+                )?;
+            }
+            let registered: Vec<_> = progress.registered_references.iter().cloned().collect();
+            for batch in
+                registered.chunks(dohc_engine_domain::work_references::WORK_REFERENCE_BATCH)
+            {
+                acknowledge_work_references(store, workspace_id, batch).map_err(reference_error)?;
+            }
+            let unregistered: Vec<_> = references
+                .iter()
+                .filter(|mapping| !progress.registered_references.contains(&mapping.reference))
+                .map(|mapping| mapping.reference.clone())
+                .collect();
+            defer_work_reference_registrations(store, workspace_id, &unregistered)
+                .map_err(reference_error)?;
+            resume_needed |= !registered.is_empty()
+                && !pending_work_references(store, workspace_id)
+                    .map_err(reference_error)?
+                    .is_empty();
+        }
         Ok(SyncPassOutcome::Complete {
             owner_admission_pending,
             pushed,
@@ -1840,9 +2476,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Pull and apply replicated operations. The returned cursor remains
-    /// pending until the caller completes disk materialization and commits it.
-    pub fn pull_chat_workspace(
+    fn resume_ordinary_pull(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
@@ -1851,97 +2485,60 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
-        let identity = read_sync_identity(store, workspace_id)
-            .map_err(local)?
-            .ok_or(RelayError::InvalidResponse)?;
-        if store
-            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
-            .map_err(local)?
-        {
-            return Err(RelayError::HostedRefusal(
-                "a hosted replica pulls with pull_hosted_workspace",
-            ));
-        }
-        let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
-        let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
-        if let Some(cursor) = &current {
-            if cursor.replication_epoch != identity.replication_epoch
-                || cursor.stream_identity != identity.stream_identity
-            {
-                return Err(RelayError::InvalidResponse);
+        let (fetch, mut progress) = match self.continuation.take(workspace_id) {
+            Some((Fetched::Ordinary(fetch), progress)) => (fetch, progress),
+            _ => return Err(RelayError::InvalidResponse),
+        };
+        let pass = match self.apply_pulled(
+            store,
+            cache,
+            workspace_id,
+            &fetch.identity,
+            &fetch.queued,
+            &fetch.ordered,
+            &mut progress,
+            None,
+            faults,
+            leases,
+        ) {
+            Ok(Applying::Done(pass)) => *pass,
+            Ok(Applying::Suspended(pending)) => {
+                self.continuation
+                    .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+                return Err(RelayError::ValidationPending(pending));
             }
-        }
-        let bootstrap_complete = store
-            .read_with(|conn| {
-                crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
-            })
-            .map_err(local)?;
-        let mut cursor = current.map_or(0, |value| value.cursor);
-        let mut fetched = 0_usize;
-        let mut pages = 0_usize;
-        let mut ops = Vec::new();
-        let has_more = loop {
-            let remaining = crate::model::MAX_PULL_OPS_PER_PASS
-                .checked_sub(fetched)
-                .ok_or(RelayError::InvalidResponse)?;
-            let limit = remaining.min(crate::MAX_PULL_OPS);
-            let response = self.transport.pull(PullRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                cursor,
-                limit,
-            })?;
-            validate_pull_page(&response, workspace_id, cursor)?;
-            if response.ops.len() > limit {
-                return Err(RelayError::InvalidResponse);
-            }
-            fetched = fetched
-                .checked_add(response.ops.len())
-                .ok_or(RelayError::InvalidResponse)?;
-            ops.extend(response.ops);
-            cursor = response.next_cursor;
-            let has_more = response.has_more;
-            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
-            if !has_more
-                || fetched >= crate::model::MAX_PULL_OPS_PER_PASS
-                || pages >= crate::model::MAX_PULL_PAGES_PER_PASS
-            {
-                break has_more;
+            Err(error) => {
+                if self
+                    .pending_preparation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    self.continuation
+                        .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+                }
+                return Err(error);
             }
         };
-
-        if !queued.is_empty() {
-            crate::deferred::check_redelivery(store, &ops)?;
-        }
-        let fetched_coordinates: BTreeSet<_> = ops
-            .iter()
-            .map(|op| (op.origin_id.clone(), op.origin_seq))
-            .collect();
-        let fetched_op_count = ops.len();
-        ops.extend(
-            queued
-                .iter()
-                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
-                .cloned(),
-        );
-        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-        let pull_token =
-            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                TxnOutcome::Committed(token) => token,
-                TxnOutcome::Crashed { .. } => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
-                }
-            };
-        self.repair_pending_ydoc_base_orders(
+        let reference_pages_remaining = fetch.reference_page.2;
+        learn_work_reference_page(
             store,
             workspace_id,
-            &identity,
-            faults,
-            &ops[..fetched_op_count],
-        )?;
-        self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
-        let ordered = merge_by_origin(ops);
+            "owner",
+            &fetch.reference_page.0,
+            fetch.reference_page.1.as_deref(),
+        )
+        .map_err(reference_error)?;
+        let OrdinaryFetch {
+            identity,
+            ordered,
+            cursor,
+            fetched,
+            has_more,
+            bootstrap_complete,
+            pull_token,
+            ..
+        } = *fetch;
         let AppliedPass {
             applied,
             refused,
@@ -1954,20 +2551,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             settlement_report_id,
             has_more: settled_more,
             stopped: _,
-            // Only a hosted pass has documents that are not ready.
+            // Only a hosted pass has documents that are not ready, or holds
+            // one for released retained work.
             redelivered: _,
-        } = self.apply_pulled(
-            store,
-            cache,
-            workspace_id,
-            &identity,
-            &queued,
-            &ordered,
-            durable_origins,
-            Holding::ByOrigin,
-            faults,
-            leases,
-        )?;
+            released: _,
+            drain_holds: _,
+        } = pass;
         let has_more = has_more || settled_more;
 
         let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
@@ -2029,7 +2618,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             owner_admission_pending: Vec::new(),
             pushed: 0,
             fetched,
-            has_more,
+            has_more: has_more || reference_pages_remaining,
             applied,
             refused,
             skipped,
@@ -2040,6 +2629,407 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             sharing_declined,
             record_facts,
         })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pull_chat_workspace(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        if self
+            .continuation
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms);
+        }
+        loop {
+            let prepared = self.fetch_pull(store, workspace_id, faults)?;
+            match self.apply_pull(
+                store,
+                cache,
+                workspace_id,
+                &prepared,
+                faults,
+                leases,
+                now_ms,
+            ) {
+                Err(RelayError::RepairPending) => continue,
+                result => return result,
+            }
+        }
+    }
+
+    /// Fetch a bounded page while Collections work waits for the terminal commit.
+    pub fn fetch_pull(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        self.fetch_pull_with_repairs(store, workspace_id, faults, false)
+    }
+
+    pub fn fetch_pull_settling_repairs(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        self.fetch_pull_with_repairs(store, workspace_id, faults, true)
+    }
+
+    fn fetch_pull_with_repairs(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        settle_repairs: bool,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        let result = self
+            .fetch_pull_inner(store, workspace_id, faults)
+            .and_then(|prepared| {
+                if settle_repairs {
+                    let ops = prepared
+                        .ops
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match self.repair_base_orders(
+                        store,
+                        workspace_id,
+                        &prepared.identity,
+                        faults,
+                        &ops,
+                        BaseRepairPhase::Apply(&prepared.repairs),
+                    ) {
+                        Ok(()) | Err(RelayError::RepairPending) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(prepared)
+            });
+        if result.is_ok() {
+            self.continuation
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        } else if !self.transport.request_pending()
+            && !matches!(&result, Err(RelayError::ValidationPending(_)))
+            && self
+                .pending_preparation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            self.abandon_fetch_pull(store, workspace_id, faults)?;
+        }
+        result
+    }
+
+    /// Release this request's failed fetch without clearing an earlier pass.
+    pub fn abandon_fetch_pull(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, RelayError> {
+        let mut fetching = self
+            .continuation
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(fetch) = fetching.as_ref() else {
+            return Ok(false);
+        };
+        if fetch.identity.workspace_id != workspace_id {
+            return Err(RelayError::InvalidResponse);
+        }
+        let released = replace_ordinary_pull_token(
+            store,
+            workspace_id,
+            &fetch.token,
+            fetch.previous.as_deref(),
+            faults,
+        )?;
+        fetching.take();
+        Ok(released)
+    }
+
+    fn fetch_pull_inner(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?
+        {
+            return Err(RelayError::HostedRefusal(
+                "a hosted replica pulls with pull_hosted_workspace",
+            ));
+        }
+        let (queued, _) = crate::deferred::read(store, workspace_id, &identity)?;
+        let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
+        if let Some(cursor) = &current {
+            if cursor.replication_epoch != identity.replication_epoch
+                || cursor.stream_identity != identity.stream_identity
+            {
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        let (pull_token, previous_pull_token) = {
+            let mut fetching = self
+                .continuation
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = ordinary_pull_token(store, workspace_id)?;
+            match fetching.as_ref() {
+                Some(fetch)
+                    if fetch.identity == identity
+                        && previous.as_deref() == Some(fetch.token.as_str()) =>
+                {
+                    (fetch.token.clone(), fetch.previous.clone())
+                }
+                Some(_) => return Err(RelayError::InvalidResponse),
+                None => {
+                    let token = match crate::cursor::begin_ordinary_pull(store, &identity, faults)
+                        .map_err(local)?
+                    {
+                        TxnOutcome::Committed(token) => token,
+                        TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                    };
+                    *fetching = Some(FetchPullToken {
+                        identity: identity.clone(),
+                        token: token.clone(),
+                        previous: previous.clone(),
+                    });
+                    (token, previous)
+                }
+            }
+        };
+        let mut cursor = current.as_ref().map_or(0, |value| value.cursor);
+        let mut fetched = 0_usize;
+        let mut pages = 0_usize;
+        let mut ops = Vec::new();
+        let reference_after =
+            work_reference_page_after(store, workspace_id, "owner").map_err(reference_error)?;
+        let mut reference_page = (Vec::new(), reference_after.clone(), false);
+        let has_more = loop {
+            let remaining = crate::model::MAX_PULL_OPS_PER_PASS
+                .checked_sub(fetched)
+                .ok_or(RelayError::InvalidResponse)?;
+            let limit = remaining.min(crate::MAX_PULL_OPS);
+            let response = self.transport.pull(PullRequest {
+                include_work_references: pages == 0,
+                reference_after: reference_after.clone(),
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                cursor,
+                limit,
+            })?;
+            validate_pull_page(&response, workspace_id, cursor)?;
+            if pages == 0 {
+                reference_page = (
+                    response.work_references,
+                    response.next_reference_after,
+                    response.reference_has_more,
+                );
+            }
+            if response.ops.len() > limit {
+                return Err(RelayError::InvalidResponse);
+            }
+            fetched = fetched
+                .checked_add(response.ops.len())
+                .ok_or(RelayError::InvalidResponse)?;
+            ops.extend(response.ops);
+            cursor = response.next_cursor;
+            let has_more = response.has_more;
+            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            if !has_more
+                || fetched >= crate::model::MAX_PULL_OPS_PER_PASS
+                || pages >= crate::model::MAX_PULL_PAGES_PER_PASS
+            {
+                break has_more;
+            }
+        };
+
+        let fetched_coordinates: BTreeSet<_> = ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        let fetched_op_count = ops.len();
+        ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
+        let mut repairs = BaseRepairAnswers::default();
+        self.repair_base_orders(
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &ops,
+            BaseRepairPhase::Fetch(&mut repairs),
+        )?;
+        self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
+        ops.truncate(fetched_op_count);
+        Ok(PreparedOrdinaryPull {
+            identity,
+            current,
+            ops: std::sync::Mutex::new(ops),
+            cursor,
+            has_more,
+            reference_page,
+            repairs,
+            pull_token,
+            previous_pull_token,
+            apply_began: AtomicBool::new(false),
+        })
+    }
+
+    fn begin_prepared_pull(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        prepared: &PreparedOrdinaryPull,
+        faults: &dyn FaultInjector,
+    ) -> Result<(Box<OrdinaryFetch>, ApplyProgress), RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        if identity != prepared.identity
+            || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
+            || store
+                .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+                .map_err(local)?
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
+        let mut held_ops = prepared
+            .ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::deferred::check_redelivery(store, &held_ops)?;
+        let fetched = held_ops.len();
+        let fetched_coordinates: BTreeSet<_> = held_ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        held_ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
+        let prepared_state = (|| {
+            preflight_collisions(store, workspace_id, &identity.origin_id, &held_ops)?;
+            self.repair_base_orders(
+                store,
+                workspace_id,
+                &identity,
+                faults,
+                &held_ops,
+                BaseRepairPhase::Apply(&prepared.repairs),
+            )?;
+            store
+                .read_with(|conn| {
+                    crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
+                })
+                .map_err(local)
+        })();
+        let bootstrap_complete = match prepared_state {
+            Ok(complete) => complete,
+            Err(error) => {
+                held_ops.truncate(fetched);
+                return Err(error);
+            }
+        };
+        prepared.apply_began.store(true, Ordering::SeqCst);
+        let ops = std::mem::take(&mut *held_ops);
+        drop(held_ops);
+        let pull_token = prepared.pull_token().to_owned();
+        let ordered = merge_by_origin(ops);
+        let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
+        Ok((
+            Box::new(OrdinaryFetch {
+                reference_page: prepared.reference_page.clone(),
+                identity,
+                queued,
+                ordered,
+                cursor: prepared.cursor,
+                fetched,
+                has_more: prepared.has_more,
+                bootstrap_complete,
+                pull_token,
+            }),
+            progress,
+        ))
+    }
+
+    /// Apply one fetched page. Mutable local state is read only after entering the writer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_pull(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        prepared: &PreparedOrdinaryPull,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        if read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .as_ref()
+            != Some(&prepared.identity)
+            || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
+            || ordinary_pull_token(store, workspace_id)?.as_deref() != Some(prepared.pull_token())
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        if self
+            .continuation
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            let (fetch, progress) =
+                match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
+                    Err(error) => {
+                        replace_ordinary_pull_token(
+                            store,
+                            workspace_id,
+                            prepared.pull_token(),
+                            prepared.previous_pull_token(),
+                            faults,
+                        )?;
+                        return Err(error);
+                    }
+                    Ok(answer) => answer,
+                };
+            self.continuation
+                .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+        }
+        self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms)
     }
 
     /// Confirm the relay holds nothing of this hosted replica's own origin
@@ -2082,15 +3072,95 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// cursor, so a row that could not apply before is tried again. A
     /// response under a new scope applies nothing; the pass adopts the scope
     /// and returns no cursor. The returned cursor stays pending until the
-    /// caller materializes the pass and commits it.
+    /// caller materializes the pass and commits it. `relay_namespace` is the
+    /// feed's, as the host's trusted configuration names it: a hosted pass
+    /// never runs without one.
     pub fn pull_hosted_workspace(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
         workspace_id: &str,
+        relay_namespace: &str,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
+        let (fetch, mut progress) = match self.continuation.take(workspace_id) {
+            Some((Fetched::Hosted(fetch), progress)) => (fetch, progress),
+            _ => match self.fetch_hosted(store, workspace_id, faults)? {
+                Some(fetched) => fetched,
+                // A pass under a new scope adopts it and applies nothing.
+                None => {
+                    return Ok(HostedPassOutcome {
+                        has_more: true,
+                        ..HostedPassOutcome::default()
+                    });
+                }
+            },
+        };
+        let pass = match self.apply_pulled(
+            store,
+            cache,
+            workspace_id,
+            &fetch.identity,
+            &fetch.queued,
+            &fetch.ordered,
+            &mut progress,
+            Some(relay_namespace),
+            faults,
+            leases,
+        )? {
+            Applying::Done(pass) => *pass,
+            Applying::Suspended(pending) => {
+                self.continuation
+                    .keep(workspace_id, Fetched::Hosted(fetch), progress);
+                return Err(RelayError::ValidationPending(pending));
+            }
+        };
+        let HostedFetch {
+            replica,
+            backfill,
+            mut reads,
+            has_more,
+            fetched,
+            cursor,
+            ..
+        } = *fetch;
+        // A ready document that stopped at a conflict child whose parent the
+        // feed withholds, at a move onto another spelling of a path another
+        // document holds, or at work past the retention limit, is held from
+        // there and reads its own rows.
+        for (object_id, op) in &pass.stopped {
+            if replica
+                .documents
+                .get(object_id)
+                .is_some_and(|document| document.status == crate::HostedDocumentStatus::Ready)
+            {
+                let at = op.relay_seq.map_or(0, |seq| seq.saturating_sub(1));
+                reads.insert(object_id.clone(), (at, true));
+            }
+        }
+        self.settle_hosted_reads(
+            store,
+            workspace_id,
+            &replica,
+            backfill.is_some(),
+            reads,
+            has_more,
+            fetched,
+            cursor,
+            pass,
+        )
+    }
+
+    /// What a hosted pass fetches and reads before it applies, and where its
+    /// apply starts; `None` once a response under a new scope was adopted
+    /// instead.
+    fn fetch_hosted(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<Option<(Box<HostedFetch>, ApplyProgress)>, RelayError> {
         let replica = crate::read_hosted_replica(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::HostedRefusal(
@@ -2117,10 +3187,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .map(|(object_id, _)| object_id.clone())
             .collect();
         let backfilled = backfill.as_ref().map(|(object_id, _)| object_id.as_str());
-        let adopted = || HostedPassOutcome {
-            has_more: true,
-            ..HostedPassOutcome::default()
-        };
         let mut ops = Vec::new();
         let mut cursor = backfill
             .as_ref()
@@ -2145,7 +3211,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             else {
                 // What earlier pages fetched under the old scope is dropped
                 // too: it cannot commit.
-                return Ok(adopted());
+                return Ok(None);
             };
             fetched = fetched
                 .checked_add(response.ops.len())
@@ -2190,7 +3256,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
             )?
             else {
-                return Ok(adopted());
+                return Ok(None);
             };
             fetched = fetched
                 .checked_add(response.ops.len())
@@ -2237,40 +3303,57 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         // Relay order is each document's order, across origins.
         ops.sort_by_key(|op| op.relay_seq);
-        let mut pass = self.apply_pulled(
-            store,
-            cache,
-            workspace_id,
-            &identity,
-            &queued,
-            &ops,
-            durable,
-            Holding::ByDocument { behind, unready },
-            faults,
-            leases,
-        )?;
-        // A ready document that stopped at a conflict child whose parent the
-        // feed withholds, at a move onto another spelling of a path another
-        // document holds, or at work past the retention limit, is held from
-        // there and reads its own rows.
-        for (object_id, op) in &pass.stopped {
-            if replica
-                .documents
-                .get(object_id)
-                .is_some_and(|document| document.status == crate::HostedDocumentStatus::Ready)
-            {
-                let at = op.relay_seq.map_or(0, |seq| seq.saturating_sub(1));
-                reads.insert(object_id.clone(), (at, true));
-            }
-        }
+        let progress =
+            Self::begin_apply(ops.len(), durable, Holding::ByDocument { behind, unready });
+        Ok(Some((
+            Box::new(HostedFetch {
+                replica,
+                identity,
+                backfill,
+                reads,
+                has_more,
+                fetched,
+                cursor,
+                queued,
+                ordered: ops,
+            }),
+            progress,
+        )))
+    }
+
+    /// Settle each document a hosted pass read: where its read stops, what
+    /// holds it, and the heads a pass whose commit can make it ready writes.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_hosted_reads(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        replica: &crate::HostedReplicaState,
+        backfilled: bool,
+        reads: BTreeMap<String, (i64, bool)>,
+        has_more: bool,
+        fetched: usize,
+        cursor: i64,
+        mut pass: AppliedPass,
+    ) -> Result<HostedPassOutcome, RelayError> {
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
         let redelivered = std::mem::take(&mut pass.redelivered);
-        let (reads, held, unparks, standing, heads) = store
+        let (reads, held, held_paths, newly_held, unparks, standing, heads) = store
             .read_with(|conn| {
                 // What holds each path, read once for every document.
                 let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
                 let mut held = BTreeMap::new();
+                let mut held_paths = BTreeMap::new();
+                let mut newly_held = BTreeSet::new();
+                // Each held document's path, and whether this pass moved it
+                // from ready, kept as it is held.
+                let mut hold_at = |object_id: &String, document: &crate::HostedDocumentState| {
+                    held_paths.insert(object_id.clone(), document.path.clone());
+                    if document.status == crate::HostedDocumentStatus::Ready {
+                        newly_held.insert(object_id.clone());
+                    }
+                };
                 let mut settled = BTreeMap::new();
                 // A document whose parked heads this pass freed the paths of
                 // comes back on the next pass.
@@ -2297,23 +3380,48 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
-                            stopped: Some(crate::hosted::stopped_hold(
-                                &mut occupancy,
-                                &object_id,
-                                op,
-                            )?),
+                            stopped: Some(match pass.released.get(&object_id) {
+                                Some(((origin_id, origin_seq), binding))
+                                    if (origin_id, *origin_seq)
+                                        == (&op.origin_id, op.origin_seq) =>
+                                {
+                                    crate::HostedHold::ReleasedLineageUnsettled {
+                                        binding: binding.clone(),
+                                        continuation: crate::ReleasedHoldContinuation::Frozen,
+                                        binding_stale: false,
+                                    }
+                                }
+                                // A frozen drain hold stopped the read before
+                                // this op; the hold stays what it was.
+                                _ => match pass.drain_holds.get(&object_id) {
+                                    Some(hold) => hold.clone(),
+                                    None => {
+                                        crate::hosted::stopped_hold(&mut occupancy, &object_id, op)?
+                                    }
+                                },
+                            }),
                             complete: false,
                             heads_written: false,
                         },
-                        None => crate::HostedRead {
-                            cursor,
-                            stopped: None,
-                            complete: !more,
-                            heads_written: false,
-                        },
+                        // Its queued work a drain held stops it where its read is.
+                        None => {
+                            let held = pass.drain_holds.get(&object_id).cloned();
+                            crate::HostedRead {
+                                cursor,
+                                complete: !more && held.is_none(),
+                                stopped: held,
+                                heads_written: false,
+                            }
+                        }
                     };
                     match read.hold(&mut occupancy, &object_id)? {
                         Some(hold) => {
+                            let Some(document) = replica.documents.get(&object_id) else {
+                                return Err(crate::error::local_corruption(
+                                    "a hosted read has no document",
+                                ));
+                            };
+                            hold_at(&object_id, document);
                             held.insert(object_id.clone(), hold);
                         }
                         None if read.complete => {
@@ -2329,17 +3437,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     settled.insert(object_id, read);
                 }
                 // A ready document that a refusal of this pass held is held
-                // too. It reads its own rows from the next pass.
+                // too. It reads its own rows from the next pass. One the
+                // pass did not read that is held for released retained work
+                // still is, so every pass names each such hold.
                 for (object_id, document) in &replica.documents {
-                    if document.status == crate::HostedDocumentStatus::Ready
-                        && !settled.contains_key(object_id)
+                    if settled.contains_key(object_id) {
+                        continue;
+                    }
+                    let released = matches!(
+                        document.status,
+                        crate::HostedDocumentStatus::Held(
+                            crate::HostedHold::ReleasedLineageUnsettled { .. }
+                        )
+                    );
+                    if (released || document.status == crate::HostedDocumentStatus::Ready)
                         && let Some(hold) =
                             crate::hosted::recorded_hold(conn, workspace_id, object_id)?
                     {
+                        hold_at(object_id, document);
                         held.insert(object_id.clone(), hold);
                     }
                 }
-                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
+                Ok::<_, SyncError>((
+                    settled, held, held_paths, newly_held, unparks, standing, heads,
+                ))
             })
             .map_err(local)?;
         for change in standing {
@@ -2355,7 +3476,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let more = has_more
             || pass.has_more
             || unparks
-            || backfill.is_some()
+            || backfilled
             || reads
                 .values()
                 .any(|read| read.stopped.is_none() && !read.complete);
@@ -2369,7 +3490,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             pending_cursor: Some(crate::HostedCursor {
                 scope_generation: replica.scope_generation,
                 cursor_commits: replica.cursor_commits,
-                main_cursor: backfill.is_none().then_some(cursor),
+                main_cursor: (!backfilled).then_some(cursor),
                 reads,
                 settlement_report_id: pass.settlement_report_id,
             }),
@@ -2378,27 +3499,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
             held,
+            held_paths,
+            newly_held,
         })
     }
 
     /// Commit a hosted pass's cursor after its work materialized. Commits
     /// nothing when the scope moved or another pass committed since its
-    /// fetch.
+    /// fetch, or a released-lineage hold's binding went stale.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &crate::HostedCursor,
+        tails: &dohc_engine_collab::live_update_application::ReleasedTails,
         faults: &dyn FaultInjector,
     ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
-        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
-            |error| match error {
+        crate::commit_hosted_cursor(store, workspace_id, cursor, tails, faults).map_err(|error| {
+            match error {
                 SyncError::InvalidInput {
                     reason: reason @ crate::hosted::NOT_A_HOSTED_REPLICA,
                 } => RelayError::HostedRefusal(reason),
                 error => local(error),
-            },
-        )
+            }
+        })
     }
 
     /// One page of the hosted feed under the stored scope: `workspace.init`
@@ -2471,10 +3595,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(Some(response))
     }
 
-    /// Apply a pass's ops in order and settle what they left pending. An op
-    /// that cannot apply yet holds the ops behind it; when a round makes no
-    /// progress, work held for a durable reason is retained so the cursor can
-    /// move past it, and any other hold fails the pass.
+    /// Where a pass's apply starts: open documents' artifacts still to
+    /// recover, and its `ops` ordered ops all still to apply.
+    fn begin_apply(ops: usize, durable: BTreeSet<String>, holding: Holding) -> ApplyProgress {
+        ApplyProgress {
+            pass: AppliedPass::default(),
+            recovering: true,
+            completed: Vec::new(),
+            round: (0..ops).collect(),
+            next: 0,
+            still_retryable: Vec::new(),
+            retryable_refusals: Vec::new(),
+            first: true,
+            made_progress: false,
+            held: holding.held_at_round(&durable),
+            durable,
+            holding,
+            rounds_done: false,
+            settlements: Default::default(),
+            archived_protected: Vec::new(),
+        }
+    }
+
+    /// Apply a pass's ops in order from where `progress` stands and settle
+    /// what they left pending. An op that cannot apply yet holds the ops
+    /// behind it; when a round makes no progress, work held for a durable
+    /// reason is retained so the cursor can move past it, and any other hold
+    /// fails the pass. An op that waits for released-tail validation stops
+    /// the pass with nothing of it applied, keeping the progress to go on
+    /// from, as does a ready owner settlement once the settlements before it
+    /// commit. `relay_namespace` names the feed, when the pull's trusted
+    /// configuration names one.
     #[allow(clippy::too_many_arguments)]
     fn apply_pulled(
         &self,
@@ -2484,161 +3635,230 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         queued: &[ReplicationEnvelope],
         ordered: &[ReplicationEnvelope],
-        mut durable: BTreeSet<String>,
-        mut holding: Holding,
+        progress: &mut ApplyProgress,
+        relay_namespace: Option<&str>,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
-    ) -> Result<AppliedPass, RelayError> {
-        let mut pass = AppliedPass::default();
-        let mut completed = Vec::new();
-        let recovered =
-            crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
-                .map_err(local)?;
-        for change in recovered.changes {
-            insert_changed_path(&mut pass.changed_paths, change);
-        }
-        pass.record_facts.extend(recovered.record_facts);
-        pass.refusals.extend(recovered.refusals);
-        pass.sharing_declined.extend(recovered.sharing_declined);
-        pass.conflicts_opened += recovered.conflicts_opened;
-        let mut round = ordered.iter().collect::<Vec<_>>();
-        let mut first = true;
-        loop {
-            let mut held = match &holding {
-                Holding::ByOrigin => durable.clone(),
-                Holding::ByDocument { .. } => BTreeSet::new(),
-            };
-            let mut still_retryable = Vec::new();
-            let mut retryable_refusals = Vec::new();
-            let mut made_progress = false;
-            for op in round {
-                let key = holding.key(op);
-                if let (Holding::ByDocument { behind, .. }, Some(key)) = (&holding, &key) {
-                    let omitted = behind
-                        .get(key)
-                        .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
-                    if omitted || held.contains(key) {
-                        still_retryable.push(op);
-                        continue;
-                    }
-                }
-                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                        .map_err(local)?;
-                }
-                let routed = match holding.held_before_routing(store, op)? {
-                    Some(reason) => Err(SyncError::RetryableState { reason }),
-                    None => crate::router::apply_replication_envelope_in_batch(
-                        store, cache, op, faults, leases, true,
-                    ),
-                };
-                match routed {
-                    Err(SyncError::RetryableState { reason }) => {
-                        retryable_refusals.push((op, reason));
-                        if let Some(key) = key {
-                            if retained_while_held(op, reason) {
-                                durable.insert(key.clone());
-                            }
-                            held.insert(key);
-                        }
-                        still_retryable.push(op);
-                    }
-                    Err(SyncError::SequenceGap)
-                        if matches!(holding, Holding::ByOrigin) && held.contains(&op.origin_id) =>
-                    {
-                        still_retryable.push(op);
-                    }
-                    Err(error) => return Err(local(error)),
-                    Ok(outcome) => {
-                        made_progress = true;
-                        completed.push(op);
-                        accumulate_pull_outcome(
-                            store,
-                            op,
-                            holding.unready(op),
-                            outcome,
-                            &mut pass.applied,
-                            &mut pass.refused,
-                            &mut pass.skipped,
-                            &mut pass.conflicts_opened,
-                            &mut pass.changed_paths,
-                            &mut pass.redelivered,
-                            &mut pass.refusals,
-                            &mut pass.sharing_declined,
-                            &mut pass.record_facts,
-                            |claims| self.keep_automation_claims(claims),
-                        )?;
-                    }
-                }
+    ) -> Result<Applying, RelayError> {
+        let p = progress;
+        // Recovery that waits for validation leaves every drain's rows
+        // queued and runs again after it, reporting them then. The rows one
+        // that completes removes leave drain reports, so a later wait loses
+        // none of what they committed.
+        while p.recovering {
+            let recovered =
+                crate::moment_apply::open_artifacts::drain_open_document_artifacts_durably(
+                    store,
+                    cache,
+                    workspace_id,
+                    leases,
+                    faults,
+                )
+                .map_err(|error| self.local(error))?;
+            for change in recovered.changes {
+                insert_changed_path(&mut p.pass.changed_paths, change);
             }
-            if still_retryable.is_empty() {
+            p.pass.record_facts.extend(recovered.record_facts);
+            for refusal in recovered.refusals {
+                push_refusal_once(&mut p.pass.refusals, refusal);
+            }
+            for declined in recovered.sharing_declined {
+                push_sharing_declined_once(&mut p.pass.sharing_declined, declined);
+            }
+            p.pass.conflicts_opened += recovered.conflicts_opened;
+            p.pass.replace_drain_holds(recovered.holds);
+            match recovered.waiting {
+                Some(pending) => return Ok(Applying::Suspended(pending)),
+                None => p.recovering = false,
+            }
+        }
+        while !p.rounds_done {
+            while let Some(&index) = p.round.get(p.next) {
+                match self.apply_one(
+                    store,
+                    cache,
+                    workspace_id,
+                    &ordered[index],
+                    index,
+                    p,
+                    relay_namespace,
+                    faults,
+                    leases,
+                ) {
+                    Err(RelayError::ValidationPending(pending)) => {
+                        return Ok(Applying::Suspended(pending));
+                    }
+                    applied => applied?,
+                }
+                p.next += 1;
+            }
+            if p.still_retryable.is_empty() {
+                p.rounds_done = true;
                 break;
             }
-            if !first && !made_progress {
+            if !p.first && !p.made_progress {
                 // Nothing left in the pass can free these, so a ready
                 // document whose op can wait indefinitely stops here.
-                for (op, reason) in &retryable_refusals {
-                    holding.stop_where_it_can_wait(op, reason);
+                for &(index, reason) in &p.retryable_refusals {
+                    p.holding.stop_where_it_can_wait(&ordered[index], reason);
                 }
                 // A document that is not ready retains nothing: its read
                 // stops at its first op still to apply, in relay order.
-                let (stopped, retained): (Vec<_>, Vec<_>) = still_retryable
+                let (stopped, retained): (Vec<_>, Vec<_>) = std::mem::take(&mut p.still_retryable)
                     .into_iter()
-                    .partition(|op| holding.unready(op).is_some());
+                    .map(|index| &ordered[index])
+                    .partition(|op| p.holding.unready(op).is_some());
                 for op in stopped {
-                    if let Some(object_id) = holding.unready(op) {
-                        pass.stopped
+                    if let Some(object_id) = p.holding.unready(op) {
+                        p.pass
+                            .stopped
                             .entry(object_id.to_owned())
                             .or_insert_with(|| op.clone());
                     }
                 }
-                if retained
-                    .iter()
-                    .any(|op| !holding.key(op).is_some_and(|key| durable.contains(&key)))
-                {
-                    return Err(retryable_refusal(retryable_refusals.into_iter().filter(
-                        |(op, _)| {
-                            holding.unready(op).is_none()
-                                && !holding.key(op).is_some_and(|key| durable.contains(&key))
-                        },
-                    )));
+                if retained.iter().any(|op| {
+                    !p.holding
+                        .key(op)
+                        .is_some_and(|key| p.durable.contains(&key))
+                }) {
+                    return Err(retryable_refusal(
+                        p.retryable_refusals
+                            .iter()
+                            .map(|&(index, reason)| (&ordered[index], reason))
+                            .filter(|(op, _)| {
+                                p.holding.unready(op).is_none()
+                                    && !p
+                                        .holding
+                                        .key(op)
+                                        .is_some_and(|key| p.durable.contains(&key))
+                            }),
+                    ));
                 }
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
                 // ready, so the pass still commits and releases other work.
-                let unretained = crate::deferred::retain(store, identity, &retained, faults)?;
+                // An origin a conflict holds says which conflict to resolve
+                // if its work passes the limit.
+                let conflict_waits: BTreeMap<String, Option<String>> = p
+                    .retryable_refusals
+                    .iter()
+                    .filter(|(_, reason)| *reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT)
+                    .map(|&(index, _)| {
+                        let op = &ordered[index];
+                        let path = op.payload["beforePath"]
+                            .as_str()
+                            .or(op.payload["path"].as_str());
+                        (op.origin_id.clone(), path.map(str::to_owned))
+                    })
+                    .collect();
+                let unretained = crate::deferred::retain_waiting(
+                    store,
+                    identity,
+                    relay_namespace,
+                    &retained,
+                    &conflict_waits,
+                    faults,
+                )?;
                 for op in retained {
                     if let Some(object_id) = crate::hosted::hosted_document(op)
                         .filter(|object_id| unretained.contains(*object_id))
                     {
-                        pass.stopped
+                        p.pass
+                            .stopped
                             .entry(object_id.to_owned())
                             .or_insert_with(|| op.clone());
                     }
                 }
+                p.rounds_done = true;
                 break;
             }
-            first = false;
-            round = still_retryable;
+            p.first = false;
+            p.round = std::mem::take(&mut p.still_retryable);
+            p.retryable_refusals.clear();
+            p.next = 0;
+            p.made_progress = false;
+            p.held = p.holding.held_at_round(&p.durable);
         }
-        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-            .map_err(local)?;
-        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
+        // The inactive drain's refusals reach the pass as pending refusals,
+        // and the facts of rows it removes that applied to a head before
+        // their lineage was archived reach it as drain reports. A document whose
+        // archived lineage released tails protect holds for it. Each lineage
+        // is decided again here, and a hold the pass reported for one it
+        // frees is cleared.
+        let archived = match crate::ydoc_apply::drain_inactive_ydoc_updates(
+            store,
+            crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
+            &cache.released_tails(store),
+            &mut Vec::new(),
+            crate::ydoc_apply::DrainReporting::Durable,
+            faults,
+        ) {
+            Ok(drained) => {
+                p.pass.clear_freed(&drained.cleared);
+                drained.holds
+            }
+            Err(SyncError::ValidationPending(pending)) => {
+                return Ok(Applying::Suspended(pending));
+            }
+            Err(error) => return Err(self.local(error)),
+        };
+        p.pass.replace_drain_holds(
+            archived
+                .iter()
+                .map(|(object_id, hold)| (object_id.clone(), Some(hold.clone())))
+                .collect(),
+        );
+        // Each pass decides again for queued work a drain held, so its
+        // document frees once that work no longer needs holding. What those
+        // drains commit is the pass's, once: when one waits, each keeps its
+        // rows queued for the next attempt to report, and the rows they
+        // remove leave drain reports.
+        if matches!(p.holding, Holding::ByDocument { .. }) {
+            let released = crate::ydoc_apply::drain_released_holds(
+                store,
+                cache,
+                workspace_id,
+                &archived,
+                faults,
+                leases,
+            )
+            .map_err(|error| self.local(error))?;
+            p.pass.replace_drain_holds(released.holds);
+            for change in released.changes {
+                insert_changed_path(&mut p.pass.changed_paths, change);
+            }
+            for refusal in released.refusals {
+                push_refusal_once(&mut p.pass.refusals, refusal);
+            }
+            if let Some(pending) = released.waiting {
+                return Ok(Applying::Suspended(pending));
+            }
+        }
+        let drained = crate::moment_apply::pending::drain_and_claim(
             store,
             workspace_id,
+            &cache.released_tails(store),
+            &mut p.settlements,
             faults,
             leases,
-        ) {
-            Ok(settlements) => settlements,
-            Err(error) => {
-                // A fault can report failure after the transaction commits.
-                cache.clear();
-                return Err(local(error));
-            }
-        };
-        if settlements.report_id.is_some() {
+        );
+        // A fault can report failure after the transaction commits.
+        if drained.is_err() || p.settlements.report_id.is_some() {
             cache.clear();
         }
+        match drained {
+            Ok(()) => {}
+            // The settlements before the one that waits committed into the
+            // report the pass goes on with.
+            Err(SyncError::ValidationPending(pending)) => {
+                return Ok(Applying::Suspended(pending));
+            }
+            Err(error) => return Err(local(error)),
+        }
+        let completed: Vec<&ReplicationEnvelope> =
+            p.completed.iter().map(|&index| &ordered[index]).collect();
+        let mut pass = std::mem::take(&mut p.pass);
+        let mut settlements = std::mem::take(&mut p.settlements);
         let replay_more = crate::deferred::claim_report(
             store,
             workspace_id,
@@ -2652,6 +3872,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             insert_changed_path(&mut pass.changed_paths, change);
         }
         pass.record_facts.extend(settlements.record_facts);
+        // What this pass's drains, and any abandoned pass's, removed from the
+        // queue reaches the pass here, under the same token.
+        let drained =
+            crate::drain_report::claim(store, workspace_id, &mut settlements.report_id, faults)
+                .map_err(local)?;
+        pass.record_facts.extend(drained.record_facts);
+        for change in drained.extras.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        for declined in drained.extras.sharing_declined {
+            push_sharing_declined_once(&mut pass.sharing_declined, declined);
+        }
+        pass.conflicts_opened = pass
+            .conflicts_opened
+            .checked_add(drained.extras.conflicts_opened)
+            .ok_or(RelayError::InvalidResponse)?;
+        // A refusal a later projection's notice clearing removed from the
+        // pending refusals still reaches the pass, once with them.
+        for refusal in drained.extras.refusals {
+            push_refusal_once(&mut pass.refusals, refusal);
+        }
         // A drain refusal can commit before a later envelope fails hard, or
         // outside a pull during open/resync/close. Claim every relay-owned
         // pending sidecar under a unique local report token and return it here.
@@ -2664,7 +3905,182 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             push_refusal_once(&mut pass.refusals, refusal);
         }
         pass.settlement_report_id = settlements.report_id;
-        Ok(pass)
+        Ok(Applying::Done(Box::new(pass)))
+    }
+
+    /// Apply the ordered op at `index` within the round `p` stands in. One
+    /// that waits for released-tail validation applies nothing and changes
+    /// nothing of `p`.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_one(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        op: &ReplicationEnvelope,
+        index: usize,
+        p: &mut ApplyProgress,
+        relay_namespace: Option<&str>,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+    ) -> Result<(), RelayError> {
+        let key = p.holding.key(op);
+        if let (Holding::ByDocument { behind, .. }, Some(key)) = (&p.holding, &key) {
+            let omitted = behind
+                .get(key)
+                .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
+            if omitted || p.held.contains(key) {
+                p.still_retryable.push(index);
+                return Ok(());
+            }
+        }
+        // Archived work queued before the op applies first, except of a
+        // lineage an earlier op's drain found protected. A hold it leaves
+        // stands in its document's row, which the pass reads when it settles
+        // that document, and one the pass reported for a lineage it frees
+        // is cleared.
+        if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+            let drained = crate::ydoc_apply::drain_inactive_ydoc_updates(
+                store,
+                crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
+                &cache.released_tails(store),
+                &mut p.archived_protected,
+                crate::ydoc_apply::DrainReporting::Durable,
+                faults,
+            )
+            .map_err(|error| self.local(error))?;
+            p.pass.clear_freed(&drained.cleared);
+        }
+        // Retained work replays under the feed it arrived on.
+        let recorded = match &p.holding {
+            Holding::ByDocument { .. } => crate::deferred::retained_namespace(store, op)?,
+            Holding::ByOrigin => None,
+        };
+        let relay_namespace = recorded.as_ref().map_or(relay_namespace, Option::as_deref);
+        // A frozen drain hold stops its document's read before the next op
+        // it has not retained, which stays in the feed. Nothing reruns the
+        // drain for it. One of an archived lineage freezes only that lineage:
+        // ingress stops each of its updates, and the head's ops route on.
+        // r1c-2: a dependency-drain hold still routes later ops, which queue
+        // behind it unbounded until its bounded retention lands.
+        let frozen = match (&p.holding, crate::hosted::hosted_document(op)) {
+            (Holding::ByDocument { .. }, Some(object_id)) if recorded.is_none() => store
+                .read_with(|conn| -> Result<Option<crate::HostedHold>, SyncError> {
+                    let hold = crate::hosted::queued_released_hold(conn, workspace_id, object_id)?;
+                    let Some(crate::HostedHold::ReleasedLineageUnsettled {
+                        binding,
+                        continuation: crate::ReleasedHoldContinuation::Frozen,
+                        ..
+                    }) = &hold
+                    else {
+                        return Ok(None);
+                    };
+                    if crate::ydoc_apply::names_archived_lineage(conn, binding)? {
+                        return Ok(None);
+                    }
+                    Ok(hold)
+                })
+                .map_err(local)?
+                .map(|hold| (object_id.to_owned(), hold)),
+            _ => None,
+        };
+        let routed = if let Some((object_id, hold)) = frozen {
+            p.pass.drain_holds.insert(object_id, hold);
+            Err(SyncError::RetryableState {
+                reason: crate::hosted::RELEASED_LINEAGE_UNSETTLED,
+            })
+        } else {
+            match p.holding.held_before_routing(store, op)? {
+                Some(reason) => Err(SyncError::RetryableState { reason }),
+                None => crate::router::apply_replication_envelope_in_batch(
+                    store,
+                    cache,
+                    op,
+                    faults,
+                    leases,
+                    true,
+                    relay_namespace,
+                ),
+            }
+        };
+        let held_for = match routed {
+            // Its transaction rolled back; it routes again once its
+            // validation completes.
+            Err(SyncError::ValidationPending(pending)) => {
+                return Err(RelayError::ValidationPending(pending));
+            }
+            // The read that stops at `op` holds its document with this
+            // binding.
+            Err(SyncError::ReleasedLineageUnsettled(binding)) => {
+                if let Some(object_id) = crate::hosted::hosted_document(op) {
+                    p.pass.released.insert(
+                        object_id.to_owned(),
+                        ((op.origin_id.clone(), op.origin_seq), binding),
+                    );
+                }
+                Err(crate::hosted::RELEASED_LINEAGE_UNSETTLED)
+            }
+            // A hosted pull no configured host names a feed for cannot
+            // queue what it must; it fails rather than stop at this op on
+            // every pass.
+            Err(SyncError::RetryableState {
+                reason: reason @ crate::ydoc_apply::HOSTED_DEFERRAL_UNNAMED,
+            }) => return Err(RelayError::Local(reason.to_owned())),
+            Err(SyncError::RetryableState { reason }) => Err(reason),
+            routed => Ok(routed),
+        };
+        // A later attempt at the coordinate that answers otherwise leaves
+        // no binding for a stop there to take.
+        if !matches!(held_for, Err(crate::hosted::RELEASED_LINEAGE_UNSETTLED))
+            && let Some(object_id) = crate::hosted::hosted_document(op)
+            && p.pass
+                .released
+                .get(object_id)
+                .is_some_and(|(coordinate, _)| {
+                    (coordinate.0.as_str(), coordinate.1) == (op.origin_id.as_str(), op.origin_seq)
+                })
+        {
+            p.pass.released.remove(object_id);
+        }
+        match held_for {
+            Err(reason) => {
+                p.retryable_refusals.push((index, reason));
+                if let Some(key) = key {
+                    if retained_while_held(op, reason) {
+                        p.durable.insert(key.clone());
+                    }
+                    p.held.insert(key);
+                }
+                p.still_retryable.push(index);
+            }
+            Ok(Err(SyncError::SequenceGap))
+                if matches!(p.holding, Holding::ByOrigin) && p.held.contains(&op.origin_id) =>
+            {
+                p.still_retryable.push(index);
+            }
+            Ok(Err(error)) => return Err(self.local(error)),
+            Ok(Ok(outcome)) => {
+                p.made_progress = true;
+                p.completed.push(index);
+                accumulate_pull_outcome(
+                    store,
+                    op,
+                    p.holding.unready(op),
+                    outcome,
+                    &mut p.pass.applied,
+                    &mut p.pass.refused,
+                    &mut p.pass.skipped,
+                    &mut p.pass.conflicts_opened,
+                    &mut p.pass.changed_paths,
+                    &mut p.pass.redelivered,
+                    &mut p.pass.refusals,
+                    &mut p.pass.sharing_declined,
+                    &mut p.pass.record_facts,
+                    |claims| self.keep_automation_claims(claims),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn commit_pull_cursor(
@@ -2831,6 +4247,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut cursor = 0;
         'pages: loop {
             let page = self.transport.pull(PullRequest {
+                include_work_references: false,
+                reference_after: None,
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
                 stream_identity: identity.stream_identity.clone(),
@@ -3069,7 +4487,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::CursorKind::SharedChannel,
         )
         .map_err(local)?;
+        let scope_id = format!("channel:{share_id}");
+        let reference_after =
+            work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
         let page = self.transport.shared_channel_pull(SharedChannelRequest {
+            include_work_references: true,
+            reference_after,
             share_id: share_id.to_owned(),
             channel_wire_id: channel_wire_id.to_owned(),
             origin_id: identity
@@ -3149,7 +4572,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // wedges the pull rather than losing a count.
                 Err(error) => match error.share_disposition() {
                     ShareDisposition::Skip => skipped += 1,
-                    ShareDisposition::Abort => return Err(local(error)),
+                    ShareDisposition::Abort => return Err(self.local(error)),
                 },
             }
         }
@@ -3167,9 +4590,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if matches!(committed, TxnOutcome::Crashed { .. }) {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
+        if !page.has_more {
+            let mappings = received_work_reference_mappings(
+                store,
+                workspace_id,
+                &boundary,
+                &page.work_references,
+            )?;
+            learn_work_reference_page(
+                store,
+                workspace_id,
+                &scope_id,
+                &mappings,
+                page.next_reference_after.as_deref(),
+            )
+            .map_err(reference_error)?;
+        }
         Ok(SharedChannelPullOutcome {
             fetched,
-            has_more: page.has_more,
+            has_more: page.has_more || page.reference_has_more,
             applied,
             refused,
             rejections,
@@ -3480,7 +4919,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut cursor =
             crate::read_share_cursor(store, workspace_id, share_id, crate::CursorKind::ShareView)
                 .map_err(local)?;
+        let scope_id = format!("view:{share_id}");
+        let reference_after =
+            work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
         let page = self.transport.share_view_pull(ShareViewRequest {
+            include_work_references: true,
+            reference_after,
             share_id: share_id.to_owned(),
             cursor,
             limit: crate::model::MAX_PULL_OPS_PER_PASS,
@@ -3598,7 +5042,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ));
                         continue;
                     }
-                    ShareDisposition::Abort => return Err(local(error)),
+                    ShareDisposition::Abort => return Err(self.local(error)),
                 },
             }
             // A chat op is fully applied by the boundary above —
@@ -3626,9 +5070,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // `refuse_replay_unit`. What reaches here is only what must abort.
             replay_share_view_op(&mut replay, &envelope)?;
         }
+        if !page.has_more {
+            let mappings = received_work_reference_mappings(
+                store,
+                workspace_id,
+                &boundary,
+                &page.work_references,
+            )?;
+            learn_work_reference_page(
+                store,
+                workspace_id,
+                &scope_id,
+                &mappings,
+                page.next_reference_after.as_deref(),
+            )
+            .map_err(reference_error)?;
+        }
         Ok(ShareViewPullOutcome {
             fetched,
-            has_more: page.has_more,
+            has_more: page.has_more || page.reference_has_more,
             applied,
             skipped,
             refusals,
@@ -4568,12 +6028,14 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
-/// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to park. A hosted document that is not
-/// ready retains nothing.
+/// it: work behind a live session or an open conflict the person resolves,
+/// and a hosted moment or Y.Doc row whose path waits for a departed document
+/// to park. A hosted document that is not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
-        crate::hosted::PATH_HELD_BY_DEPARTED => true,
+        crate::hosted::PATH_HELD_BY_DEPARTED | crate::moment_apply::RESOLVE_EXISTING_CONFLICT => {
+            true
+        }
         "ydoc-session-live" => {
             matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         }
@@ -4620,6 +6082,15 @@ impl Holding {
             .map_err(local)
     }
 
+    /// What each round starts out holding: an origin with durable work, or
+    /// nothing for a hosted replica.
+    fn held_at_round(&self, durable: &BTreeSet<String>) -> BTreeSet<String> {
+        match self {
+            Self::ByOrigin => durable.clone(),
+            Self::ByDocument { .. } => BTreeSet::new(),
+        }
+    }
+
     /// The document of `op`, when it is a hosted document that is not ready.
     fn unready<'a>(&self, op: &'a ReplicationEnvelope) -> Option<&'a str> {
         let Self::ByDocument { unready, .. } = self else {
@@ -4629,14 +6100,22 @@ impl Holding {
     }
 
     /// Stop a ready hosted document at `op` when it can wait indefinitely:
-    /// the feed withholds its conflict parent, or it would move onto another
-    /// spelling of a path another document holds. The document is held there,
-    /// naming why, and retains nothing, as one that is not ready.
+    /// the feed withholds its conflict parent, it would move onto another
+    /// spelling of a path another document holds, its released lineage is
+    /// unsettled, or its lineage does not project its resulting head yet. The
+    /// document is held there, naming why, and retains nothing, as one that
+    /// is not ready.
+    // MERGE-REVIEW: main stops these only after a round without progress;
+    // the released-lineage and resulting-head reasons now wait for that too.
     fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
             && matches!(
                 reason,
-                crate::hosted::CONFLICT_PARENT_WITHHELD | crate::hosted::PATH_HELD_IN_SCOPE
+                crate::hosted::CONFLICT_PARENT_WITHHELD
+                    | crate::hosted::PATH_HELD_IN_SCOPE
+                    | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+                    | crate::moment_apply::RESOLVE_EXISTING_CONFLICT
+                    | "ydoc-resulting-head-pending"
             )
             && let Some(object_id) = crate::hosted::hosted_document(op)
         {
@@ -4666,6 +6145,83 @@ struct AppliedPass {
     /// conflict parent, or whose work would pass the retention limit, whose
     /// ops did not all apply, with the first that did not.
     stopped: BTreeMap<String, ReplicationEnvelope>,
+    /// Each document an op held for released retained work, with that op's
+    /// coordinate and the binding the hold names.
+    released: BTreeMap<String, ReleasedStop>,
+    /// Each document whose queued work the pass's drain held for released
+    /// retained work, with that hold.
+    drain_holds: BTreeMap<String, crate::HostedHold>,
+}
+
+impl AppliedPass {
+    /// Take what a drain decided for each document it examined: the hold it
+    /// left, or none, which clears the hold an earlier drain of the pass
+    /// reported. A document it did not examine keeps its entry.
+    fn replace_drain_holds(&mut self, examined: BTreeMap<String, Option<crate::HostedHold>>) {
+        for (object_id, hold) in examined {
+            match hold {
+                Some(hold) => self.drain_holds.insert(object_id, hold),
+                None => self.drain_holds.remove(&object_id),
+            };
+        }
+    }
+
+    /// Clear each hold an earlier drain reported that names an archived
+    /// lineage `cleared` says a later one took every queued row of, by
+    /// object id. A hold of another lineage stands.
+    fn clear_freed(&mut self, cleared: &BTreeMap<String, BTreeSet<String>>) {
+        self.drain_holds.retain(|object_id, hold| {
+            !matches!(
+                hold,
+                crate::HostedHold::ReleasedLineageUnsettled { binding, .. }
+                    if cleared
+                        .get(object_id)
+                        .is_some_and(|lineages| lineages.contains(&binding.lineage_claim_id))
+            )
+        });
+    }
+}
+
+type ReleasedStop = (
+    (String, i64),
+    Box<dohc_engine_collab::live_update_application::ReleasedLineageBinding>,
+);
+
+/// Where a pass's apply stands. Ops are named by their index in the pass's
+/// ordered ops.
+struct ApplyProgress {
+    pass: AppliedPass,
+    /// Open documents' artifacts are still to recover into the pass.
+    recovering: bool,
+    completed: Vec<usize>,
+    /// The round being applied, and how far into it.
+    round: Vec<usize>,
+    next: usize,
+    /// What the round held for the next one.
+    still_retryable: Vec<usize>,
+    /// Why each op the round held could not apply.
+    retryable_refusals: Vec<(usize, &'static str)>,
+    first: bool,
+    made_progress: bool,
+    held: BTreeSet<String>,
+    durable: BTreeSet<String>,
+    holding: Holding,
+    /// Every round ran; only settling what the ops left pending remains.
+    rounds_done: bool,
+    /// The owner settlements the pass reports so far.
+    settlements: crate::moment_apply::pending::PendingSettlementReport,
+    /// The archived lineages, as `[version, object, lineage]`, that the
+    /// inactive drains before its ops found released tails protect. Those
+    /// drains pass over them; the end of the pass decides them again.
+    archived_protected: Vec<[String; 3]>,
+}
+
+/// What applying a pass came to.
+enum Applying {
+    Done(Box<AppliedPass>),
+    /// An op or owner settlement waits for released-tail validation; nothing
+    /// of it applied.
+    Suspended(Box<dohc_engine_collab::live_update_application::PendingValidation>),
 }
 
 /// The documents a scope names, each once, with its path.
@@ -4770,6 +6326,11 @@ fn validate_push_response(
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
     crate::hosted::validate_push_refusals(response, batch, hosted)?;
+    crate::ydoc_recovery::validate_redundant_recoveries(
+        &response.redundant_recoveries,
+        batch,
+        hosted,
+    )?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -4798,6 +6359,7 @@ pub(crate) fn validate_share_push_response(
     if push.accepted != batch_len
         || push.inserted.checked_add(push.skipped) != Some(push.accepted)
         || !push.hosted_refusals.is_empty()
+        || !push.redundant_recoveries.is_empty()
     {
         return Err(RelayError::InvalidResponse);
     }
@@ -4807,6 +6369,7 @@ pub(crate) fn validate_share_push_response(
 pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
         || !response.hosted_refusals.is_empty()
+        || !response.redundant_recoveries.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0
@@ -4817,6 +6380,176 @@ pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), Rel
     Ok(())
 }
 
+fn reference_error(error: DomainError) -> RelayError {
+    match error {
+        DomainError::Storage(StorageError::FileLocked) => RelayError::StoreBusy,
+        error => RelayError::Local(error.code().to_owned()),
+    }
+}
+
+fn register_reference_probe(
+    transport: &impl RelayTransport,
+    workspace_id: &str,
+    identity: &crate::SyncIdentity,
+    references: &[WorkReferenceMapping],
+    registered: &mut BTreeSet<String>,
+) -> Result<(), RelayError> {
+    let mut request = push_probe_request(workspace_id, identity, &identity.origin_id, -1);
+    request.work_references = references.to_vec();
+    let response = transport.push(request)?;
+    validate_probe_response(&response)?;
+    confirm_reference_registration(references, registered, &response)?;
+    Ok(())
+}
+
+fn received_work_reference_mappings(
+    store: &EngineStore,
+    workspace_id: &str,
+    boundary: &crate::ShareBoundary,
+    mappings: &[WorkReferenceMapping],
+) -> Result<Vec<WorkReferenceMapping>, RelayError> {
+    use dohc_engine_domain::work_references::WorkTarget;
+    store.read_with(|conn| -> Result<_, SyncError> {
+        let mut received = Vec::new();
+        for mapping in mappings {
+            let mut mapping = mapping.clone();
+            let admitted = match &mut mapping.target {
+                WorkTarget::File { version_id, object_id }
+                | WorkTarget::App { version_id, object_id }
+                | WorkTarget::DocumentCollection { version_id, object_id } => {
+                    let grant = boundary.granted.as_ref();
+                    if let Some(grant) = grant.filter(|grant| version_id.as_str() == grant.version_id.as_deref().unwrap_or("main")) {
+                        let path = crate::share::object_main_path(conn, workspace_id, object_id)?;
+                        let admitted = received_object_token(object_id) && path.as_deref()
+                            .is_some_and(|path| crate::share::tracked_path_within_grant(path, grant));
+                        if admitted { *version_id = "main".to_owned(); }
+                        admitted
+                    } else { false }
+                }
+                WorkTarget::DocumentRecord { version_id, record_id } => {
+                    if let Some(grant) = boundary.granted.as_ref().filter(|grant| version_id.as_str() == grant.version_id.as_deref().unwrap_or("main")) {
+                        let row: Option<(String, String)> = conn.query_row(
+                            "SELECT s.path,s.object_id FROM collection_records r JOIN snapshots s \
+                             ON s.workspace_id=r.workspace_id AND s.version_id=r.version_id AND s.object_id=r.object_id \
+                             WHERE r.workspace_id=?1 AND r.version_id='main' AND r.record_id=?2",
+                            params![workspace_id, record_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?)))
+                            .optional().map_err(SyncError::corrupt)?;
+                        let admitted = row.is_some_and(|(path, object)| received_object_token(&object) &&
+                            crate::share::tracked_path_within_grant(&path, grant));
+                        if admitted { *version_id = "main".to_owned(); }
+                        admitted
+                    } else { false }
+                }
+                WorkTarget::Message { message_id, thread_id, channel_id } => {
+                    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn.query_row(
+                        "SELECT t.channel_id,w.wire_id,t.linked_object_id FROM chat_messages m \
+                         JOIN chat_threads t ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id \
+                         LEFT JOIN chat_channel_wire_ids w ON w.workspace_id=t.workspace_id AND w.channel_id=t.channel_id \
+                         WHERE m.workspace_id=?1 AND m.message_id=?2 AND m.thread_id=?3",
+                        params![workspace_id, message_id.as_str(), thread_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+                        .optional().map_err(SyncError::corrupt)?;
+                    if let Some((local_channel, wire, object)) = row {
+                        let admitted = if boundary.surface == crate::ShareSurface::SharedChannel {
+                            boundary.channel_wire_id.is_some() && wire == boundary.channel_wire_id
+                        } else if let (Some(grant), Some(object)) = (&boundary.granted, object) {
+                            crate::share::object_main_path(conn, workspace_id, &object)?.as_deref()
+                                .is_some_and(|path| crate::share::selected_path_within_grant(path, grant))
+                        } else { false };
+                        if admitted { *channel_id = local_channel; }
+                        admitted
+                    } else { false }
+                }
+                // Dataset targets need the dataset host's admission contract.
+                WorkTarget::TransactionalCollection { .. } | WorkTarget::TransactionalRecord { .. } => false,
+            };
+            if admitted { received.push(mapping); }
+        }
+        Ok(received)
+    }).map_err(local)
+}
+
+fn references_for_batch(
+    store: &EngineStore,
+    workspace_id: &str,
+    ops: &[ReplicationEnvelope],
+    pending: &[WorkReferenceMapping],
+    registered: &BTreeSet<String>,
+) -> Result<Vec<WorkReferenceMapping>, RelayError> {
+    use dohc_engine_domain::work_references::{
+        WORK_REFERENCE_BATCH, WorkReferenceResolution, resolve_work_reference,
+    };
+    let mut required = BTreeMap::new();
+    for op in ops {
+        if op.op_kind != "chat.message.append" {
+            continue;
+        }
+        let Some(body) = op.payload.get("body").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        for token in body.split("@[work:").skip(1) {
+            let Some(reference) = token.get(..43) else {
+                continue;
+            };
+            if !matches!(token.as_bytes().get(43), Some(b']' | b'#')) {
+                continue;
+            }
+            let local_binding = store.read_with(|conn| conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM work_references WHERE workspace_id=?1 AND reference=?2)",
+                params![workspace_id, reference], |row| row.get::<_, bool>(0))).map_err(|error| local(SyncError::corrupt(error)))?;
+            if !local_binding {
+                continue;
+            }
+            if let WorkReferenceResolution::Found {
+                reference,
+                target,
+                created_at_ms,
+                ..
+            } =
+                resolve_work_reference(store, workspace_id, reference).map_err(reference_error)?
+            {
+                required.insert(
+                    reference.clone(),
+                    WorkReferenceMapping {
+                        reference,
+                        target,
+                        created_at_ms,
+                    },
+                );
+            }
+        }
+    }
+    required.retain(|reference, _| !registered.contains(reference));
+    for mapping in pending {
+        if registered.contains(&mapping.reference) {
+            continue;
+        }
+        if required.len() >= WORK_REFERENCE_BATCH {
+            break;
+        }
+        required
+            .entry(mapping.reference.clone())
+            .or_insert_with(|| mapping.clone());
+    }
+    Ok(required.into_values().collect())
+}
+
+fn confirm_reference_registration(
+    sent: &[WorkReferenceMapping],
+    registered: &mut BTreeSet<String>,
+    response: &PushResponse,
+) -> Result<(), RelayError> {
+    if response.registered_references.len() > sent.len()
+        || response
+            .registered_references
+            .iter()
+            .any(|reference| !sent.iter().any(|mapping| &mapping.reference == reference))
+    {
+        return Err(RelayError::InvalidResponse);
+    }
+    registered.extend(response.registered_references.iter().cloned());
+    Ok(())
+}
+
 fn push_probe_request(
     workspace_id: &str,
     identity: &crate::SyncIdentity,
@@ -4824,6 +6557,7 @@ fn push_probe_request(
     after_seq: i64,
 ) -> PushRequest {
     PushRequest {
+        work_references: Vec::new(),
         workspace_id: workspace_id.to_owned(),
         replication_epoch: identity.replication_epoch.clone(),
         stream_identity: identity.stream_identity.clone(),
@@ -5994,11 +7728,21 @@ fn replay_share_write<T: RelayTransport>(
             },
         ));
     }
-    if content_kind != "binary" && std::str::from_utf8(&bytes).is_err() {
-        return Err(RelayError::ShareOpInvalid {
-            reason: "share write claims text content the shared bytes cannot be",
-        });
-    }
+    let content: Result<String, Vec<u8>> = if content_kind == "binary" {
+        Err(bytes)
+    } else {
+        // These bytes already matched the sha the op named, so they are
+        // the content the granter shared. The op calling them text is the
+        // defect, and no repair at the relay changes that.
+        Ok(String::from_utf8(bytes).map_err(|_| {
+            remember(
+                blob_refusals,
+                RelayError::ShareOpInvalid {
+                    reason: "share write claims text content the shared bytes cannot be",
+                },
+            )
+        })?)
+    };
     if let Some(before) = rename_from {
         let input = dohc_engine_domain::RenameTextFile {
             workspace_id: workspace_id.to_owned(),
@@ -6076,8 +7820,8 @@ fn replay_share_write<T: RelayTransport>(
             now_ms: envelope.recorded_at_ms,
         }
     });
-    let deduped = {
-        if content_kind == "binary" {
+    let deduped = match content {
+        Err(bytes) => {
             let input = WriteBinary {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),
@@ -6126,18 +7870,8 @@ fn replay_share_write<T: RelayTransport>(
             )
             .map_err(domain)?
             .deduped
-        } else {
-            // These bytes already matched the sha the op named, so they are
-            // the content the granter shared. The op calling them text is the
-            // defect, and no repair at the relay changes that.
-            let text = String::from_utf8(bytes).map_err(|_| {
-                remember(
-                    blob_refusals,
-                    RelayError::ShareOpInvalid {
-                        reason: "share write claims text content the shared bytes cannot be",
-                    },
-                )
-            })?;
+        }
+        Ok(text) => {
             let input = WriteText {
                 workspace_id: workspace_id.to_owned(),
                 version_id: version_id.to_owned(),
@@ -6587,13 +8321,14 @@ fn validate_identity_request(workspace: &str, epoch: &str, stream: &str) -> Resu
 // the same way, so a relay operation refused for contention reaches the wire
 // as the retryable class no matter which taxonomy it came through.
 fn local(error: SyncError) -> RelayError {
-    if matches!(error, SyncError::Storage(StorageError::FileLocked)) {
-        return RelayError::StoreBusy;
+    match error {
+        SyncError::Storage(StorageError::FileLocked) => RelayError::StoreBusy,
+        SyncError::ValidationPending(pending) => RelayError::ValidationPending(pending),
+        error if matches!(error.original(), SyncError::RetryableState { .. }) => {
+            RelayError::Local(format!("{}: {error}", error.code()))
+        }
+        error => RelayError::Local(error.code().to_owned()),
     }
-    if matches!(error, SyncError::RetryableState { .. }) {
-        return RelayError::Local(format!("{}: {error}", error.code()));
-    }
-    RelayError::Local(error.code().to_owned())
 }
 
 fn retryable_refusal<'a>(
@@ -6801,6 +8536,9 @@ mod pull_page_validation_tests {
     fn pull_page_allows_gaps_but_requires_one_global_order_before_apply() {
         validate_pull_page(
             &PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12)), op(Some(15))],
                 next_cursor: 15,
                 has_more: false,
@@ -6812,26 +8550,41 @@ mod pull_page_validation_tests {
 
         for invalid in [
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(None)],
                 next_cursor: 11,
                 has_more: false,
             },
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(10))],
                 next_cursor: 10,
                 has_more: false,
             },
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12)), op(Some(11))],
                 next_cursor: 11,
                 has_more: false,
             },
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12))],
                 next_cursor: 11,
                 has_more: false,
             },
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12))],
                 next_cursor: 13,
                 has_more: false,
@@ -6860,6 +8613,9 @@ mod pull_page_validation_tests {
             super::validate_hosted_page(&hosted, "ws", 10)
                 .expect("the scoped feed's cursor passes rows it withholds");
             let ordinary = PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops,
                 next_cursor,
                 has_more: false,

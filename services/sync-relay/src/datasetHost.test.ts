@@ -9,12 +9,14 @@ import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
-import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
+import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
+import { collectionFilePresent } from "./storage/collectionFilePresence";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import {createDatasetAppRoutes} from "./datasetRoutes";
-import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
+import { createRelayDatasetHost, datasetReferenceReadContainsRecord, type RelayDatasetHost } from "./datasetHost";
 import { workspaceUsageBytes } from "./storage/workspaces";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
+import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -40,12 +42,93 @@ const revision = describeDatasetRevision({definition, revision: 1, schemaSql, op
 const scope = {workspaceId: "w", datasetId: definition.datasetId};
 const helper: AppBackendAuth = {kind: "named", workspaceId: "w", userId: "helper", grantId: "helper-grant"};
 
+it("tests the filtered primary key field rather than the row envelope id", () => {
+  expect(datasetReferenceReadContainsRecord({rows: [{id: "wrong", values: {[id(3)]: "record"}}]}, id(3), "record")).toBe(true);
+  expect(datasetReferenceReadContainsRecord({rows: [{id: "record", values: {[id(3)]: "wrong"}}]}, id(3), "record")).toBe(false);
+  expect(datasetReferenceReadContainsRecord({rows: [{id: 7, values: {[id(3)]: "7"}}]}, id(3), 7)).toBe(false);
+});
+
+it("checks transactional reference targets through current dataset reads and guards the registration revision", async () => {
+  const rules: DatasetDefinition = {...definition, operations: [...definition.operations,
+    {operationId: id(8), name: "remove", label: "Remove", tableId: id(2), kind: "delete", access: "owner", readOnly: false, fieldIds: []},
+  ]};
+  const source = datasetOperations.generateDatasetOperations(rules);
+  const schema = schemaSql.replace("name TEXT NOT NULL)", "name TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1)");
+  const approved = describeDatasetRevision({definition: rules, revision: 1, schemaSql: schema, operationSource: source});
+  const f = await fixture(false, {revision: approved, schemaSql: schema, operationSource: source});
+  await f.activate(); f.addHelper();
+  const added = await f.invoke(owner, id(5), {values: {[id(4)]: "Person"}}, undefined, "create-person");
+  const recordId = (added.result as {id: string}).id;
+  const target = {kind: "transactionalRecord" as const, datasetId: scope.datasetId, tableId: id(2), recordId};
+  const reference = "D".repeat(43);
+  const mapping = {reference, target, createdAtMs: 1};
+  const register = async (references: typeof mapping[]) => {
+    const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references});
+    return f.storage.appendLogBatch({workspaceId: "w", originId: "reference-probe", ops: [],
+      workReferences: {userId: "owner", references, datasetAccess}}).registeredReferences ?? [];
+  };
+  expect(await register([mapping])).toEqual([reference]);
+  expect(await register([{...mapping, reference: "F".repeat(43), target: {...target, recordId: "missing"}}])).toEqual(["F".repeat(43)]);
+  expect(await f.storage.resolveWorkReference({reference: "F".repeat(43), reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
+  expect(await register([{...mapping, reference: "G".repeat(43), target: {...target, tableId: id(99)}}])).toEqual(["G".repeat(43)]);
+  const reader = {kind: "user" as const, userId: "helper", grantId: "helper-grant"};
+  expect(await f.storage.resolveWorkReference({reference, reader, identityKey: "key"})).toEqual({status: "unavailable"});
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {
+    operationIds: [id(6)], discover: true, revision: 1, revisionSha256: approved.revisionSha256,
+  }});
+  expect(await f.storage.resolveWorkReference({reference, reader, identityKey: "key"})).toMatchObject({status: "found", target});
+  const publicationId = f.publish([id(6)], [{operationId: id(6), fieldIds: [id(3), id(4)]}]);
+  const datasetAuth = f.link("reader");
+  if (datasetAuth.kind !== "link") throw new Error("Expected link authority");
+  const linkReader = {kind: "link" as const, grantId: "g", generation: 1, requireSession() {}, datasetAuth};
+  expect(await f.storage.resolveWorkReference({reference, reader: linkReader, identityKey: "key"})).toMatchObject({status: "found", target});
+  f.storage.withdrawAppPublication({...scope, publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
+  expect(await f.storage.resolveWorkReference({reference, reader: linkReader, identityKey: "key"})).toEqual({status: "unavailable"});
+  const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references: [mapping]});
+  await f.invoke(owner, id(8), {id: recordId, expectedVersion: 1}, undefined, "remove-person");
+  expect([...datasetAccess.values()].every(check => !check())).toBe(true);
+  expect(await f.storage.resolveWorkReference({reference, reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
+  expect(f.storage.db.prepare("SELECT deleted FROM sync_relay_work_reference_scopes WHERE reference=?").get(reference)!.deleted).toBe(0);
+  await register([mapping]);
+  expect(f.storage.db.prepare("SELECT deleted FROM sync_relay_work_reference_scopes WHERE reference=?").get(reference)!.deleted).toBe(1);
+});
+
+it("keeps custom transactional record reads unavailable until they have an existence contract", async () => {
+  const f = await fixture();
+  await f.activate();
+  const target = {kind: "transactionalRecord" as const, datasetId: scope.datasetId, tableId: id(2), recordId: "custom-record"};
+  const reference = "C".repeat(43), references = [{reference,target,createdAtMs:1}];
+  const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId:"w",userId:"owner",references});
+  expect(f.storage.appendLogBatch({workspaceId:"w",originId:"probe",ops:[],workReferences:{userId:"owner",references,datasetAccess}}).registeredReferences).toEqual([reference]);
+  expect(await f.storage.resolveWorkReference({reference,reader:{kind:"user",userId:"owner"}})).toEqual({status:"unavailable"});
+});
+
+it("acknowledges 200 unavailable record bindings from a deleted dataset", async () => {
+  const f = await fixture();
+  await f.activate();
+  f.host.archiveDataset(owner, scope);
+  const preview = f.host.deletePreview(owner, scope);
+  await f.host.deleteDataset(owner, {...scope, expected: preview.cursor, reviewToken: preview.reviewToken, acknowledge: true});
+  for (let start = 0; start < 200; start += 128) {
+    const references = Array.from({length: Math.min(128, 200 - start)}, (_, i) => ({
+      reference: String(start + i).padStart(43, "0"), createdAtMs: 1,
+      target: {kind: "transactionalRecord" as const, datasetId: scope.datasetId, tableId: id(2), recordId: String(start + i)},
+    }));
+    const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references});
+    expect(f.storage.appendLogBatch({workspaceId: "w", originId: "reference-probe", ops: [],
+      workReferences: {userId: "owner", references, datasetAccess}}).registeredReferences).toEqual(references.map(row => row.reference));
+  }
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_work_reference_scopes WHERE deleted=1").get()!.n).toBe(200);
+  expect(await f.storage.resolveWorkReference({reference: "0".repeat(43), reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
+});
+
 async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }) {
   const { revision, schemaSql, operationSource } = prepared;
   const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
   let host: RelayDatasetHost;
   const shutdownErrors: unknown[] = [];
-  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, startupExclusive, nowMs: () => 10, onShutdownError(error) {shutdownErrors.push(error);}});
+  let now = 10;
+  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, startupExclusive, nowMs: () => now, onShutdownError(error) {shutdownErrors.push(error);}});
   host = await create();
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25}); expect(shutdownErrors).toEqual([]);});
   const activate = () => host.activate(owner, {...scope, revision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
@@ -69,8 +152,9 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
     host.bindPublication(owner, {...scope, publicationId: result.publicationId});
     return result.publicationId;
   }
-  return {...base, directory, get host() {return host;}, activate, invoke, publish, addHelper,
-    async reopen() {await host.close(); host = await create();}};
+  // These tests move the clock by minutes, so their link sessions outlast it.
+  return {...base, link: (id: string) => base.link(id, Number.MAX_SAFE_INTEGER), get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
+    async reopen() {await host.close(); host = await create();}, advance(ms: number) {now += ms;}};
 }
 
 it("keeps its workers and recovery staging in the folder it was given", async () => {
@@ -86,6 +170,7 @@ it("keeps its workers and recovery staging in the folder it was given", async ()
 it("permanently deletes at the owner authority and releases private storage without deleting source publications", async () => {
   const f = await fixture(); await f.activate(); const publicationId = f.publish(), link = f.link("friend");
   await f.invoke(link,id(5),{name:"Deleted"},publicationId);
+  f.host.archiveDataset(owner,scope);
   const preview = f.host.deletePreview(owner,scope);
   const request = {...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
   await expect(f.host.deleteDataset(link,request)).rejects.toThrow();
@@ -443,4 +528,212 @@ it("records schema checkpoint time through the relay host and retains it after r
   await f.reopen();
   expect(f.host.history(owner,scope).entries).toMatchObject([{recordedAtMs:10}]);
   expect(f.storage.db.prepare("SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=? AND dataset_id=? AND revision=1").get(scope.workspaceId,scope.datasetId)).toMatchObject({recorded_at_ms:10});
+});
+
+const receiptSchemaSql = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,receipt TEXT);";
+const receiptSource = `globalThis.operations={
+  submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO people VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},
+  read(ctx){return ctx.db.query('SELECT * FROM people ORDER BY id');},
+  edit(ctx,input){ctx.db.execute('UPDATE people SET name=? WHERE id=?',[input.name,input.id]);return true;}
+};`;
+const receiptDefinition: DatasetDefinition = {...definition, tables: [{...definition.tables[0]!, fields: [...definition.tables[0]!.fields,
+  {fieldId: id(8), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: false, unique: false}]}]};
+const receipts = {revision: describeDatasetRevision({definition: receiptDefinition, revision: 1, schemaSql: receiptSchemaSql, operationSource: receiptSource}),
+  schemaSql: receiptSchemaSql, operationSource: receiptSource};
+const receiptBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]).toString("base64");
+
+/** A fenced Collection with one record and its attachment, saved for a move to the relay. */
+async function movingCollection() {
+  const source = await fixture(false, receipts); await source.activate();
+  const {file} = source.host.ownerUpload(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256,
+    idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png", bytesBase64: receiptBytes});
+  await source.invoke(owner, id(5), {name: "Kept", fileId: file.fileId});
+  const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)});
+  const sourceCursor = journal.head(scope, () => {}).cursor;
+  journal.fence({expected: sourceCursor, authorize() {}});
+  const archive = await source.host.exportRecovery(owner, scope), chunks: Uint8Array[] = [];
+  const manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, {maxTotalBytes: source.storage.options.workspaceQuotaBytes})).digest("hex");
+  try { for await (const bytes of archive.stream()) chunks.push(bytes); } finally { await archive.dispose(); }
+  const body = Buffer.concat(chunks);
+  return {fileId: file.fileId, sourceCursor,
+    importInto: (host: RelayDatasetHost, activate: boolean, signal?: AbortSignal) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
+      signal, stream: (async function* () { yield body; })()})};
+}
+
+it("finishes a move whose import stopped when the relay stopped, once the relay starts again (#2903)", async () => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  const usageBefore = workspaceUsageBytes(target.storage, "w");
+  const leftover = () => ({
+    imports: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n),
+    attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
+    stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
+    usage: workspaceUsageBytes(target.storage, "w"),
+    // A usage row left for the Collection refuses creating it on this relay.
+    usageRows: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")
+      .get(scope.workspaceId, scope.datasetId)!.n),
+  });
+  // The relay stops inside the final install transaction. Records, checkpoints, and the attachment are
+  // durable and charged, the transaction rolls back, and the stopped storage cannot run the import's cleanup.
+  const stopped = target.storage, prepare = stopped.db.prepare.bind(stopped.db);
+  const stop = vi.spyOn(stopped.db, "prepare").mockImplementation(sql => {
+    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN")) stopped.invalidate();
+    return prepare(sql);
+  });
+  await expect(moved.importInto(target.host, true)).rejects.toThrow();
+  stop.mockRestore();
+  const interrupted = leftover();
+  expect(stopped.db.prepare("SELECT phase FROM dohc_dataset_imports").get()).toMatchObject({phase: "staging"});
+  expect(interrupted).toMatchObject({imports: 1, attachments: 1, usageRows: 1});
+  expect(interrupted.stages).toBeGreaterThan(0);
+  expect(interrupted.usage).toBeGreaterThan(usageBefore);
+
+  target.restart(); await target.reopen();
+  const restarted = leftover();
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
+    targetCursor: {revision: moved.sourceCursor.revision + 1}});
+  // Startup released the stopped import's quota, attachment, and checkpoints before the retry.
+  expect(restarted).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore, usageRows: 0});
+  expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
+  expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256, fileId: moved.fileId}))
+    .toMatchObject({bytesBase64: receiptBytes});
+});
+
+it("finishes a move whose import request was cut off, on the next try (#3067)", async () => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  const usageBefore = workspaceUsageBytes(target.storage, "w");
+  // The request's deadline passes inside the final install transaction, which rolls back.
+  const deadline = new AbortController(), prepare = target.storage.db.prepare.bind(target.storage.db);
+  const cut = vi.spyOn(target.storage.db, "prepare").mockImplementation(sql => {
+    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN")) deadline.abort(new DOMException("Recovery import timed out", "TimeoutError"));
+    return prepare(sql);
+  });
+  await expect(moved.importInto(target.host, true, deadline.signal)).rejects.toThrow("Recovery import timed out");
+  cut.mockRestore();
+  // The cut-off import cleared its copy and released its quota, with the relay still running.
+  expect({
+    imports: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n),
+    attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
+    stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
+    usage: workspaceUsageBytes(target.storage, "w"),
+  }).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore});
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
+    targetCursor: {revision: moved.sourceCursor.revision + 1}});
+  expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
+});
+
+it.each([false, true])("keeps an installed or claimed import, its quota, and its attachments across startup (claimed: %s)", async claimed => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  await moved.importInto(target.host, claimed);
+  const kept = () => ({
+    imports: target.storage.db.prepare("SELECT import_id,phase,retained_bytes,head_json FROM dohc_dataset_imports").all(),
+    stages: target.storage.db.prepare("SELECT stage_id,role FROM dohc_dataset_import_checkpoints ORDER BY stage_id").all(),
+    attachments: target.storage.db.prepare("SELECT file_id,storage_bytes FROM sync_relay_dataset_files ORDER BY file_id").all(),
+    usage: workspaceUsageBytes(target.storage, "w"),
+  });
+  const before = kept();
+  expect(before.imports).toMatchObject([{phase: claimed ? "claimed" : "installed"}]);
+  expect(before.stages).toHaveLength(claimed ? 0 : 1);
+  expect(before.attachments).toMatchObject([{file_id: moved.fileId}]);
+  await target.reopen();
+  expect(kept()).toEqual(before);
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({targetCursor: {revision: moved.sourceCursor.revision + 1}});
+});
+
+const collectionFile = (path = "registrations/dataset.json") => ({path, text: JSON.stringify({datasetId: id(1)})});
+const collectionMissing = {code: "app_collection_missing", statusCode: 410};
+
+it("stops a deleted Collection's apps, reads included, two minutes after the server sees it gone, and keeps its records", async () => {
+  const f = await fixture(); await f.activate(); f.addHelper(); pushFile(f.storage, "dataset", null, collectionFile());
+  const publicationId = f.publish([id(5), id(6), id(7)]), link = f.link("friend");
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  await f.invoke(link, id(5), {name: "Before"}, publicationId, "before");
+  pushFile(f.storage, "dataset", collectionFile(), null);
+  await f.invoke(link, id(5), {name: "During"}, publicationId, "during");
+  f.advance(119_999);
+  expect((await f.invoke(helper, id(6), {}, publicationId, "read-1")).result).toHaveLength(2);
+  f.advance(1);
+  await expect(f.invoke(link, id(5), {name: "After"}, publicationId, "after")).rejects.toMatchObject(collectionMissing);
+  await expect(f.invoke(helper, id(6), {}, publicationId, "read-2")).rejects.toMatchObject(collectionMissing);
+  // An account without access keeps its own refusal, the one that person can fix.
+  await expect(f.invoke({...helper, userId: "stranger"}, id(6), {}, publicationId, "stranger")).rejects.toMatchObject({statusCode: 404});
+  expect(() => f.host.bindPublication(owner, {...scope, publicationId})).toThrow(expect.objectContaining(collectionMissing));
+  expect((await f.invoke(owner, id(6))).result).toHaveLength(2);
+  pushFile(f.storage, "restored", null, collectionFile());
+  expect((await f.invoke(helper, id(6), {}, publicationId, "read-3")).result).toHaveLength(2);
+});
+
+it("keeps an app working when its Collection moves, or when its dataset.json comes back within two minutes", async () => {
+  const f = await fixture(); await f.activate(); pushFile(f.storage, "dataset", null, collectionFile());
+  const publicationId = f.publish(), link = f.link("friend");
+  pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
+  await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
+  f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), null);
+  await f.invoke(link, id(5), {name: "Deleted"}, publicationId, "deleted");
+  f.advance(60_000); pushFile(f.storage, "restored", null, collectionFile());
+  await f.invoke(link, id(5), {name: "Restored"}, publicationId, "restored");
+  pushFile(f.storage, "restored", collectionFile(), null); f.advance(60_000);
+  // The grace period starts again when the file goes again.
+  await f.invoke(link, id(5), {name: "Deleted again"}, publicationId, "deleted-again");
+  f.advance(119_999);
+  await f.invoke(link, id(5), {name: "Late"}, publicationId, "late");
+});
+
+it("keeps an app working, on its own records only, when another Collection takes its moved Collection's old folder (#3186)", async () => {
+  const f = await fixture(); await f.activate(); f.addHelper(); pushFile(f.storage, "dataset", null, collectionFile());
+  const other = {workspaceId: "w", datasetId: id(9)};
+  const otherRevision = describeDatasetRevision({definition: {...definition, datasetId: id(9), name: "Other"}, revision: 1, schemaSql, operationSource});
+  const invokeOther = (auth: AppBackendAuth, operationId: string, input: Record<string, string>, key: string, appId?: string) => f.host.invoke(auth, {...other,
+    revision: 1, revisionSha256: otherRevision.revisionSha256, operationId, input, idempotencyKey: key, ...(appId ? {access: {kind: "app" as const, appId}} : {})});
+  await f.host.activate(owner, {...other, revision: otherRevision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
+  await invokeOther(owner, id(5), {name: "Other record"}, "other");
+  const publicationId = f.publish([id(5), id(6)]), link = f.link("friend");
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
+  pushFile(f.storage, "other", null, {path: "registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
+  await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
+  f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
+  const names = (result: unknown) => (result as {name: string}[]).map(row => row.name).sort();
+  expect(names((await f.invoke(helper, id(6), {}, publicationId, "read")).result)).toEqual(["Moved", "Still moved"]);
+  // The app can't reach the Collection that took its old folder.
+  await expect(invokeOther(link, id(5), {name: "Leaked"}, "leaked", publicationId)).rejects.toMatchObject({statusCode: 404});
+  await expect(invokeOther(helper, id(6), {}, "leaked-read", publicationId)).rejects.toMatchObject({statusCode: 404});
+  expect(names((await invokeOther(owner, id(6), {}, "other-read")).result)).toEqual(["Other record"]);
+  // A file that names the other Collection never stands in for this one, at the old folder or where the moved file went.
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), {path: "archive/registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
+  await f.invoke(link, id(5), {name: "Renamed"}, publicationId, "renamed");
+  f.advance(120_000);
+  await expect(f.invoke(link, id(5), {name: "Refused"}, publicationId, "refused")).rejects.toMatchObject(collectionMissing);
+  await expect(f.invoke(helper, id(6), {}, publicationId, "read-refused")).rejects.toMatchObject(collectionMissing);
+  expect(names((await f.invoke(owner, id(6))).result)).toEqual(["Moved", "Renamed", "Still moved"]);
+});
+
+it("looks for a root Collection's dataset.json at the workspace root", async () => {
+  const root = {...definition, schemaPath: "schema.sql", operationsPath: "operations.js"};
+  const f = await fixture(false, {revision: describeDatasetRevision({definition: root, revision: 1, schemaSql, operationSource}), schemaSql, operationSource});
+  await f.activate(); pushFile(f.storage, "dataset", null, collectionFile("dataset.json"));
+  const publicationId = f.publish(), link = f.link("friend");
+  await f.invoke(link, id(5), {name: "Root"}, publicationId, "root");
+  f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still root"}, publicationId, "still-root");
+  pushFile(f.storage, "dataset", collectionFile("dataset.json"), null);
+  await f.invoke(link, id(5), {name: "Deleted"}, publicationId, "deleted");
+  f.advance(120_000);
+  await expect(f.invoke(link, id(5), {name: "Gone"}, publicationId, "gone")).rejects.toMatchObject(collectionMissing);
+});
+
+it("checks a remembered dataset.json again after two seconds, and at once after a push or a reset", async () => {
+  const f = await fixture(); await f.activate(); pushFile(f.storage, "dataset", null, collectionFile());
+  const present = (nowMs: number) => collectionFilePresent(f.storage, "w", id(1), nowMs);
+  expect(present(10)).toBe(true);
+  // Another relay process's push leaves this process's answer in place.
+  f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_current_files WHERE workspace_id='w' AND path='registrations/dataset.json'").run());
+  expect(present(2_009)).toBe(true);
+  expect(present(2_010)).toBe(false);
+  pushFile(f.storage, "restored", null, collectionFile());
+  expect(present(2_011)).toBe(true);
+  f.storage.rotateWorkspaceIdentity({workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 1});
+  expect(present(2_012)).toBe(false);
 });

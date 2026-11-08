@@ -1121,6 +1121,138 @@ describe("agent moves and deletes", () => {
   });
 });
 
+describe("a folder with a live page", () => {
+  const refusal = [`dohc can't move "notes" while a page in it has live editing on`,
+    "In Live documents, stop live editing for every page in this folder, then move the folder again."].join(String.fromCharCode(10));
+  const deleteRefusal = [`dohc can't delete "notes" while a page in it has live editing on`,
+    "In Live documents, stop live editing for every page in this folder, then delete the folder again."].join(String.fromCharCode(10));
+  // A page this computer owns at notes/page.md. The engine refuses only a folder move or delete over it.
+  async function ownedFixture() {
+    const methods: string[] = [], checks: Array<{ path: string; change: string | undefined }> = [];
+    const f = await fixture({ beforeRequest: request => {
+      methods.push(request.method);
+      if (request.method !== VERSIONED_METHOD.textCheckMove) return;
+      const params = request.params as { path: string; change?: "movePage" | "moveFolder" | "delete" };
+      checks.push({ path: params.path, change: params.change });
+      if ((params.change === "moveFolder" || params.change === "delete") && "notes/page.md".startsWith(`${params.path}/`)) {
+        throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" }, null);
+      }
+    } });
+    await write(f.rootPath, "notes/page.md", "page");
+    await write(f.rootPath, "drafts/plain.md", "plain");
+    const seen = await f.start();
+    return { ...f, methods, checks, seen };
+  }
+
+  it("refuses the move from the app, the CLI and MCP, with no relay, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.move("notes", "moved")).toMatchObject({ ok: false, reason: refusal });
+    await expect(f.moveByHand("notes", "moved")).rejects.toMatchObject({ name: "LiveFolderError", message: refusal });
+    expect(f.checks.filter(check => check.path === "notes")).toEqual([{ path: "notes", change: "moveFolder" }, { path: "notes", change: "moveFolder" }]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    expect(existsSync(join(f.rootPath, "moved"))).toBe(false);
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
+  it("moves a folder with no live page, and a file move sends a page check", async () => {
+    const f = await ownedFixture();
+    expect(await f.move("drafts", "kept")).toMatchObject({ ok: true });
+    expect(await f.move("notes/page.md", "notes/renamed.md")).toMatchObject({ ok: true });
+    expect(f.checks).toContainEqual({ path: "drafts", change: "moveFolder" });
+    expect(f.checks.filter(check => check.path === "notes/page.md").every(check => check.change === "movePage")).toBe(true);
+    expect(await readFile(join(f.rootPath, "kept/plain.md"), "utf8")).toBe("plain");
+  });
+
+  it("refuses the delete from the app, the CLI and MCP, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.remove("notes")).toMatchObject({ ok: false, reason: deleteRefusal });
+    await expect(f.removeByHand("notes")).rejects.toMatchObject({ name: "LiveFolderError", message: deleteRefusal });
+    expect(f.checks.filter(check => check.path === "notes")).toEqual([{ path: "notes", change: "delete" }, { path: "notes", change: "delete" }]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
+  it("deletes a folder with no live page", async () => {
+    const f = await ownedFixture();
+    await f.removeByHand("drafts");
+    expect(existsSync(join(f.rootPath, "drafts"))).toBe(false);
+    expect(f.checks).toContainEqual({ path: "drafts", change: "delete" });
+  });
+});
+
+describe("a page this computer owns live", () => {
+  const refusal = [`dohc can't move "notes/page.md" while it has live editing on`,
+    "In Live documents, stop live editing for this page, then move it again."].join(String.fromCharCode(10));
+  const deleteRefusal = [`dohc can't delete "notes/page.md" while it has live editing on`,
+    "In Live documents, stop live editing for this page, then delete it again."].join(String.fromCharCode(10));
+  // The engine refuses only a page move or delete of notes/page.md.
+  async function ownedFixture() {
+    const methods: string[] = [], changes: Array<string | undefined> = [];
+    const f = await fixture({ beforeRequest: request => {
+      methods.push(request.method);
+      if (request.method !== VERSIONED_METHOD.textCheckMove) return;
+      const params = request.params as { path: string; change?: "movePage" | "moveFolder" | "delete" };
+      if (params.path === "notes/page.md") changes.push(params.change);
+      if ((params.change === "movePage" || params.change === "delete") && params.path === "notes/page.md") {
+        throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" }, null);
+      }
+    } });
+    await write(f.rootPath, "notes/page.md", "page");
+    await write(f.rootPath, "notes/plain.md", "plain");
+    const seen = await f.start();
+    return { ...f, methods, changes, seen };
+  }
+
+  it("refuses its move from the app, the CLI and MCP, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.move("notes/page.md", "notes/renamed.md")).toMatchObject({ ok: false, reason: refusal });
+    await expect(f.moveByHand("notes/page.md", "notes/renamed.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: refusal });
+    expect(f.changes).toEqual(["movePage", "movePage"]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    expect(existsSync(join(f.rootPath, "notes/renamed.md"))).toBe(false);
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
+  it("refuses its delete from the app, the CLI and MCP, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.remove("notes/page.md")).toMatchObject({ ok: false, reason: deleteRefusal });
+    await expect(f.removeByHand("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: deleteRefusal });
+    expect(f.changes).toEqual(["delete", "delete"]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
+  // A control character is the only name History can't address that a move
+  // admits, and Windows refuses those names.
+  it.skipIf(process.platform === "win32")("refuses an agent's move to a path History can't address", async () => {
+    const f = await ownedFixture();
+    expect(await f.move("notes/page.md", "notes/bell\u0007.md")).toMatchObject({ ok: false, reason: refusal });
+    expect(f.changes).toEqual(["movePage"]);
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+  });
+
+  it("deletes another page, which sends its own delete check", async () => {
+    const f = await ownedFixture();
+    await f.removeByHand("notes/plain.md");
+    expect(existsSync(join(f.rootPath, "notes/plain.md"))).toBe(false);
+    expect(f.changes).toEqual([]);
+  });
+});
+
 describe("agent move and delete admission", () => {
   // Runs the admission inside a stand-in for the capture seam and fails the
   // test if anything is recorded or the disk is touched.
@@ -1350,14 +1482,14 @@ describe("a person's delete", () => {
     } finally { await f.engine().stop(); }
   });
 
-  it("trashes the entry recoverably without History when capture is unavailable", async () => {
+  it("trashes an ordinary file recoverably without History when capture is unavailable", async () => {
     const f = await fixture();
-    await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
+    await write(f.rootPath, "tasks/hand.txt", "Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/hand.md", null)).toMatchObject({ trashed: true });
-      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
-      expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
+      expect(await f.removeByHand("tasks/hand.txt", null)).toMatchObject({ trashed: true });
+      expect(await readFile(join(f.systemTrash, "hand.txt"), "utf8")).toBe("Hand made\n");
+      expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.txt");
       expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
     } finally { await f.engine().stop(); }
   });
@@ -1678,4 +1810,24 @@ it("cleans an exact root head that becomes oversized under the capture hold", as
     expect(await f.engine().fileObjectIdForPath("b.txt")).toBeNull();
     expect((await readFile(join(f.rootPath, "b.txt"))).length).toBe(11 * 1024 * 1024);
   } finally { await f.engine().stop(); }
+});
+
+describe("a restore of a page this computer owns live", () => {
+  it("refuses removing it to before its creation with the restore words, and keeps the page", async () => {
+    // The engine refuses the delete a restore to before creation runs.
+    const f = await fixture({ beforeRequest: request => {
+      if (request.method === VERSIONED_METHOD.textDelete) {
+        throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" }, null);
+      }
+    } });
+    await write(f.rootPath, "notes/page.md", "page");
+    await f.start();
+    try {
+      const created = (await f.rows()).find(row => row.path === "notes/page.md" && row.operation === "write")!;
+      await expect(f.engine().restoreFileToBeforeMoment(created.id, person)).rejects.toMatchObject({ name: "LivePageOwnedError",
+        message: [`dohc can't restore "notes/page.md" while it has live editing on`,
+          "In Live documents, stop live editing for this page, then restore it again."].join(String.fromCharCode(10)) });
+      expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    } finally { await f.engine().stop(); }
+  });
 });

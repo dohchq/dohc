@@ -166,6 +166,8 @@ win:
     - ext: [md, markdown, txt, csv, json]
       name: dohc workspace document
       description: Open with dohc
+nsis:
+  include: build/installer.nsh
 linux:
   # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
   # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
@@ -184,6 +186,13 @@ linux:
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
   syncDesktopName: true
+  # GLib launchers request an activation token only with StartupNotify;
+  # GNOME on Wayland needs that token to raise a running window. On X11,
+  # Electron never ends the startup sequence, so every launcher start keeps
+  # the busy cursor until the desktop's timeout, about 15 s on GNOME.
+  desktop:
+    entry:
+      StartupNotify: "true"
 appImage:
   # electron-builder's default AppImage desktop entry passes --no-sandbox.
   # Menu launches, dohc:// links and opened files keep the Chromium sandbox.

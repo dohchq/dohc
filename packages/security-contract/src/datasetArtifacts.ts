@@ -46,6 +46,15 @@ export function describeDatasetRevision(input: {
   return revision;
 }
 
+/**
+ * What a person agrees to when they apply a change someone asked them to
+ * apply: the revision it creates and the migration that gets there. The host
+ * refuses an approval that names another digest.
+ */
+export function datasetChangeDigest(input: { revisionSha256: string; migrationSql: string }): string {
+  return hash(JSON.stringify(["dohc-dataset-change-v1", input.revisionSha256, hash(input.migrationSql)]));
+}
+
 /** Verify captured bytes, not paths that may have changed since preparation. */
 export function verifyDatasetArtifacts(input: {
   revision: DatasetRevision;

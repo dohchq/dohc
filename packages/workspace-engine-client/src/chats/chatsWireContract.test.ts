@@ -18,6 +18,7 @@ describe("chats result decoder rejection", () => {
       runId: "run-prototype-key",
       threadId: "thread",
       triggerMessageId: "trigger",
+      agentId: "default",
       command: "agent",
       startedAtMs: 1,
       failureHandled: false,
@@ -282,6 +283,18 @@ describe("link messages", () => {
       mentions: [{ threadId: "t", messageId: "m", handle: "ada", authorKind: "link", createdAtMs: 1 }],
       nextCursor: null,
     }).mentions[0]?.authorKind).toBe("link");
+  });
+
+  it("decodes an agent's link message with its connection, and only on a link author", () => {
+    const agent = { ...linkAuthor, displayName: "Helper", agentConnectionId: "connection-1" };
+    expect(decodeChatMessage({ ...linkMessage, author: agent }).author).toEqual(agent);
+    for (const author of [
+      { ...agent, agentConnectionId: "" },
+      { kind: "human", displayName: "Ada", agentConnectionId: "connection-1" },
+      { kind: "agent", displayName: "Helper", agentConnectionId: "connection-1" },
+    ]) {
+      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(ProtocolShapeError);
+    }
   });
 
   it("rejects a link message that names an account or lacks its link", () => {

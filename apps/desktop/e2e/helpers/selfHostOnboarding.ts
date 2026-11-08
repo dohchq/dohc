@@ -1,10 +1,10 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import type { Duplex } from "node:stream";
+import { Transform, type Duplex, type Readable } from "node:stream";
 import { createRequire } from "node:module";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
 import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { parseStoredShareSelectorJson } from "../../../../services/sync-relay/src/shareFilter";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
+import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
 import { readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
 
@@ -30,9 +31,12 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * `live` serves the stack over HTTPS from a fixture CA and runs the self-host
  * live service with the native engine. `trustEnv` is the environment a desktop
  * needs to trust that CA: Node reads it, and the debug engine accepts it only
- * for an HTTPS loopback relay.
+ * for an HTTPS loopback relay. `refuse` answers matching requests with 503
+ * before they reach a service.
  */
-export async function startSelfHostOnboardingStack(directory: string, options: { live?: boolean; signal: AbortSignal }) {
+export async function startSelfHostOnboardingStack(directory: string, options: {
+  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean;
+}) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
   const ca = options.live ? await mintLocalhostCa(directory) : undefined;
@@ -43,24 +47,30 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
     ? { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1", DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
       DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" }
     : {};
-  const proxy = await startServerProxy(ca);
+  const proxy = await startServerProxy(ca, options.refuse ? { refuse: options.refuse } : {});
+  let account: Awaited<ReturnType<typeof startAccountServer>> | undefined;
   let relay: Awaited<ReturnType<typeof startAuthenticatedRelay>> | undefined;
   try {
+    // The account server applies the migrations whose tables the relay reads as it starts.
+    account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
+    proxy.routeAuthTo(account.listenOrigin);
     relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin) } : {});
     proxy.routeRelayTo(relay.url);
-    const account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
-    proxy.routeAuthTo(account.listenOrigin);
     return {
       account,
       ca,
       trustEnv,
       relayUrl: proxy.origin,
+      pause: () => proxy.pause(),
+      resume: () => proxy.resume(),
+      outageState: () => proxy.outageState(),
       // The relay's recent console output, such as a failed service host pass,
       // for a failure report. Bearer values are removed.
       relayOutput: () => relay!.output().replace(/(bearer\s+)\S+/giu, "$1[redacted]"),
       // Counts and cursors only, for a failure report: the live settlements the
       // service host made, held for export, or journaled, and those the relay holds.
       settlementEvidence: () => settlementEvidence(directory),
+      livePublication: (workspaceId: string, path: string) => livePublication(directory, workspaceId, path),
       // The document's accepted change just before a named account's first live
       // edit, the restore point that keeps everything the account did not write.
       acceptedCursorBefore: (workspaceId: string, path: string, principalId: string) =>
@@ -71,13 +81,13 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
         hostedAgentEvidence(directory, workspaceId, path, agentId),
       ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
       async close() {
-        const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
+        const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
         if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Self-host services did not close.");
       },
     };
   } catch (error) {
-    await Promise.allSettled([proxy.close(), relay?.close()]);
+    await Promise.allSettled([proxy.close(), relay?.close(), account?.close()]);
     throw error;
   }
 }
@@ -111,29 +121,69 @@ export class HostedLogClientClosedError extends Error {
 
 interface PendingHostedLogResponse extends HostedLogResponseBarrier {
   workspaceId: string;
-  hold(incoming: IncomingMessage, outgoing: ServerResponse): void;
+  hold(incoming: IncomingMessage, outgoing: ServerResponse, body: Readable): void;
   attach(outgoing: ServerResponse): void;
   receive(response: IncomingMessage): void;
   fail(error: Error): void;
 }
 
+// Passes each chunk on `delayMs` after it arrived, in order.
+function delayedStream(delayMs: number): Transform {
+  const queue: Array<{ chunk: Buffer; due: number }> = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let flushed: (() => void) | undefined;
+  const stream: Transform = new Transform({
+    transform(chunk: Buffer, _encoding, done) { queue.push({ chunk, due: performance.now() + delayMs }); schedule(); done(); },
+    flush(done) { flushed = done; schedule(); },
+    destroy(error, done) { clearTimeout(timer); queue.length = 0; done(error); },
+  });
+  function schedule() {
+    if (timer !== undefined) return;
+    if (!queue.length) { flushed?.(); flushed = undefined; return; }
+    timer = setTimeout(() => {
+      timer = undefined;
+      const now = performance.now();
+      while (queue.length && queue[0]!.due <= now) stream.push(queue.shift()!.chunk);
+      schedule();
+    }, Math.max(0, queue[0]!.due - performance.now()));
+  }
+  return stream;
+}
+
+/** `delayMs` delays every request, response, upgrade and socket chunk by that much each way. */
 export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
   collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
+  refuse?(method: string, path: string): boolean;
+  delayMs?: number;
 } = {}) {
+  let delayMs = options.delayMs ?? 0;
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
   let nextHostedLog: PendingHostedLogResponse | undefined;
   let holdingHostedLog: PendingHostedLogResponse | undefined;
+  let paused = false;
+  let refusedRequests = 0;
+  let refusedUpgrades = 0;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
-  const forward: RequestListener = (incoming, outgoing) => {
+  const delayed: RequestListener = (incoming, outgoing) => {
+    const wait = delayMs;
+    if (wait <= 0) { forward(incoming, outgoing, incoming, 0); return; }
+    // The body's delay runs from its arrival, alongside the headers', so a
+    // buffered body crosses once.
+    const body = incoming.pipe(delayedStream(wait));
+    setTimeout(() => forward(incoming, outgoing, body, wait), wait);
+  };
+  const forward = (incoming: IncomingMessage, outgoing: ServerResponse, body: Readable, wait: number) => {
+    if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
     const path = incoming.url ?? "/";
+    if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
     const hostedWorkspace = incoming.method === "GET"
       ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
     const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace
       ? holdingHostedLog : undefined;
-    if (holding) { holding.hold(incoming, outgoing); return; }
+    if (holding) { holding.hold(incoming, outgoing, body); return; }
     const barrier = nextHostedLog && encodeURIComponent(nextHostedLog.workspaceId) === hostedWorkspace
       ? nextHostedLog : undefined;
     if (barrier) { nextHostedLog = undefined; barrier.attach(outgoing); }
@@ -146,7 +196,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     const intercept = options.collectionWriteResponse && incoming.method === "POST"
       && /^\/sync\/shares\/[^/]+\/collection-writes$/u.test(path);
     const requestChunks: Buffer[] = [];
-    if (intercept) incoming.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
+    if (intercept) body.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
     const upstream = requestHttp(new URL(path, target), { method: incoming.method, headers: incoming.headers }, (response) => {
       if (barrier) { barrier.receive(response); return; }
       if (intercept) {
@@ -165,9 +215,15 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
         });
         return;
       }
+      response.on("error", () => outgoing.destroy());
+      if (wait > 0) {
+        const later = delayedStream(wait);
+        setTimeout(() => { outgoing.writeHead(response.statusCode ?? 502, response.headers); later.pipe(outgoing); }, wait);
+        response.pipe(later);
+        return;
+      }
       outgoing.writeHead(response.statusCode ?? 502, response.headers);
       response.pipe(outgoing);
-      response.on("error", () => outgoing.destroy());
     });
     upstreams.add(upstream);
     upstream.once("close", () => upstreams.delete(upstream));
@@ -180,25 +236,47 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       upstream.destroy();
     });
     incoming.on("error", error => { barrier?.fail(error); upstream.destroy(); });
-    incoming.pipe(upstream);
+    body.pipe(upstream);
   };
-  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, forward) : createHttpServer(forward);
+  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, delayed) : createHttpServer(delayed);
   server.on("upgrade", (incoming, socket, head) => {
+    const wait = delayMs;
+    if (wait > 0) {
+      // The client may send its first frames before the delayed upgrade starts.
+      socket.pause();
+      setTimeout(() => upgrade(incoming, socket, head, wait), wait);
+    } else upgrade(incoming, socket, head, 0);
+  });
+  const upgrade = (incoming: IncomingMessage, socket: Duplex, head: Buffer, wait: number) => {
+    if (paused) { refusedUpgrades++; socket.destroy(); return; }
     const target = route(incoming.url ?? "/");
     if (!target) { socket.destroy(); return; }
     upgraded.add(socket);
     socket.once("close", () => upgraded.delete(socket));
     const upstream = requestHttp(new URL(incoming.url ?? "/", target), { method: incoming.method, headers: incoming.headers });
+    upstreams.add(upstream);
+    upstream.once("close", () => upstreams.delete(upstream));
     const answer = (response: IncomingMessage) => {
       const lines = [`HTTP/1.1 ${response.statusCode} ${response.statusMessage}`];
       for (let index = 0; index < response.rawHeaders.length; index += 2) lines.push(`${response.rawHeaders[index]}: ${response.rawHeaders[index + 1]}`);
       return `${lines.join("\r\n")}\r\n\r\n`;
     };
     upstream.once("upgrade", (response, relaySocket, relayHead) => {
+      if (paused) { relaySocket.destroy(); socket.destroy(); return; }
       upgraded.add(relaySocket);
       relaySocket.once("close", () => { upgraded.delete(relaySocket); socket.destroy(); });
       socket.once("close", () => relaySocket.destroy());
       relaySocket.on("error", () => relaySocket.destroy());
+      if (wait > 0) {
+        const down = delayedStream(wait), up = delayedStream(wait);
+        down.write(Buffer.from(answer(response)));
+        down.write(relayHead);
+        up.write(head);
+        relaySocket.pipe(down).pipe(socket);
+        socket.pipe(up).pipe(relaySocket);
+        socket.resume();
+        return;
+      }
       socket.write(answer(response));
       socket.write(relayHead);
       relaySocket.write(head);
@@ -209,12 +287,24 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
     upstream.end();
-  });
+  };
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   return {
     origin: `${tls ? "https" : "http"}://127.0.0.1:${address.port}`,
+    pause() {
+      paused = true;
+      nextHostedLog?.destroy();
+      holdingHostedLog?.destroy();
+      for (const request of upstreams) request.destroy();
+      for (const socket of upgraded) socket.destroy();
+      server.closeAllConnections();
+    },
+    resume() { paused = false; },
+    /** Applies to requests and upgrades that start after the call. */
+    setDelayMs(value: number) { delayMs = value; },
+    outageState() { return { paused, refusedRequests, refusedUpgrades, upstreams: upstreams.size, upgraded: upgraded.size }; },
     routeAuthTo(url: string) { authInternalUrl = url; },
     routeRelayTo(url: string) { relayUrl = url; },
     /** Buffers the next real hosted-log response for this workspace until released. */
@@ -232,10 +322,10 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       let outgoing: ServerResponse | undefined;
       let buffered: ProxiedHostedLogResponse | undefined;
       let released = false;
-      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse }> = [];
+      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse; body: Readable }> = [];
       const barrier: PendingHostedLogResponse = {
         workspaceId, captured, delivered,
-        hold(incoming, outgoing) { held.push({ incoming, outgoing }); },
+        hold(incoming, outgoing, body) { held.push({ incoming, outgoing, body }); },
         attach(destination) {
           outgoing = destination;
           if (!released) holdingHostedLog = barrier;
@@ -274,7 +364,7 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
             outgoing = undefined;
           }
           for (const request of held.splice(0)) {
-            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing);
+            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing, request.body, 0);
           }
         },
         fail(error) {
@@ -396,8 +486,10 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
      WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
   ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
   const hostRoot = join(directory, "relay-deployment", "live-host");
+  // The relay makes a store's folder before the service host creates its engine database.
   const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-    .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+    .flatMap((file) => read(file, (db) => relay.map((change) => ({
       deliveryId: change.deliveryId,
       accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
           json_extract(metadata_json,'$.accepted') AS accepted, json_extract(metadata_json,'$.authorSnapshot') AS authorSnapshot FROM live_accepted_updates
@@ -419,7 +511,8 @@ function settlementEvidence(directory: string) {
   const hostRoot = join(directory, "relay-deployment", "live-host");
   return {
     host: readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-      .map((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => ({
+      .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+      .map((file) => read(file, (db) => ({
         settled: cursors(db, "SELECT terminal_cursor AS cursor FROM live_device_settlements ORDER BY terminal_cursor"),
         heldForExport: Number(db.prepare("SELECT COUNT(*) AS n FROM live_audit_pending_exports").get()?.n ?? 0),
         journaled: cursors(db, `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log
@@ -456,6 +549,33 @@ function settlementEvidence(directory: string) {
   };
 }
 
+// How far the server's live work on one document has gone: the relay's
+// accepted head, the last cursor the service host settled, the host's
+// operations not yet pushed, and each host origin's last operation in the
+// relay log. Cursors and counts only.
+function livePublication(directory: string, workspaceId: string, path: string) {
+  const read = <T>(file: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try { return query(db); } finally { db.close(); }
+  };
+  const count = (db: InstanceType<typeof DatabaseSync>, sql: string, ...params: string[]) => Number(db.prepare(sql).get(...params)?.n ?? 0);
+  const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => ({
+    acceptedHead: count(db, "SELECT COALESCE(MAX(journal_cursor),0) AS n FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?", workspaceId, path),
+    hostOrigins: Object.fromEntries(db.prepare(
+      "SELECT origin_id AS origin, MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id=? AND origin_id LIKE 'service-host:%' GROUP BY origin_id",
+    ).all(workspaceId).map((row) => [String(row.origin), Number(row.seq)])),
+  }));
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  const hosts = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
+    .map((file) => read(file, (db) => ({
+      settledThrough: count(db, "SELECT COALESCE(MAX(terminal_cursor),0) AS n FROM live_device_settlements"),
+      unpushed: count(db, `SELECT COUNT(*) AS n FROM replication_log l LEFT JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+        WHERE l.imported=0 AND l.origin_seq>COALESCE(p.pushed_seq,-1)`),
+    })));
+  return { ...relay, hosts };
+}
+
 // The supported self-host profile: an initialized deployment whose service
 // host runs the native engine and replicates through the public HTTPS origin.
 function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
@@ -472,6 +592,8 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     // The live host requires canonical paths.
     DOHC_RELAY_SERVICE_HOST_ROOT: realpathSync.native(join(deployment, "live-host")),
     DOHC_RELAY_ENGINE_EXECUTABLE: realpathSync.native(resolveEngineBinary()),
+    // The self-host image gives the service host a Markdown reader. Without one it holds every lossy rewrite.
+    DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
     DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
     DOHC_RELAY_SHARE_WEB_ORIGIN: origin,

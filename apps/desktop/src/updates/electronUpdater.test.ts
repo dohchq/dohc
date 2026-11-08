@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   debInstallFailure,
   publicUpdateState,
@@ -7,7 +10,7 @@ import {
   updateFeedOverride,
   type AutoUpdateController,
 } from "./electronUpdater";
-import { initialUpdateState, transition } from "./updateMachine";
+import { initialUpdateState, transition, type UpdateEvent } from "./updateMachine";
 import { deferred } from "../testing/deferred";
 import { UpdateStateEvent } from "../ipc/bridgeContract";
 
@@ -34,7 +37,9 @@ function fakeUpdater() {
     forceDevUpdateConfig: undefined as boolean | undefined,
     setFeedURL: vi.fn(),
     checkForUpdates: vi.fn(async () => undefined),
+    downloadUpdate: vi.fn(async (): Promise<unknown> => undefined),
     quitAndInstall: vi.fn(),
+    install: vi.fn((_isSilent?: boolean, _isForceRunAfter?: boolean): boolean => false),
     on: vi.fn((eventName: string, listener: Listener) => {
       listeners.set(eventName, [...(listeners.get(eventName) ?? []), listener]);
     }),
@@ -45,29 +50,63 @@ function fakeUpdater() {
   // electron-updater's quitAndInstall is ONE-SHOT: a
   // second call returns without quitting. The double models the latch so a
   // test can never pass by relying on a re-call the dependency ignores.
+  // install() spends the same latch.
   let quitAndInstallLatched = false;
   updater.quitAndInstall.mockImplementation(() => {
     if (quitAndInstallLatched) return;
     quitAndInstallLatched = true;
     updater.emit("before-quit-for-update");
   });
+  updater.install.mockImplementation(() => {
+    if (quitAndInstallLatched) return false;
+    quitAndInstallLatched = true;
+    return true;
+  });
   return updater;
+}
+
+// dohc's quit handler runs first. electron-updater's own install on quit
+// (BaseUpdater.addQuitHandler) runs after it: a silent install that does not
+// open dohc again, skipped once an install started or on an error exit.
+function fakeApp(updater: ReturnType<typeof fakeUpdater>) {
+  const handlers: ((exitCode: number) => void)[] = [];
+  return {
+    quit: vi.fn(),
+    onQuit: (handler: (exitCode: number) => void) => {
+      handlers.push(handler);
+    },
+    exit(exitCode: number) {
+      for (const handler of handlers) handler(exitCode);
+      if (updater.autoInstallOnAppQuit && exitCode === 0) updater.install(true, false);
+    },
+  };
+}
+
+// The installs that started, with their (isSilent, isForceRunAfter).
+function startedInstalls(updater: ReturnType<typeof fakeUpdater>): unknown[][] {
+  return updater.install.mock.calls.filter((_call, index) => updater.install.mock.results[index]?.value === true);
 }
 
 async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterActive?: () => boolean }, options: {
   isPackaged?: boolean;
   env?: NodeJS.ProcessEnv;
   currentVersion?: string;
-  quitForStagedRestart?: () => void;
+  app?: ReturnType<typeof fakeApp>;
+  restartApproved?: () => boolean;
+  stateDir?: string;
   platform?: NodeJS.Platform;
 } = {}): Promise<AutoUpdateController | null> {
+  const app = options.app ?? fakeApp(updater);
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
     env: options.env ?? {},
     currentVersion: options.currentVersion ?? "1.2.3",
     startupDelayMs: 60 * 60_000,
     pollIntervalMs: 60 * 60_000,
-    quitForStagedRestart: options.quitForStagedRestart,
+    quit: app.quit,
+    onQuit: app.onQuit,
+    restartApproved: options.restartApproved,
+    stateDir: options.stateDir,
     importUpdater: async () => ({ autoUpdater: updater }),
     platform: options.platform ?? "win32",
   });
@@ -103,7 +142,7 @@ describe("electron updater configuration", () => {
 
     expect(controller).not.toBeNull();
     expect(updater.setFeedURL).not.toHaveBeenCalled();
-    expect(updater.autoDownload).toBe(true);
+    expect(updater.autoDownload).toBe(false);
     expect(updater.autoInstallOnAppQuit).toBe(true);
     expect(updater.channel).toBe("latest");
     expect(updater.allowPrerelease).toBe(false);
@@ -149,8 +188,10 @@ describe("electron updater configuration", () => {
     const updater = fakeUpdater();
     const controller = await startWith(updater, { platform: "linux" });
     expect(updater.autoInstallOnAppQuit).toBe(false);
-    expect(updater.autoDownload).toBe(true);
+    expect(updater.autoDownload).toBe(false);
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
     expect((await controller!.installUpdate()).accepted).toBe(true);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
@@ -247,6 +288,25 @@ describe("electron updater release without this platform's files", () => {
 });
 
 describe("electron updater actions", () => {
+  it("on macOS, offers the download again when Squirrel cannot stage it", async () => {
+    const updater = fakeUpdater();
+    const controller = (await startWith(updater, { platform: "darwin" }))!;
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    const staging = new Error("Code signature at URL did not pass validation");
+    // Squirrel's error, then the same error as the download's rejection.
+    updater.emit("error", staging);
+    updater.emit("error", staging);
+    expect(controller.publicState()).toMatchObject({
+      status: "available",
+      message: expect.stringContaining("Code signature"),
+      failure: { step: "download", id: 1 },
+    });
+    expect(controller.downloadUpdate().accepted).toBe(true);
+  });
+
   it("coalesces repeated checks while one is active", async () => {
     const updater = fakeUpdater();
     const check = deferred<undefined>();
@@ -289,10 +349,10 @@ describe("electron updater actions", () => {
   // lost — electron-updater installs it on the next quit — so a second
   // request completes it by quitting, and this is MAIN's fact to hold, not a
   // renderer module variable a reload resets.
-  it("installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
+  it("on macOS, installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
-    const quitForStagedRestart = vi.fn();
-    const controller = await startWith(updater, { quitForStagedRestart });
+    const app = fakeApp(updater);
+    const controller = await startWith(updater, { app, platform: "darwin" });
     expect(controller).not.toBeNull();
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -300,19 +360,79 @@ describe("electron updater actions", () => {
     });
 
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
-    expect(quitForStagedRestart).not.toHaveBeenCalled();
+    expect(app.quit).not.toHaveBeenCalled();
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
-    expect(quitForStagedRestart).toHaveBeenCalledTimes(1);
+    expect(app.quit).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall, "one-shot: drop the restartStaged branch so quitAndInstall runs again. electron-updater ignores it, and the app never quits.").toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+  });
+
+  // Windows' installer closes dohc by force about a second after it starts,
+  // so it starts only once dohc has quit, and a window can still go back.
+  describe("on Windows", () => {
+    async function ready(options: { restartApproved?: () => boolean } = {}) {
+      const updater = fakeUpdater();
+      const app = fakeApp(updater);
+      const controller = (await startWith(updater, { app, ...options }))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      controller.downloadUpdate();
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      return { updater, app, controller };
+    }
+
+    it("quits on Restart to update, then starts the installer that opens dohc again", async () => {
+      const { updater, app, controller } = await ready();
+      await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
+      expect(app.quit).toHaveBeenCalledOnce();
+      expect(updater.install).not.toHaveBeenCalled();
+      expect(updater.quitAndInstall).not.toHaveBeenCalled();
+      // A window went back, so dohc did not quit. Restart quits again.
+      await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
+      expect(app.quit).toHaveBeenCalledTimes(2);
+      expect(updater.install).not.toHaveBeenCalled();
+
+      app.exit(0);
+      expect(startedInstalls(updater)).toEqual([[false, true]]);
+    });
+
+    it("after a window goes back, a later quit installs without opening dohc again", async () => {
+      let approved = true;
+      const { updater, app, controller } = await ready({ restartApproved: () => approved });
+      await controller.installUpdate();
+      approved = false;
+      app.exit(0);
+      expect(startedInstalls(updater)).toEqual([[true, false]]);
+    });
+
+    it("installs on an ordinary quit as before, and nothing on an error exit", async () => {
+      const ordinary = await ready();
+      ordinary.app.exit(0);
+      expect(startedInstalls(ordinary.updater)).toEqual([[true, false]]);
+
+      const failed = await ready();
+      await failed.controller.installUpdate();
+      failed.app.exit(1);
+      expect(failed.updater.install).not.toHaveBeenCalled();
+    });
+
+    it("starts the installer after the controller stops, as launch recovery's does", async () => {
+      const { updater, app, controller } = await ready();
+      await controller.installUpdate();
+      controller.stop();
+      app.exit(0);
+      expect(startedInstalls(updater)).toEqual([[false, true]]);
+    });
   });
 
   it("bounds progress exposed to the renderer", async () => {
@@ -322,6 +442,7 @@ describe("electron updater actions", () => {
 
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("download-progress", { percent: 150 });
 
     expect(controller!.publicState()).toMatchObject({
@@ -330,15 +451,85 @@ describe("electron updater actions", () => {
     });
   });
 
+  it("downloads only when a person asks, once", async () => {
+    const updater = fakeUpdater();
+    const controller = (await startWith(updater))!;
+    expect(controller.downloadUpdate()).toMatchObject({ accepted: false, state: { status: "idle" } });
+
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    expect(controller.publicState()).toMatchObject({ status: "available", version: "1.2.4", message: "dohc 1.2.4 is available." });
+    expect(updater.downloadUpdate).not.toHaveBeenCalled();
+    // Nothing a download did not start can install.
+    await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: false });
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect(controller.publicState().status).toBe("available");
+
+    expect(controller.downloadUpdate()).toMatchObject({ accepted: true, state: { status: "downloading" } });
+    expect(controller.downloadUpdate()).toMatchObject({ accepted: false });
+    expect(updater.downloadUpdate).toHaveBeenCalledOnce();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect(controller.publicState()).toMatchObject({ status: "ready", canInstall: true });
+    expect(updater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("returns a failed download to Update, with the step that failed", async () => {
+    // The updater emits "error" and rejects; a rejection alone still ends the download.
+    for (const emits of [true, false]) {
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      updater.downloadUpdate.mockImplementationOnce(async () => {
+        const error = new Error("sha512 checksum mismatch\nheaders");
+        if (emits) updater.emit("error", error);
+        throw error;
+      });
+      controller.downloadUpdate();
+      await vi.waitFor(() => expect(controller.publicState()).toMatchObject({
+        status: "available",
+        message: "sha512 checksum mismatch",
+        failure: { step: "download" },
+      }));
+      // Trying again clears the failure while it runs.
+      expect(controller.downloadUpdate().state).not.toHaveProperty("failure");
+    }
+  });
+
+  it("toasts a background check failure once, and every failure a person asked for", async () => {
+    const updater = fakeUpdater();
+    failChecksWith(updater, new Error("feed returned 500"));
+    const controller = (await startWith(updater))!;
+    await controller.checkForUpdates();
+    const first = controller.publicState().failure;
+    expect(first).toMatchObject({ step: "check" });
+    expect(controller.publicState().message).toBe("feed returned 500");
+    await controller.checkForUpdates();
+    expect(controller.publicState().failure).toEqual(first);
+    await controller.checkForUpdates(true);
+    const asked = controller.publicState().failure;
+    expect(asked?.id).toBeGreaterThan(first!.id);
+    failChecksWith(updater, new Error("feed returned 503"));
+    await controller.checkForUpdates();
+    expect(controller.publicState().failure?.id).toBeGreaterThan(asked!.id);
+    // Offline is not a failure to report.
+    failChecksWith(updater, new Error("net::ERR_INTERNET_DISCONNECTED"));
+    await controller.checkForUpdates();
+    expect(controller.publicState()).toMatchObject({ status: "offline" });
+    expect(controller.publicState()).not.toHaveProperty("failure");
+  });
+
   it("reports quitAndInstall failures as rejected restart requests", async () => {
     const updater = fakeUpdater();
     updater.quitAndInstall.mockImplementationOnce(() => {
       throw new Error("quit failed");
     });
-    const controller = await startWith(updater);
+    const controller = await startWith(updater, { platform: "darwin" });
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -346,7 +537,8 @@ describe("electron updater actions", () => {
       state: {
         status: "ready",
         canInstall: true,
-        message: "Could not restart into the update.",
+        message: "quit failed",
+        failure: { step: "install" },
       },
     });
   });
@@ -356,10 +548,13 @@ describe("electron updater actions", () => {
     updater.quitAndInstall.mockImplementationOnce(() => {
       updater.emit("error", new Error("quit failed"));
     });
-    const controller = await startWith(updater);
+    // Windows installs on the quit, and on macOS an error while ready is a failed staging.
+    const controller = await startWith(updater, { platform: "linux" });
     expect(controller).not.toBeNull();
 
     updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4" });
+    controller!.downloadUpdate();
     updater.emit("update-downloaded", { version: "1.2.4" });
 
     await expect(controller!.installUpdate()).resolves.toMatchObject({
@@ -367,7 +562,8 @@ describe("electron updater actions", () => {
       state: {
         status: "ready",
         canInstall: true,
-        message: "Could not restart into the update.",
+        message: "quit failed",
+        failure: { step: "install" },
       },
     });
   });
@@ -377,15 +573,17 @@ describe("electron updater actions", () => {
     const install = `sudo apt install '${deb}'`;
     // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
     for (const [error, message, installCommand] of [
-      ["Command pkexec exited with code 126", "The update did not install without your password. Choose Restart to try again.", undefined],
-      ["Command pkexec exited with code 127", "dohc did not get permission to install the update. Run this command in a terminal to install it.", install],
-      ["Command sudo exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
-      ["Command pkexec exited with code 1", "The update did not install. Run this command in a terminal to install it.", install],
+      ["Command pkexec exited with code 126", "The update needs your password.", undefined],
+      ["Command pkexec exited with code 127", "dohc did not get permission. Run this command in a terminal to install it.", install],
+      ["Command sudo exited with code 1", "Run this command in a terminal to install it.", install],
+      ["Command pkexec exited with code 1", "Run this command in a terminal to install it.", install],
     ] as const) {
       const updater = fakeUpdater();
       updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error(error)));
       const controller = await startWith(updater, { platform: "linux" });
       updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4", downloadedFile: deb });
+      controller!.downloadUpdate();
       updater.emit("update-downloaded", { version: "1.2.4", downloadedFile: deb });
 
       const result = await controller!.installUpdate();
@@ -397,18 +595,20 @@ describe("electron updater actions", () => {
     }
   });
 
-  it("keeps the generic install failure for a Linux AppImage and on Windows", async () => {
-    for (const [platform, downloadedFile] of [["linux", "/home/sam/dohc-1.2.4-linux-x86_64.AppImage"], ["win32", "C:/Users/sam/dohc-1.2.4.exe"]] as const) {
-      const updater = fakeUpdater();
-      updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
-      const controller = await startWith(updater, { platform });
-      updater.emit("checking-for-update");
-      updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
+  it("keeps the generic install failure for a Linux AppImage", async () => {
+    const downloadedFile = "/home/sam/dohc-1.2.4-linux-x86_64.AppImage";
+    const updater = fakeUpdater();
+    updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
+    const controller = await startWith(updater, { platform: "linux" });
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version: "1.2.4", downloadedFile });
+    controller!.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
 
-      const result = await controller!.installUpdate();
-      expect(result, platform).toMatchObject({ accepted: false, reason: "Could not restart into the update.", state: { message: "Could not restart into the update." } });
-      expect(result.state.installCommand, platform).toBeUndefined();
-    }
+    const result = await controller!.installUpdate();
+    const cause = "Command pkexec exited with code 127";
+    expect(result).toMatchObject({ accepted: false, reason: cause, state: { message: cause, failure: { step: "install" } } });
+    expect(result.state.installCommand).toBeUndefined();
   });
 
   it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
@@ -416,11 +616,12 @@ describe("electron updater actions", () => {
       .toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
     // A Linux path is at most 4,096 bytes; quoting makes each ' four characters.
     const longest = debInstallFailure(new Error("Command sudo exited with code 1"), `/${"'".repeat(4095)}`).installCommand;
-    expect(UpdateStateEvent.parse({ status: "ready", message: "The update did not install.", installCommand: longest }).installCommand).toBe(longest);
+    expect(UpdateStateEvent.parse({ status: "ready", message: "Run this command in a terminal to install it.", installCommand: longest }).installCommand).toBe(longest);
   });
 
   describe("awaitUpdate", () => {
     const bounds = { verdictMs: 15_000, downloadMs: 300_000 };
+    const yes = async () => true;
 
     it("checks now and resolves with the version once it downloads", async () => {
       const updater = fakeUpdater();
@@ -430,8 +631,15 @@ describe("electron updater actions", () => {
       });
       const controller = (await startWith(updater))!;
       const onDownloading = vi.fn();
-      const waiting = controller.awaitUpdate(bounds, onDownloading);
-      await vi.waitFor(() => expect(controller.state().status).toBe("available"));
+      const answer = deferred<boolean>();
+      const confirmDownload = vi.fn(() => answer.promise);
+      const waiting = controller.awaitUpdate(bounds, confirmDownload, onDownloading);
+      // Nothing downloads until the person answers.
+      await vi.waitFor(() => expect(confirmDownload).toHaveBeenCalledWith("1.2.4"));
+      expect(updater.downloadUpdate).not.toHaveBeenCalled();
+      answer.resolve(true);
+      await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
+      expect(updater.downloadUpdate).toHaveBeenCalledOnce();
       expect(onDownloading).toHaveBeenCalledWith("1.2.4");
       updater.emit("download-progress", { percent: 50 });
       updater.emit("update-downloaded", { version: "1.2.4" });
@@ -454,15 +662,43 @@ describe("electron updater actions", () => {
         answer(updater);
       });
       const controller = (await startWith(updater))!;
-      await expect(controller.awaitUpdate(bounds)).resolves.toBeNull();
+      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBeNull();
+    });
+
+    it("downloads nothing when the person declines", async () => {
+      const updater = fakeUpdater();
+      updater.checkForUpdates.mockImplementationOnce(async () => {
+        updater.emit("checking-for-update");
+        updater.emit("update-available", { version: "1.2.4" });
+      });
+      const controller = (await startWith(updater))!;
+      await expect(controller.awaitUpdate(bounds, async () => false)).resolves.toBeNull();
+      expect(updater.downloadUpdate).not.toHaveBeenCalled();
+      expect(controller.state().status).toBe("available");
+    });
+
+    it("joins a download the person already started without asking again", async () => {
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater))!;
+      updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      controller.downloadUpdate();
+      const confirmDownload = vi.fn(yes);
+      const waiting = controller.awaitUpdate(bounds, confirmDownload);
+      updater.emit("update-downloaded", { version: "1.2.4" });
+      await expect(waiting).resolves.toBe("1.2.4");
+      expect(confirmDownload).not.toHaveBeenCalled();
+      expect(updater.downloadUpdate).toHaveBeenCalledOnce();
     });
 
     it("resolves at once with an update already downloaded", async () => {
       const updater = fakeUpdater();
       const controller = (await startWith(updater))!;
       updater.emit("checking-for-update");
+      updater.emit("update-available", { version: "1.2.4" });
+      controller.downloadUpdate();
       updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(controller.awaitUpdate(bounds)).resolves.toBe("1.2.4");
+      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).not.toHaveBeenCalled();
     });
 
@@ -470,7 +706,9 @@ describe("electron updater actions", () => {
       const updater = fakeUpdater();
       const controller = (await startWith(updater))!;
       updater.emit("checking-for-update");
-      const waiting = controller.awaitUpdate(bounds);
+      const waiting = controller.awaitUpdate(bounds, yes);
+      updater.emit("update-available", { version: "1.2.4" });
+      await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
       updater.emit("update-downloaded", { version: "1.2.4" });
       await expect(waiting).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).not.toHaveBeenCalled();
@@ -481,7 +719,7 @@ describe("electron updater actions", () => {
       try {
         const silent = fakeUpdater();
         silent.checkForUpdates.mockImplementationOnce(async () => { silent.emit("checking-for-update"); });
-        const silentWait = (await startWith(silent))!.awaitUpdate(bounds);
+        const silentWait = (await startWith(silent))!.awaitUpdate(bounds, yes);
         await vi.advanceTimersByTimeAsync(bounds.verdictMs);
         await expect(silentWait).resolves.toBeNull();
 
@@ -491,7 +729,7 @@ describe("electron updater actions", () => {
           stalled.emit("update-available", { version: "1.2.4" });
         });
         let result: string | null | undefined;
-        void (await startWith(stalled))!.awaitUpdate(bounds).then((version) => { result = version; });
+        void (await startWith(stalled))!.awaitUpdate(bounds, yes).then((version) => { result = version; });
         await vi.advanceTimersByTimeAsync(bounds.verdictMs);
         expect(result).toBeUndefined();
         await vi.advanceTimersByTimeAsync(bounds.downloadMs - bounds.verdictMs);
@@ -522,7 +760,84 @@ describe("electron updater actions", () => {
   });
 });
 
+describe("electron updater after a quit", () => {
+  function stateDir(): { stateDir: string; path: string } {
+    const folder = mkdtempSync(join(tmpdir(), "dohc-chosen-update-"));
+    onTestFinished(() => rmSync(folder, { recursive: true, force: true }));
+    return { stateDir: folder, path: join(folder, "chosen-update.json") };
+  }
+  const offer = (updater: ReturnType<typeof fakeUpdater>, version: string) => {
+    updater.emit("checking-for-update");
+    updater.emit("update-available", { version });
+  };
+
+  it("says a chosen update did not install when dohc opens on the same version, then downloads it again", async () => {
+    const { stateDir: folder, path } = stateDir();
+    const before = fakeUpdater();
+    const first = (await startWith(before, { stateDir: folder, platform: "darwin" }))!;
+    offer(before, "1.2.4");
+    expect(existsSync(path)).toBe(false);
+    first.downloadUpdate();
+    // Quitting now installs it, so the choice is kept from the download on.
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
+
+    // ShipIt gave up after the quit, so dohc opens on 1.2.3 again.
+    const after = fakeUpdater();
+    const second = (await startWith(after, { stateDir: folder, platform: "darwin" }))!;
+    expect(second.publicState()).not.toHaveProperty("failure");
+    offer(after, "1.2.5");
+    const state = second.publicState();
+    expect(state).toMatchObject({
+      status: "available",
+      version: "1.2.5",
+      message: "dohc is still on version 1.2.3.",
+      failure: { step: "download", notInstalled: "1.2.4" },
+    });
+    expect(UpdateStateEvent.parse(state)).toEqual(state);
+    expect(existsSync(path)).toBe(false);
+
+    expect(second.downloadUpdate().state).not.toHaveProperty("failure");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.5", from: "1.2.3" });
+  });
+
+  it("forgets a chosen update once dohc opens on another version, or the feed offers none", async () => {
+    for (const [currentVersion, ending] of [["1.2.4", "launch"], ["1.2.3", "not-available"]] as const) {
+      const { stateDir: folder, path } = stateDir();
+      writeFileSync(path, JSON.stringify({ version: "1.2.4", from: "1.2.3" }));
+      const updater = fakeUpdater();
+      const controller = (await startWith(updater, { stateDir: folder, currentVersion }))!;
+      if (ending === "not-available") {
+        updater.emit("checking-for-update");
+        updater.emit("update-not-available");
+      }
+      expect(existsSync(path)).toBe(false);
+      offer(updater, "1.2.5");
+      expect(controller.publicState()).toMatchObject({ status: "available" });
+      expect(controller.publicState()).not.toHaveProperty("failure");
+    }
+  });
+
+  it("on Linux, where quitting installs nothing, keeps the choice only from Restart to update", async () => {
+    const { stateDir: folder, path } = stateDir();
+    const updater = fakeUpdater();
+    const controller = (await startWith(updater, { stateDir: folder, platform: "linux" }))!;
+    offer(updater, "1.2.4");
+    controller.downloadUpdate();
+    updater.emit("update-downloaded", { version: "1.2.4" });
+    expect(existsSync(path)).toBe(false);
+    await controller.installUpdate();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
+  });
+});
+
 describe("publicUpdateState", () => {
+  const READY_EVENTS: UpdateEvent[] = [
+    { type: "check" },
+    { type: "available", version: "1.0.1" },
+    { type: "download" },
+    { type: "downloaded", version: "1.0.1" },
+  ];
+
   it("gates actions during an active check", () => {
     const checking = transition(initialUpdateState, { type: "check" });
     expect(
@@ -535,8 +850,7 @@ describe("publicUpdateState", () => {
   });
 
   it("enables install when an update is downloaded and ready", () => {
-    const checking = transition(initialUpdateState, { type: "check" });
-    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
 
     expect(
       publicUpdateState(ready, {
@@ -556,8 +870,7 @@ describe("publicUpdateState", () => {
   // was interrupted — a recovery warning whose "Go back" had nothing to go
   // back to. The restart is not lost; it is finishable by quitting.
   it("keeps a staged restart offerable while blocking a new check", () => {
-    const checking = transition(initialUpdateState, { type: "check" });
-    const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
+    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
 
     expect(
       publicUpdateState(ready, {

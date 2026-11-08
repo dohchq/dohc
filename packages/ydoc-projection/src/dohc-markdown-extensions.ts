@@ -8,6 +8,7 @@ import { preprocessTablePipes, renderTableToMarkdown, Table } from '@tiptap/exte
 import { ListItem, OrderedList, TaskItem, TaskList } from '@tiptap/extension-list'
 import { Paragraph } from '@tiptap/extension-paragraph'
 import { sanitizeImageSrc } from './image-src.js'
+import { TABLE_ROW_HEIGHTS_RE, tableRowHeight, tableRowHeights } from './table-row-heights.js'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
   const match = src.match(pattern)
@@ -1157,28 +1158,9 @@ export const MarkdownTaskList = TaskList.extend({
   },
 })
 
-// A resized row keeps its height in an HTML comment on the line above its
-// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
-// the header row. GFM has no row-height syntax, Markdown renderers hide the
-// comment, and the Rust projector writes the same bytes, so a local close
-// that prunes the Y.Doc and reseeds from the file keeps the height.
-const TABLE_ROW_HEIGHTS_RE =
-  /^<!-- dohc:table row-heights=(\d+:\d+(?:,\d+:\d+)*) -->[ \t]*(?:\n+|$)/u
 const tableParseMarkdown = Table.config.parseMarkdown!
 type TableRowHeightsToken = Parameters<typeof tableParseMarkdown>[0] & {
   rowHeights?: [number, number][]
-}
-
-// The Rust projector reads the attribute through `attr_i64`, which accepts
-// an integer or a trimmed integer string. Keep the same rule here so both
-// projectors write the same annotation for the same Y.Doc.
-function tableRowHeight(value: unknown): number | null {
-  const height = typeof value === 'number'
-    ? value
-    : typeof value === 'string' && /^\s*[+-]?\d+\s*$/u.test(value)
-      ? Number(value)
-      : Number.NaN
-  return Number.isSafeInteger(height) && height > 0 ? height : null
 }
 
 function tableRowHeightsAnnotation(rows: JSONContent[]): string {
@@ -1307,13 +1289,7 @@ export const DohcMarkdownTable = Table.extend({
       if (table?.type !== 'table') return undefined
       // The newline after the last row belongs to the table, as in marked.
       const raw = prefix + extent.text + (extent.text.length < rest.length ? '\n' : '')
-      const rowHeights: [number, number][] = []
-      for (const pair of annotation?.[1].split(',') ?? []) {
-        const [index, height] = pair.split(':').map(Number)
-        if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
-          rowHeights.push([index, height])
-        }
-      }
+      const rowHeights = annotation ? tableRowHeights(annotation[1]) : []
       return { ...table, raw, rowHeights }
     },
   },

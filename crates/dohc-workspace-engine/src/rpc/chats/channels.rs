@@ -44,6 +44,15 @@ struct ChatChannelEnsureParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatChannelEnsureAgentParams {
+    channel_id: String,
+    agent_id: String,
+    name: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatChannelFindParams {
     slug: String,
 }
@@ -81,6 +90,8 @@ pub(super) struct ChannelWire<'a> {
     updated_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     folder_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<&'a str>,
 }
 
 impl<'a> From<&'a ChatChannel> for ChannelWire<'a> {
@@ -96,6 +107,7 @@ impl<'a> From<&'a ChatChannel> for ChannelWire<'a> {
             created_at_ms: channel.created_at_ms,
             updated_at_ms: channel.updated_at_ms,
             folder_path: channel.group.folder_path.as_deref(),
+            agent_id: channel.agent_id.as_deref(),
         }
     }
 }
@@ -189,7 +201,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatChannelEnsureParams = parse(params)?;
+        let params: ChatChannelEnsureAgentParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let channel = Self::read_under_ctx(
@@ -198,6 +210,8 @@ impl EngineService {
             open.actor.chat_channel_ensure_agent(
                 open.workspace_id.clone(),
                 params.channel_id,
+                params.agent_id,
+                params.name,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
             ),
@@ -299,6 +313,7 @@ mod tests {
             group: ChannelGroup::default(),
             created_at_ms: 10,
             updated_at_ms: 11,
+            agent_id: None,
         };
         let summary = ChatChannelSummary {
             channel: channel.clone(),

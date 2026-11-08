@@ -23,7 +23,10 @@ const context: CommandContext = {
   activeDocumentKind: null,
   activeDocumentShareable: false,
   pinnedApps: [],
+  updateStatus: null,
 };
+// Main's palette with an update ready to install.
+const mainContext: CommandContext = { ...mainPalette.context, updateStatus: "ready" };
 const viewShare: ShareViewWriteScope = { access: "view", ended: false };
 const editShare: ShareViewWriteScope = { access: "edit", ended: false };
 // In palette order.
@@ -108,9 +111,20 @@ describe("command inventory", () => {
   });
 
   it("tags only the matching capability already issued on this base", () => {
-    expect(paletteCommandRows(mainPalette.context).filter((row) => row.capabilityId).map(({ id, capabilityId }) => ({ id, capabilityId }))).toEqual([
+    expect(paletteCommandRows(mainContext).filter((row) => row.capabilityId).map(({ id, capabilityId }) => ({ id, capabilityId }))).toEqual([
       { id: "new-folder", capabilityId: "folder.create" },
     ]);
+  });
+
+  it("offers Update dohc while an update waits, and Restart to update once it is downloaded", () => {
+    const updateRows = (updateStatus: CommandContext["updateStatus"]) =>
+      paletteCommandRows({ ...context, updateStatus })
+        .filter((row) => row.id.endsWith("-update") || row.id === "check-updates")
+        .map((row) => row.label);
+    expect(updateRows(null)).toEqual(["Check for updates"]);
+    expect(updateRows("available")).toEqual(["Check for updates", "Update dohc"]);
+    expect(updateRows("downloading")).toEqual(["Check for updates"]);
+    expect(updateRows("ready")).toEqual(["Check for updates", "Restart to update"]);
   });
 
   it("rejects an unknown command rather than treating it as unavailable", () => {
@@ -118,7 +132,7 @@ describe("command inventory", () => {
   });
 
   it("renders main's generated labels in main's order for the fixed context", () => {
-    const rows = paletteCommandRows(mainPalette.context);
+    const rows = paletteCommandRows(mainContext);
     expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(mainPalette.rows);
     Element.prototype.scrollIntoView = vi.fn();
     render(<CommandPalette commands={rows.map((row) => ({ ...row, run: vi.fn() }))} onClose={vi.fn()} />);

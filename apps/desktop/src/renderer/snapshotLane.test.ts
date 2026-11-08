@@ -36,27 +36,6 @@ describe("snapshot lane", () => {
     expect(it0.handle().latest()).toBe("newer");
   });
 
-  // The user acted after every request in flight was issued, so counting only
-  // responses would let one of those answers undo what they just did.
-  it("keeps a local write from being undone by a request already in flight", async () => {
-    const it0 = lane(false);
-    const inFlight = it0.take();
-
-    act(() => it0.handle().set(true));
-    expect(it0.value()).toBe(true);
-
-    await act(async () => {
-      it0.handle().settle(
-        inFlight,
-        Promise.resolve({ running: false }),
-        (answer) => answer.running,
-        () => expect.unreachable("a resolved read does not report"),
-      );
-      await Promise.resolve();
-    });
-    expect(it0.value()).toBe(true);
-  });
-
   // The owner went away. Everything outstanding is stale, and a lane that
   // still believed nothing had answered would let any of it write. The lane
   // invalidates itself, so nobody has to remember to.

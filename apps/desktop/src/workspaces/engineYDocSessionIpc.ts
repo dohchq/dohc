@@ -2,20 +2,24 @@ import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   isYdocArtifactAssetsInvalidRefusal,
+  isYdocAuthorCapacityRefusal,
+  YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
   type ChangeAttributionWire,
+  type YdocDeliveredHead,
 } from "@dohc/workspace-engine-client";
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
 import { YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import * as Y from "yjs";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { windowShowsWorkspace } from "../window/workspaceWindowReuse";
 
 import {
   AcknowledgeEngineYDocLineageReplacementPayload,
@@ -112,6 +116,7 @@ interface EngineYDocWorkspace {
 
 export interface EngineYDocRendererSession {
   readonly workspaceId: string;
+  readonly attachmentId: symbol;
   readonly generation: number;
   isCurrent(): boolean;
 }
@@ -120,6 +125,7 @@ interface EngineYDocSessionIpcOptions {
   sessionFor: (
     sender: EngineYDocIpcSender,
   ) => EngineYDocRendererSession | undefined;
+  authorities: Parameters<typeof windowShowsWorkspace>[2];
   acquireWorkspace: (workspaceId: string) => {
     workspace: EngineYDocWorkspace;
     assertCurrent(): void;
@@ -168,10 +174,17 @@ interface SessionEvent {
   seq: number;
 }
 
+// An update for the renderer and, when the engine sent one, the head it was read with.
+interface RemoteDelivery {
+  update: Uint8Array;
+  head?: YdocDeliveredHead;
+}
+
 interface LineageReplacement {
   update: Uint8Array;
   recoveredPaths: string[];
   artifactAssets: readonly ArtifactAssetDescriptor[];
+  head?: YdocDeliveredHead;
 }
 
 interface EngineYDocIpcOwnedSession {
@@ -284,6 +297,7 @@ export interface LiveDocumentEditOrigin {
 }
 
 export interface LiveDocumentEdit {
+  allowLossySourceSha256?: string;
   workspaceId: string;
   /** Validated and normalized; resolved again to the path sessions use. */
   path: string;
@@ -292,7 +306,7 @@ export interface LiveDocumentEdit {
    * current state, or null for no change. `keepBlocks` says someone may be
    * typing in the document.
    */
-  change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
+  change(state: Uint8Array, options: { keepBlocks: boolean; headSha256?: string | null }): Promise<Uint8Array | null>;
   /**
    * Throws when the document at the resolved `path` is a lossy note
    * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
@@ -330,14 +344,14 @@ type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
   EngineYDocIpcSender,
   EngineYDocIpcOwnedSession,
   SessionEvent,
-  Uint8Array,
+  RemoteDelivery,
   LineageReplacement
 >;
 
 type SessionOutbound = EngineYDocSessionOutbound<
   EngineYDocIpcSender,
   SessionEvent,
-  Uint8Array,
+  RemoteDelivery,
   LineageReplacement
 >;
 
@@ -455,6 +469,7 @@ class DocumentMutationReservations {
 
 class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #sessionFor: EngineYDocSessionIpcOptions["sessionFor"];
+  readonly #authorities: EngineYDocSessionIpcOptions["authorities"];
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
@@ -478,6 +493,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   constructor(options: EngineYDocSessionIpcOptions) {
     this.#sessionFor = options.sessionFor;
+    this.#authorities = options.authorities;
     this.#acquireWorkspace = options.acquireWorkspace;
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
@@ -528,6 +544,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       !rendererSession.isCurrent()
     ) {
       return unavailableOpen();
+    }
+    // Only a window that shows the workspace as it is open now opens its
+    // documents. A window left from before Forget shows them as unavailable,
+    // not in the plain editor, because it can't save them.
+    if (!windowShowsWorkspace(rendererSession, input.workspaceId, this.#authorities)) {
+      return unavailableOpen({ documentUnavailable: true });
     }
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
@@ -707,6 +729,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
+            ...(!shared && input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             path: canonicalPath,
             contentKind: documentKind,
             assertRecordWritable: () => {
@@ -737,16 +760,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 ...(readOnlyCause ? { readOnlyCause } : {}), ...(saveFailure ? { saveFailure } : {}),
               }));
             },
-            onRemoteUpdate: (update) => {
-              publish(() => signals.remoteUpdate(update));
+            onRemoteUpdate: (update, head) => {
+              publish(() => signals.remoteUpdate({ update, ...(head ? { head } : {}) }));
             },
-            onLineageReplaced: (update, recoveredPaths) => {
+            onLineageReplaced: (update, recoveredPaths, head) => {
               lastEvent = null;
               publish(() =>
                 signals.replaceLineage({
                   update,
                   recoveredPaths,
                   artifactAssets: provider.artifactAssets ?? [],
+                  ...(head ? { head } : {}),
                 }),
               );
             },
@@ -781,7 +805,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           deleted: false,
           objectChanged: false,
           emit,
-          show: (update) => publish(() => signals.remoteUpdate(update)),
+          show: (update) => publish(() => signals.remoteUpdate({ update })),
           markDeleted() {
             owned.deleted = true;
             owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
@@ -829,6 +853,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
+        headSha256: owned.provider.headSha256,
         initialUpdate: Y.encodeStateAsUpdate(owned.provider.doc),
         ...(owned.provider.objectId ? { objectId: owned.provider.objectId } : {}),
         ...(owned.provider.versionId
@@ -917,7 +942,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path, of);
       if (!held || held.session.deleted) return "closed";
       if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
-      settle = held.session.provider.settleNow();
+      settle = held.session.provider.settleNow(
+        !this.#isSharedView(authority.workspace) && input.allowLossySourceSha256
+          ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined,
+      );
     } finally {
       authority.release();
     }
@@ -1130,6 +1158,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
     if (!capture) throw new Error("The workspace engine is not running.");
     const provider = await capture.openYDocSession({
+      ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
       path,
       contentKind: "richdoc",
       // Nothing else reads this session's doc before it closes.
@@ -1209,6 +1238,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         onDurableLocalChange: (handler: () => void) => {
           assertCurrent();
           return native.onDurableLocalChange(handler);
+        },
+        onSettlementWanted: (handler: () => void) => {
+          assertCurrent();
+          return native.onSettlementWanted(handler);
         },
         prepareHandoff: async (signal: AbortSignal) => {
           assertCurrent(); signal.throwIfAborted();
@@ -1302,7 +1335,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   async waitForAdmission(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<boolean> {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const renderer = this.#sessionFor(sender);
-    if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId || sender.isDestroyed()) return false;
+    if (!renderer?.isCurrent() || !windowShowsWorkspace(renderer, input.workspaceId, this.#authorities) || sender.isDestroyed()) return false;
     const authority = this.#acquireWorkspace(input.workspaceId);
     const waits = this.#admissionWaits.get(sender) ?? new Map<string, SharedAdmissionWait>();
     // Bound IPC waits too, including requests that have not reached relay authentication.
@@ -1411,7 +1444,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           CHANNELS.engineYDocRemoteUpdate,
           EngineYDocRemoteUpdateEvent.parse({
             sessionId: outbound.sessionId,
-            update: message.update,
+            ...message.update,
             lineageGeneration: message.lineageGeneration,
           }),
         );
@@ -1466,11 +1499,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 }
 
-// Journals one main-side edit on a live document session and settles it, so
-// the edit is in the engine and the file when the caller hears back. The
-// update is computed off this thread against the session's state and reaches
-// the editor as a remote update, which merges with anything the person typed
-// meanwhile.
+export const DOCUMENT_EDIT_PENDING_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+
+// Admit the edit before reporting a pending owner draft as saved. The editor
+// receives the admitted update, merged with what the person typed meanwhile.
 async function applyDocumentEdit(
   provider: EngineYDocSessionProvider,
   path: string,
@@ -1481,31 +1513,48 @@ async function applyDocumentEdit(
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,
+    headSha256: provider.headSha256,
   });
   if (update === null) return { changed: false };
   session.assertSame();
-  let armed = false;
-  provider.applyLocalUpdate(update, () => {
-    armed = true;
-  }, input.origin);
+  const options = { ...input.origin, idempotencyKey: randomUUID() };
+  const append = () => provider.applyDecidedLocalUpdate(() => {
+    session.assertSame();
+    return update;
+  }, undefined, options);
+  let accepted: boolean;
+  try {
+    accepted = await append();
+  } catch (error) {
+    if (!input.allowLossySourceSha256 || !isYdocAuthorCapacityRefusal(error)) throw error;
+    session.assertSame();
+    await settleNow.call(provider, { allowLossySourceSha256: input.allowLossySourceSha256 });
+    session.assertSame();
+    accepted = await append();
+  }
+  if (!accepted) throw new Error(`The engine did not accept the edit to ${path}.`);
+  let pending = false;
   session.show(update);
   try {
-    await settleNow.call(provider);
+    await settleNow.call(provider, input.allowLossySourceSha256
+      ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined);
   } catch (error) {
-    if (!armed) throw error;
-    // The session's journal holds the edit and a later settle saves it.
-    // Sending the edit again could apply it twice.
-    const cause = error instanceof Error ? error.message : String(error);
-    // Over a change made outside dohc, the disk version stands when the
-    // document reloads or closes, and the edit stays in History.
-    throw new LiveDocumentEditAppliedError(
-      isConflictStaleTargetCause(error)
-        ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
-        : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
-      { cause: error },
-    );
+    if (error instanceof YdocOwnerDraftPendingError) {
+      pending = true;
+    } else {
+      // The session's journal holds the edit and a later settle saves it.
+      // Sending the edit again could apply it twice.
+      const cause = error instanceof Error ? error.message : String(error);
+      // Over a change made outside dohc, the disk version stands when the
+      // document reloads or closes, and the edit stays in History.
+      throw new LiveDocumentEditAppliedError(
+        isConflictStaleTargetCause(error)
+          ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
+          : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
+        { cause: error },
+      );
+    }
   }
-  if (!armed) throw new Error(`The engine did not accept the edit to ${path}.`);
   // Someone who removed or reshaped a block while the edit went into it takes
   // the edit's text with the block. That merge is correct for the document,
   // but the agent must not hear that its text is there.
@@ -1518,6 +1567,8 @@ async function applyDocumentEdit(
   // before the edit can still be on its way from their editor, and waiting
   // for it would only move the moment: they can change the block again right
   // after. So the answer says so instead of promising the text stays.
+  if (pending) return { changed: true, warning: session.keepBlocks
+    ? `${DOCUMENT_EDIT_PENDING_WARNING} ${DOCUMENT_EDIT_SHARED_WARNING}` : DOCUMENT_EDIT_PENDING_WARNING };
   return session.keepBlocks ? { changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING } : { changed: true };
 }
 

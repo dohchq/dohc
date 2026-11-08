@@ -165,6 +165,8 @@ export function createLocalDatasetTransfers(options: {
   }
   return {
     status(datasetId: string) { const value = read(datasetId); return value ? status(value) : null; },
+    /** The move this process is running for the dataset, or null. */
+    inFlight(datasetId: string): Promise<DatasetTransferStatus> | null { return inFlight.get(datasetId) ?? null; },
     transfer(input: Parameters<typeof execute>[0]) {
       const pending = inFlight.get(input.datasetId);
       const task = pending ? pending.then(() => execute(input), () => execute(input)) : execute(input);

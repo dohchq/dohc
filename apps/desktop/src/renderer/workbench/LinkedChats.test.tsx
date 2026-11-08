@@ -1,6 +1,6 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Suspense, useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -114,6 +114,8 @@ const bridgeMock = {
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
   markChatThreadRead: vi.fn(),
+  getObjectAccess: vi.fn(),
+  requestAccessRefresh: vi.fn(),
 };
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
@@ -128,6 +130,13 @@ beforeEach(() => {
   });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
   bridgeMock.markChatThreadRead.mockResolvedValue(undefined);
+  // Access opens with the file. Only its owner has it.
+  bridgeMock.getObjectAccess.mockImplementation(async (input: { ref: unknown }) => ({
+    ref: input.ref, rows: [], visibility: "visible", unknownReason: null,
+    coverage: { kind: "granted", complete: true, observation: "interval" },
+    checkedAtMs: 0, freshness: "fresh", nextCursor: null,
+  }));
+  bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
   bridgeMock.listChatReactions.mockResolvedValue({
     reactions: [],
     viewerAuthorId: "you@example.com",
@@ -159,16 +168,16 @@ afterEach(() => {
 describe("LinkedChatsPanel with no file focused", () => {
   it.each([
     [true, false, "Switch to a file or a conversation to see who has access."],
-    [true, true, "Switch to a file's tab to see its chats and access."],
+    [true, true, "Switch to a file's tab to see its comments and access."],
     [false, false, "Open a file or a conversation to see who has access."],
-    [false, true, "Open a file to see its chats and access."],
+    [false, true, "Open a file to see its comments and access."],
   ] as const)("aboutTabOpen %s, shared %s", (aboutTabOpen, shared, copy) => {
     render(
       <LinkedChatsPanel
         workspaceId="workspace-1"
         filePath={null}
         aboutTabOpen={aboutTabOpen}
-        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, paused: false, onOpenMoment: () => undefined } })}
+        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, paused: false, onOpenMoment: () => undefined, onOpenHistory: () => undefined } })}
         onError={() => undefined}
       />,
     );
@@ -185,14 +194,14 @@ describe("LinkedChatsPanel startup", () => {
       <LinkedChatsPanel
         workspaceId="workspace-1"
         filePath="docs/plan.md"
-        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined, onOpenHistory: () => undefined }}
         onError={() => undefined}
       />,
     );
 
     await act(async () => undefined);
     expect(screen.getByTestId("about-chats-toggle")).toBeTruthy();
-    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.getByText("Loading comments...")).toBeTruthy();
     expect(screen.queryByTestId("linked-chats-panel")).toBeNull();
     expect(screen.queryByTestId("about-chats-count")).toBeNull();
     expect(screen.getByTestId("about-history-file").textContent).toBe("loading");
@@ -201,7 +210,8 @@ describe("LinkedChatsPanel startup", () => {
       fileRead.resolve({ fileObjectId: "object-1", threads: [] });
       await fileRead.promise;
     });
-    expect(screen.getByTestId("linked-chats-empty")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count").textContent).toBe("0");
+    expect(screen.queryByTestId("about-chats-toggle")).toBeNull();
     expect(screen.getByTestId("about-history-file").textContent).toBe("ready:object-1");
   });
 
@@ -218,13 +228,13 @@ describe("LinkedChatsPanel startup", () => {
       <LinkedChatsPanel
         workspaceId="workspace-1"
         filePath="docs/plan.md"
-        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined, onOpenHistory: () => undefined }}
         onError={() => undefined}
       />,
     );
 
     await act(async () => undefined);
-    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.getByText("Loading comments...")).toBeTruthy();
     expect(screen.queryByTestId("about-chats-count")).toBeNull();
     expect(screen.queryByText("Try again")).toBeNull();
     expect(screen.getByTestId("about-history-file").textContent).toBe("updating");
@@ -235,7 +245,7 @@ describe("LinkedChatsPanel startup", () => {
     });
 
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count")).toBeTruthy();
   });
 
   it("reports an ordinary load failure through the shell once, without retrying it", async () => {
@@ -313,7 +323,7 @@ describe("LinkedChatsPanel startup", () => {
 
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(301);
     expect(notices.report).not.toHaveBeenCalled();
-    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.getByText("Loading comments...")).toBeTruthy();
     expect(screen.queryByText("Try again")).toBeNull();
 
     bridgeMock.listFileChats.mockResolvedValue({
@@ -323,7 +333,7 @@ describe("LinkedChatsPanel startup", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
-    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count")).toBeTruthy();
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(302);
   });
 
@@ -352,7 +362,7 @@ describe("LinkedChatsPanel startup", () => {
       />,
     );
     await act(async () => undefined);
-    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-chats-count")).toBeTruthy();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
@@ -379,7 +389,7 @@ describe("LinkedChatsPanel startup", () => {
 
     const retry = await screen.findByText("Try again");
     await act(async () => retry.click());
-    expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
+    expect(await screen.findByTestId("about-chats-count")).toBeTruthy();
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
   });
 
@@ -418,7 +428,7 @@ describe("LinkedChatsPanel startup", () => {
       path === "docs/old.md" ? forOld.promise : Promise.resolve({ fileObjectId: "object-2", threads: [] }));
     const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/old.md" onError={() => undefined} />);
     view.rerender(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/new.md" onError={() => undefined} />);
-    await screen.findByTestId("linked-chats-panel");
+    await screen.findByTestId("about-chats-count");
     const clears = notices.clear.mock.calls.length;
     await act(async () => {
       forOld.reject(new Error("offline"));
@@ -485,7 +495,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
 
     // The remounted panel lands on the thread LIST — the stale search thread
     // must not re-open (no second listChatMessages call).
-    await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("about-chats-count")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
   });
@@ -778,7 +788,7 @@ describe("LinkedChatsPanel thread and file reads", () => {
         workspaceId="workspace-1"
         filePath="docs/plan.md"
         initialThread={searchThread}
-        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined, onOpenHistory: () => undefined }}
         onError={() => undefined}
       />,
     );
@@ -951,7 +961,7 @@ describe("LinkedChatsPanel share level", () => {
     );
   });
 
-  it("offers no new chat when the share refuses writes, and never asks main to create one", async () => {
+  it("offers no comment when the share refuses writes, and never asks main to create one", async () => {
     render(panel({ shareReadOnly: true }));
 
     await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
@@ -964,7 +974,7 @@ describe("LinkedChatsPanel share level", () => {
 
   // The other half of both gates. Without this, hiding the composer from
   // every share keeps the two pins above green.
-  it("keeps the composer and new chat when the share allows writes", async () => {
+  it("keeps the composer and the comment control when the share allows writes", async () => {
     const view = render(panel({ shareReadOnly: false }));
 
     await waitFor(() => expect(screen.getByTestId("linked-chat-new")).toBeTruthy());
@@ -1236,5 +1246,60 @@ describe("LinkedChats reactions through the workspace store", () => {
     await ready("panel");
     expect(thumbsIn("panel").getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryAllByTestId("linked-chat-reaction-pill")).toHaveLength(0);
+  });
+});
+
+describe("LinkedChatsPanel comment on the file", () => {
+  const created: ChatThreadRecord = { id: "thread-new", title: "Tighten the intro", createdAtMs: 1, updatedAtMs: 1 };
+
+  function renderPanel(onError = vi.fn()) {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [] });
+    render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />);
+    return onError;
+  }
+
+  async function writeComment(body: string) {
+    fireEvent.click(await screen.findByTestId("linked-chat-new"));
+    const composer = screen.getByTestId("linked-chat-new-composer");
+    expect(document.activeElement).toBe(composer);
+    fireEvent.change(composer, { target: { value: body } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+  }
+
+  it("starts the file's chat titled by the comment's first line, posts the comment, then opens it", async () => {
+    bridgeMock.createFileChat.mockResolvedValue({ thread: created });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1" } });
+    renderPanel();
+    await writeComment("Tighten the intro\nIt runs long.");
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(bridgeMock.createFileChat).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "docs/plan.md", title: "Tighten the intro" });
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-1", threadId: "thread-new", body: "Tighten the intro\nIt runs long." });
+  });
+
+  it("keeps the words in the chat's composer when posting them fails", async () => {
+    bridgeMock.createFileChat.mockResolvedValue({ thread: created });
+    bridgeMock.sendChatMessage.mockRejectedValue(new Error("disk is busy"));
+    const onError = renderPanel();
+    await writeComment("Tighten the intro");
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect((screen.getByTestId("linked-chat-composer") as HTMLTextAreaElement).value).toBe("Tighten the intro");
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it("closes the composer on Escape without writing anything", async () => {
+    renderPanel();
+    fireEvent.click(await screen.findByTestId("linked-chat-new"));
+    fireEvent.keyDown(screen.getByTestId("linked-chat-new-composer"), { key: "Escape" });
+    expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();
+    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+
+  it("says why a file dohc does not track takes no comments, and offers none", async () => {
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: null, threads: [] });
+    render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={vi.fn()} />);
+    expect((await screen.findByTestId("linked-chats-untracked")).textContent).toBe(
+      "dohc does not track this file, so it cannot have comments.",
+    );
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
   });
 });

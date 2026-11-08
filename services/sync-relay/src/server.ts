@@ -1,5 +1,6 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import {parseRoute} from "./relayRoute";
+import {createWorkReferenceRoutes} from "./workReferenceRoutes";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {normalizeLinkRefusal} from "./linkRefusal";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -15,6 +16,7 @@ import {readOwnerAppResponses} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientChat} from "./namedRecipientChat";
+import {createPushRoutes} from "./pushRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -26,9 +28,10 @@ import {
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
+import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
-import type { ResolveActor } from "@dohc/workspace-auth/session";
+import type { ResolveAccountSession, ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
@@ -55,6 +58,8 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
+import { createAgentChatRoutes } from "./agentChatRoutes";
+import { createAgentConnectionRoutes } from "./agentConnectionRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
@@ -117,8 +122,15 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
+  // The session host's read of what its hosted replicas hold for released retained work.
+  heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
+  // The browser sign-in behind a cookie, for state bound to it such as push subscriptions.
+  resolveAccountSession?: ResolveAccountSession;
+  // This server's VAPID public key. Absent means alerts are unavailable here.
+  pushVapidPublicKey?: string;
+  pushHosts?: ReadonlySet<string>;
   nowMs?: () => number;
   // Maps a verified email to its account id. An unknown or unverified address returns null.
   // Absent means email-addressed grants are unavailable; grants by user id still work.
@@ -194,8 +206,12 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
+  heldDocumentHost = () => undefined,
   storage,
   resolveActor,
+  resolveAccountSession,
+  pushVapidPublicKey,
+  pushHosts,
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
@@ -461,11 +477,22 @@ export function createSyncRelayHandler({
     historicalSharedBlob,
     discussionActivity,
     lookupUserDisplayName,
+    linkKey,
   );
 
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
     resolveActor, lookupUserDisplayName, claimPendingShares, activity: discussionActivity, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+  }) : undefined;
+
+  const push = namedBrowserSessionLimits && resolveAccountSession ? createPushRoutes({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, vapidPublicKey: pushVapidPublicKey, pushHosts,
+    limits: namedBrowserSessionLimits, nowMs,
+    resolveAccountSession: async (request) => {
+      const session = await resolveAccountSession(request);
+      if (accountIsFenced(storage, session.userId)) throw notFound();
+      return session;
+    },
   }) : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
@@ -683,6 +710,32 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
+  const { respondToAgentSignIn, respondToLinkAgents } = createAgentConnectionRoutes({
+    storage,
+    linkKey,
+    shareWebOrigin,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    newId,
+    newLinkBearer,
+    linkExchangeRateLimiter,
+    linkExchangeGlobalRateLimiter,
+    requireShareWorkspace,
+    publicEditRelease,
+    activity: discussionActivity,
+  });
+
+  const respondToAgentChat = createAgentChatRoutes({
+    storage,
+    linkKey,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    activity: discussionActivity,
+    reads: { chatResolverFor },
+  });
+
   const respondToLinkChat = createLinkChatRoutes({
     storage,
     linkKey,
@@ -721,6 +774,7 @@ export function createSyncRelayHandler({
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});
+  const respondToHeldDocuments = createHeldDocumentRoutes({storage, host: heldDocumentHost});
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
@@ -739,7 +793,26 @@ export function createSyncRelayHandler({
       if (pathname.startsWith("/sync/named-chat/")) {
         return namedChat ? await namedChat(request) : errorResponse(notFound());
       }
+      if (pathname.startsWith("/sync/push/")) {
+        return push ? await push(request) : errorResponse(notFound());
+      }
       const route = parseRoute(request);
+      if (route.route === "work-reference" || route.route === "work-references" || route.route === "share-work-references" || route.route === "internal-work-reference") {
+        if (request.headers.has("cookie")) throw notFound();
+        if (route.route === "internal-work-reference" &&
+            (!relayExchangeKeyHash || !hasValidRelayExchangeKey(request))) throw notFound();
+        const respond = createWorkReferenceRoutes(storage, linkKey, nowMs);
+        if (request.headers.get("authorization")?.startsWith("LinkCapability ")) {
+          const {capabilityToken, capability} = requireLinkCapability(request);
+          const secret = request.headers.get("x-dohc-link-profile-secret");
+          const datasetAuth = secret && linkKey && LINK_SECRET_PATTERN.test(secret)
+            ? {kind: "link" as const, capabilityHash: capability.session.capabilityHash, profileTokenHash: hashLinkProfileSecret(secret, linkKey)} : undefined;
+          return await respond(request, route, {kind: "link", grantId: capability.grantId, generation: capability.generation, datasetAuth,
+            requireSession: () => { requireFreshLinkRead(capabilityToken, capability); }});
+        }
+        const actor = await resolveActor(request, route.route === "work-references" ? route.workspaceId : "");
+        return await respond(request, route, {kind: "user", userId: actor.userId});
+      }
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         return await respondToLinkExchange(request);
@@ -751,6 +824,17 @@ export function createSyncRelayHandler({
       if (route.route === "link-handoff") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         return respondToLinkHandoff(request);
+      }
+      if (
+        route.route === "agent-clients" ||
+        route.route === "agent-authorizations" ||
+        route.route === "agent-token" ||
+        route.route === "agent-introspect"
+      ) {
+        return await respondToAgentSignIn(request, route);
+      }
+      if (route.route === "agent-chat") {
+        return await respondToAgentChat(request, route);
       }
       if (route.route === "link-redeem") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
@@ -874,6 +958,16 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await automationPresses.respondToHost(request, route, actor.userId);
       }
+      if (route.route === "held-documents") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToHeldDocuments(request, route, actor.userId);
+      }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -931,6 +1025,10 @@ export function createSyncRelayHandler({
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);
+      }
+
+      if (route.route === "share-link-agents" || route.route === "share-link-agent-disconnect") {
+        return respondToLinkAgents(request, route, actor);
       }
 
       if (route.route === "share-log" || route.route === "share-blob") {

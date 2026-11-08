@@ -1,5 +1,6 @@
+import { signalChatWrite } from "./chatWriteSignals";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
-import type { ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatMessage, ChatReportedAgent, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
@@ -23,12 +24,19 @@ import {
 // the caller's: it comes from the registry and the signed-in session.
 // `agentName` is the name an agent gave for itself, such as an MCP client's
 // handshake name. It is provenance, like a document edit's author; without
-// it the message carries the agent name from the person's settings.
+// it the message is from "Agent". A name that is one of the person's agents'
+// ids is dropped, so no other agent takes that agent's place.
+// `agentId` names the agent of a run dohc dispatched, which main knows; the
+// message carries that agent's id and settings name.
+// `reported` is what the agent said about itself: its MCP client's product
+// and version, and the model it stated. It sits beside the author's name and
+// never replaces it.
+// A person's own message in the app wakes each of their agents it names.
 export type ChatWriter =
   | { via: "renderer" }
-  | { via: "cli"; actor: "human" | "agent"; agentName?: string }
+  | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string; reported?: ChatReportedAgent }
   // `local` marks a message that stays on this computer, such as a wake in
-  // "My agent", so it never waits for a session.
+  // an agent's chat, so it never waits for a session.
   | { via: "automation"; automationId: string; name: string; depth: number; local?: true };
 // A person or their agent: only they react.
 export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
@@ -81,7 +89,12 @@ export function createChatWrites(dependencies: {
   // Changes whenever the credential cache sets, clears, or reloads a session.
   currentCredentialGeneration(): number;
   localUserDisplayName(): string;
-  agentDisplayName(): Promise<string>;
+  // The name of the person's agent with this id.
+  agentDisplayName(agentId: string): Promise<string>;
+  // The person's agents a message names.
+  agentIdsNamedIn(body: string): Promise<string[]>;
+  // Whether a name is one of the person's agents' ids.
+  isOwnAgentId(name: string): Promise<boolean>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -98,7 +111,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, localInstallationId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, agentIdsNamedIn, isOwnAgentId, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
@@ -206,12 +219,21 @@ export function createChatWrites(dependencies: {
     return await personActorFor(writer);
   }
 
+  // Keeps an agent's own name unless it is one of the person's agents' ids,
+  // which would give its message that agent's key.
+  async function admittedWriter(writer: ChatWriter): Promise<ChatWriter> {
+    if (writer.via !== "cli" || writer.agentName === undefined || !await isOwnAgentId(writer.agentName)) return writer;
+    return { via: "cli", actor: writer.actor, ...(writer.agentId ? { agentId: writer.agentId } : {}), ...(writer.reported ? { reported: writer.reported } : {}) };
+  }
+
   // People and agents; only they react.
   async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
       ? {
-          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName() },
+          author: { kind: "agent" as const, displayName: writer.agentName ?? (writer.agentId ? await agentDisplayName(writer.agentId) : "Agent") },
           authorOwnerDisplayName: localUserDisplayName(),
+          ...(writer.agentId ? { authorAgentId: writer.agentId } : {}),
+          ...(writer.reported ? { authorReported: writer.reported } : {}),
         }
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
   }
@@ -235,13 +257,15 @@ export function createChatWrites(dependencies: {
       (findWorkspace(place.workspaceId)?.remote ?? findWorkspace(place.workspaceId)?.pausedRemote) !== undefined) {
       throw new AutomationChatSessionWait();
     }
-    const actor = await actorFor(input.writer);
+    const writer = await admittedWriter(input.writer);
+    const actor = await actorFor(writer);
+    const namedAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,
       installationId: admission.installationId,
       workspaceId: place.workspaceId,
-      writer: input.writer,
+      writer,
       displayName: actor.author.displayName,
     });
     return { admission, fields: {
@@ -251,6 +275,7 @@ export function createChatWrites(dependencies: {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(authorUserId ? { authorUserId } : {}),
       ...(input.writer.via === "cli" ? { origin: "cli" as const } : {}),
+      ...(namedAgentIds.length > 0 ? { namedAgentIds } : {}),
       body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
@@ -262,6 +287,7 @@ export function createChatWrites(dependencies: {
     // Nothing on screen asked for an automation's message, so the windows hear of it.
     if (writer?.via === "automation") notifyRenderer(workspaceId);
     if (message) {
+      signalChatWrite(workspaceId);
       // A message can mark a live bookmark projection pending, and a person's
       // message can call an agent.
       projectChatBookmarks(workspaceId);
@@ -343,6 +369,8 @@ export function createChatWrites(dependencies: {
     title?: string;
     // The thread a new post starts; a Group's chat lane keeps its running one.
     threadId?: string;
+    // Desktop's own thread in an agent DM; see LinkedChatStore.startChannelThread.
+    ownThread?: true;
   }) {
     const target = { channelId: input.channelId };
     let started;
@@ -354,6 +382,7 @@ export function createChatWrites(dependencies: {
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.title ? { title: input.title } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(input.ownThread ? { ownThread: true } : {}),
         ...fields,
       }), admission, input.signal);
     } catch (error) {
@@ -473,7 +502,7 @@ export function deriveChatActorKey(input: {
       author: input.writer.via === "automation"
         ? { kind: "automation", automationId: input.writer.automationId }
         : input.writer.via === "cli" && input.writer.actor === "agent"
-          ? { kind: "agent", claimedName: input.writer.agentName }
+          ? { kind: "agent", claimedName: input.writer.agentId ?? input.writer.agentName }
           : { kind: "human" },
       displayName: input.displayName,
       origin: input.writer.via,

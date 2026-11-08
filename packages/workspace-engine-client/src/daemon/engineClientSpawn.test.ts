@@ -39,6 +39,22 @@ it.each([undefined, "explicit-host.json"])("passes only explicit native host con
   finally { client.close(); await client.waitForExit(); }
 });
 
+it("starts the engine in its own process group when asked", async () => {
+  spawning.mockImplementation(child);
+  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2, capabilities: ["core", "blobs"],
+    ownProcessGroup: true });
+  try { expect(spawning.mock.calls[0]![2].detached).toBe(true); }
+  finally { client.close(); await client.waitForExit(); }
+});
+
+it.each([false, undefined])("keeps the engine in its owner's process group otherwise: %s", async ownProcessGroup => {
+  spawning.mockImplementation(child);
+  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2, capabilities: ["core", "blobs"],
+    ...(ownProcessGroup === undefined ? {} : { ownProcessGroup }) });
+  try { expect(spawning.mock.calls[0]![2]).not.toHaveProperty("detached"); }
+  finally { client.close(); await client.waitForExit(); }
+});
+
 it("rejects invalid private upload budgets before creating a process", async () => {
   await expect(createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2, capabilities: ["core"],
     privateLiveApplication: { aggregateBytes: -1, maxUploads: 1 } })).rejects.toThrow();

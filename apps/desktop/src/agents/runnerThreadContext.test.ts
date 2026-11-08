@@ -130,17 +130,127 @@ describe("buildRunnerThreadContext", () => {
       store,
       workspaceId: WORKSPACE_ID,
       threadId: "th_1",
+      askingMessageId: "msg_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
-    await dispatchStore.store.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "th_1", triggerMessageId: "msg_1" });
+    await dispatchStore.store.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "th_1", triggerMessageId: "msg_1", agentId: "default" });
     const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected run");
     await dispatchStore.store.completeRun({ runId: claim.run.runId, exitCode: 0 });
     await dispatchStore.store.markFailureHandled(claim.run.runId);
     cliShowFixture.dispatch.lastRun = { state: "failed", failureReason: "no-reply", exitCode: 0 };
     await expect(buildRunnerThreadContext({
-      dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1",
+      dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1", askingMessageId: "msg_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
     await dispatchStore.store.setThreadDispatchPaused({ workspaceId: WORKSPACE_ID, threadId: "th_1", paused: true, reason: "re-dispatch budget exceeded" });
-    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { ...cliShowFixture.dispatch, paused: "budget" } }));
+    await expect(buildRunnerThreadContext({ store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_1", askingMessageId: "msg_1" })).resolves.toBe(renderShowMarkdown({ ...cliShowFixture, dispatch: { ...cliShowFixture.dispatch, paused: "budget" } }));
+  });
+
+  async function seedThread(bodies: readonly string[]): Promise<void> {
+    let id = 1;
+    await loopback.sendRequest({
+      id: id++, method: CHATS_METHOD.threadCreate, workspace: WORKSPACE_ID, idempotencyKey: "th_long",
+      params: { threadId: "th_long", nowMs: FIRST_MESSAGE_AT_MS - 1_000, title: "Long thread", linkedFile: { objectId: "object_long", pathHint: "long.md" } },
+    });
+    for (const [index, body] of bodies.entries()) {
+      await loopback.sendRequest({
+        id: id++, method: CHATS_METHOD.messageSend, workspace: WORKSPACE_ID, idempotencyKey: `m_${index}`,
+        params: { threadId: "th_long", messageId: `m_${index}`, nowMs: FIRST_MESSAGE_AT_MS + index, authorKind: "human", authorDisplayName: "Sam", body, attachments: [] },
+      });
+    }
+  }
+
+  const shownIds = (markdown: string) => [...markdown.matchAll(/· (m_\d+)$/gm)].map((match) => match[1]);
+  const context = (askingMessageId: string, readEarlier?: string) => buildRunnerThreadContext({
+    store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_long", askingMessageId,
+    ...(readEarlier ? { readEarlier } : {}),
+  });
+
+  it("shows the newest 40 messages and says how many were left out", async () => {
+    await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
+    const markdown = await context("m_44", "dohc chat show th_long --peek");
+    expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
+    expect(markdown).toContain("5 earlier messages in this thread aren't shown. Read them with `dohc chat show th_long --peek`.");
+    expect(await context("m_44")).toContain("5 earlier messages in this thread aren't shown.\n");
+  });
+
+  it("reads the newest 40 when the engine cuts each page short", async () => {
+    await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
+    // The engine ends a page at its byte budget and names where the next starts.
+    const shortPages = {
+      ...store,
+      listMessagesPage: async (page: Parameters<typeof store.listMessagesPage>[0]) =>
+        await store.listMessagesPage({ ...page, limit: Math.min(page.limit, 15) }),
+    };
+    const markdown = await buildRunnerThreadContext({
+      store: shortPages, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_long", askingMessageId: "m_44",
+    });
+    expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
+  });
+
+  it("reads on from the asking message when it is older than the newest 40", async () => {
+    await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
+    const markdown = await context("m_2");
+    expect(shownIds(markdown)).toEqual(Array.from({ length: 43 }, (_, index) => `m_${index + 2}`));
+    expect(markdown).toContain("2 earlier messages in this thread aren't shown.");
+  });
+
+  it("drops the oldest messages past 48,000 characters, but none from the asking one on", async () => {
+    await seedThread(Array.from({ length: 20 }, (_, index) => `${index}`.padEnd(5_000, ".")));
+    const markdown = await context("m_15");
+    expect(markdown.length).toBeLessThanOrEqual(48_000);
+    const ids = shownIds(markdown);
+    expect(ids.slice(-5)).toEqual(["m_15", "m_16", "m_17", "m_18", "m_19"]);
+    expect(ids.length).toBeGreaterThan(5);
+    expect(markdown).toContain(`${20 - ids.length} earlier messages in this thread aren't shown.`);
+  });
+
+  // A claim answers every request queued in its thread, not only the asking one.
+  it("keeps a later request past 48,000 characters", async () => {
+    await seedThread(["first request".padEnd(30_000, "."), "second request".padEnd(30_000, ".")]);
+    const markdown = await context("m_0");
+    expect(shownIds(markdown)).toEqual(["m_0", "m_1"]);
+    expect(markdown.length).toBeGreaterThan(48_000);
+  });
+
+  describe("a request asked in a thread of a conversation", () => {
+    const sam = { kind: "human" as const, displayName: "Sam" };
+    async function seedConversation(replyBody = (index: number) => `reply ${index}`) {
+      const nova = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+      const send = async (body: string, parentMessageId?: string) => await store.sendMessage({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: chat.thread.id, author: sam, body, ...(parentMessageId ? { parentMessageId } : {}),
+      });
+      const chat = await store.startChannelThread({ authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: sam, body: "stream 0" });
+      const parent = await send("Draft the agenda");
+      const replies = [];
+      for (let index = 0; index < 3; index += 1) {
+        await send(`stream ${index + 1}`);
+        replies.push(await send(replyBody(index), parent.id));
+      }
+      return { threadId: chat.thread.id, parent, replies };
+    }
+    const bodies = (markdown: string) => ["stream 0", "Draft the agenda", "stream 1", "reply 0", "stream 2", "reply 1", "stream 3", "reply 2"]
+      .filter((body) => new RegExp(`^${body}`, "m").test(markdown));
+
+    it("reads the message it hangs from and every reply, not the stream around them", async () => {
+      const { threadId, replies } = await seedConversation();
+      const markdown = await buildRunnerThreadContext({
+        store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId, askingMessageId: replies[1]!.id, readEarlier: "dohc chat show",
+      });
+      expect(bodies(markdown)).toEqual(["Draft the agenda", "reply 0", "reply 1", "reply 2"]);
+      expect(markdown).toContain("This request was asked in a thread of this conversation, so only that thread is shown. 4 other messages aren't shown. Read them with `dohc chat show`.");
+
+      const stream = await buildRunnerThreadContext({
+        store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId, askingMessageId: "message-7",
+      });
+      expect(bodies(stream)).toHaveLength(8);
+    });
+
+    it("keeps the message it hangs from when its replies pass 48,000 characters", async () => {
+      const { threadId, replies } = await seedConversation((index) => `reply ${index}`.padEnd(20_000, "."));
+      const markdown = await buildRunnerThreadContext({
+        store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId, askingMessageId: replies[1]!.id,
+      });
+      expect(bodies(markdown)).toEqual(["Draft the agenda", "reply 1", "reply 2"]);
+    });
   });
 });

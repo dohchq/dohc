@@ -246,7 +246,7 @@ describe("EngineRelayClient real daemon", () => {
           await sync.stop();
         }
         await receiver.client.bootstrapJoinIdentity(relay.claims[0]!);
-        const pulled = await receiver.client.pull(async () => undefined);
+        const pulled = await receiver.client.pull(async (apply) => apply(async () => undefined));
         expect(pulled.fetched).toBeGreaterThan(0);
         expect(
           await channelIds(receiver.sessions, workspaceId, receiverRoot),

@@ -144,13 +144,13 @@ export function DevPanel(props: { workspaceId?: string }) {
             <Act
               danger
               onClick={() =>
-                run("Forget workspaces", async () => {
+                run("Remove all workspaces from the list", async () => {
                   const result = await bridge().devForgetWorkspaces();
-                  setStatus(`Forgot ${result.forgot} workspace${result.forgot === 1 ? "" : "s"}. Folders were not deleted.`);
+                  setStatus(`Removed ${result.forgot} workspace${result.forgot === 1 ? "" : "s"} from the list. Their folders stay.`);
                 })
               }
             >
-              Forget all workspaces
+              Remove all from list
             </Act>
           </Row>
           <Row label="Perf">

@@ -1,5 +1,6 @@
 import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
 
@@ -13,47 +14,80 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await openWorkspaceFromFirstRun(page, temp);
     await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-channel").click();
+    // An empty Posts page has nothing to scroll.
+    await expect(page.getByTestId("chats-channel-empty")).toBeVisible();
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await waitForVisibleAnimations(page);
+      await page.screenshot({ path: testInfo.outputPath(`posts-empty-${theme}.png`) });
+    }
+    expect(await page.getByTestId("chats-feed-column").evaluate((node) => ({
+      overflowY: getComputedStyle(node).overflowY,
+      overflow: node.scrollHeight - node.clientHeight,
+    }))).toEqual({ overflowY: "auto", overflow: 0 });
     await page.getByTestId("chats-new-thread-composer").fill("Polished reactions");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     const view = page.locator("main");
     const composer = view.getByTestId("chats-composer");
+    // A has-locator is matched inside the form, so it can't start at main.
+    const frame = view.locator("form", { has: page.getByTestId("chats-composer") });
+    await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"]) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-      await page.emulateMedia({ reducedMotion: "reduce" });
       await composer.fill("@");
       const menu = view.getByTestId("chats-mention-menu");
       await expect(menu).toBeVisible();
+      await waitForVisibleAnimations(page);
       const openBox = await composer.boundingBox();
       const menuBox = await menu.boundingBox();
-      expect(menuBox!.y).toBeGreaterThanOrEqual(openBox!.y + openBox!.height);
+      const frameBox = await frame.boundingBox();
+      // 4px over the frame, the gap every floating menu keeps.
+      expect(frameBox!.y - (menuBox!.y + menuBox!.height)).toBeCloseTo(4, 1);
+      expect(Math.abs(menuBox!.x - frameBox!.x)).toBeLessThanOrEqual(1);
       await page.screenshot({ path: testInfo.outputPath(`mentions-${theme}.png`) });
       await composer.press("Escape");
       const closedBox = await composer.boundingBox();
       expect(closedBox!.y).toBe(openBox!.y);
       await composer.fill("");
-      // The opening post's actions show, and take the pointer, on hover.
-      const trigger = view.getByTestId("chats-add-reaction").first();
-      await view.locator('article[data-testid="chats-message"]').hover();
-      await expect(trigger).toBeVisible();
-      await trigger.click();
-      const search = page.getByRole("textbox", { name: "Search emoji or paste any emoji" });
-      await search.fill("🧑🏽‍🚀");
-      await expect(page.getByRole("button", { name: "🧑🏽‍🚀", exact: true })).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
-      await page.getByRole("button", { name: "🧑🏽‍🚀", exact: true }).click();
     }
-    // The menu opens above only when the composer has no room for it below.
+    // The opening post's actions show, and take the pointer, on hover. Both
+    // themes are shot from one open picker, before the reaction is added.
+    const trigger = view.getByTestId("chats-add-reaction").first();
+    await view.locator('article[data-testid="chats-message"]').hover();
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🧑🏽‍🚀");
+    const astronaut = page.getByRole("button", { name: "🧑🏽‍🚀", exact: true });
+    await expect(astronaut).toBeVisible();
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await waitForVisibleAnimations(page);
+      await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
+    }
+    // Picking it adds the reaction; picking it again from the picker takes it
+    // back, so the later shots show the post as it was.
+    const astronautPill = view.locator('[data-testid="chats-reaction-pill"][data-emoji="🧑🏽‍🚀"]');
+    await astronaut.click();
+    await expect(astronautPill).toBeVisible();
+    await view.locator('article[data-testid="chats-message"]').hover();
+    await trigger.click();
+    await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🧑🏽‍🚀");
+    await astronaut.click();
+    await expect(astronautPill).toHaveCount(0);
+    // The menu opens above even when the composer has no room for it below.
     // A short thread leaves its composer high, so the window ends just
-    // under the composer, with less room than one row of the menu.
+    // under the composer's frame, with less room than one row of the menu.
     await page.setViewportSize({ width: 1280, height: 480 });
-    const placed = await composer.boundingBox();
+    const placed = await frame.boundingBox();
     await page.setViewportSize({ width: 1280, height: Math.ceil(placed!.y + placed!.height + 30) });
     await composer.fill("@");
     const upperMenu = view.getByTestId("chats-mention-menu");
     await expect(upperMenu).toBeVisible();
+    await waitForVisibleAnimations(page);
     const lowComposerBox = await composer.boundingBox();
+    const lowFrameBox = await frame.boundingBox();
     const upperMenuBox = await upperMenu.boundingBox();
-    expect(upperMenuBox!.y + upperMenuBox!.height).toBeLessThanOrEqual(lowComposerBox!.y);
+    expect(lowFrameBox!.y - (upperMenuBox!.y + upperMenuBox!.height)).toBeCloseTo(4, 1);
     await composer.press("Escape");
     expect((await composer.boundingBox())!.y).toBe(lowComposerBox!.y);
     await composer.fill("");
@@ -91,6 +125,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       // Compared at rest: a hovered row takes a fill and rounded corners.
       await page.mouse.move(0, 0);
       await expect(homeCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await waitForVisibleAnimations(page);
       const surface = await homeCard.evaluate(node => {
         const style = getComputedStyle(node);
         return { background: style.backgroundColor, radius: style.borderRadius, padding: style.paddingLeft };
@@ -102,6 +137,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await expect(opened).toHaveCSS("background-color", surface.background);
       await expect(opened).toHaveCSS("border-radius", surface.radius);
       await expect(opened).toHaveCSS("padding-left", surface.padding);
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`opened-card-${theme}.png`) });
       await page.getByTestId("chats-feed-link").click();
     }

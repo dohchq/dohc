@@ -274,15 +274,15 @@ export function registerSharedViewsIpcHandlers<
       },
       rollbackLabel: "open-share",
       cleanupFailureMessage:
-        `dohc could not close the failed share download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before opening the share again. Forget keeps the folder. Then choose another empty folder.`,
+        `dohc could not close the failed share download. Files stay in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Remove from list on its row in Manage workspaces before opening the share again. Its folder stays. Then choose another empty folder.`,
       failure: (error) => {
         if (error instanceof ShareUnavailableError) {
           return new Error(
-            `This share ended before it could be opened. Files remain in ${rootPath}. Ask the owner to share again, then choose another empty folder.`,
+            `This share ended before it could be opened. Files stay in ${rootPath}. Ask the owner to share again, then choose another empty folder.`,
           );
         }
         return new Error(
-          `dohc could not open the share. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
+          `dohc could not open the share. Files stay in ${rootPath}. Check your connection, then choose another empty folder.`,
         );
       },
     });
@@ -490,6 +490,8 @@ export function registerSharedViewsIpcHandlers<
                 ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
                 receivedIdentity: refreshReceivedReferencePin(current.shareView.receivedIdentity, info),
                 genericChatWritable: info.genericChatWritable,
+                // Forget clears the email, so a reopened share takes the server's. A share that has one keeps it.
+                granterEmail: current.shareView.granterEmail ?? info.granterEmail,
                 subjectName: info.subjectName,
                 sharerName: info.sharerName,
               };

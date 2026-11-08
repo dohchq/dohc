@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
-import { TriangleAlert, type LucideIcon } from "lucide-react";
+import { CircleAlert, TriangleAlert, type LucideIcon } from "lucide-react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
@@ -15,37 +15,37 @@ function cx(...parts: Array<string | false | undefined>): string {
 }
 
 const primaryButtonClass =
-  "rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+  "h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
 const secondaryButtonClass =
-  "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
+  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
-  "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-0.5 text-[12px] leading-5 text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:outline-offset-1 disabled:opacity-50";
+  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 type DangerButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
-  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
 // The secondary recipe at a table row's height, for a control inside a
 // cell. `aria-disabled` keeps a button that says why it cannot run in the
 // tab order, where `disabled` would drop it.
 const rowSecondaryButtonClass =
   "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted";
 const compactSecondaryButtonClass =
-  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50";
 // The primary recipe on the danger fill, for the confirm of an action that
 // removes or revokes something. Paper text on danger clears AA in both
 // themes (tokens.test.ts guards the pair).
 const dangerButtonClass =
-  "rounded-lg bg-danger px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+  "h-8 rounded-lg bg-danger px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
 const compactDangerButtonClass =
-  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
 // The danger confirm at the secondary row button's height, so a row's
 // confirm takes its place without the row growing.
 const rowDangerButtonClass =
-  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger px-2 text-xs font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
+  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger px-2 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
@@ -204,13 +204,36 @@ export function EmptyState({
   );
 }
 
+/** The error under a field: what is wrong and how to fix it. Give the field
+ * `aria-invalid` and point its `aria-describedby` at `id`. The icon sits on
+ * the first line, so a sentence that wraps keeps it beside its start. */
+export function FieldError(props: { id: string; children: ReactNode; className?: string; testId?: string }) {
+  return (
+    <p id={props.id} data-testid={props.testId} role="alert" className={cx("m-0 flex items-start gap-1 text-[12px] text-danger", props.className)}>
+      <span aria-hidden className="flex h-lh shrink-0 items-center">
+        <CircleAlert size={12} />
+      </span>
+      {props.children}
+    </p>
+  );
+}
+
 /** A list or section whose read failed. Its words are in the toast and its
  * Notices row, reported through the shell's error hook; here the mark says it
- * failed and Try again reads again. */
-export function RetryRow(props: { testId: string; onRetry: () => void }) {
+ * failed and Try again reads again. A caller that passes `children` also shows
+ * that sentence beside the mark. It wraps, and Try again follows it on the same
+ * line when both fit. */
+export function RetryRow(props: { testId: string; onRetry: () => void; children?: ReactNode }) {
   return (
-    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
-      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+    <div data-testid={props.testId} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1">
+      {props.children ? (
+        <p className="m-0 flex min-w-0 items-start gap-1.5 text-[12px] leading-4 text-muted">
+          <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+          <span>{props.children}</span>
+        </p>
+      ) : (
+        <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+      )}
       <SecondaryButton size="compact" onClick={props.onRetry}>
         Try again
       </SecondaryButton>

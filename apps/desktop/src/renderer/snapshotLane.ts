@@ -3,8 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 // Two facts per lane, because the two questions a lane is asked are different
 // ones:
 //
-// - `committed` — what this lane last WROTE. A response, or a local action by
-//   the user, which counts as newer than every request already issued.
+// - `committed` — what this lane last WROTE.
 // - `issued` — the newest request this lane has ASKED. Not the same fact: a
 //   request in flight has written nothing, and "is anything newer coming"
 //   cannot be answered from what was last written.
@@ -30,15 +29,6 @@ export type SnapshotLane<T> = {
   // that fails never will, so superseding on ISSUE would throw away the only
   // answer there was.
   commit: (token: number, value: T) => void;
-  // The user acted, so this value is newer than every request in flight. The
-  // committed mark jumps to the newest token issued and the losing answers
-  // lose by construction whenever they land. Dismissing a review is the case
-  // that bites: it emits no replacement activity, so a restored card would sit
-  // there until something unrelated refreshed.
-  //
-  // It moves `committed` and not `issued`: the user asked nothing. A failure
-  // from the request they superseded is judged by `committed`, and stays quiet.
-  set: (value: T) => void;
   // The whole read, so both ways it can settle face the same rule, and the
   // request registers itself, so no caller can issue a read the lane does not
   // know about.
@@ -83,10 +73,6 @@ export function useSnapshotLane<T>(
     return {
       latest: () => latest.current,
       commit,
-      set: (next) => {
-        mark.current.committed = issue.current;
-        write(next);
-      },
       settle: (token, read, select, report) => {
         if (token > mark.current.issued) mark.current.issued = token;
         void read.then(

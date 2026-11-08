@@ -1,4 +1,5 @@
 import {EngineRequestDeadlineError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {liveHostSignal} from "./liveHostSignal.js";
 
 type Kind = "read" | "write";
 type Pending = {kind: Kind; start(): void; cancel(reason: unknown): void};
@@ -109,4 +110,92 @@ export function queueLiveHostRequests(client: EngineClient, options: {
     };
     methods.set(property, wrapped); return wrapped;
   }});
+}
+
+/** A held read refused because its workspace has a different one, or the lane is full. */
+export class HeldReadBusyError extends Error {
+  constructor() {super("Another held read is running for this workspace.");}
+}
+
+/** A held read whose answer is larger than the engine keeps for one; asking again answers the same. */
+export class HeldReadTooLargeError extends Error {
+  constructor() {super("The held document is larger than a held read can answer.");}
+}
+
+type HeldWaiter = {settle(outcome: {value: unknown} | {error: unknown}): void};
+type HeldJob = {key: string; waiters: Set<HeldWaiter>; controller: AbortController; start(): void};
+
+/**
+ * Held reads beside the ordinary queue, so neither waits on the other. At most
+ * `maxRunning` run and `maxQueued` wait. A workspace has one distinct read; an
+ * identical one, by `key`, joins it and shares its result, up to `maxWaiters`
+ * callers. A caller leaves on its own signal or deadline, and the last to leave
+ * cancels the read, queued or running. A cancelled read keeps its running slot
+ * and its workspace until its work settles.
+ */
+export function heldReadLane(options: {maxRunning: number; maxQueued: number; maxWaiters: number; deadlineMs: number; signal: AbortSignal}) {
+  for (const value of [options.maxRunning, options.maxQueued, options.maxWaiters, options.deadlineMs]) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new TypeError("Invalid held read lane bound.");
+  }
+  const jobs = new Map<string, HeldJob>(), queued: HeldJob[] = [];
+  let running = 0;
+  const pump = () => {
+    while (running < options.maxRunning && !options.signal.aborted) {
+      const next = queued.shift();
+      if (!next) return;
+      next.start();
+    }
+  };
+  // A running job keeps its workspace until its work settles, refusing every new caller.
+  const abandon = (workspaceId: string, job: HeldJob, reason: unknown) => {
+    const index = queued.indexOf(job);
+    if (index >= 0) {
+      queued.splice(index, 1);
+      if (jobs.get(workspaceId) === job) jobs.delete(workspaceId);
+    }
+    job.controller.abort(reason);
+  };
+
+  /** `work` runs once per job; a caller that joins shares the first caller's work. */
+  return function read<T>(workspaceId: string, key: string, caller: AbortSignal | undefined, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const scope = liveHostSignal(options.signal, caller);
+      if (scope.signal.aborted) {scope.dispose(); reject(scope.signal.reason); return;}
+      let job = jobs.get(workspaceId);
+      if (job ? job.controller.signal.aborted || job.key !== key || job.waiters.size >= options.maxWaiters
+        : running >= options.maxRunning && queued.length >= options.maxQueued) {
+        scope.dispose(); reject(new HeldReadBusyError()); return;
+      }
+      if (!job) {
+        const created: HeldJob = {key, waiters: new Set(), controller: new AbortController(), start() {
+          running++;
+          void (async () => {
+            let outcome: {value: unknown} | {error: unknown};
+            try {outcome = {value: await work(created.controller.signal)};} catch (error) {outcome = {error};}
+            running--;
+            if (jobs.get(workspaceId) === created) jobs.delete(workspaceId);
+            for (const waiter of created.waiters) waiter.settle(outcome);
+            created.waiters.clear();
+            pump();
+          })();
+        }};
+        job = created; jobs.set(workspaceId, job); queued.push(job);
+      }
+      const joined = job;
+      const leave = (reason: unknown) => {
+        if (!joined.waiters.delete(waiter)) return;
+        waiter.settle({error: reason});
+        if (joined.waiters.size === 0) abandon(workspaceId, joined, reason);
+      };
+      const aborted = () => leave(scope.signal.reason);
+      const timer = setTimeout(() => leave(new Error("Held read deadline exceeded.")), options.deadlineMs);
+      const waiter: HeldWaiter = {settle(outcome) {
+        clearTimeout(timer); scope.signal.removeEventListener("abort", aborted); scope.dispose();
+        if ("error" in outcome) reject(outcome.error); else resolve(outcome.value as T);
+      }};
+      scope.signal.addEventListener("abort", aborted, {once: true});
+      joined.waiters.add(waiter);
+      pump();
+    });
+  };
 }

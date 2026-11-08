@@ -1,5 +1,6 @@
-import { UpdateActionResult, UpdateCheckResult, type UpdateStateEvent } from "./bridgeContract";
+import { UpdateActionResult, UpdateCheckResult, updateDownloadOperations, type UpdateStateEvent } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { registerOperations, type OperationBoundary } from "./operationTable";
 import type { AutoUpdateController } from "../updates/electronUpdater";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
 
@@ -31,9 +32,11 @@ export function createUpdateInstall<Participant = unknown>(dependencies: {
     // Ask every workspace window at the quit boundary: the requesting
     // renderer checked before it called, another window may hold drafts of
     // its own, and a reopen can set an edit aside in the gap. Only once
-    // every window is clear does main approve the quit that quitAndInstall
-    // starts — the round cannot veto it afterwards, because that would burn
-    // the one-shot latch.
+    // every window is clear does main approve the quit. On macOS and Linux,
+    // quitAndInstall starts that quit, and the round cannot veto it
+    // afterwards, because that would burn the one-shot latch. On Windows the
+    // installer starts only once dohc has quit, so a window that goes back
+    // still keeps dohc open.
     const round = exitRounds.begin("update");
     // Every window in the round holds a restart intent and an approval for
     // it, and the round retracts both if the staging fails.
@@ -69,11 +72,12 @@ export function createUpdateInstall<Participant = unknown>(dependencies: {
   };
 }
 
-export function registerUpdatesIpcHandlers<Event>(dependencies: {
+export function registerUpdatesIpcHandlers<Event, Operation>(dependencies: {
   registerHandler(channel: string, handler: (event: Event) => unknown): void;
+  boundary: OperationBoundary<Event, Operation>;
   assertTrustedSender(event: Event): void;
   currentUpdateState(): UpdateStateEvent;
-  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates"> | null;
+  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates" | "downloadUpdate"> | null;
   installUpdate(): Promise<UpdateActionResult>;
 }): void {
   const { registerHandler, assertTrustedSender, currentUpdateState, installUpdate } = dependencies;
@@ -91,7 +95,12 @@ export function registerUpdatesIpcHandlers<Event>(dependencies: {
         state: currentUpdateState(),
       });
     }
-    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates());
+    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates(true));
+  });
+
+  registerOperations(dependencies.boundary, updateDownloadOperations, {
+    downloadUpdate: () =>
+      dependencies.autoUpdateController?.downloadUpdate() ?? { accepted: false, state: currentUpdateState() },
   });
 
   registerHandler(CHANNELS.installUpdate, async (event) => {

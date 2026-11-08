@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { buildDrillApp, DIALOG_RECORDER, FEED_VERSION, feedManifest, injectFault, launchApp, readDrillLog, runDrill } from "./release-drill.mjs";
+import {
+  buildDrillApp, DIALOG_RECORDER, downloadedOnlyAfterAnswer, FEED_VERSION, feedManifest, injectFault, launchApp, readDrillLog, runDrill,
+} from "./release-drill.mjs";
 
 function scratchDir(t) {
   const directory = mkdtempSync(join(tmpdir(), "release-drill-test-"));
@@ -92,22 +94,44 @@ test("refuses an entry that loads the app module statically", (t) => {
   }), /dynamic import/);
 });
 
-test("records dialogs, holds the restart question, and closes the notice with its signal", async (t) => {
+test("records dialogs and requests, presses Download only once the drill answers, and closes the notice with its signal", async (t) => {
   const root = scratchDir(t);
   const electron = join(root, "node_modules", "electron");
   mkdirSync(electron, { recursive: true });
   writeFileSync(join(electron, "package.json"), '{"name":"electron","type":"module","main":"index.js"}\n');
-  writeFileSync(join(electron, "index.js"), "export const dialog = { showErrorBox() {}, showMessageBox() {} };\n");
+  writeFileSync(join(electron, "index.js"),
+    "export const dialog = { showErrorBox() {}, showMessageBox() {} };\nexport const net = { request: (options) => ({ sent: options }) };\n");
   writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
   writeFileSync(join(root, "recorder.mjs"), DIALOG_RECORDER);
   const log = join(root, "dialogs.jsonl");
-  const previous = process.env.DOHC_DRILL_LOG;
-  process.env.DOHC_DRILL_LOG = log;
-  t.after(() => { if (previous === undefined) delete process.env.DOHC_DRILL_LOG; else process.env.DOHC_DRILL_LOG = previous; });
+  const answer = join(root, "answer");
+  const previous = { DOHC_DRILL_LOG: process.env.DOHC_DRILL_LOG, DOHC_DRILL_ANSWER: process.env.DOHC_DRILL_ANSWER };
+  Object.assign(process.env, { DOHC_DRILL_LOG: log, DOHC_DRILL_ANSWER: answer });
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  t.mock.timers.enable({ apis: ["setInterval"] });
   await import(pathToFileURL(join(root, "recorder.mjs")).href);
-  const { dialog } = await import(pathToFileURL(join(electron, "index.js")).href);
+  const { dialog, net } = await import(pathToFileURL(join(electron, "index.js")).href);
+  const installer = { path: `/dohc-${FEED_VERSION}-setup.exe` };
 
   dialog.showErrorBox("dohc failed to start", "boom");
+  let pressed = false;
+  const question = dialog.showMessageBox({ message: "Update 2.0.0 is available.", buttons: ["Download", "Quit"] })
+    .then((result) => { pressed = true; return result; });
+  // A download that does not wait for the answer.
+  assert.deepEqual(net.request(installer), { sent: installer });
+  t.mock.timers.tick(1_000);
+  await new Promise((done) => setImmediate(done));
+  assert.equal(pressed, false);
+  writeFileSync(answer, "Download\n");
+  t.mock.timers.tick(100);
+  assert.equal((await question).response, 0);
+  net.request(installer);
+  assert.equal(downloadedOnlyAfterAnswer(readDrillLog(log)), false);
+
   const signal = new AbortController();
   let noticeClosed = false;
   const notice = dialog.showMessageBox({ message: "Downloading update 2.0.0.", buttons: ["Quit"], signal: signal.signal })
@@ -120,8 +144,23 @@ test("records dialogs, holds the restart question, and closes the notice with it
   signal.abort();
   await notice;
   assert.equal(answered, false);
-  assert.deepEqual(readDrillLog(log).map((entry) => entry.kind), ["entry", "error-box", "notice", "dialog"]);
-  assert.deepEqual(readDrillLog(log)[3].buttons, ["Restart now", "Quit"]);
+  const entries = readDrillLog(log);
+  assert.deepEqual(entries.map((entry) => entry.kind),
+    ["entry", "error-box", "question", "request", "answered", "request", "notice", "dialog"]);
+  assert.equal(entries[3].path, installer.path);
+  assert.deepEqual(entries[7].buttons, ["Restart now", "Quit"]);
+});
+
+test("counts a download as asked for only when every installer request follows Download", () => {
+  const manifest = { kind: "request", path: "/latest.yml" };
+  const installer = { kind: "request", path: `/dohc-${FEED_VERSION}-setup.exe` };
+  const question = { kind: "question" };
+  const answered = { kind: "answered" };
+  assert.equal(downloadedOnlyAfterAnswer([manifest, question, answered, installer]), true);
+  assert.equal(downloadedOnlyAfterAnswer([manifest, installer, question, answered, installer]), false);
+  assert.equal(downloadedOnlyAfterAnswer([manifest, question, installer, answered, installer]), false);
+  assert.equal(downloadedOnlyAfterAnswer([manifest, question, answered]), false);
+  assert.equal(downloadedOnlyAfterAnswer([manifest, answered, installer]), false);
 });
 
 test("a failed setup closes the feed and deletes the scratch app, keeping only evidence", async (t) => {

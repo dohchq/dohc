@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { PINNED_NODE } from "./pinned-node.mjs";
@@ -20,7 +20,7 @@ export async function compileOwner(sources, outfile, main = "AgentProbeOwner") {
     await promisify(execFile)(csc, ["/nologo", "/noconfig", "/target:exe", "/platform:x64", "/optimize+",
       "/reference:System.dll", `/main:${main}`, `/out:${outfile}`, ...sources], { windowsHide: true });
   } catch (error) {
-    throw new Error(`Cannot compile the agent probe owner: ${(error.stdout || error.message).trim()}`);
+    throw new Error(`Cannot compile ${basename(outfile)}: ${(error.stdout || error.message).trim()}`);
   }
 }
 

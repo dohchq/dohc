@@ -39,6 +39,9 @@ const LARGE_FILE_PATHS = Array.from(
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
     files: FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
     folders: [],
     editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
@@ -56,7 +59,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),

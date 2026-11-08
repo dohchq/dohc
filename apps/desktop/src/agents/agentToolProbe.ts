@@ -1,4 +1,5 @@
 import { posix, win32 } from "node:path";
+import { isInside, isInsideOrUnknownSync, type ContainmentStat } from "../security/pathContainment";
 import { AGENT_TOOLS, type AgentToolDetection, type AgentToolId } from "./agentToolCatalog";
 
 export interface ProbeOutput { exitCode: number | null; stdout: string; stderr: string }
@@ -8,9 +9,11 @@ export interface AgentProbeDependencies {
   home: string;
   workspaceRoot: string;
   realPath(path: string): string | null;
+  stat: ContainmentStat;
   isExecutable(path: string): boolean;
   signal: AbortSignal;
   run(executable: string, args: readonly string[], signal: AbortSignal): Promise<ProbeOutput>;
+  codexMayRunWithoutLogin(): boolean;
 }
 
 // Only absolute PATH entries and known user install locations participate.
@@ -44,6 +47,11 @@ export function agentExecutableCandidates(tool: AgentToolId, deps: Pick<AgentPro
   return [...new Set(candidates)];
 }
 
+// The version a tool's --version printed, never its free-form output.
+export function parseToolVersion(stdout: string): string | null {
+  return /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/u.exec(stdout)?.[0] ?? null;
+}
+
 export function parseAgentAuth(tool: AgentToolId, output: ProbeOutput): AgentToolDetection["auth"] {
   if (tool === "claude") {
     try {
@@ -56,7 +64,8 @@ export function parseAgentAuth(tool: AgentToolId, output: ProbeOutput): AgentToo
   }
   const text = `${output.stdout}\n${output.stderr}`.replace(/\x1b\[[0-9;]*m/gu, "");
   if (tool === "codex") {
-    if (output.exitCode === 0 && /Logged in using /u.test(text)) return "signed-in";
+    // Codex 0.164 and later say "API key configured" for a saved API key.
+    if (output.exitCode === 0 && /Logged in using |API key configured/u.test(text)) return "signed-in";
     if (/Not logged in/iu.test(text)) return "signed-out";
   }
   if (tool === "cursor") {
@@ -77,17 +86,16 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
   deps.signal.throwIfAborted();
   const path = deps.platform === "win32" ? win32 : posix;
   const canonicalWorkspace = deps.realPath(deps.workspaceRoot);
-  const insideWorkspace = (candidate: string, root: string): boolean => {
-    const relative = path.relative(root, candidate);
-    return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
-  };
+  const roots = [canonicalWorkspace ?? deps.workspaceRoot, deps.workspaceRoot];
+  // Exact matches first, so stored spellings never need a stat.
+  const exactlyInside = (candidate: string) => roots.some((root) => isInside(root, candidate, path));
+  const mayBeInside = (candidate: string) => roots.some((root) => isInsideOrUnknownSync(root, candidate, deps.stat, path));
   const installedExecutable = (candidate: string): boolean => {
-    if (!canonicalWorkspace || !path.isAbsolute(canonicalWorkspace)
-      || insideWorkspace(candidate, deps.workspaceRoot) || insideWorkspace(candidate, canonicalWorkspace)) return false;
+    if (!canonicalWorkspace || !path.isAbsolute(canonicalWorkspace) || exactlyInside(candidate)) return false;
     if (!deps.isExecutable(candidate)) return false;
     const canonical = deps.realPath(candidate);
     return canonical !== null && path.isAbsolute(canonical)
-      && !insideWorkspace(canonical, deps.workspaceRoot) && !insideWorkspace(canonical, canonicalWorkspace);
+      && !exactlyInside(canonical) && !mayBeInside(candidate) && !mayBeInside(canonical);
   };
   // Join every started probe before reporting cancellation, so no probe outlives detection.
   const probes = await Promise.allSettled(AGENT_TOOLS.map(async (tool): Promise<AgentToolDetection> => {
@@ -97,11 +105,12 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
     try {
       const version = await deps.run(executable, ["--version"], deps.signal);
       if (version.exitCode !== 0) return result;
-      // Return the version only, never a tool's free-form diagnostic output.
-      result.version = /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/u.exec(version.stdout)?.[0] ?? null;
+      result.version = parseToolVersion(version.stdout);
       if (!result.version) return result;
       result.probe = "detected";
       if (tool.authArgs && !deps.signal.aborted) result.auth = parseAgentAuth(tool.id, await deps.run(executable, tool.authArgs, deps.signal));
+      // Codex reports only a saved login. A key or another provider can still reach a model.
+      if (tool.id === "codex" && result.auth === "signed-out" && deps.codexMayRunWithoutLogin()) result.auth = "unknown";
     } catch { /* Keep detection separate from probe success and authentication; cancellation is reported after the join. */ }
     return result;
   }));

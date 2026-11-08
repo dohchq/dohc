@@ -9,7 +9,7 @@ export const USAGE_MAX_COUNT = 2_147_483_647;
 // An issued id alone is never permission to count an invocation.
 export const USAGE_ACTION_IDS = [
   "version.create", "version.switch", "version.compare", "version.merge",
-  "version.conflict.resolve", "file.kept.save", "version.try", "version.try.dismiss",
+  "version.conflict.resolve", "file.kept.save",
   "search.start", "crash.dismiss", "crash.send", "chat.dispatch.notice.dismiss",
   "automation.host.choose", "automation.host.takeover", "notice.mark",
   "automation.schedule.run", "automation.notice.retry", "workspace.open.retry",
@@ -21,7 +21,7 @@ export const USAGE_ACTION_IDS = [
   "dataset.attempt.reconcile", "dataset.attempt.cancel", "dataset.grant.set",
   "dataset.grant.remove", "dataset.export", "dataset.recovery.prepare", "dataset.recovery.claim",
   "dataset.recovery.discard", "dataset.file.upload", "dataset.form.create", "dataset.create",
-  "dataset.prepare", "dataset.approve", "dataset.discard", "dataset.migration.prepare",
+  "dataset.prepare", "dataset.approve", "dataset.discard", "dataset.migration.prepare", "dataset.change.ask",
   "dataset.schema.change.prepare", "dataset.migration.approve", "dataset.migration.discard",
   "dataset.operation.invoke", "app.link.create", "app.local.prepare", "app.local.launch",
   "app.publication.prepare", "app.publication.approve", "app.publication.cancel",

@@ -88,7 +88,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     startEngine(): Promise<boolean>;
     loadSettings(): Promise<Settings>;
     applySettings(settings: Settings): void;
-    prepareCli(): Promise<void> | undefined;
     registerHandlers(): void;
     markFirstWindow(): void;
     reportFailure(error: unknown): void;
@@ -132,6 +131,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     stopAutomationWakes(): Promise<void>;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
+    // This run's copies of other people's files that dohc opened in other apps.
+    removeMarkedCopies(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;
     // Sends the reports that wait, within its own deadline inside the budget.
@@ -162,25 +163,34 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // Every ordinary quit reaches here, including Update and Restart's.
     launch.finished();
     event.preventDefault();
+    // The steps still running when the budget runs out, named in the quit line.
+    const running = new Set<string>();
+    const step = <T>(name: string, work: Promise<T>): Promise<T> => {
+      running.add(name);
+      const done = () => { running.delete(name); };
+      work.then(done, done);
+      return work;
+    };
     // Refusal Notices and agent wakes read workspaces, so they stop before any
     // producer drains.
-    const noticeRefusalStop = shutdown.stopNoticeRefusals();
-    const automationWakeStop = shutdown.stopAutomationWakes();
+    const noticeRefusalStop = step("stopNoticeRefusals", shutdown.stopNoticeRefusals());
+    const automationWakeStop = step("stopAutomationWakes", shutdown.stopAutomationWakes());
     // Release opening-document backoff before producers drain. Accepted Y.Doc
     // writes keep retrying until settlement or the overall shutdown budget.
     shutdown.beginEngineShutdown();
-    const searchStop = shutdown.stopSearch().catch(() => undefined);
-    const sitePreviewStop = shutdown.stopSitePreviews();
-    const chatDispatchStop = settledWithin(services.dispatch.stop(), DISPATCH_STOP_LIMIT_MS);
+    const searchStop = step("stopSearch", shutdown.stopSearch()).catch(() => undefined);
+    const sitePreviewStop = step("stopSitePreviews", shutdown.stopSitePreviews());
+    const chatDispatchStop = step("stopDispatch", settledWithin(services.dispatch.stop(), DISPATCH_STOP_LIMIT_MS));
     const cliServerStop = chatDispatchStop.then(() =>
-      (cliServerStartup ?? Promise.resolve(cliServer))
-        .then((server) => server?.close())
+      step("closeCliServer", (cliServerStartup ?? Promise.resolve(cliServer))
+        .then((server) => server?.close()))
         .catch(() => undefined),
     );
-    const engineYDocStop = shutdown.settleYDocs();
-    const agentIntegrationStop = shutdown.stopAgentIntegration().catch(() => undefined);
-    // Reports go alongside teardown, and exit waits for both within the budget.
-    const reportsFlush = shutdown.flushReports().catch(() => undefined);
+    const engineYDocStop = step("settleYDocs", shutdown.settleYDocs());
+    const agentIntegrationStop = step("stopAgentIntegration", shutdown.stopAgentIntegration()).catch(() => undefined);
+    // Reports and copies go alongside teardown, and exit waits for all within the budget.
+    const reportsFlush = step("flushReports", shutdown.flushReports()).catch(() => undefined);
+    const markedCopiesRemoval = step("removeMarkedCopies", shutdown.removeMarkedCopies()).catch(() => undefined);
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       noticeRefusalStop,
@@ -192,17 +202,17 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       agentIntegrationStop,
       sitePreviewStop,
     ])
-      .then(() => shutdown.closeWorkspaces())
+      .then(() => step("closeWorkspaces", shutdown.closeWorkspaces()))
       .catch(() => undefined);
     const workspaceShutdown = workspaceAuthorityStop
-      .then(async () => await shutdown.disposeDatabase())
-      .then(async () => await shutdown.closeRelay())
+      .then(async () => await step("disposeDatabase", shutdown.disposeDatabase()))
+      .then(async () => await step("closeRelay", shutdown.closeRelay()))
       .catch(() => undefined)
-      .then(async () => await shutdown.stopEngine());
+      .then(async () => await step("stopEngine", shutdown.stopEngine()));
     let budgetExpired = false;
     let shutdownTimer: ReturnType<typeof setTimeout>;
     void Promise.race([
-      Promise.all([workspaceShutdown, reportsFlush]),
+      Promise.all([workspaceShutdown, reportsFlush, markedCopiesRemoval]),
       new Promise<void>((resolve) => {
         shutdownTimer = setTimeout(() => {
           budgetExpired = true;
@@ -212,7 +222,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     ]).finally(() => {
       clearTimeout(shutdownTimer);
       shutdown.reportQuit(budgetExpired
-        ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget`
+        ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget, still running: ${[...running].join(", ")}`
         : `[desktop] quit: shutdown finished in ${Date.now() - shutdownStarted} ms`);
       app.exit(budgetExpired ? shutdown.deadlineExitCode : 0);
     });
@@ -283,8 +293,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     bootstrap.markReady();
     const engineStartup = bootstrap.startEngine();
     const cachedSettingsRead = bootstrap.loadSettings();
-    const cliPreparation = bootstrap.prepareCli();
-    if (cliPreparation) await cliPreparation;
     bootstrap.registerHandlers();
     // Apply persisted zoom before creating the first window; overlap its IO
     // and renderer load with the daemon handshake.

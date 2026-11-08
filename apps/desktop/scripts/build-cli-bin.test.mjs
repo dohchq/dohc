@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import * as launchers from "./build-cli-bin.mjs";
 import { agentResourceFailures } from "./package-smoke.mjs";
-import { agentRuntimeTarget, NODE_MISSING_MESSAGE } from "./mcp-launchers.mjs";
+import { agentRuntimeTarget, BUNDLED_NODE_MISSING_MESSAGE, NODE_MISSING_MESSAGE } from "./mcp-launchers.mjs";
 
-const scratch = mkdtempSync(join(tmpdir(), "dohc-launchers-"));
+// Node reports its own path with links resolved, and a Mac's temp folder is under the /var link.
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "dohc-launchers-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 const windows = process.platform === "win32";
 const shCandidates = windows
@@ -24,6 +25,14 @@ console.log(JSON.stringify({execPath:process.execPath,args:process.argv.slice(2)
 console.error('probe-stderr'); process.exit(37);`;
 let serial = 0;
 let exercisedLaunchers = 0;
+// Homebrew's Node loads libnode through @rpath, which starts at the binary's own
+// folder, so each copy gets a link to it there. Official Node has no such library.
+const nodeLib = join(dirname(realpathSync(process.execPath)), "..", "lib");
+const nodeLibraries = existsSync(nodeLib) ? readdirSync(nodeLib).filter(name => /^libnode\..*\.dylib$/.test(name)) : [];
+function copyNode(to) {
+  copyFileSync(process.execPath, to);
+  for (const name of nodeLibraries) symlinkSync(join(nodeLib, name), join(dirname(to), name));
+}
 function fixture(platform = "win32", arch = "x64", label = "Ice Test") {
   const root = join(scratch, String(serial++), label);
   const cli = join(root, "resources", "cli-bin");
@@ -32,8 +41,8 @@ function fixture(platform = "win32", arch = "x64", label = "Ice Test") {
   const competing = join(root, "competing");
   for (const dir of [cli, compiler, cwd, competing]) mkdirSync(dir, { recursive: true });
   const node = join(compiler, platform === "win32" ? "node.exe" : "node");
-  copyFileSync(process.execPath, node);
-  copyFileSync(process.execPath, join(competing, windows ? "node.exe" : "node"));
+  copyNode(node);
+  copyNode(join(competing, windows ? "node.exe" : "node"));
   for (const name of ["node.exe", "node.cmd"]) writeFileSync(join(cwd, name), "@echo WORKSPACE-NODE-RAN\r\nexit /b 98\r\n");
   const files = launchers.cliLaunchers({ platform, arch });
   for (const name of ["dohc", "dohc-mcp"]) {
@@ -43,13 +52,20 @@ function fixture(platform = "win32", arch = "x64", label = "Ice Test") {
   }
   return { cli, cwd, node, competing };
 }
-for (const name of ["dohc", "dohc-mcp"]) {
-  test(`macOS arm64 ${name} selects the adjacent runtime`, { skip: !hasSh }, () => {
-    const f = fixture("darwin", "arm64");
-    const result = run(f, name, "sh", f.competing);
-    assert.equal(result.status, 37, result.stderr);
-    assert.equal(resolve(JSON.parse(result.stdout).execPath), resolve(f.node));
-  });
+for (const [platform, arch] of [["darwin", "arm64"], ["linux", "x64"]]) {
+  for (const name of ["dohc", "dohc-mcp"]) {
+    test(`${platform} ${arch} ${name} selects the adjacent runtime over Node.js on PATH`, { skip: !hasSh }, () => {
+      const f = fixture(platform, arch);
+      const result = run(f, name, "sh", f.competing);
+      assert.equal(result.status, 37, result.stderr);
+      assert.equal(resolve(JSON.parse(result.stdout).execPath), resolve(f.node));
+      rmSync(f.node);
+      const missing = run(f, name, "sh", f.competing);
+      assert.equal(missing.status, 127);
+      assert.equal(missing.stdout, "");
+      assert.equal(missing.stderr.trim(), BUNDLED_NODE_MISSING_MESSAGE);
+    });
+  }
 }
 test("unsupported launcher targets are refused before building", () => {
   assert.throws(() => launchers.cliLaunchers({ platform: "darwin", arch: "x64" }), /Unsupported/);
@@ -93,15 +109,13 @@ for (const label of ["Ice Test", "Icé"]) {
     }
   }
 }
-for (const arch of ["arm64", "x64"]) {
-  for (const name of ["dohc", "dohc-mcp"]) {
-    test(`Linux ${arch} ${name} retains the PATH prerequisite`, { skip: !hasSh }, () => {
-      const f = fixture("linux", arch);
-      const result = run(f, name, "sh", f.cli);
-      assert.equal(result.status, 127);
-      assert.match(result.stderr, /Node\.js/);
-    });
-  }
+for (const name of ["dohc", "dohc-mcp"]) {
+  test(`Linux arm64 ${name} retains the PATH prerequisite`, { skip: !hasSh }, () => {
+    const f = fixture("linux", "arm64");
+    const result = run(f, name, "sh", f.cli);
+    assert.equal(result.status, 127);
+    assert.ok(result.stderr.includes(NODE_MISSING_MESSAGE), result.stderr);
+  });
 }
 for (const version of ["22.12.0", "23.3.0", "22.13.0", "23.4.0", "24.0.0", "garbage", "", "v24.nope.0"]) {
   test(`Linux arm64 version floor: ${version}`, { skip: !hasSh }, () => {
@@ -130,7 +144,7 @@ test("at least one platform launcher was actually exercised here", () => {
 });
 
 test("runtime targets agree across launchers and resource checks", () => {
-  for (const [platform, arch, expected] of [["win32", "x64", "bundled"], ["darwin", "arm64", "bundled"], ["linux", "x64", "path"], ["linux", "arm64", "path"]]) {
+  for (const [platform, arch, expected] of [["win32", "x64", "bundled"], ["darwin", "arm64", "bundled"], ["linux", "x64", "bundled"], ["linux", "arm64", "path"]]) {
     assert.equal(agentRuntimeTarget(platform, arch), expected);
     assert.doesNotThrow(() => launchers.cliLaunchers({ platform, arch }));
     assert.doesNotThrow(() => agentResourceFailures(scratch, { platform, arch }));
@@ -168,6 +182,7 @@ test("resource closure rejects an omitted chat module or bundled runtime", () =>
   writeFileSync(join(root, "app-compiler", "node.exe"), "runtime");
   assert.deepEqual(agentResourceFailures(root, { platform: "win32", arch: "x64" }), []);
   assert.deepEqual(agentResourceFailures(root, { platform: "linux", arch: "arm64" }), []);
-  assert.deepEqual(agentResourceFailures(root, { platform: "linux", arch: "x64" }), []);
-  assert.ok(agentResourceFailures(root, { platform: "darwin", arch: "arm64" }).some((failure) => failure.includes("app-compiler/node")));
+  for (const [platform, arch] of [["darwin", "arm64"], ["linux", "x64"]]) {
+    assert.deepEqual(agentResourceFailures(root, { platform, arch }), ["Missing or unusable agent resource: app-compiler/node"]);
+  }
 });

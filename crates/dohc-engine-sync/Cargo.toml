@@ -28,12 +28,16 @@ dohc-macos-files = { path = "../dohc-macos-files" }
 dohc-linux-files = { path = "../dohc-linux-files" }
 
 [dev-dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
+tokio = { version = "1", features = ["macros", "rt"] }
 yrs = "=0.27.3"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+# Builds a store as the build before agent ids left it.
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 
 [lints]
 workspace = true

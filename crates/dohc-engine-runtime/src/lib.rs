@@ -35,12 +35,13 @@ pub mod supervisor;
 
 pub use actor::{
     ActiveVersionSwitch, ActorHandle, AutomationClaimListener, BinaryWriteExecutionResult,
-    CAPTURE_NEW_FILE_LIVE, CollectionReconciliation, HistoryPageRead, LifecycleState,
-    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
-    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
-    TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
-    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
+    CAPTURE_NEW_FILE_LIVE, CheckpointCycle, CollectionReconciliation, HistoryPageRead,
+    LifecycleState, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
+    MergeExecutionResult, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
+    RelayOperationOutcome, RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord,
+    SharingDeclined, TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions,
+    YdocAppend, YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState,
+    YdocSettleOutcome, YdocSettlement,
 };
 #[cfg(unix)]
 pub use actor::{

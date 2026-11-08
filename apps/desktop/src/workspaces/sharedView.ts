@@ -17,7 +17,7 @@ import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
-import { absentAsNull, diskSpelling } from "./diskSpelling";
+import { absentAsNull, diskSpelling, lookAlikeSpelling } from "./diskSpelling";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
@@ -72,6 +72,9 @@ export interface RefreshSharedViewOutcome {
   excludedPaths: string[];
   unjournalablePaths: UnjournalablePath[];
   collisionRecordQuarantined?: boolean;
+  // Set with collisionRecordQuarantined: whether this view's refreshes count
+  // the person's changed files as their edits, which the notice says.
+  takesLocalWrites?: boolean;
   // Ops the pull refused. The pull skips them and keeps going, so without
   // this the view silently stops carrying part of what the granter shares.
   refusedOps: number;
@@ -85,13 +88,32 @@ export type StandaloneShareViewRefreshOutcome =
       ok: true;
       collisionRecordQuarantined: boolean;
     } & RefreshSharedViewOutcome)
-  | { ok: false; changedPaths: number; errorMessage: string; errorKind?: "unauthorized" };
+  | ({
+      ok: false;
+      changedPaths: number;
+      errorMessage: string;
+      errorKind?: "unauthorized" | "collision-record";
+      // For a collision-record refusal: what kept dohc from reading or
+      // setting aside the record.
+      errorCause?: string;
+    } & SetAsideCollisionRecord);
+
+// Set when this refresh's capture set the collision record aside, whether the
+// refresh then completed or failed.
+type SetAsideCollisionRecord = Pick<RefreshSharedViewOutcome, "collisionRecordQuarantined" | "takesLocalWrites">;
+
+export function setAsideCollisionRecord(captured: CaptureSharedViewLocalDivergenceOutcome): SetAsideCollisionRecord {
+  return captured.collisionRecordQuarantined
+    ? { collisionRecordQuarantined: true, takesLocalWrites: captured.takesLocalWrites ?? false }
+    : {};
+}
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
   repairedPaths: number;
   unjournalablePaths: UnjournalablePath[];
   collisionRecordQuarantined: boolean;
+  takesLocalWrites?: boolean;
   failedPaths?: string[];
   remainingPreservedPaths?: string[];
 }
@@ -118,6 +140,9 @@ class CapturePartialFailureError extends Error {
       options,
     );
     this.name = "CapturePartialFailureError";
+    if (options.cause instanceof CollisionRecordRefusal) {
+      Object.assign(this, { code: options.cause.code });
+    }
   }
 }
 
@@ -135,14 +160,18 @@ class SharedViewTargetAccessError extends Error {
   }
 }
 
-function standaloneShareViewFailureOutcome(
+export function standaloneShareViewFailureOutcome(
   error: unknown,
   changedPaths: number,
 ): Extract<StandaloneShareViewRefreshOutcome, { ok: false }> {
   // A damaged pin never heals on retry. Main turns this into a specific
   // "record is damaged" message, so keep it as a rejection.
   if (error instanceof SharePinInvalidError) throw error;
+  if (error instanceof CollisionRecordRefusal) return collisionRecordFailure(error, changedPaths);
   if (error instanceof CapturePartialFailureError) {
+    if (error.cause instanceof CollisionRecordRefusal) {
+      return collisionRecordFailure(error.cause, error.capturedPaths + error.repairedPaths);
+    }
     return {
       ok: false,
       changedPaths: error.capturedPaths + error.repairedPaths,
@@ -159,6 +188,20 @@ function standaloneShareViewFailureOutcome(
     changedPaths,
     errorMessage: errorMessage(error),
     ...(error instanceof RelayUnauthorizedError ? { errorKind: "unauthorized" as const } : {}),
+  };
+}
+
+function collisionRecordFailure(
+  refusal: CollisionRecordRefusal,
+  changedPaths: number,
+): Extract<StandaloneShareViewRefreshOutcome, { ok: false }> {
+  return {
+    ok: false,
+    changedPaths,
+    errorMessage: refusal.message,
+    errorKind: "collision-record",
+    ...(refusal.cause instanceof Error && "code" in refusal.cause && typeof refusal.cause.code === "string"
+      ? { errorCause: errorMessage(refusal.cause) } : {}),
   };
 }
 
@@ -260,10 +303,9 @@ async function withCaptureMutationLock<T>(
 async function reachesOtherSpelling(rootDir: string, path: string): Promise<boolean> {
   if (!/^[\x00-\x7f]*$/u.test(path)) return true;
   const segments = path.split("/");
-  const normalizesTo: Record<string, string> = { ";": ";", "`": "`", K: "K" };
   for (const [index, segment] of segments.entries()) {
     const swapped = [...segment].map((c) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join("");
-    const composed = [...segment].map((c) => normalizesTo[c] ?? c).join("");
+    const composed = lookAlikeSpelling(segment);
     for (const spelling of [swapped, composed]) {
       if (spelling === segment) continue;
       const probe = [...segments.slice(0, index), spelling, ...segments.slice(index + 1)];
@@ -671,14 +713,22 @@ async function removeRecord(
   await syncFolder(folder);
 }
 
+// Moves a record dohc can't use out of the way, keeping its bytes beside it.
+async function moveRecordAside(
+  records: ShareViewRecords,
+  name: string,
+): Promise<void> {
+  const target = join(await recordsFolderForWrite(records), name);
+  await rename(target, `${target}.invalid-${Date.now()}`);
+}
+
 async function quarantineRecord(
   records: ShareViewRecords,
   name: string,
   context: string,
 ): Promise<boolean> {
   try {
-    const target = join(await recordsFolderForWrite(records), name);
-    await rename(target, `${target}.invalid-${Date.now()}`);
+    await moveRecordAside(records, name);
     return true;
   } catch (quarantineError) {
     console.error(
@@ -794,6 +844,9 @@ async function readPendingMaterializationPathsForCapture(
           pullInFlight,
         };
       } catch (error) {
+        // A read the view's open didn't hold throughout found nothing wrong
+        // with the record. The refresh refuses, and the record stays.
+        if (error instanceof LocalStateUnavailableError) throw error;
         console.error(
           `[desktop] pending materialization record at ${recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE)} ` +
             "is unreadable; quarantining it and verifying every tracked path. Pending paths " +
@@ -1031,6 +1084,22 @@ function untrustedCollisionRecordRefusal(
   return new Error(words, { cause: error });
 }
 
+// A damaged collision record that only the capture may set aside, or that it
+// could not set aside. The record still holds what kept the person's files
+// apart, so the refresh changes nothing.
+class CollisionRecordRefusal extends Error {
+  readonly code = "share-collision-record";
+
+  constructor(records: ShareViewRecords, options: { cause: unknown }) {
+    super(
+      `dohc did not update these shared files because it could not read ${posix.join(records.shown, COLLISION_RECORD_FILE)}. ` +
+        "It keeps a refresh from replacing your own files.",
+      options,
+    );
+    this.name = "Error";
+  }
+}
+
 // Before #2372 the collision record lived at the top of `.dohc`. A view
 // updated from then may have one there still keeping a person's files apart,
 // and reading no new record as "no collisions" would let the next capture
@@ -1123,9 +1192,13 @@ async function writeCollisionRecordUnlocked(
   );
 }
 
-// Called while already holding the collision-record lock. Quarantines a
-// corrupt or stale record and starts fresh rather than guessing which paths
-// were excluded. A lost record cannot be reconstructed. Guessing at each
+// Called while already holding the collision-record lock. Only the capture,
+// which passes `onQuarantine`, sets a corrupt or stale record aside, and it
+// hears of it only once the record is aside. Every other reader refuses, as
+// does a capture that can't set the record aside. A read the view's open
+// didn't hold throughout refuses as not opened, and the record stays.
+//
+// A lost record cannot be reconstructed. Guessing at each
 // path's status here would be irreversible before the recipient could see it
 // happen, so the capture pass that discovers the quarantine makes no
 // mutations at all. See the early return keyed on
@@ -1149,37 +1222,42 @@ async function readCollisionRecordLocked(
   onQuarantine?: () => void,
 ): Promise<Set<string>> {
   const target = recordPath(records.rootPath, COLLISION_RECORD_FILE);
+  const quarantine = async (problem: string, cause: unknown): Promise<Set<string>> => {
+    if (onQuarantine === undefined) throw new CollisionRecordRefusal(records, { cause });
+    try {
+      await moveRecordAside(records, COLLISION_RECORD_FILE);
+    } catch (quarantineError) {
+      if (quarantineError instanceof LocalStateUnavailableError) throw quarantineError;
+      console.error(
+        `[desktop] share collision record at ${target} ${problem}, and dohc could not set it aside: ${String(quarantineError)}`,
+      );
+      throw new CollisionRecordRefusal(records, { cause: quarantineError });
+    }
+    console.error(
+      `[desktop] share collision record at ${target} ${problem}; set it aside. ` +
+        "A previously-excluded path will follow this share's ordinary capture rules on the next capture.",
+    );
+    onQuarantine();
+    return new Set<string>();
+  };
   let record: { shareId: string; paths: Set<string> };
   try {
     record = await readCollisionRecordUnlocked(records.rootPath, shareId);
   } catch (error) {
+    if (error instanceof LocalStateUnavailableError) throw error;
     if (error instanceof UntrustedCollisionRecordError) {
       throw untrustedCollisionRecordRefusal(records, error);
     }
     if (error instanceof OlderCollisionRecordError) {
       throw olderCollisionRecordRefusal(records, error);
     }
-    console.error(
-      `[desktop] share collision record at ${target} is unreadable; quarantining it. ` +
-        "A previously-excluded path will follow this share's ordinary capture " +
-        `rules on the next capture: ${String(error)}`,
-    );
-    onQuarantine?.();
-    await quarantineRecord(records, COLLISION_RECORD_FILE, "share collision record");
-    return new Set<string>();
+    return quarantine(`is unreadable (${String(error)})`, error);
   }
   if (record.shareId !== shareId) {
-    console.error(
-      `[desktop] share collision record at ${target} belongs to share ` +
-        `${record.shareId}, not ${shareId}; quarantining the stale record.`,
+    return quarantine(
+      `belongs to share ${record.shareId}, not ${shareId}`,
+      new Error(`The record belongs to share ${record.shareId}, not ${shareId}.`),
     );
-    onQuarantine?.();
-    await quarantineRecord(
-      records,
-      COLLISION_RECORD_FILE,
-      "stale share collision record",
-    );
-    return new Set<string>();
   }
   return record.paths;
 }
@@ -1770,6 +1848,7 @@ async function captureSharedViewLocalDivergence(input: {
       repairedPaths: 0,
       unjournalablePaths: [],
       collisionRecordQuarantined: true,
+      takesLocalWrites: allowLocalJournaling,
     };
   }
   if (!allowLocalJournaling) {
@@ -2615,9 +2694,7 @@ async function refreshCapturedShareView(
   }, records);
   return {
     ...outcome,
-    ...(captured.collisionRecordQuarantined
-      ? { collisionRecordQuarantined: true }
-      : {}),
+    ...setAsideCollisionRecord(captured),
     status:
       outcome.status === "unchanged" && localChanges > 0
         ? "updated"
@@ -2646,7 +2723,10 @@ async function reconcileStandaloneShareView(
       collisionRecordQuarantined: captured.collisionRecordQuarantined,
     };
   } catch (error) {
-    return standaloneShareViewFailureOutcome(error, totalLocalChanges);
+    return {
+      ...standaloneShareViewFailureOutcome(error, totalLocalChanges),
+      ...setAsideCollisionRecord(input.captured),
+    };
   }
 }
 

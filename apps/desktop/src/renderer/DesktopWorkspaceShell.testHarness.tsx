@@ -1,4 +1,5 @@
 import { historyCursor, historyPageFields, timelinePage } from "../testing/historyPageFixture";
+import { defaultWorkbenchState, serializeUiState } from "./workbench/workbenchState";
 import "../testing/legendListMock";
 import {
   act,
@@ -8,11 +9,13 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
   AgentRunStatusResult,
@@ -79,7 +82,6 @@ import type {
   SyncDmsPayload,
   SyncDmsResult,
   SyncStatusResult,
-  TryInVersionStateResult,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -166,9 +168,19 @@ const IDLE_UPDATE_STATE: UpdateStateEvent = {
   canInstall: false,
 };
 
+const AVAILABLE_UPDATE_STATE: UpdateStateEvent = {
+  status: "available",
+  message: "dohc 1.2.4 is available.",
+  currentVersion: "1.2.3",
+  channel: "latest",
+  canCheck: false,
+  canInstall: false,
+  version: "1.2.4",
+};
+
 export const READY_UPDATE_STATE: UpdateStateEvent = {
   status: "ready",
-  message: "Update 1.2.4 is ready. Restart dohc to apply it.",
+  message: "Update 1.2.4 is ready. Restart dohc to install it.",
   currentVersion: "1.2.3",
   channel: "latest",
   canCheck: false,
@@ -187,7 +199,15 @@ export const STORED_STATE: WorkspaceUiState = {
   activeEditorGroup: "primary",
   aboutVisible: true,
   aboutWidth: 360,
+  explorerMode: "files",
 };
+
+// These tests drive the folder tree, so a workspace with no saved state
+// opens the Explorer in Files rather than Home.
+const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({ ...defaultWorkbenchState(), explorerMode: "files" });
+
+// A workspace with no saved state but its Explorer on Home, as a new one opens.
+export const HOME_STATE: WorkspaceUiState = serializeUiState(defaultWorkbenchState());
 
 // The stored state with the chat list showing in the left side panel.
 export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
@@ -335,7 +355,7 @@ function makeBaseBridge(
     },
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
-    getWorkspaceUiState: vi.fn(() => uiStatePromise),
+    getWorkspaceUiState: vi.fn((): Promise<WorkspaceUiState | null> => uiStatePromise.then((state) => state ?? FRESH_FILES_STATE)),
     openSystemPrivacySettings: vi.fn(async () => undefined),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -399,6 +419,9 @@ function makeBaseBridge(
     retryOwnerLiveDelivery: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),
+    retryHistoryCapture: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<void> => undefined,
+    ),
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
@@ -450,6 +473,7 @@ function makeBaseBridge(
     })),
     getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
     openUserSettingsFile: vi.fn(async () => undefined),
+    openWorkspacePolicyFile: vi.fn(async () => undefined),
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
@@ -467,6 +491,8 @@ function makeBaseBridge(
     setTitlebarTheme: vi.fn(async () => undefined),
     onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
+    onVersionRound: vi.fn(() => () => {}),
+    answerVersionRound: vi.fn(async () => undefined),
     onChatDispatchNotices: vi.fn(() => () => {}),
     onScheduleHostChanged: vi.fn(() => () => {}),
     readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
@@ -554,6 +580,10 @@ function makeBaseBridge(
     getUpdateState: vi.fn(async () => IDLE_UPDATE_STATE),
     checkForUpdates: vi.fn(async () => ({
       checked: true,
+      state: AVAILABLE_UPDATE_STATE,
+    })),
+    downloadUpdate: vi.fn(async () => ({
+      accepted: true,
       state: READY_UPDATE_STATE,
     })),
     installUpdate: vi.fn(async () => ({
@@ -690,6 +720,8 @@ function makeBaseBridge(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
     onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
+    // The Explorer's Apps section: no apps unless a test says so.
+    listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({ sites: [] })),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
@@ -697,6 +729,7 @@ function makeBaseBridge(
       };
     }),
     closeThisWindow: vi.fn(async (): Promise<void> => undefined),
+    goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
@@ -731,6 +764,7 @@ function makeBaseBridge(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
+    onCollectionRulesChanged: vi.fn(() => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,
@@ -825,6 +859,12 @@ export function makeBridge(
       if (request.action === "list") return { kind: "list", datasets: [], nextCursor: null };
       throw new Error(`Unexpected dataset action in shell fixture: ${request.action}`);
     }),
+    // The synced workspace lists its unfinished restores when it opens; the
+    // restore tests swap in their own.
+    ownerRestore: vi.fn(async (request: OwnerRestoreRequest): Promise<unknown> => {
+      if (request.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
+      throw new Error(`Unexpected owner restore action in shell fixture: ${request.action}`);
+    }),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",
       objectId: "object-test",
@@ -847,6 +887,13 @@ export function makeBridge(
       async (payload: ListHistoryPayload): Promise<ListHistoryResult> =>
         timelinePage([], { workspaceId: payload.workspaceId }),
     ),
+    // About opens Access with each file: by default only its owner has it.
+    getObjectAccess: vi.fn(async (input: { ref: AccessObjectRef }): Promise<AccessAnswer> => ({
+      ref: input.ref, rows: [], visibility: "visible", unknownReason: null,
+      coverage: { kind: "granted", complete: true, observation: "interval" },
+      checkedAtMs: 0, freshness: "fresh", nextCursor: null,
+    })),
+    requestAccessRefresh: vi.fn(async () => undefined),
     // About's per-file History still reads moments directly.
     listEngineMoments: vi.fn(
       async (): Promise<ListEngineMomentsResponse> => ({
@@ -857,11 +904,7 @@ export function makeBridge(
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
-    // drive a real review card and a real version switch through them.
-    getTryInVersionState: vi.fn(
-      async (): Promise<TryInVersionStateResult> => ({ state: null }),
-    ),
-    dismissTryInVersionReview: vi.fn(async (): Promise<void> => undefined),
+    // drive a real version switch through it.
     switchWorkspaceVersion: vi.fn(
       async (): Promise<SwitchWorkspaceVersionResult> => ({
         activeVersionId: "main", ...historyPageFields,
@@ -960,7 +1003,10 @@ export async function enterMarkdownSource(
   const toggle = (await queries.findByTestId(
     "markdown-edit-toggle",
   )) as HTMLButtonElement;
-  await waitFor(() => expect(toggle.disabled).toBe(false));
+  await waitFor(() => {
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
+  });
 
   // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
   // WYSIWYG (source).

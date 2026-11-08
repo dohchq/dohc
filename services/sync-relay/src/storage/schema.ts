@@ -1,4 +1,5 @@
 import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
+import {initializeWorkReferenceSchema} from "./workReferenceSchema";
 import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
 import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
 import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
@@ -14,6 +15,7 @@ import { initializeRelayAdmissionColumn } from "./relayAdmission";
 import { initializeServiceHostUploadSchema } from "./serviceHostUploads";
 import { initializeServiceKeptEditsSchema } from "./serviceKeptEdits";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
+import { initializeLiveRestoreCancellationSchema } from "./liveRestoreCancellationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
 import {
@@ -27,6 +29,8 @@ import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
+import { initializePushSchema } from "./pushSchema";
+import { initializePushDeliveries } from "./pushDeliveries";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -34,6 +38,7 @@ import {
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
 } from "./limits";
 import { initializeLinkCreationSchema } from "./linkCreationSchema";
+import { initializeAgentConnectionSchema } from "./agentConnections";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1270,6 +1275,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeServiceHostUploadSchema(db);
     initializeServiceKeptEditsSchema(db);
     initializeLiveRestoreOperationSchema(db);
+    initializeLiveRestoreCancellationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveJournalWorkspaceIndex(db);
     initializeLiveCommittedDeliverySchema(db);
@@ -1294,11 +1300,15 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationServerScheduleSchema(db);
     initializeAutomationServerUnsentRunSchema(db);
     initializeCurrentFileKeySchema(db);
+    initializeWorkReferenceSchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);
+    initializePushSchema(db);
+    initializePushDeliveries(db);
     initializeLiveClaimIndex(db);
     initializeServiceHostFeedIndex(db);
+    initializeAgentConnectionSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

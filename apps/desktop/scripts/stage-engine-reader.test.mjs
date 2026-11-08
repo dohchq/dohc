@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -10,14 +9,34 @@ import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
 import { stageEngineReader, requireEngineReader } from "./stage-engine-reader.mjs";
 import { readPinnedCompilerNode } from "./stage-app-compiler.mjs";
+import { cachedNodeFetch, useCachedNodeDownloads } from "./pinned-node-downloads.testSupport.mjs";
 import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.ts";
+import { builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builder = createRequire(require.resolve("electron-builder/package.json"));
-builder("app-builder-lib");
-const { getFileMatchers, copyFiles } = builder("app-builder-lib/out/fileMatcher.js");
-const { WinPackager } = builder("app-builder-lib/out/winPackager.js");
+builderRequire("app-builder-lib");
+const { getFileMatchers, copyFiles } = builderRequire("app-builder-lib/out/fileMatcher.js");
+const { WinPackager } = builderRequire("app-builder-lib/out/winPackager.js");
 const desktop = fileURLToPath(new URL("..", import.meta.url));
+useCachedNodeDownloads();
+
+test("a kept pinned Node download serves later runs without the network", async t => {
+  const cache = await mkdtemp(join(tmpdir(), "dohc-pinned-node-cache-"));
+  t.after(() => rm(cache, { recursive: true, force: true }));
+  const archive = Buffer.from("pinned archive");
+  const sha256 = createHash("sha256").update(archive).digest("hex");
+  const otherSha256 = createHash("sha256").update("other archive").digest("hex");
+  const pinned = { good: { url: "https://node.test/good.tar.gz", archiveSha256: sha256 }, bad: { url: "https://node.test/bad.tar.gz", archiveSha256: otherSha256 } };
+  const body = async response => Buffer.from(await (await response).arrayBuffer());
+  const online = cachedNodeFetch({ cache, pinned, download: async url => new Response(url === pinned.good.url ? archive : "tampered") });
+  assert.deepEqual(await body(online(pinned.good.url)), archive);
+  assert.equal(String(await body(online(pinned.bad.url))), "tampered");
+  const offline = cachedNodeFetch({ cache, pinned, download: async () => { throw new TypeError("fetch failed"); } });
+  assert.deepEqual(await body(offline(pinned.good.url)), archive);
+  await assert.rejects(offline(pinned.bad.url), /fetch failed/, "a download with the wrong hash is never kept");
+  await writeFile(join(cache, sha256), "corrupted");
+  await assert.rejects(offline(pinned.good.url), /fetch failed/);
+  await assert.rejects(offline("https://node.test/other"), /fetch failed/);
+});
 
 test("reader generations and staging files stay out of git", () => {
   for (const path of ["resources/engine-reader/selection.json", "resources/engine-reader/.staging-incomplete/node", `resources/engine-reader/${"a".repeat(64)}/reader.cjs`]) {
@@ -28,11 +47,16 @@ test("reader generations and staging files stay out of git", () => {
 test("unsupported reader targets leave desktop and self-host preparation available", async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-unsupported-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["linux", "arm64"], ["win32", "arm64"], ["freebsd", "x64"]]) {
+  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["win32", "arm64"], ["freebsd", "x64"]]) {
     assert.deepEqual(await stageEngineReader({ resources: root, platform, arch, selfHost: true }), { supported: false });
     assert.equal(await requireEngineReader(root, platform, arch), undefined);
     assert.deepEqual(await readdir(root), []);
   }
+  // Only the self-host image has a linux-arm64 reader.
+  assert.deepEqual(await stageEngineReader({ resources: root, platform: "linux", arch: "arm64" }), { supported: false });
+  assert.equal(await requireEngineReader(root, "linux", "arm64"), undefined);
+  assert.deepEqual(await readdir(root), []);
+  await assert.rejects(requireEngineReader(root, "linux", "arm64", process.execPath), { code: "ENOENT" });
   assert.equal(installedReaderConfig("/absent", "darwin"), undefined);
   assert.equal(installedReaderConfig("/absent", "win32"), undefined);
 });
@@ -100,7 +124,6 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     assert.deepEqual((await readdir(base)).sort(), [staged.generation, "selection.json"].sort());
   });
   await t.test("preparation repairs a corrupt existing generation before selecting it", async () => {
-    await chmod(staged.bundle, 0o600);
     await writeFile(staged.bundle, "corrupt existing bundle");
     assert.deepEqual(await stageEngineReader({ resources, platform, arch }), staged);
     await requireEngineReader(resources, platform, arch);
@@ -112,6 +135,11 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
   await copyFiles(getFileMatchers({ extraResources }, "extraResources", packaged, {
     defaultSrc: join(root, "source"), globalOutDir: packaged, customBuildOptions: {}, macroExpander: x => x,
   }));
+  // Updaters replace every packaged file, and macOS ShipIt cannot clear quarantine from a read-only one.
+  for (const entry of await readdir(join(packaged, "engine-reader"), { recursive: true, withFileTypes: true })) {
+    const path = join(entry.parentPath, entry.name);
+    if (entry.isFile()) assert.ok((await stat(path)).mode & 0o200, `${path} is owner-writable`);
+  }
   await t.test("plain rm deletes the staged layout without mode repair", async () => {
     await rm(join(root, "source"), { recursive: true, force: true });
   });
@@ -144,14 +172,12 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     const oldRoot = join(packaged, "engine-reader", staged.generation);
     const newRoot = join(packaged, "engine-reader", changed.buildSha256);
     await chmod(oldRoot, 0o700);
-    await chmod(installed.manifest, 0o600);
     await writeFile(installed.manifest, JSON.stringify(changed));
     await rename(oldRoot, newRoot);
     await writeFile(join(packaged, "engine-reader/selection.json"), JSON.stringify({ generation: changed.buildSha256 }));
     await assert.rejects(requireEngineReader(packaged, platform, arch), /identity mismatch/);
     await rename(newRoot, oldRoot);
     await writeFile(installed.manifest, JSON.stringify(manifest));
-    await chmod(installed.manifest, 0o444);
     await chmod(oldRoot, 0o755);
     await writeFile(join(packaged, "engine-reader/selection.json"), JSON.stringify({ generation: staged.generation }));
   }
@@ -169,12 +195,13 @@ test("macOS signing uses the reader hook without enabling Electron Node mode", a
   const config = load(await readFile(new URL("../electron-builder.yml", import.meta.url), "utf8"));
   assert.equal(config.mac.sign, "scripts/sign-engine-reader-macos.mjs");
   assert.equal(config.electronFuses.runAsNode, false);
-  await builder("app-builder-lib/out/util/config/config.js").validateConfiguration(config);
-  const hook = await builder("app-builder-lib/out/util/resolve.js").resolveFunction("module", join(desktop, config.mac.sign), "sign", desktop);
+  await builderRequire("app-builder-lib/out/util/config/config.js").validateConfiguration(config);
+  const hook = await builderRequire("app-builder-lib/out/util/resolve.js").resolveFunction("module", join(desktop, config.mac.sign), "sign", desktop);
   assert.equal(typeof hook, "function");
 });
 
 test("the reader has no Intel Mac runtime pin", async () => {
-  const { PINNED_NODE } = await import("./pinned-node.mjs");
+  const { PINNED_NODE, SELF_HOST_NODE } = await import("./pinned-node.mjs");
   assert.equal(PINNED_NODE["darwin-x64"], undefined);
+  assert.equal(SELF_HOST_NODE["darwin-x64"], undefined);
 });

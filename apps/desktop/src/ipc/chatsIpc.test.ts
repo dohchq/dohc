@@ -162,7 +162,8 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     findWorkspace: () => ({ ...workspace, remote: { serverUrl: "https://cloud.test", ownerUserId: "verified-owner" } }),
     warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
     currentCredentialGeneration: () => 0,
-    localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova",
+    localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova", agentIdsNamedIn: async () => [],
+    isOwnAgentId: async () => false,
     localInstallationId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
     betweenDispatchScans: (_workspaceId, write) => write(),
@@ -348,6 +349,21 @@ describe("chat message IPC identity", () => {
     expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" }, () => null, neutralPresentation)))
       .toMatchObject({ authorUserId: "person-1" });
     expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation))).not.toHaveProperty("authorUserId");
+    // The badge knows your agent's run by this id alone.
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorAgentId: "codex" }, () => null, neutralPresentation)))
+      .toMatchObject({ authorAgentId: "codex" });
+    expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation))).not.toHaveProperty("authorAgentId");
+  });
+
+  it("marks an agent that joined with a link, and never bridges its connection", () => {
+    const { message } = fixture();
+    const link = { kind: "link" as const, displayName: "Helper", grantId: "grant-1", principalId: "principal-1" };
+    const agent = ChatMessageRecord.parse(chatMessageForIpc(
+      { ...message, author: { ...link, agentConnectionId: "connection-1" } }, () => null, neutralPresentation));
+    expect(agent).toMatchObject({ authorKind: "link", authorDisplayName: "Helper", linkAgent: true });
+    expect(JSON.stringify(agent)).not.toMatch(/connection-1|grant-1|principal-1/);
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, author: link }, () => null, neutralPresentation)))
+      .not.toHaveProperty("linkAgent");
   });
 
   it("carries an automation author, the automation that wrote the message, and where its Collection is now", () => {
@@ -433,7 +449,7 @@ describe("registered chat writes", () => {
 
   it("says when Restricted Mode holds the agent a sent message asks, and never fails the send over it", async () => {
     const test = fixture();
-    const send = { workspaceId: "workspace", threadId: "thread", body: "@agent plan the day" };
+    const send = { workspaceId: "workspace", threadId: "thread", body: "@Nova plan the day" };
     expect(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send)).waitsForTrust).toBeUndefined();
     test.agentWaitsForTrust.mockResolvedValueOnce(true);
     const held = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, send));
@@ -863,7 +879,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     }],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"sealed",
   });
   const options:CliServerOptions={
-    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,agentRunWorkspace:()=>undefined,
+    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgent:()=>null,dispatchedRunId:()=>null,agentRunWorkspace:()=>undefined,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
     chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
     openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},
@@ -886,7 +902,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   expect(cli.exitCode).toBe(0);
   const {schemaVersion:_,...groupPage}=JSON.parse(cli.stdout);
   expect(groupPage).toEqual(ipc);
-  const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request},{channelWireId:"wire",cursor:"sealed"});
+  const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request:value=>request(value)},{channelWireId:"wire",cursor:"sealed"});
   expect(cliPage).toEqual(ipc);expect(mcp).toEqual(ipc);
   const calls=h.storeMethods.linksPage.mock.calls.map(([input])=>input);
   expect(calls).toHaveLength(4);
@@ -894,7 +910,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   expect(JSON.stringify(ipc)).not.toMatch(/secret|authorUserId|authorActorKey/);
   h.resolveEngineFiles.mockResolvedValue([{status:"absent"}]);
   const denied=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
-  expect(await mcpChatLinks({root,home:root,request},{channelWireId:"wire"})).toEqual(denied);
+  expect(await mcpChatLinks({root,home:root,request:value=>request(value)},{channelWireId:"wire"})).toEqual(denied);
   h.storeMethods.listChannels.mockResolvedValue([]);
   expect(await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"})).toBeNull();
   expect(await request({protocolVersion:CLI_PROTOCOL_VERSION,verb:"chatLinks",args:{cwd:root,actor:"agent",channelWireId:"wire"}})).toBeNull();

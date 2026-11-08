@@ -15,7 +15,7 @@ import {
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
   type CommitRelayCursorResult,
-  type MaterializeRelayPullPage,
+  type RunRelayPullBatch,
   type ProbeRelayWorkspaceResult,
   type RelayWorkspaceIdentity,
   type PullSharedChannelResult,
@@ -170,7 +170,6 @@ export class RelayTransportRouteGuard {
 
 class RelayConfiguredDaemonClient implements EngineDaemonClient {
   // Preserve the optional request and event capabilities used by workspace sessions.
-  readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
   readonly onBlob?: EngineDaemonClient["onBlob"];
   readonly onEvent?: EngineDaemonClient["onEvent"];
 
@@ -183,14 +182,13 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     private readonly routes: RelayTransportRouteGuard,
     private readonly hasNoOrdinarySync: (workspaceId: string) => boolean,
   ) {
-    if (client.cancelRequest) this.cancelRequest = client.cancelRequest.bind(client);
     if (client.onBlob) this.onBlob = client.onBlob.bind(client);
     if (client.onEvent) this.onEvent = client.onEvent.bind(client);
   }
 
-  async sendRequest(request: Request): Promise<Response> {
+  async sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response> {
     if (request.method !== "workspace.open") {
-      return await this.client.sendRequest(request);
+      return await this.client.sendRequest(request, signal, onProgress, cancelSignal);
     }
     const params = resultRecord(request.params, "workspace.open params");
     const rootPath = stringField(params, "rootDir", "workspace.open params");
@@ -201,7 +199,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     );
     const relay = this.routes.relayForOpen(workspaceId, rootPath);
     if (relay) {
-      return await this.client.sendRequest({ ...request, params: { ...params, relay } });
+      return await this.client.sendRequest({ ...request, params: { ...params, relay } }, signal, onProgress, cancelSignal);
     }
     // A full owner open of a workspace with no ordinary sync makes what an
     // unfinished pull applied local truth. Capture-free and read-only opens
@@ -214,7 +212,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     return await this.client.sendRequest({
       ...request,
       params: abandonOrdinaryPull ? { ...params, abandonOrdinaryPull } : params,
-    });
+    }, signal, onProgress, cancelSignal);
   }
 
   close(): void {
@@ -428,7 +426,8 @@ function pendingCursor(
 
 const SYNC_PASS_METHODS: ReadonlySet<string> = new Set([
   "sync.push",
-  "sync.pull",
+  "sync.fetchPull",
+  "sync.applyPull",
   "sync.commitCursor",
   "sync.recoverOrigin",
 ]);
@@ -473,7 +472,7 @@ function translateRelayError(method: string, error: unknown): never {
     throw new RelayWorkspaceUnavailableError();
   }
   if (
-    (method === "sync.push" || method === "sync.pull") &&
+    (method === "sync.push" || method === "sync.fetchPull" || method === "sync.applyPull") &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "relay-origin-diverged"
   ) {
@@ -503,7 +502,7 @@ function translateRelayError(method: string, error: unknown): never {
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(
-    materializePage: MaterializeRelayPullPage,
+    runBatch: RunRelayPullBatch,
   ): Promise<PullWorkspaceFromRelayResult>;
   commitCursor(
     cursor: Record<string, JsonValue | undefined>,
@@ -697,12 +696,26 @@ export class EngineRelayClient {
                 }, { workspace: handle, deadlineMs: this.requestDeadlineMs });
                 accountChecked = true;
               }
-              return await requester.request(method, params, {
-                workspace: handle,
-                deadlineMs: this.requestDeadlineMs,
-              });
+              try {
+                return await requester.request(method, params, {
+                  workspace: handle,
+                  deadlineMs: this.requestDeadlineMs,
+                });
+              } catch (error) {
+                // The engine answers an unreachable relay with a code that
+                // asks for a new session. The session is fine, so end the
+                // request here instead of reopening and trying again.
+                if (
+                  error instanceof DaemonRefusalError &&
+                  error.wireCode === "WORKSPACE_UNAVAILABLE" &&
+                  error.message === "relay-unreachable"
+                ) {
+                  translateRelayError(method, error);
+                }
+                throw error;
+              }
             },
-            { retryTransportErrors: true },
+            { retryTransportErrors: true, abandonAtQuit: true },
           );
         } catch (error) {
           translateRelayError(method, error);
@@ -797,7 +810,7 @@ export class EngineRelayClient {
           sharingDeclined: result.sharingDeclined,
         };
       },
-      pull: async (materializePage) => {
+      pull: async (runBatch) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
@@ -815,16 +828,25 @@ export class EngineRelayClient {
           }
         >();
         for (;;) {
-          const result = decodeOrdinarySyncResult("sync.pull",
-            await request("sync.pull", { workspaceId: workspace.workspaceId }),
+          const { pageToken } = decodeOrdinarySyncResult("sync.fetchPull",
+            await request("sync.fetchPull", { workspaceId: workspace.workspaceId }),
           );
-          const { pendingCursor: cursor, nextCursor: pageCursor, hasMore } = result;
-          assertRelayPullProgress(
-            "sync.pull",
-            previousCursor,
-            pageCursor,
-            hasMore,
-          );
+          const result = await runBatch(async (materializePage) => {
+            const page = decodeOrdinarySyncResult("sync.applyPull",
+              await request("sync.applyPull", { workspaceId: workspace.workspaceId, pageToken }),
+            );
+            if (page.status === "retry") return page;
+            assertRelayPullProgress("sync.applyPull", previousCursor, page.nextCursor, page.hasMore);
+            try {
+              await materializePage(page.changedPaths);
+              appendDeclines(declines, (await commitCursor(page.pendingCursor)).sharingDeclined);
+            } finally {
+              this.onRefusalsChanged?.();
+            }
+            return page;
+          });
+          if (result.status === "retry") continue;
+          const { nextCursor: pageCursor, hasMore } = result;
           previousCursor = pageCursor;
           nextCursor = pageCursor;
           fetched += result.fetched;
@@ -835,12 +857,6 @@ export class EngineRelayClient {
           const pageChangedPaths = result.changedPaths;
           for (const path of pageChangedPaths) {
             changed.set(`${path.versionId}\0${path.path}`, path);
-          }
-          try {
-            await materializePage(pageChangedPaths);
-            appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
-          } finally {
-            this.onRefusalsChanged?.();
           }
           if (!hasMore) break;
         }

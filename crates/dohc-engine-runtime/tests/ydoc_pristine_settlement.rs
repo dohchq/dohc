@@ -74,6 +74,7 @@ async fn settle(
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
+            None,
         )
         .await
         .expect("settle note")
@@ -260,6 +261,7 @@ async fn closed_pristine_synced_seed_unloads_without_pending_settlement() {
     let pending = owner
         .unload(
             key.object_id.clone(),
+            None,
             vec![key],
             scratch.path().to_path_buf(),
             51,

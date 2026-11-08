@@ -98,6 +98,7 @@ import {
 import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
 
 import { decodeFileResolveResult, MAX_FILE_RESOLVE_TARGETS, MAX_FILE_RESOLVE_BYTES, type FileResolveTarget, type FileResolveResult } from "../daemon/fileResolution";
+import { decodeMadeWorkReference, decodeWorkReferenceResolution, type MadeWorkReference, type WorkReferenceResolution, type WorkTargetInput } from "../daemon/workReferences";
 
 export class VersionedAdapterCapabilityError extends Error {
   constructor(message: string) {
@@ -249,7 +250,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async request<M extends VersionedMethod>(
     method: M,
     params: VersionedMethodParamsMap[M],
-    options?: { idempotencyKey?: string; deadlineMs?: number },
+    options?: { idempotencyKey?: string; deadlineMs?: number; cancelSignal?: AbortSignal },
   ): Promise<VersionedMethodResultMap[M]> {
     const raw = await this.requester.request(method, params, {
       workspace: this.workspace,
@@ -952,6 +953,27 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return result;
   }
 
+  /** Return this device's reference for a target, making one when it has none. */
+  async makeWorkReference(input: { workspaceId: string; target: WorkTargetInput; signal?: AbortSignal }): Promise<MadeWorkReference> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal?.throwIfAborted();
+    const result = decodeMadeWorkReference(await this.requester.request("workReferences.make", { target: input.target }, { workspace: this.workspace }));
+    input.signal?.throwIfAborted();
+    return result;
+  }
+
+  /** Resolve a reference to the work it names here. A rename or move does not change the answer. */
+  async resolveWorkReference(input: { workspaceId: string; reference: string; signal?: AbortSignal }): Promise<WorkReferenceResolution> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal?.throwIfAborted();
+    const result = decodeWorkReferenceResolution(await this.requester.request("workReferences.resolve", { reference: input.reference }, { workspace: this.workspace }));
+    input.signal?.throwIfAborted();
+    if (result.status === "found" && result.reference !== input.reference) {
+      throw new DaemonProtocolError("workReferences.resolve returned a different reference.");
+    }
+    return result;
+  }
+
   /**
    * Lists every file in the version, or only files under the folder `under`.
    * The engine orders paths bytewise, so a folder's files are one run that
@@ -1072,12 +1094,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return inputs;
   }
 
-  async checkMove(input: { workspaceId: string; versionId: string; path: string; author?: WriteAuthor }): Promise<void> {
+  /** `change`: the move or delete that takes the path away, so a page this computer owns at or under it refuses too. A duplicate leaves it out. */
+  async checkMove(input: { workspaceId: string; versionId: string; path: string; author?: WriteAuthor; change?: "movePage" | "moveFolder" | "delete" }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.textCheckMove, {
       versionId: input.versionId,
       path: input.path,
       ...(input.author ? { author: input.author } : {}),
+      ...(input.change ? { change: input.change } : {}),
     });
   }
 
@@ -1203,9 +1227,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
   }
 
-  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryLinkRewriteResult> {
+  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor; cancelSignal?: AbortSignal}): Promise<HistoryLinkRewriteResult> {
     this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
+    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId, cancelSignal: input.cancelSignal});
   }
 
   async getMoment(input: {
@@ -1712,6 +1736,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async reconcileCapture(): Promise<CaptureFlushResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.captureReconcile, {});
+  }
+
+  /** Restart capture that stopped, then flush once. */
+  async retryCapture() {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureRetry, {});
   }
 
   async retryHeldCapture(path: string) {

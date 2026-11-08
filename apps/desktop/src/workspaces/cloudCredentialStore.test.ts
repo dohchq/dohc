@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   createCloudCredentialStore,
+  mayUseKeychain,
   type CloudCredentials,
   type TokenCipher,
 } from "./cloudCredentialStore";
@@ -91,6 +92,17 @@ describe("cloud credential store", () => {
     const store = createCloudCredentialStore({ dir });
     await store.save(credentials);
     expect(await store.load()).toEqual(credentials);
+  });
+
+  it("keeps the keychain out of only an unpackaged desktop test run on a Mac", () => {
+    const test = { DOHC_DESKTOP_TEST: "1" };
+    expect(mayUseKeychain({ isPackaged: false, platform: "darwin", env: test })).toBe(false);
+    // A packaged app, an ordinary run, and Windows or Linux tests still seal the token.
+    expect(mayUseKeychain({ isPackaged: true, platform: "darwin", env: test })).toBe(true);
+    expect(mayUseKeychain({ isPackaged: false, platform: "darwin", env: {} })).toBe(true);
+    expect(mayUseKeychain({ isPackaged: false, platform: "darwin", env: { DOHC_DESKTOP_TEST: "0" } })).toBe(true);
+    expect(mayUseKeychain({ isPackaged: false, platform: "win32", env: test })).toBe(true);
+    expect(mayUseKeychain({ isPackaged: false, platform: "linux", env: test })).toBe(true);
   });
 
   it("round-trips the opaque Better Auth user id (the reactor identity)", async () => {

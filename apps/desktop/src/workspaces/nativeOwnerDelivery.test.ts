@@ -9,11 +9,12 @@ import type {OwnerYDocFrameDeliveryOptions} from "./ownerYDocFrameDelivery";
 import {runNativeOwnerDeliveryPass} from "./nativeOwnerDelivery";
 import {parseDesktopOwnerDeliveryConfig} from "./desktopOwnerDelivery";
 
-const mock = vi.hoisted(() => ({options: undefined as unknown, drain: vi.fn(), dispose: vi.fn(), authority: vi.fn()}));
+const mock = vi.hoisted(() => ({options: undefined as unknown, drain: vi.fn(), dispose: vi.fn(), authority: vi.fn(), synchronized: false}));
 vi.mock("./ownerYDocFrameDelivery", () => ({OwnerYDocFrameDelivery: class {
   constructor(options: unknown) {mock.options = options;}
   dispose = mock.dispose;
   freshOwnerAuthority = mock.authority;
+  get synchronized() {return mock.synchronized;}
 }}));
 vi.mock("./ownerYDocOutbox", () => ({OwnerYDocOutboxDrainer: class {drainOnce = mock.drain; dispose() {}}}));
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
@@ -21,7 +22,7 @@ const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: re
   relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
   attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]});
-afterEach(() => {vi.clearAllMocks(); vi.useRealTimers();});
+afterEach(() => {vi.clearAllMocks(); vi.useRealTimers(); mock.synchronized = false;});
 
 it("keeps a known-document preparation overload on the work retry cadence", async () => {
   vi.useFakeTimers();
@@ -91,6 +92,7 @@ it("awaits an interrupted native read before releasing the pass", async () => {
 });
 
 it("requests a complete host checkpoint before discovering the enrolled outbox", async () => {
+  const onEnrolled = vi.fn(async () => undefined);
   const captured={nativeHeadSequence:2,localStateDigest:"c".repeat(64)};
   const draft={binding,relayDatabaseNamespace:"namespace",revision:1,acceptedCursor:7,nativeHeadSequence:3, nativeUnsettled: false,outboxId:"enrolled",pendingBytes:2,state:"active"};
   const client={ownerYDocPrepareEnrollment:vi.fn().mockResolvedValueOnce({status:"capture",captured}).mockResolvedValue({status:"observed",draft}),
@@ -104,9 +106,10 @@ it("requests a complete host checkpoint before discovering the enrolled outbox",
     return {kind:"authority",authority:{value:{},hostEpoch:parseHostEpoch(1)}};
   });
   mock.drain.mockResolvedValue("acknowledged");
-  expect(await runNativeOwnerDeliveryPass({client:client as unknown as EngineClient,workspaceHandle:"handle",config,refusals:new OwnerKnownRefusals(),document:config.documents[0]!,signal:new AbortController().signal,bearer:"credential",accountId:"owner",assertCurrent(){}})).toBe("acknowledged");
+  expect(await runNativeOwnerDeliveryPass({client:client as unknown as EngineClient,workspaceHandle:"handle",config,refusals:new OwnerKnownRefusals(),document:config.documents[0]!,signal:new AbortController().signal,bearer:"credential",accountId:"owner",assertCurrent(){},onEnrolled})).toBe("acknowledged");
   expect(client.ownerYDocEnroll).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({captured,journalCursor:7,hostVector:Uint8Array.of(1),checkpoint:Uint8Array.of(2,3)}),expect.any(AbortSignal));
   expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(2);
+  expect(onEnrolled).toHaveBeenCalledExactlyOnceWith();
 });
 
 it("pulls accepted state when an enrolled owner has no pending edits", async () => {
@@ -127,4 +130,68 @@ it("persists a fenced idle outbox instead of requesting it again indefinitely", 
     document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", accountId: "owner", assertCurrent() {}})).toBe("frozen");
   expect(sendRequest).toHaveBeenCalledWith(expect.objectContaining({method: "ydoc.ownerOutbox.quarantine", workspace: "handle",
     params: {outboxId: "outbox", reason: "binding changed", observedBinding: binding}}), expect.any(AbortSignal));
+});
+
+// #3089: a move's owner sync never enrolls, and answers only after an opening sync installed.
+const observedPass = (client: unknown) => runNativeOwnerDeliveryPass({client: client as EngineClient, workspaceHandle: "handle", config,
+  refusals: new OwnerKnownRefusals(), document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential",
+  accountId: "owner", assertCurrent() {}, observedOnly: true});
+
+it("answers unbound for a page this device has not enrolled, without asking the host or enrolling", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "capture", captured: {nativeHeadSequence: 2, localStateDigest: "c".repeat(64)}})),
+    ownerYDocEnroll: vi.fn()};
+  expect(await observedPass(client)).toBe("unbound");
+  expect(mock.authority).not.toHaveBeenCalled();
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  {name: "no outbox", outboxId: null, drained: undefined, synchronized: false, expected: "retry"},
+  {name: "no outbox", outboxId: null, drained: undefined, synchronized: true, expected: "empty"},
+  {name: "a drained outbox", outboxId: "outbox", drained: "acknowledged", synchronized: false, expected: "retry"},
+  {name: "a drained outbox", outboxId: "outbox", drained: "acknowledged", synchronized: true, expected: "acknowledged"},
+  {name: "an empty outbox", outboxId: "outbox", drained: "empty", synchronized: false, expected: "retry"},
+  {name: "an empty outbox", outboxId: "outbox", drained: "empty", synchronized: true, expected: "empty"},
+])("answers $expected for $name when the opening sync installed is $synchronized", async ({outboxId, drained, synchronized, expected}) => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId}})), ownerYDocEnroll: vi.fn()};
+  mock.authority.mockImplementation(async () => {mock.synchronized = synchronized; return {kind: "authority", authority: {}};});
+  mock.drain.mockImplementation(async () => {mock.synchronized = synchronized; return drained;});
+  expect(await observedPass(client)).toBe(expected);
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
+});
+
+it("answers empty at once for a retired generation, so a move's pull is not held", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "retired"})), ownerYDocEnroll: vi.fn()};
+  expect(await observedPass(client)).toBe("empty");
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(1);
+  expect(mock.authority).not.toHaveBeenCalled();
+  expect(mock.drain).not.toHaveBeenCalled();
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
+});
+
+it("skips a retired generation without authority or a drain, and the next page delivers", async () => {
+  vi.useFakeTimers();
+  const second = {...config.documents[0]!, binding: {...binding, objectId: "second", currentPath: "b.md", selectorPaths: ["b.md"]}};
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async (_request: unknown, target: {binding: {objectId: string}}) =>
+    target.binding.objectId === "object" ? {status: "retired"} : {status: "observed", draft: {outboxId: "outbox"}})};
+  mock.drain.mockResolvedValue("acknowledged");
+  const outcomes: string[] = [];
+  const runPass = vi.fn(async (_workspace: string, index: number, signal: AbortSignal) => {
+    const documents = [config.documents[0]!, second];
+    const outcome = await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(),
+      document: documents[index % documents.length]!, signal, bearer: "credential", accountId: "owner", assertCurrent() {}});
+    outcomes.push(outcome);
+    return {documentCount: documents.length, acknowledged: outcome === "acknowledged"};
+  });
+  const onError = vi.fn(), owner = startServerOwnerDelivery({workspaceIds: () => ["workspace"],
+    attemptTimeoutMs: config.attemptTimeoutMs, retryDelayMs: config.retryDelayMs, runPass, onError});
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(outcomes).toEqual(["empty", "acknowledged"]));
+    expect(runPass.mock.calls.map(call => call[1])).toEqual([0, 1]);
+    expect(mock.authority).not.toHaveBeenCalled();
+    expect(mock.drain).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  } finally {await owner.stop();}
 });

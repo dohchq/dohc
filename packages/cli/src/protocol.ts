@@ -49,25 +49,80 @@ const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
-const showArgsSchema = z
-  .object({ ...argsBase, target: z.string().min(1), peek: z.boolean() })
+export const CHAT_WATCH_TIMEOUT_MS = 25_000;
+export const CHAT_WATCH_MAX_TIMEOUT_MS = 25_000;
+export const chatWatchInputSchema = z.object({
+  cursor: z.string().min(1).max(1_048_576).optional(),
+  group: z.string().min(1).max(500).optional(),
+  thread: z.string().min(1).max(500).optional(),
+  timeoutMs: z.number().int().min(0).max(CHAT_WATCH_MAX_TIMEOUT_MS).optional(),
+}).strict();
+const watchArgsSchema = chatWatchInputSchema.extend(argsBase).strict();
+// Where a group's stream page ends: an item's time, lane and id.
+const streamPositionSchema = z
+  .object({
+    createdAtMs: z.number().int().nonnegative(),
+    lane: z.enum(["posts", "chat"]),
+    id: z.string().min(1).max(200),
+  })
   .strict();
+export type CliStreamPosition = z.infer<typeof streamPositionSchema>;
+const streamPageArgs = {
+  before: streamPositionSchema.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+};
+// A thread or message shows that thread; a group shows its stream.
+const showArgsSchema = z
+  .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
+  .strict();
+// One part of what an agent reports about itself: printable text with no
+// surrounding space.
+export const MAX_REPORTED_AGENT_CHARS = 64;
+export const reportedAgentPartSchema = z
+  .string()
+  .min(1)
+  .max(MAX_REPORTED_AGENT_CHARS)
+  .refine((value) => value.trim() === value && !/\p{Cc}/u.test(value), {
+    message: "Use printable text with no space at either end.",
+  });
+// What an agent reports about itself: its MCP client's product and version
+// from the handshake, and the model the agent states. dohc shows it only as
+// reported. A version comes with its product.
+export const chatReportedAgentSchema = z
+  .object({
+    product: reportedAgentPartSchema.optional(),
+    version: reportedAgentPartSchema.optional(),
+    model: reportedAgentPartSchema.optional(),
+  })
+  .strict()
+  .refine((reported) => reported.version === undefined || reported.product !== undefined, {
+    message: "A reported version needs its product.",
+  });
+export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
+// A name the calling agent gives itself, recorded as the author of its edits
+// and messages. A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
 const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
+    reported: chatReportedAgentSchema.optional(),
     group: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
     options: z.array(z.string().min(1)).max(12).optional(),
     body: z.string().min(1),
+    agent: documentAgentNameSchema.optional(),
   })
   .strict();
 const replyArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
+    reported: chatReportedAgentSchema.optional(),
     thread: z.string().min(1),
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -76,6 +131,7 @@ const replyArgsSchema = z
     resolve: z.string().min(1).optional(),
     choose: z.string().min(1).optional(),
     body: z.string().min(1),
+    agent: documentAgentNameSchema.optional(),
   })
   .strict();
 const reactArgsSchema = z
@@ -128,9 +184,10 @@ const momentArgsSchema = z
 const fileChatsArgsSchema = z
   .object({ ...argsBase, path: z.string().min(1).max(4096) })
   .strict();
-const chatArgsSchema = z
-  .object({ ...argsBase, threadId: z.string().min(1).max(200) })
-  .strict();
+const chatArgsSchema = z.union([
+  z.object({ ...argsBase, threadId: z.string().min(1).max(200) }).strict(),
+  z.object({ ...argsBase, group: z.string().min(1).max(500), ...streamPageArgs }).strict(),
+]);
 const groupsFullArgsSchema = z.object(argsBase).strict();
 export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
   group: z.string().min(1).max(500),
@@ -149,11 +206,6 @@ export const documentEditTextSchema = z
   .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
     message: "Document edit text is at most 256 KiB as UTF-8.",
   });
-// A name the calling agent gives itself, recorded as the author of its edits.
-// A slash is refused so no name can pass for an automation's id.
-export const documentAgentNameSchema = z
-  .string()
-  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
 const documentReadArgsSchema = z
   .object({ ...argsBase, path: documentPathArg })
   .strict();
@@ -194,6 +246,37 @@ const fileDeleteArgsSchema = z.object({
   requestId: requestIdSchema,
 }).strict();
 
+const versionListArgsSchema = z.object(argsBase).strict();
+// `version` is a version's name or id, as version list prints them.
+const versionCompareArgsSchema = z.object({
+  ...argsBase,
+  version: z.string().min(1).max(200),
+  afterPath: z.string().min(1).max(4096).optional(),
+}).strict();
+const versionConflictsArgsSchema = z.object({ ...argsBase, afterConflictId: z.string().min(1).max(200).optional() }).strict();
+// The versions menu's name field takes at most 80 characters.
+export const MAX_VERSION_NAME_LENGTH = 80;
+const versionCreateArgsSchema = z.object({ ...argsBase, name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) }).strict();
+const versionSwitchArgsSchema = z.object({ ...argsBase, version: z.string().min(1).max(200) }).strict();
+const versionMergeArgsSchema = versionSwitchArgsSchema;
+// Keep one side of a conflict, or replace both with combined text. Combined
+// text replaces the file, so it has the file write limit.
+export const versionResolutionSchema = z.discriminatedUnion("keep", [
+  z.object({ keep: z.enum(["current", "incoming"]) }).strict(),
+  z.object({
+    keep: z.literal("combined"),
+    text: z.string().refine((value) => fitsUtf8Bytes(value, MAX_FILE_WRITE_BYTES), {
+      message: "Combined text is at most 10 MiB as UTF-8.",
+    }),
+  }).strict(),
+]);
+export type VersionResolution = z.infer<typeof versionResolutionSchema>;
+const versionResolveArgsSchema = z.object({
+  ...argsBase,
+  conflictId: z.string().min(1).max(200),
+  resolution: versionResolutionSchema,
+}).strict();
+
 const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
@@ -226,6 +309,7 @@ const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
 const documentEditArgsSchema = z
   .object({
+    allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
     requestId: requestIdSchema.optional(),
@@ -247,6 +331,7 @@ const fileChatStartArgsSchema = z
   .object({
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
+    reported: chatReportedAgentSchema.optional(),
     requestId: requestIdSchema.optional(),
     runId: z.string().min(1).optional(),
     path: documentPathArg,
@@ -448,6 +533,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
@@ -491,6 +577,13 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionConflicts"), args: versionConflictsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionCreate"), args: versionCreateArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionSwitch"), args: versionSwitchArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionMerge"), args: versionMergeArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
@@ -517,6 +610,7 @@ export type CliVerb = CliRequest["verb"];
 export const APP_PUBLICATION_CAPABILITIES = {
   createLink: "app.link.create",
   listLocal: "app.local.list",
+  checkLocal: "app.local.check",
   prepareLocal: "app.local.prepare",
   launchLocal: "app.local.launch",
   list: "app.publication.list",
@@ -548,6 +642,7 @@ export const CLI_CAPABILITIES = {
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
   threads: ["chat.threads.list"],
+  watch: ["chat.inbox.read"],
   inbox: ["chat.inbox.read"],
   show: ["chat.show"],
   post: ["chat.post"],
@@ -571,6 +666,13 @@ export const CLI_CAPABILITIES = {
   fileMove: ["file.move"],
   fileDelete: ["file.delete"],
   documentRead: ["document.read"],
+  versionList: ["version.list"],
+  versionCompare: ["version.compare"],
+  versionConflicts: ["version.conflicts.list"],
+  versionCreate: ["version.create"],
+  versionSwitch: ["version.switch"],
+  versionMerge: ["version.merge"],
+  versionResolve: ["version.conflict.resolve"],
   keptCopies: ["file.kept.list"],
   collectionsWaiting: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
@@ -654,6 +756,20 @@ const cliAttachmentSchema = z
   })
   .strict();
 
+// Where one agent's request to answer a message stands. Finished requests
+// are left out.
+const agentRequestSchema = z
+  .object({
+    agentId: z.string().min(1),
+    state: z.enum(["waiting", "running", "failed"]),
+    runId: z.string().min(1).optional(),
+    startedAtMs: z.number().int().nonnegative().optional(),
+    failureReason: z.string().min(1).optional(),
+    exitCode: z.number().int().optional(),
+    logPath: z.string().min(1).optional(),
+  })
+  .strict();
+
 const cliShowMessageSchema = z
   .object({
     id: z.string().min(1),
@@ -666,6 +782,8 @@ const cliShowMessageSchema = z
     decisionChosenOption: z.string().optional(),
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
+    agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -728,13 +846,50 @@ const threadDispatchSchema = z.object({
   }).strict().nullable(),
 }).strict();
 
-const showResultSchema = z
+const showThreadResultSchema = z
   .object({
     thread: cliShowThreadSchema,
     dispatch: threadDispatchSchema,
     messages: z.array(cliShowMessageSchema),
   })
   .strict();
+export type CliShowThreadResult = z.infer<typeof showThreadResultSchema>;
+
+// A group's posts and conversation messages in one order, oldest first. A
+// post carries what its thread holds beyond its first message.
+function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(group: Group, message: Message) {
+  return z
+    .object({
+      group,
+      items: z.array(z.object({
+        position: streamPositionSchema,
+        threadId: z.string().min(1),
+        message,
+        post: z.object({
+          replyCount: z.number().int().nonnegative(),
+          repliers: z.array(z.object({ author: cliAuthorSchema, lastReplyAtMs: z.number().int().nonnegative() }).strict()),
+          lastReplyAtMs: z.number().int().nonnegative().optional(),
+          latestAgentReply: z.object({
+            id: z.string().min(1),
+            author: cliAuthorSchema,
+            createdAtMs: z.number().int().nonnegative(),
+            bodyExcerpt: z.string(),
+          }).strict().optional(),
+          openDecisionCount: z.number().int().nonnegative(),
+        }).strict().optional(),
+      }).strict()),
+      // Pass as `before` to read the older page. Null at the oldest item.
+      nextBefore: streamPositionSchema.nullable(),
+      // The newest item the person has read.
+      readPosition: streamPositionSchema.nullable(),
+    })
+    .strict();
+}
+
+const showResultSchema = z.union([
+  showThreadResultSchema,
+  z.object({ stream: streamSchema(cliGroupSchema, cliShowMessageSchema) }).strict(),
+]);
 const postResultSchema = z
   .object({
     group: cliGroupSchema,
@@ -933,6 +1088,8 @@ const rawChatMessageSchema = z
     options: z.array(z.string()).optional(),
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
+    agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z
@@ -950,7 +1107,7 @@ const fileChatsResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-const chatResultSchema = z.discriminatedUnion("ok", [
+const chatResultSchema = z.union([
   z
     .object({
       ok: z.literal(true),
@@ -964,6 +1121,15 @@ const chatResultSchema = z.discriminatedUnion("ok", [
           text: z.string(),
         })
         .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      stream: streamSchema(
+        z.object({ id: rawChannelIdSchema, name: z.string().min(1), kind: z.enum(["group", "dm", "agent"]) }).strict(),
+        rawChatMessageSchema,
+      ),
     })
     .strict(),
   rawFailureSchema,
@@ -1142,12 +1308,119 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// A workspace's versions and the active one, whose files the folder shows.
+// canMergeIntoMain is false for a version made from another version.
+// madeFromVersionId is the version it was made from. Main has none.
+const versionListResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    versions: z.array(z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      kind: z.enum(["main", "named"]),
+      createdAtMs: z.number(),
+      canMergeIntoMain: z.boolean(),
+      madeFromVersionId: z.string().min(1).optional(),
+    }).strict()),
+    activeVersionId: z.string().min(1),
+  }).strict(),
+  rawFailureSchema,
+]);
+
+// Version rows leave out secret-backed files and paths the workspace's rules
+// don't track, as History does.
+const versionCompareResultSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    version: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
+    // One page of the files that differ from Main. Pass nextAfterPath back as
+    // afterPath for the next page.
+    files: z.array(z.object({
+      path: z.string().min(1),
+      status: z.enum(["added", "modified", "deleted"]),
+      // Main's side; absent when the file exists only in the version.
+      currentText: z.string().optional(),
+      // The version's side; absent when the file exists only in Main.
+      incomingText: z.string().optional(),
+      // A binary file differs by its bytes, so neither side has text.
+      binary: z.boolean().optional(),
+    }).strict()),
+    nextAfterPath: z.string().min(1).nullable(),
+  }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
+const conflictBinarySchema = z.object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1) }).strict().nullable();
+// One page of open conflicts: from a merge, or from two computers editing
+// the same file while apart (origin "sync"). A side's text is null when that
+// side has no file or holds binary.
+const versionConflictsPage = {
+  conflicts: z.array(z.object({
+    conflictId: z.string().min(1),
+    path: z.string().min(1),
+    sourceVersionId: z.string().min(1),
+    targetVersionId: z.string().min(1),
+    origin: z.enum(["merge", "sync"]),
+    contentKind: z.enum(["text", "binary"]),
+    currentText: z.string().nullable(),
+    incomingText: z.string().nullable(),
+    baseText: z.string().nullable(),
+    currentBinary: conflictBinarySchema.optional(),
+    incomingBinary: conflictBinarySchema.optional(),
+    baseBinary: conflictBinarySchema.optional(),
+    // Another computer saved a newer version, which dohc holds until this
+    // conflict is resolved. The rest are technical details.
+    waiting: z.object({
+      code: z.literal("resolve-existing-conflict"),
+      message: z.string().min(1),
+      objectId: z.string().min(1),
+      originId: z.string().min(1),
+      originSeq: z.number().int().nonnegative(),
+    }).strict().optional(),
+  }).strict()),
+  nextAfterConflictId: z.string().min(1).nullable(),
+};
+const versionConflictsResultSchema = z.union([
+  z.object({ ok: z.literal(true), ...versionConflictsPage }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+
+const versionNameSchema = z.object({ id: z.string().min(1), name: z.string().min(1) }).strict();
+// The new version, now the active one.
+const versionCreateResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema }).strict(),
+  rawFailureSchema,
+]);
+const versionSwitchResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), version: versionNameSchema, changedFileCount: z.number().int().nonnegative() }).strict(),
+  rawFailureSchema,
+]);
+// conflictCount counts every conflict the merge left. The page lists the
+// open conflicts, from this merge and earlier ones, as version conflicts does.
+const versionMergeResultSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    version: versionNameSchema,
+    mergedFileCount: z.number().int().nonnegative(),
+    unchangedFileCount: z.number().int().nonnegative(),
+    conflictCount: z.number().int().nonnegative(),
+    ...versionConflictsPage,
+  }).strict(),
+  rawFailureSchema,
+  historyPolicyUnreadableSchema,
+]);
+// The open conflicts that remain, as version conflicts lists them.
+const versionResolveResultSchema = versionConflictsResultSchema;
+
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
 // visible copy beside its file.
 const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
+    outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
     keptCopies: z.array(z.object({
       id: z.number().int(),
       path: z.string().min(1),
@@ -1221,6 +1494,7 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       incident: keptEditsIncidentSchema,
       recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
       earlier: z.literal(true).optional(),
+      saveOnly: z.literal(true).optional(),
     }).strict()),
   }).strict(),
   rawFailureSchema,
@@ -1525,6 +1799,7 @@ export const cliResultSchemas = {
   ownerAppResponses: OwnerAppResponsesResult,
   groups: groupsResultSchema,
   threads: threadsResultSchema,
+  watch: z.object({ messages: z.array(cliInboxMentionSchema), cursor: z.string().min(1).max(1_048_576) }).strict(),
   inbox: inboxResultSchema,
   show: showResultSchema,
   post: postResultSchema,
@@ -1542,6 +1817,13 @@ export const cliResultSchemas = {
   collectionSetFields: collectionSetFieldsResultSchema,
   collectionCreateRecord: collectionCreateRecordResultSchema,
   documentRead: documentReadResultSchema,
+  versionList: versionListResultSchema,
+  versionCompare: versionCompareResultSchema,
+  versionConflicts: versionConflictsResultSchema,
+  versionCreate: versionCreateResultSchema,
+  versionSwitch: versionSwitchResultSchema,
+  versionMerge: versionMergeResultSchema,
+  versionResolve: versionResolveResultSchema,
   keptCopies: keptCopiesResultSchema,
   // The engine's answer: Collection updates wait for an unfinished pull.
   collectionsWaiting: z.discriminatedUnion("ok", [

@@ -895,10 +895,14 @@ const SERVED_CHAT_FIELDS = {
     // An automation's chain depth, so a chain stops across computers. The
     // automation and its Collection path never leave the author's computer.
     "chainDepth",
+    // What an agent reported about itself: its product, version, and model.
+    "authorReported",
     // A link post's link grant and link principal, which name the link and
-    // no account. Every desktop refuses a link post without them.
+    // no account. Every desktop refuses a link post without them. An agent's
+    // link post also names its agent connection.
     "linkGrantId",
     "linkPrincipalId",
+    "agentConnectionId",
   ],
   "chat.reaction.set": [
     "reactionId",

@@ -207,7 +207,7 @@ describe("markdown document opening state", () => {
           ? "toggle"
           : el.getAttribute("aria-label") ?? el.querySelector("[aria-label]")?.getAttribute("aria-label") ?? el.textContent,
       ),
-      disabled: controls.map((el) => (control(el) as HTMLButtonElement).disabled),
+      disabled: controls.map((el) => (control(el) as HTMLButtonElement).disabled || control(el).getAttribute("aria-disabled") === "true"),
     };
   }
   const CONTROLS = ["Share file", "toggle", "Document actions"];
@@ -248,12 +248,32 @@ describe("markdown document opening state", () => {
     bridgeMock.readWorkspaceText.mockRejectedValue(new Error("EACCES"));
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     expect(headerGroup(), "a failed read drops the toggle and the menu, and Share moves right").toEqual({
       status: [], controls: CONTROLS, disabled: [false, true, true],
     });
-    // A failed read never opens, so the toggle does not promise that it will.
-    expect(screen.getByTestId("view-actions").querySelector("button:not([aria-label])")?.getAttribute("title")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Edit", description: "dohc could not open this file." });
+    expect(toggle.getAttribute("title")).toBe("dohc could not open this file.");
+    const user = userEvent.setup();
+    screen.getByRole("button", { name: "Share file" }).focus();
+    await user.tab();
+    expect(document.activeElement).toBe(toggle);
+    await user.keyboard("{Enter} ");
+    await user.click(toggle);
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+  });
+
+  it("offers Try again when any text file's read fails, and reads it again", async () => {
+    const { bridgeMock } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockRejectedValueOnce(new Error("EBUSY"));
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    await screen.findByText("dohc could not read this file.");
+    const reads = bridgeMock.readWorkspaceText.mock.calls.length;
+    await user.click(screen.getByTestId("file-read-retry"));
+    await waitFor(() => expect(bridgeMock.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(screen.queryByText("dohc could not read this file.")).toBeNull());
   });
 
   it("keeps the document's header controls in their places, disabled, when the file is gone from its path", async () => {
@@ -288,8 +308,8 @@ describe("markdown document opening state", () => {
       ),
     );
     expect(
-      (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
-    ).toBe(true);
+      screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled"),
+    ).toBe("true");
     expect(
       (screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly,
     ).toBe(true);
@@ -365,11 +385,9 @@ describe("markdown document opening state", () => {
       expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
     );
 
-    // The properties draw where they will be, and the block as written starts
-    // closed, as it does once the properties take edits.
+    // The properties draw where they will be, so nothing moves once the
+    // document is ready.
     await screen.findByTestId("properties-panel");
-    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
-    expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
     // The body draws with the editor's own rules (styles.css
     // .dohc-notion-editor): its column, type and block spacing. No block
     // carries a look of its own that would beat them.
@@ -383,7 +401,8 @@ describe("markdown document opening state", () => {
     );
     bind();
     await screen.findByTestId("markdown-source-toggle");
-    expect(asWritten()?.open).toBe(false);
+    // The page's icon shows every line, so the properties offer no Source.
+    expect(screen.queryByTestId("properties-source")).toBeNull();
   });
 
   it("gives up the bound editor the moment a version switch reopens the session", async () => {
@@ -447,6 +466,7 @@ describe("markdown document opening state", () => {
     expect(
       (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
     ).toBe(false);
+    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).not.toBe("true");
 
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
@@ -2429,11 +2449,11 @@ describe("markdown document opening state", () => {
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     await screen.findByTestId("orphaned-draft-notice");
     await user.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
-      expect(await navigator.clipboard.readText(), "error-branch render: drop {recoveryNotices} from the loading/error branch. The screen says only 'Couldn't read this file' while the close warning demands actions that render nowhere.").toBe("Kept!"),
+      expect(await navigator.clipboard.readText(), "error-branch render: drop {recoveryNotices} from the loading/error branch. The screen says only 'dohc could not read this file' while the close warning demands actions that render nowhere.").toBe("Kept!"),
     );
   });
 

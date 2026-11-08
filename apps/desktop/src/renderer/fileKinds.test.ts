@@ -1,18 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { FILE_KIND_RECORDS, fileKindForPath } from "@dohc/workspace-contracts/kinds";
 
-// Independent corpus of the original extension sets, now split into code and
-// plain-text display kinds. FileInspector's tests pin their shared editor.
+// Independent corpus of the original extension sets, now split into code,
+// data and plain-text display kinds. FileInspector's tests pin their shared
+// editor.
 const CORPUS = {
   markdown: ["md", "markdown"],
   drawing: ["excalidraw"],
   csv: ["csv", "tsv", "tab"],
-  json: ["json"],
-  text: ["txt", "html", "htm", "xml", "yaml", "yml", "toml", "ini", "env", "log"],
+  json: ["json", "xml", "yaml", "yml", "toml", "ini", "env"],
+  text: ["txt", "log"],
   code: [
     "css", "scss", "sass", "less", "js", "jsx", "ts", "tsx", "mjs", "cjs",
     "sql", "sh", "bash", "zsh", "ps1", "py", "rb", "go", "rs", "java", "c",
-    "cpp", "h", "hpp",
+    "cpp", "h", "hpp", "html", "htm",
   ],
   image: ["png", "jpg", "jpeg", "webp", "gif", "svg"],
   audio: ["m4a", "mp3", "wav", "ogg"],
@@ -47,7 +48,9 @@ describe("file display classification corpus", () => {
   it.each([
     ["file.csv", "csv", "text"],
     ["file.json", "json", "text"],
-    ["file.yaml", "text", "text"],
+    ["file.yaml", "json", "text"],
+    ["file.log", "text", "text"],
+    ["file.html", "code", "text"],
     ["file.ts", "code", "text"],
     ["file.excalidraw.json", "json", "text"],
     ["file.svg", "image", "asset"],

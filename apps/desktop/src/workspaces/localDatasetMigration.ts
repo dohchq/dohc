@@ -41,10 +41,11 @@ interface MigrationAuthority {
   assertCurrent(): void;
   approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean } | Promise<{ revision: DatasetRevision; cursor: DatasetCursor; active: boolean }>;
   prepareMigrationCandidate(input: MigrateDatasetInput): Promise<DatasetMigrationCandidate>;
-  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
+  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; changeSha256?: string; approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
   discardMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; signal?: AbortSignal }): Promise<unknown>;
 }
-type MigrationApproval = { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal };
+/** `changeSha256` names the change a person was asked to apply. */
+type MigrationApproval = { preparationId: string; revisionSha256: string; approvalDigest: string; changeSha256?: string; signal?: AbortSignal };
 
 async function assertMigrationCursor(dependencies: MigrationAuthority, expected: DatasetCursor) {
   dependencies.assertCurrent();
@@ -61,7 +62,8 @@ export async function approveLocalDatasetMigration(dependencies: MigrationAuthor
   }
   await assertMigrationCursor(dependencies, review.expected);
   const result = await dependencies.approveMigrationCandidate({ workspaceId: dependencies.workspaceId, datasetId: review.revision.datasetId,
-    candidateId: review.candidate.candidateId, checkpointSha256: review.candidate.checkpointSha256, signal: input.signal });
+    candidateId: review.candidate.candidateId, checkpointSha256: review.candidate.checkpointSha256,
+    ...(input.changeSha256 === undefined ? {} : { changeSha256: input.changeSha256 }), signal: input.signal });
   dependencies.assertCurrent();
   if (result.revision.revisionSha256 !== review.revision.revisionSha256 || result.revision.datasetId !== review.revision.datasetId ||
       result.cursor.workspaceId !== dependencies.workspaceId || result.cursor.datasetId !== review.revision.datasetId ||

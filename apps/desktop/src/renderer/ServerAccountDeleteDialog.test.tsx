@@ -271,5 +271,6 @@ it("offers no deletion in the connect panel's account row", async () => {
   render(<CloudLogin />);
   await screen.findByTestId("settings-row-account");
   expect(screen.getByTestId("cloud-disconnect")).toBeTruthy();
+  expect(screen.queryByTestId("cloud-account-more")).toBeNull();
   expect(screen.queryByTestId("cloud-delete-account")).toBeNull();
 });

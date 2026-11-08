@@ -62,7 +62,7 @@ describe("EngineHistoryView automation rows", () => {
     const source = screen.getByTestId("engine-moment-source");
     expect(source.textContent).toBe("Automation Stamp the finish date in Tasks");
     const row = screen.getByTestId("engine-moment-open");
-    expect(row.firstElementChild?.querySelector('[title="Stamp the finish date"] .lucide-zap')).not.toBeNull();
+    expect(row.querySelector('[title="Stamp the finish date"] .lucide-zap')).not.toBeNull();
     expect(row.getAttribute("aria-label")).toBe("Open diff for Tasks/new.md");
     expect(document.getElementById(row.getAttribute("aria-describedby")!)?.textContent).toContain("Automation Stamp the finish date in Tasks");
   });
@@ -89,7 +89,7 @@ describe("EngineHistoryView protected rows", () => {
       />,
     );
     expect(screen.getAllByTestId("engine-moment-lock")).toHaveLength(1);
-    expect(screen.getByText("Updated .env")).toBeTruthy();
+    expect(screen.getAllByTestId("engine-moment-summary").find((summary) => summary.textContent === "Updated .env")).toBeTruthy();
     // The protected row is still a normal, clickable timeline row.
     const rows = screen.getAllByTestId("engine-moment-open");
     expect(rows).toHaveLength(2);

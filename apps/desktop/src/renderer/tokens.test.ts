@@ -47,14 +47,19 @@ describe("the surface ladder", () => {
 });
 
 describe("state fills", () => {
-  // The decided alphas (MEGA-PLAN step 2): 7% hover and 11% selected,
-  // and one 40% scrim with no blur. Both themes share them.
-  it("are 7% hover, 11% selected and a 40% scrim in both themes", () => {
+  // The decided alphas (MEGA-PLAN step 2), and a scrim with no blur.
+  it("are 7% hover and 14% selected in both themes, and a 40% or 65% scrim", () => {
     for (const mode of ["light", "dark"] as const) {
       expect(inkAlpha(palette[mode].hover, "hover")).toBe(0.07);
-      expect(inkAlpha(palette[mode].selected, "selected")).toBe(0.11);
-      expect(palette[mode].scrim).toBe("rgba(0, 0, 0, 0.40)");
+      expect(inkAlpha(palette[mode].selected, "selected")).toBe(0.14);
     }
+    expect(palette.light.scrim).toBe("rgba(0, 0, 0, 0.40)");
+    expect(palette.dark.scrim).toBe("rgba(0, 0, 0, 0.65)");
+  });
+
+  // A skeleton bar is not a selection, so it keeps 11% when the selected fill moves.
+  it("and an 11% skeleton fill in both themes", () => {
+    for (const mode of ["light", "dark"] as const) expect(inkAlpha(palette[mode].skeleton, "skeleton")).toBe(0.11);
   });
 
   it("tell a hovered row from a selected one on every surface", () => {
@@ -70,6 +75,32 @@ describe("state fills", () => {
   });
 });
 
+// A focus mark is a graphical object: 3:1 against what it sits on, a surface
+// or a hover or selected fill on that surface. The halo is the accent at the
+// focus alpha; a row's line is the accent itself.
+describe("keyboard focus marks", () => {
+  for (const mode of ["light", "dark"] as const) {
+    it(`${mode} halo and row line clear 3:1 on every surface and fill`, () => {
+      const tokens = palette[mode];
+      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(tokens.focus);
+      expect(alpha, "focus").not.toBeNull();
+      for (const surface of SURFACES) {
+        const unders = [
+          ["", tokens[surface]],
+          ["hover/", mix(tokens.ink, tokens[surface], inkAlpha(tokens.hover, "hover"))],
+          ["selected/", mix(tokens.ink, tokens[surface], inkAlpha(tokens.selected, "selected"))],
+        ] as const;
+        for (const [fill, under] of unders) {
+          const halo = contrast(mix(tokens.accent, under, Number(alpha![1]) / 100), under);
+          expect(halo, `halo on ${fill}${surface} (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+          const line = contrast(tokens.accent, under);
+          expect(line, `row line on ${fill}${surface} (${mode}) = ${line.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+        }
+      }
+    });
+  }
+});
+
 describe("WCAG AA contrast, both modes", () => {
   const PAIRS: Array<{
     fg: keyof ThemeTokens;
@@ -78,6 +109,9 @@ describe("WCAG AA contrast, both modes", () => {
   }> = [
     { fg: "ink", bg: "bg", min: 4.5 },
     { fg: "muted", bg: "bg", min: 4.5 },
+    // A menu's hints and empty line sit on its panel. On an active row,
+    // the state-fill test below covers them.
+    { fg: "muted", bg: "panel", min: 4.5 },
     { fg: "ink", bg: "panel", min: 4.5 },
     { fg: "ink", bg: "panel2", min: 4.5 },
     // Olive is text (an agent's name) on every surface a chat or history
@@ -85,6 +119,11 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "agent", bg: "bg", min: 4.5 },
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
+    // State text (a strip, a pill, a failed row) sits on every surface
+    // too. Light warning on panel-2 was 4.37:1.
+    ...(["success", "warning", "danger"] as const).flatMap((fg) =>
+      SURFACES.map((bg) => ({ fg, bg, min: 4.5 })),
+    ),
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
     // every surface it actually sits on, not just bg (count pills and
     // section headers render text-subtle on panel-2).
@@ -97,6 +136,8 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "match", bg: "bg", min: 3.0 },
     { fg: "match", bg: "panel", min: 3.0 },
     { fg: "match", bg: "panel2", min: 3.0 },
+    // A link in a document is body text in the match blue, on paper.
+    { fg: "match", bg: "bg", min: 4.5 },
     // Paper-colored text sits ON the mark, at AA like any other text.
     { fg: "bg", bg: "match", min: 4.5 },
     // Labels on filled buttons use the paper color: primary on accent, and
@@ -140,6 +181,16 @@ describe("WCAG AA contrast, both modes", () => {
           // fill, the only fill rows use (see the attenuation scan below).
           expect(contrast(palette[mode].match, fill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
         }
+      }
+    });
+
+    // Subtle text misses AA on the selected fill, so inside it subtle shows
+    // in muted (the bg-selected utility in styles.css).
+    it(`${mode} subtle text on the selected fill shows in muted at AA`, () => {
+      const amount = inkAlpha(palette[mode].selected, "selected");
+      for (const surface of SURFACES) {
+        const ratio = contrast(palette[mode].muted, mix(palette[mode].ink, palette[mode][surface], amount));
+        expect(ratio, `muted on selected/${surface} (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
       }
     });
 
@@ -203,10 +254,15 @@ describe("styles.css mirrors tokens.ts", () => {
   }
 
   it("state utilities map to their semantic tokens", () => {
-    for (const state of ["hover", "selected", "scrim"] as const) {
+    for (const state of ["hover", "selected", "skeleton", "scrim"] as const) {
       expect(block("@theme inline")).toContain(`--color-${state}: var(--dohc-${state});`);
-      expect(palette.light[state]).toBe(palette.dark[state]);
     }
+  });
+
+  it("the selected fill shows subtle text in muted", () => {
+    const rule = block("@utility bg-selected");
+    expect(rule).toContain("background-color: var(--dohc-selected);");
+    expect(rule).toContain("--dohc-subtle: var(--dohc-muted);");
   });
 
   it("type stacks match", () => {
@@ -235,6 +291,19 @@ describe("renderer rows use the full state fills", () => {
     expect(sources.length).toBeGreaterThan(100);
     const offenders = sources.filter((name) => /\bbg-(selected|hover)\//.test(readFileSync(join(root, name), "utf8")));
     expect(offenders).toEqual([]);
+  });
+
+  // bg-selected shows subtle text in muted. A source that paints a selected
+  // fill itself, like Ref's selection-tint gradient, must do the same.
+  it("shows subtle text in muted wherever a source paints a selected fill itself", () => {
+    const root = fileURLToPath(new URL(".", import.meta.url));
+    const painters = readdirSync(root, { recursive: true, encoding: "utf8" })
+      .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name))
+      .filter((name) => /var\(--(color|dohc)-(selected|selection)\)/.test(readFileSync(join(root, name), "utf8")));
+    expect(painters.map((name) => name.replace(/\\/g, "/"))).toContain("ui/Ref.tsx");
+    for (const name of painters) {
+      expect(readFileSync(join(root, name), "utf8"), name).toContain("[--dohc-subtle:var(--dohc-muted)]");
+    }
   });
 });
 

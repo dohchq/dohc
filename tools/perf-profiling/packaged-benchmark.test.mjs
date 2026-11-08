@@ -13,6 +13,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
+import { linkFixtureFile, linkingPaths, linkIndexReady } from './packaged-link-rename.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { parseCpuTime, parseMacProcessSnapshot } from './packaged-process-snapshot.mjs';
@@ -25,6 +26,21 @@ import { automationCases, automationFixtureDigest, automationOf, busyShare, clas
   dismissToasts, documentAutomationFiles, documentValues, journalBytes, noticeForPress, observeAutomationRun, outcomeTexts, peakByKind, readAutomationNotices, readDocumentCase, readRunJournal, runForPress, TRIGGER,
   verifyCase, waitForQuiet, WIDE_SET } from './packaged-collection-automations.mjs';
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
+
+test('link index readiness waits through startup refusal and indexing without hiding other errors', async () => {
+  const answers = [Error("Error invoking remote method 'desktop:links-in': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again."),
+    {indexBuilding: true}, {indexBuilding: false}, Error('unrelated failure')];
+  const page = {evaluate: async (_read, request) => {
+    assert.deepEqual(request, {workspaceId: 'workspace', path: 'link-target.md'});
+    const answer = answers.shift();
+    if (answer instanceof Error) throw answer;
+    return answer;
+  }};
+  assert.equal(await linkIndexReady(page, 'workspace'), false);
+  assert.equal(await linkIndexReady(page, 'workspace'), false);
+  assert.equal(await linkIndexReady(page, 'workspace'), true);
+  await assert.rejects(linkIndexReady(page, 'workspace'), /unrelated failure/);
+});
 
 // A jsdom window with a fake clock. Frames and timers only advance through step() and frame().
 function fakePage(t, html) {
@@ -143,15 +159,24 @@ test('startup observer restarts its frame check when the bound editor is replace
 
 const fixtureWorkspaces = [0, 1].map(index => ({ workspaceId: `perf4-package-${index}`, rootPath: `C:/fixture/workspace-${index}` }));
 
-test('full restart after odd switches opens registry workspace 0 despite workspace 1 recency', async t => {
+test('full restart after odd switches opens workspace 1, the workspace opened last', async t => {
   const p = readinessPage(t);
+  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
+  p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
   const registry = { version: 1, workspaces: fixtureWorkspaces.map((workspace, index) => ({ ...workspace, lastOpenedAt: 100 + index })) };
-  const result = p.observe(startupTargetFromRegistry(registry, fixtureWorkspaces));
+  const target = startupTargetFromRegistry(registry, fixtureWorkspaces);
+  assert.deepEqual(target, { workspaceName: 'workspace-1', path: 'small.md', content: 'Workspace 1 small' });
+  const result = p.observe(target);
   p.frame(); p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, true);
-  assert.equal(observed.workspaceName, 'workspace-0');
+  assert.equal(observed.workspaceName, 'workspace-1');
   assert.equal(observed.path, 'small.md');
+});
+
+test('startup target keeps the first registry entry when lastOpenedAt ties', () => {
+  const registry = { version: 1, workspaces: fixtureWorkspaces.map(workspace => ({ ...workspace, lastOpenedAt: 100 })) };
+  assert.equal(startupTargetFromRegistry(registry, fixtureWorkspaces).workspaceName, 'workspace-0');
 });
 
 test('restart records a different known workspace only when the persisted registry selects it', async t => {
@@ -423,6 +448,18 @@ test('traced typing is a full-scenario option', () => {
 test('a package directory names the platform executable', () => {
   const options = parseOptions(['--package-dir', '/packages/dohc', '--package-commit', 'a'.repeat(40), '--output', '/perf/out', '--label', 'baseline']);
   assert.equal(options.binary, resolve(process.platform === 'darwin' ? '/packages/dohc/Contents/MacOS/dohc' : '/packages/dohc/dohc.exe'));
+});
+test('link rename fixtures have exactly the requested incoming links among 5000 files', () => {
+  for (const links of [0, 100, 2000]) {
+    const options = parseOptions([...required, '--scenario', 'link-rename', '--links', String(links)]);
+    assert.equal(options.fixtureFiles, 5000);
+    const files = Array.from({length: 4998}, (_, n) => linkFixtureFile(n + 2, links));
+    assert.equal(files.filter(file => file.content.includes('[[link-target')).length + (links ? 1 : 0), links);
+    assert.equal(linkingPaths(links).length, links);
+    assert.equal(new Set(files.map(file => file.name)).size, 4998);
+  }
+  assert.throws(() => parseOptions([...required, '--links', '100']), /requires --scenario/);
+  assert.throws(() => parseOptions([...required, '--scenario', 'link-rename', '--links', '5000']), /room for its target/);
 });
 test('the macOS sampler keeps the app tree with CPU time and physical footprint', () => {
   assert.equal(parseCpuTime('0:01.50'), 1500);

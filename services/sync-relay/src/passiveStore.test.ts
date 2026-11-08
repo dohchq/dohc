@@ -185,7 +185,7 @@ it.skipIf(engineBinary.missing)(
     ) => {
       let result: any;
       do {
-        result = await rpc(engine, "sync.pull", { workspaceId });
+        result = await rpc(engine, "sync.applyPull", { workspaceId , pageToken: (await rpc(engine, "sync.fetchPull", { workspaceId })).pageToken});
         if (materialize && engine.name.startsWith("owner"))
           await rpc(engine, "sync.materializePendingCursor", {
             workspaceId,

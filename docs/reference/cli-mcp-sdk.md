@@ -50,7 +50,7 @@ Create a share link, prepare an immutable app revision, and approve publication 
 
 Changes the workspace, so a shared view does not offer it.
 
-- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
@@ -78,7 +78,7 @@ Report whether this workspace is local-only or cloud-synced. In the owning works
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -110,7 +110,7 @@ Returns `{ versionId, subject: { objectId, path } | null, entries: { attachment,
 
 ### `dohc_links_edges`
 
-Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
+Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
 
 - `cursor`: `string`
 
@@ -146,24 +146,96 @@ Returns `{ ok: true, operationId, undo: { available: true } | { available: false
 
 ### `dohc_read_operation`
 
-List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.
+List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.
 
 Operation reads require the owning workspace. Shared profiles do not offer this read.
 
 - `operationId`: `string`. Required.
 - `cursor`: `string`
 
-Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, links?: { state: "updating" } | { state: "done", documents, unchecked, uncheckedCount }, nextCursor }`.
 
 ### `dohc_undo_operation`
 
-Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.
+Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry. Undo of a move also reverses its link updates.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `operationId`: `string`. Required.
 
 Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
+
+### `dohc_list_versions`
+
+List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+No arguments.
+
+Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId } | { ok: false, reason }`.
+
+### `dohc_compare_version`
+
+Read one page of files that differ between a version and Main. Name the version by its name or id from dohc_list_versions. currentText is Main's text and incomingText the version's; binary files carry no text. Files History does not track and secret files are left out. Continue with afterPath set to nextAfterPath until it is null. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+- `version`: `string`. Required.
+- `afterPath`: `string`
+
+Returns `{ ok: true, version: { id, name }, files: { path, status, currentText?, incomingText?, binary? }[], nextAfterPath } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_list_version_conflicts`
+
+Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
+
+A shared view keeps no versions of its own, so it does not offer this tool.
+
+- `afterConflictId`: `string`
+
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_create_version`
+
+Create a version from the active one and switch the workspace folder to it. The new version starts as a copy. Refuses a name another version has. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `name`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name } } | { ok: false, reason }`.
+
+### `dohc_switch_version`
+
+Switch the workspace folder to a version, named by its name or id from dohc_list_versions. dohc first saves the active version's files and the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, changedFileCount } | { ok: false, reason }`.
+
+### `dohc_merge_version`
+
+Merge a version into Main, named by its name or id from dohc_list_versions. Only versions made from Main can merge into Main. Returns the merged and conflict counts and the first page of open conflicts, as dohc_list_version_conflicts does. First saves the edits open in dohc, and refuses when it can't. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `version`: `string`. Required.
+
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+
+### `dohc_resolve_version_conflict`
+
+Resolve an open conflict from dohc_list_version_conflicts. keep current or incoming keeps that side; keep combined with text replaces both. In a merge, current is Main and incoming is the version; in sync, current is this computer. A binary conflict takes no combined text. Returns the open conflicts that remain. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `conflictId`: `string`. Required.
+- `resolution`: `{ keep: "current" | "incoming" } | { keep: "combined", text: string }`. Required.
+
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_changes`
 
@@ -180,11 +252,11 @@ Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine"
 
 List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
 
-Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.
+Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.
 
 No arguments.
 
-Returns `{ ok: true, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
+Returns `{ ok: true, outsideWriteCopies?, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
 
 ### `dohc_save_kept_copy`
 
@@ -209,7 +281,7 @@ Returns `{ ok: true, copyPath, packagePath, folder, storedOn, keptEdits } | { ok
 
 ### `dohc_retry_kept_edits`
 
-Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts a `recovery` of `paused`, or `copied` for edits the server keeps. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs dohc_stop_again instead. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -302,10 +374,11 @@ Returns `{ ok: true, path, markdown } | { ok: false, reason }`.
 
 ### `dohc_edit_document`
 
-Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
+Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A pending `warning` means the edit is saved locally and the shared file update is pending; do not repeat the edit. Other warnings mean someone may be changing the same blocks; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.
 
 Changes the workspace, so a shared view does not offer it.
 
+- `allowLossySourceSha256`: `string`
 - `path`: `string`. Required.
 - `find`: `string`
 - `replacement`: `string`. Required.
@@ -351,7 +424,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -431,13 +504,29 @@ List the dohc Chats linked to a workspace file. Chats follow the file's stable d
 
 Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] } | { ok: false, reason }`.
 
+### `dohc_wait_for_messages`
+
+Wait for the outside-run agent inbox without marking messages read. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.
+
+The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.
+
+- `cursor`: `string`
+- `group`: `string`
+- `thread`: `string`
+- `timeoutMs`: `integer`
+
+Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
+
 ### `dohc_read_chat`
 
-Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.
+Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
 
-- `threadId`: `string`. Required.
+- `threadId`: `string`
+- `group`: `string`
+- `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
+- `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId? }[], projection: { path, readOnly: true, text } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests?, authorReported? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -449,7 +538,7 @@ Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, t
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -460,12 +549,13 @@ Changes the workspace, so a shared view does not offer it.
 - `needsDecision`: `boolean`
 - `options`: `string[]`
 - `runId`: `string`
+- `model`: `string`
 
 Returns `{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`.
 
 ### `dohc_start_file_chat`
 
-Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.
+Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -474,12 +564,13 @@ Changes the workspace, so a shared view does not offer it.
 - `body`: `string`. Required.
 - `requestId`: `string`
 - `runId`: `string`
+- `model`: `string`
 
 Returns `{ ok: true, path, threadId, messageId, warning? } | { ok: false, reason }`.
 
 ### `dohc_reply_to_chat`
 
-Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.
+Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, and `model` behave as in dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -492,6 +583,7 @@ Changes the workspace, so a shared view does not offer it.
 - `needsDecision`: `boolean`
 - `options`: `string[]`
 - `runId`: `string`
+- `model`: `string`
 
 Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
@@ -793,7 +885,7 @@ dohc document edit <path> [-] [options]
 
 Replace matching text or append Markdown through the live document.
 
-Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. Read again after a warning or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
+Use - as the body to read it from stdin. Use --text instead to supply the body as an argument. Each side allows at most 256 KiB of UTF-8. Edits change the body, not frontmatter. Concurrent editing can prevent removing blocks or changing their kind. A pending warning means the edit is saved locally and the shared file update is pending. Do not repeat it. Read again after other warnings or an unexplained failure. Retry keys have the same limits as dohc_edit_document.
 
 - `--text <markdown>`: Use this Markdown as the body. An empty string is allowed.
 - `--agent <name>`: Record this agent name with the change.
@@ -855,9 +947,9 @@ dohc document kept-edits [options]
 
 List live documents whose edits the server refused, and where dohc keeps those edits.
 
-storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
+storedOn is this-computer, or server for a document the server hosts. A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it. A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved. If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit. A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again. earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.
 
-With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true }[] }`.
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, storedOn, incident, recovery, earlier?: true, saveOnly?: true }[] }`.
 
 #### `dohc document save-recovery-copy`
 
@@ -921,27 +1013,45 @@ List the threads in a Group.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threads: { lane?, id, title, commentCount, openDecisionCount, unread, updatedAtMs }[] }`.
 
+#### `dohc chat watch`
+
+```sh
+dohc chat watch [options]
+```
+
+Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.
+
+- `--cursor <cursor>`: Continue from the cursor returned by watch.
+- `--group <group>`: Wait only for messages in this Group.
+- `--thread <thread>`: Wait only for messages in this thread.
+- `--timeout <seconds>`: Wait up to this many seconds per batch. The default and maximum are 25.
+- `--once`: Return after one batch, including an empty batch at the timeout.
+
+With `--json`, prints `{ schemaVersion, messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
+
 #### `dohc chat inbox`
 
 ```sh
 dohc chat inbox [options]
 ```
 
-List unread threads. For an agent, also list its unread mentions.
+List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.
 
 With `--json`, prints `{ schemaVersion, threads: { lane?, id, title, commentCount, openDecisionCount, unread, updatedAtMs, group }[], mentions: { threadId, messageId, group, author, createdAtMs, text }[] }`.
 
 #### `dohc chat show`
 
 ```sh
-dohc chat show <thread-or-message> [options]
+dohc chat show <thread-message-or-group> [options]
 ```
 
-Show a thread or message and mark the thread read.
+Show a thread or message and mark the thread read, or show a group's posts and conversation.
 
 - `--peek`: Show it without changing what is marked read. A read-only shared view requires it.
+- `--before <position>`: For a group, show the page older than this position, as printed after older:.
+- `--limit <count>`: For a group, show at most this many items. The default is 50, the most 100.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId? }[] }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests?, authorReported? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
 
 #### `dohc chat post`
 
@@ -957,6 +1067,7 @@ Use - as the body to read it from stdin. In a direct message, use reply instead.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.
 - `--needs-decision`: Ask readers for a decision.
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
+- `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threadId, messageId, title, warning? }`.
 
@@ -976,6 +1087,7 @@ Use - as the body to read it from stdin. Put options first, then --, then text t
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
 - `--resolve <message>`: Resolve this open decision with the reply.
 - `--choose <choice>`: Pick this choice of the decision. Needs --resolve.
+- `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
@@ -1074,7 +1186,7 @@ On a computer that doesn't keep the workspace's Collections, list returns the Co
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }`.
+Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }` or `{ kind: "collections-refused", refusal: { kind, words } | { kind: "elsewhere", words, computer } | { kind: "server-unavailable", words, computer, failure } }`.
 
 #### `dohc dataset describe`
 
@@ -1087,7 +1199,7 @@ Use describe to find approved operation IDs.
 - `expectedDatasetId`: `UUID`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }`.
+Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }`.
 
 #### `dohc dataset history`
 
@@ -1126,7 +1238,7 @@ Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `hist
 - `targetRevisionSha256`: `SHA-256 hex`. Required.
 - `changedRevisionSha256`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset permissions`
 
@@ -1138,19 +1250,20 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor }`.
+Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here", server } | { kind: "server", host } }`.
 
 #### `dohc dataset setGrant`
 
 Add or change an explicit data grant.
 
-grant names revision, revisionSha256, operationIds, and discover.
+grant names revision, revisionSha256, operationIds, and discover. A Collection only on this computer moves to the workspace's server first, for good. permissions shows its place. Send moveToServer: true to agree.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
 - `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
+- `moveToServer`: `true`
 
 Returns `{ kind: "grant-updated" }`.
 
@@ -1217,7 +1330,7 @@ Returns `{ kind: "delete-preview", archived, generation, reason, apps: { appId, 
 
 Permanently delete a Collection and all its data.
 
-Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
+Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. Archive the Collection first with dohc dataset archive. Then run deletePreview, since archiving makes an earlier preview stale. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
@@ -1384,7 +1497,7 @@ Review the result, then approve it with approveMigration.
 - `fieldId`: `UUID`. Required.
 - `labelFieldId`: `UUID`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset create`
 
@@ -1437,7 +1550,21 @@ Read more changed records with migrationPreviewPage. Review the result, then app
 - `expectedDatasetId`: `UUID`
 - `migrationPath`: `string`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+
+#### `dohc dataset askToApply`
+
+Write a prepared change to a file a person can apply from a chat.
+
+Edit the Collection's source files and write the migration SQL first. askToApply prepares that change, records what it does in a new file beside dataset.json, and discards the preparation. Post the returned path in a chat reply with --attach and --needs-decision. The Collection's owner applies the change from that message. note is one sentence the person reads beside the change to the code.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `migrationPath`: `string`. Required.
+- `note`: `string`
+
+Returns `{ kind: "change-asked", path, changeSha256 }`.
 
 #### `dohc dataset migrationPreviewPage`
 
@@ -1463,7 +1590,7 @@ change.kind is one of renameCollection, renameTable, renameField, changeField, a
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset approveMigration`
 
@@ -1476,6 +1603,7 @@ Take revisionSha256 and approvalDigest from the preparation. Approval applies th
 - `preparationId`: `UUID`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `approvalDigest`: `SHA-256 hex`. Required.
+- `changeSha256`: `SHA-256 hex`
 
 Returns `{ kind: "migrated", revision, cursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest } }`.
 
@@ -1503,7 +1631,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 - `input`: `any JSON`. Required.
 - `idempotencyKey`: `string`. Required.
 
-Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }` or `{ kind: "refused", code, message }`.
+Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }` or `{ kind: "refused", code, message }`.
 
 ### `dohc app`
 
@@ -1537,13 +1665,24 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
+
+#### `dohc app checkLocal`
+
+Read an app's current source revision on this computer.
+
+Compare sourceRevision with the one listLocal returns. They differ once the app's source changed since its approval.
+
+- `workspaceId`: `string`. Required.
+- `appRoot`: `string`. Required.
+
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
 
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
 
-Review the source and the Collection access it asks for, then approve.
+Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
@@ -1565,11 +1704,13 @@ Returns `{ kind: "localLaunched", publicationId, url }`.
 
 List an app's shared publications.
 
+listUnavailable means the server does not publish apps for this workspace.
+
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
 
 #### `dohc app prepare`
 
@@ -1703,7 +1844,7 @@ List the paths changed by one operation.
 
 - `--cursor <cursor>`: Continue from the cursor on the previous operation page.
 
-With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, links?: { state: "updating" } | { state: "done", documents, unchecked, uncheckedCount }, nextCursor }`.
 
 #### `dohc history undo`
 
@@ -1742,6 +1883,101 @@ Find the change's ID with history list. With --json, print both sides and the ch
 - `--before`: Print the text from before the change instead.
 
 With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
+
+### `dohc version`
+
+Read and change the workspace's versions and their open conflicts.
+
+Versions belong to the owning workspace. A change first saves the edits open in dohc, or refuses when dohc can't.
+
+#### `dohc version list`
+
+```sh
+dohc version list [options]
+```
+
+List the versions and which one is active.
+
+A version's madeFromVersionId is the id of the version it was made from.
+
+With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId }`.
+
+#### `dohc version compare`
+
+```sh
+dohc version compare <version> [options]
+```
+
+List the files that differ between Main and a version.
+
+Name a version by its name or ID, as version list prints them. With --json, print both sides' text.
+
+- `--after <path>`: Continue after this path from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, files: { path, status, currentText?, incomingText?, binary? }[], nextAfterPath }`.
+
+#### `dohc version conflicts`
+
+```sh
+dohc version conflicts [options]
+```
+
+List open conflicts from merges and from sync.
+
+With --json, print each conflict's sides.
+
+- `--after <conflict>`: Continue after this conflict ID from the previous page.
+
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
+
+#### `dohc version create`
+
+```sh
+dohc version create <name> [options]
+```
+
+Create a version from the active one and switch to it.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name } }`.
+
+#### `dohc version switch`
+
+```sh
+dohc version switch <version> [options]
+```
+
+Switch the workspace folder to a version.
+
+Name a version by its name or ID, as version list prints them.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, changedFileCount }`.
+
+#### `dohc version merge`
+
+```sh
+dohc version merge <version> [options]
+```
+
+Merge a version into Main.
+
+Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves.
+
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
+
+#### `dohc version resolve`
+
+```sh
+dohc version resolve <conflict> [-] [options]
+```
+
+Resolve an open conflict.
+
+Use - to read the combined text from stdin. Give exactly one of --keep, --text or -. In a merge, current is Main and incoming is the version. In sync, current is this computer.
+
+- `--keep <side>`: Keep current or incoming, as version conflicts names the sides.
+- `--text <text>`: Replace both sides with this combined text.
+
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 ### `dohc automation`
 

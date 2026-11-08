@@ -14,6 +14,7 @@ import {
   type EngineYdocProviderSessionOptions,
   YdocReleasedWithSettleFailureError,
   type EngineTransport,
+  type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
@@ -35,6 +36,8 @@ import {
   type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
+import { HistoryStillPausedError } from "../ipc/errorWords";
+import { EngineCaptureNotSettledError } from "./workspaceEngineCaptureLiveStore";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { createWorkspaceActivity, settleYDocsAfterFileObservation, WorkspaceActivityState } from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
@@ -98,7 +101,15 @@ async function reconnectFailureCapture(prefix: string) {
     moveRefusalAt: null as "preflight" | "native" | null,
     adoptOnClose: false,
     moveRequests: [] as string[],
+    // A page this computer owns: only a folder check over it refuses.
+    ownedUnder: null as string | null,
+    // A page this computer owns: only a page move of it refuses.
+    ownedPage: null as string | null,
+    checkedFolders: [] as Array<{ path: string; folder: boolean }>,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
+    // Capture that never settles: "unsettled" runs healthy, "scanning" is a
+    // replacement still on its first scan, "stopped" a driver that stopped.
+    captureAnswer: null as "unsettled" | "scanning" | "stopped" | null,
   };
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -110,6 +121,30 @@ async function reconnectFailureCapture(prefix: string) {
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      if (request.method === "versionedText.checkMove") {
+        const params = request.params as { path: string; change?: "movePage" | "moveFolder" | "delete" };
+        state.checkedFolders.push({ path: params.path, folder: params.change === "moveFolder" });
+        if (params.change === "moveFolder" && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
+          state.moveRequests.push(request.method);
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" },
+            new Error("daemon response"),
+          );
+        }
+        if (params.change === "delete" && state.ownedUnder !== null && state.ownedUnder.startsWith(`${params.path}/`)) {
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" },
+            new Error("daemon response"),
+          );
+        }
+        if ((params.change === "movePage" || params.change === "delete") && params.path === state.ownedPage) {
+          state.moveRequests.push(request.method);
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" },
+            new Error("daemon response"),
+          );
+        }
+      }
       if (request.method === "versionedText.checkMove" || request.method === "versionedText.rename") {
         state.moveRequests.push(request.method);
         if (state.moveRefusalAt === (request.method === "versionedText.checkMove" ? "preflight" : "native")) {
@@ -119,7 +154,15 @@ async function reconnectFailureCapture(prefix: string) {
           );
         }
       }
-      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      const answer = state.captureAnswer;
+      const lifecycle = daemonCaptureLifecycleAnswer(request, () => ({
+        deferredWrites: [], heldFiles: [], degraded: false,
+        settled: answer === null, running: answer === null || answer === "unsettled",
+      }));
+      if (lifecycle && (answer === "scanning" || answer === "stopped") && request.method === "watcher.status") {
+        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }),
+          running: false, degraded: answer === "stopped", phase: "degraded" } };
+      }
       if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
@@ -127,10 +170,13 @@ async function reconnectFailureCapture(prefix: string) {
   const sessions = new EngineWorkspaceSessions({
     currentClient: () => daemonClient,
   });
+  // The daemon leases each path to one session.
+  const leased = new Set<string>();
   const openProvider = async (
     options: EngineYdocProviderSessionOptions,
   ): Promise<EngineYdocProviderSession> => {
-    if (state.leaseActive) throw new Error("ydoc-session-busy");
+    if (leased.has(options.path)) throw new Error("ydoc-session-busy");
+    leased.add(options.path);
     state.leaseActive = true;
     const openedGeneration = ++state.generation;
     const doc = new Y.Doc();
@@ -171,7 +217,8 @@ async function reconnectFailureCapture(prefix: string) {
             ? { settle: closeOptions.settle }
             : {}),
         });
-        state.leaseActive = false;
+        leased.delete(options.path);
+        state.leaseActive = leased.size > 0;
       },
     };
   };
@@ -266,6 +313,211 @@ it("refuses a folder move when owner adoption finishes during session teardown",
   await capture.stop();
 });
 
+const FOLDER_REFUSAL = `dohc can't move "notes" while a page in it has live editing on
+In Live documents, stop live editing for every page in this folder, then move the folder again.`;
+
+it("refuses a folder move over an owned page with the folder words, before anything moves", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-move-");
+  await mkdir(join(rootPath, "notes/box"), { recursive: true });
+  await writeFile(join(rootPath, "notes/box/page.md"), "original");
+  state.ownedUnder = "notes/box/page.md";
+  const refused = await capture.beginFileRename("notes", "moved", true).catch((error: unknown) => error);
+  expect(refused).toMatchObject({ name: "LiveFolderError", message: FOLDER_REFUSAL });
+  expect(state.checkedFolders).toEqual([{ path: "notes", folder: true }]);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  // Try again before live editing stops gets the same refusal.
+  await expect(capture.beginFileRename("notes", "moved", true)).rejects.toMatchObject({ message: FOLDER_REFUSAL });
+  await capture.stop();
+});
+
+it("words a folder move over a hosted page like one over an owned page", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-hosted-folder-move-");
+  await mkdir(join(rootPath, "notes/box"), { recursive: true });
+  await writeFile(join(rootPath, "notes/box/page.md"), "original");
+  state.moveRefusalAt = "preflight";
+  await expect(capture.beginFileRename("notes", "moved", true)).rejects.toMatchObject({ name: "LiveFolderError", message: FOLDER_REFUSAL });
+  expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+it("moves a folder with no live page, and keeps a page's own move check as it was", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-plain-folder-move-");
+  await mkdir(join(rootPath, "drafts"));
+  await writeFile(join(rootPath, "drafts/plain.md"), "plain");
+  state.ownedUnder = "notes/box2/page.md";
+  const finish = await capture.beginFileRename("notes/box", "moved", true);
+  await finish(false);
+  const page = await capture.beginFileRename("notes/box2/page.md", "notes/box2/renamed.md");
+  await page(false);
+  expect(state.checkedFolders).toEqual([
+    { path: "notes/box", folder: true },
+    { path: "notes/box", folder: true },
+    { path: "notes/box2/page.md", folder: false },
+    { path: "notes/box2/page.md", folder: false },
+  ]);
+  await capture.stop();
+});
+
+// #3089: a move checks this before it catches a live page up, so the
+// refusal comes first. It gives the same words and changes nothing.
+it("checks a folder move ahead of the move, with the folder words, and passes a folder with no live page", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-folder-move-check-");
+  await mkdir(join(rootPath, "notes/box"), { recursive: true });
+  await writeFile(join(rootPath, "notes/box/page.md"), "original");
+  state.ownedUnder = "notes/box/page.md";
+  await expect(capture.checkFolderMove("notes")).rejects.toMatchObject({ name: "LiveFolderError", message: FOLDER_REFUSAL });
+  await expect(capture.checkFolderMove("drafts")).resolves.toBeUndefined();
+  state.ownedUnder = null;
+  state.moveRefusalAt = "preflight";
+  await expect(capture.checkFolderMove("notes")).rejects.toMatchObject({ name: "LiveFolderError", message: FOLDER_REFUSAL });
+  expect(state.checkedFolders).toEqual([
+    { path: "notes", folder: true },
+    { path: "drafts", folder: true },
+    { path: "notes", folder: true },
+  ]);
+  expect(state.moveRequests.every(method => method === "versionedText.checkMove")).toBe(true);
+  expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+const PAGE_REFUSAL = `dohc can't move "notes/page.md" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`;
+
+// A move checks this before it catches a page up, so the refusal comes first.
+// It gives the move words and changes nothing.
+it("checks a page move ahead of the move, with the move words, and passes a page this computer doesn't own", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-page-move-check-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedPage = "notes/page.md";
+  await expect(capture.checkPageMove("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: PAGE_REFUSAL });
+  await expect(capture.checkPageMove("notes/other.md")).resolves.toBeUndefined();
+  expect(state.checkedFolders).toEqual([{ path: "notes/page.md", folder: false }, { path: "notes/other.md", folder: false }]);
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+it("refuses a move of an owned page with the move words, before anything moves", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-page-move-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedPage = "notes/page.md";
+  await expect(capture.beginFileRename("notes/page.md", "notes/renamed.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: PAGE_REFUSAL });
+  expect(state.moveRequests).toEqual(["versionedText.checkMove"]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+it("refuses deleting an owned page, or a folder that holds one, before anything closes", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-delete-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedUnder = "notes/page.md";
+  state.ownedPage = "notes/page.md";
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toMatchObject({ name: "LiveFolderError",
+    message: [`dohc can't delete "notes" while a page in it has live editing on`,
+      "In Live documents, stop live editing for every page in this folder, then delete the folder again."].join(String.fromCharCode(10)) });
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError",
+    message: [`dohc can't delete "notes/page.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then delete it again."].join(String.fromCharCode(10)) });
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+it("refuses an authored folder move, as the CLI and MCP send it, with the folder words", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-authored-move-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedUnder = "notes/page.md";
+  const work = vi.fn(async () => "moved");
+  const refused = await capture.changePathsAs(["notes", "moved"], {
+    operation: "move", author: { kind: "human", humanId: "local-person" }, operationId: "dohc-operation:44444444-4444-4444-8444-444444444444", folder: true,
+  }, work, () => []).catch((error: unknown) => error);
+  expect(refused).toMatchObject({ name: "LiveFolderError", message: FOLDER_REFUSAL });
+  expect(work).not.toHaveBeenCalled();
+  expect(state.checkedFolders[0]).toEqual({ path: "notes", folder: true });
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
+const MOVE_AUTHOR = { kind: "human" as const, humanId: "local-person" };
+const MOVE_OPERATION = "dohc-operation:44444444-4444-4444-8444-444444444444";
+
+it("refuses a move that would replace an owned page or a folder that holds one, before anything closes or moves", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-move-destination-");
+  await mkdir(join(rootPath, "notes"));
+  await mkdir(join(rootPath, "box"));
+  await writeFile(join(rootPath, "notes/page.md"), "source");
+  await writeFile(join(rootPath, "notes/target.md"), "owned");
+  await writeFile(join(rootPath, "box/page.md"), "owned in a folder");
+  state.ownedPage = "notes/target.md";
+  state.ownedUnder = "box/page.md";
+  const session = await capture.openYDocSession({ path: "notes/target.md", onRemoteUpdate: () => undefined });
+  const work = vi.fn(async () => "moved");
+  const replace = (to: string) => capture.changePathsAs(["notes/page.md", to], { operation: "move", author: MOVE_AUTHOR, operationId: MOVE_OPERATION },
+    work, () => []).catch((error: unknown) => error);
+  expect(await replace("notes/target.md")).toMatchObject({ name: "LivePageOwnedError",
+    message: [`dohc can't replace "notes/target.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then try again."].join(String.fromCharCode(10)) });
+  expect(await replace("box")).toMatchObject({ name: "LiveFolderError",
+    message: [`dohc can't replace "box" while a page in it has live editing on`,
+      "In Live documents, stop live editing for every page in this folder, then try again."].join(String.fromCharCode(10)) });
+  expect(work).not.toHaveBeenCalled();
+  expect(state.releaseCalls).toEqual([]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("source");
+  expect(await readFile(join(rootPath, "notes/target.md"), "utf8")).toBe("owned");
+  expect(await readFile(join(rootPath, "box/page.md"), "utf8")).toBe("owned in a folder");
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+});
+
+it("refuses a move onto an owned page whose file is gone, and checks a destination with no page", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-absent-destination-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "source");
+  // The head of notes/gone.md survives; its file was deleted outside dohc.
+  state.ownedPage = "notes/gone.md";
+  const work = vi.fn(async () => "moved");
+  const move = (to: string) => capture.changePathsAs(["notes/page.md", to], { operation: "move", author: MOVE_AUTHOR, operationId: MOVE_OPERATION },
+    work, () => []).catch((error: unknown) => error);
+  expect(await move("notes/gone.md")).toMatchObject({ name: "LivePageOwnedError",
+    message: [`dohc can't replace "notes/gone.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then try again."].join(String.fromCharCode(10)) });
+  expect(work).not.toHaveBeenCalled();
+  expect(state.releaseCalls).toEqual([]);
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("source");
+  // A destination with no page passes its check. This harness cannot hold
+  // capture, so the move stops later, and not for live editing.
+  state.checkedFolders.length = 0;
+  const free = await move("notes/free.md");
+  expect(state.checkedFolders).toContainEqual({ path: "notes/free.md", folder: false });
+  expect(free).not.toMatchObject({ name: "LivePageOwnedError" });
+  expect(free).not.toMatchObject({ name: "LiveFolderError" });
+  await capture.stop();
+});
+
+it("refuses archiving an owned generated page with the archive words, before its session closes", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-generated-archive-");
+  await mkdir(join(rootPath, "Bookmarks/Chats"), { recursive: true });
+  await writeFile(join(rootPath, "Bookmarks/Chats/launch.md"), "owned");
+  state.ownedPage = "Bookmarks/Chats/launch.md";
+  const session = await capture.openYDocSession({ path: "Bookmarks/Chats/launch.md", onRemoteUpdate: () => undefined });
+  const words = [`dohc can't archive "Bookmarks/Chats/launch.md" while it has live editing on`,
+    "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10));
+  await expect(capture.checkGeneratedTextArchive("Bookmarks/Chats/launch.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: words });
+  await expect(capture.archiveGeneratedTextFile({ fromPath: "Bookmarks/Chats/launch.md", toPath: "Bookmarks/Chats/Archived/launch.md",
+    expectedObjectId: "launch" })).rejects.toMatchObject({ name: "LivePageOwnedError", message: words });
+  expect(state.moveRequests).toEqual(["versionedText.checkMove", "versionedText.checkMove"]);
+  expect(state.releaseCalls).toEqual([]);
+  expect(await readFile(join(rootPath, "Bookmarks/Chats/launch.md"), "utf8")).toBe("owned");
+  await session.settleNow();
+  await session.close();
+  await capture.stop();
+});
+
 async function failRendererUpdate(
   session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>,
 ): Promise<void> {
@@ -300,6 +552,60 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
   });
   expect(state.generation).toBe(2);
   await reopened.close({ settle: false });
+  await capture.stop();
+});
+
+// A dead live session keeps History paused past Try again, so Try again names
+// the page of each one; closing a page releases its session, and History runs
+// once none is left.
+it("names every page whose live editing stopped when Try again leaves History paused, until those pages close", async () => {
+  const { capture, outcomes } = await reconnectFailureCapture(
+    "dohc-ydoc-history-retry-dead-",
+  );
+  const plan = await capture.openYDocSession({
+    path: "notes/plan.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await failRendererUpdate(plan);
+  const agenda = await capture.openYDocSession({
+    path: "notes/agenda.md",
+    onRemoteUpdate: () => undefined,
+  });
+  await failRendererUpdate(agenda);
+  expect(outcomes.at(-1)).toBe(false);
+
+  const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
+  expect(refused).toBeInstanceOf(HistoryStillPausedError);
+  expect(refused).toMatchObject({ code: "live-editing-stopped", paths: ["notes/agenda.md", "notes/plan.md"] });
+  expect(outcomes.at(-1)).toBe(false);
+
+  // Close each page as the renderer's release does
+  // (engineYDocSessionOwner.ts), which tries to revive a dead session first.
+  await plan.close(undefined);
+  await expect(capture.retryHistoryCapture()).rejects.toMatchObject({ paths: ["notes/agenda.md"] });
+  expect(outcomes.at(-1)).toBe(false);
+  await agenda.close(undefined);
+  expect(outcomes.at(-1)).toBe(true);
+  await expect(capture.retryHistoryCapture()).resolves.toBeUndefined();
+  await capture.stop();
+});
+
+// Try again that outlasts the settle budget reads as catching up while
+// capture runs or a replacement is still on its first scan; a driver that
+// stopped again keeps History paused.
+it("keeps History paused when Try again finds capture stopped again, and catching up while it still runs", async () => {
+  const { capture, state } = await reconnectFailureCapture("dohc-ydoc-history-retry-unsettled-");
+  state.captureAnswer = "unsettled";
+  await expect(capture.retryHistoryCapture()).rejects.toBeInstanceOf(EngineCaptureNotSettledError);
+  // Not running and phase "degraded" until its first scan ends, but neither
+  // degraded nor terminal (capture_driver.rs replacement_phase, stopped).
+  state.captureAnswer = "scanning";
+  await expect(capture.retryHistoryCapture()).rejects.toBeInstanceOf(EngineCaptureNotSettledError);
+  state.captureAnswer = "stopped";
+  const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
+  expect(refused).toBeInstanceOf(HistoryStillPausedError);
+  expect(refused).toMatchObject({ paths: [] });
+  state.captureAnswer = null;
   await capture.stop();
 });
 
@@ -3244,6 +3550,137 @@ it("a settling close persists outage text when the user never types again", asyn
   expect(state.settled.at(-1)).toBe("alive PRE_KILL");
   expect(state.diskMarkdown).toBe("alive PRE_KILL");
   expect(state.generation).toBe(2);
+  await capture.stop();
+});
+
+// Forget closes every session through the workspace close before anything
+// else closes the document, so that close is the last chance to persist it.
+it("a workspace close persists outage text when the user never types again", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-forget-",
+    "ydoc-death-forget",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-forget",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  state.daemonAlive = true;
+  await capture.settleAndCloseAllLiveSessions();
+
+  expect(state.settled.at(-1)).toBe("alive PRE_KILL");
+  expect(state.diskMarkdown).toBe("alive PRE_KILL");
+  expect(state.generation).toBe(2);
+  await capture.stop();
+});
+
+// A close that couldn't save the outage text fails, so Forget stops before it
+// deletes the only copy.
+it("a workspace close fails while the daemon is still down, and reopens nothing", async () => {
+  const reported: string[] = [];
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-death-still-down-",
+    "ydoc-death-still-down",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-death-still-down",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => reported.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  typeInto(rendererDoc, session, "alive ");
+  await session.settleNow();
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+
+  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow(/closed/i);
+  expect(state.generation).toBe(1);
+  expect(state.diskMarkdown).toBe("alive ");
+
+  state.daemonAlive = true;
+  await capture.stop();
+  await session.close();
+  expect(state.generation).toBe(1);
+  expect(reported).toContain("Y.Doc close recovery of note.md");
+});
+
+// Forget stops the capture, which closes the workspace's engine session, and
+// then closes the sessions its close loop could not save. Their close must not
+// open an engine session that nothing would close.
+it("a session closed after its capture stopped opens no engine session", async () => {
+  const reported: string[] = [];
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-after-stop-",
+    "ydoc-after-stop",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-after-stop",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: (context) => reported.push(context),
+  });
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+  });
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  state.daemonAlive = false;
+  typeInto(rendererDoc, session, "PRE_KILL");
+  await expect(session.settleNow()).rejects.toThrow(/closed/i);
+  state.daemonAlive = true;
+
+  await capture.stop();
+  await session.close();
+  expect(state.generation).toBe(1);
+  // The text it could not save is reported, not dropped quietly.
+  expect(reported).toContain("Y.Doc close recovery of note.md");
+});
+
+it("a workspace close still closes every session after one refuses its release", async () => {
+  const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
+    "dohc-ydoc-close-every-",
+    "ydoc-close-every",
+  );
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-close-every",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+    onError: () => undefined,
+  });
+  await capture.openYDocSession({ path: "a.md", onRemoteUpdate: () => undefined });
+  await capture.openYDocSession({ path: "b.md", onRemoteUpdate: () => undefined });
+  // Only the first release is refused.
+  let refusals = 1;
+  Object.defineProperty(state, "failRelease", { get: () => refusals-- > 0 });
+
+  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow("release-refused");
+  expect(state.releasedGenerations).toEqual([2]);
   await capture.stop();
 });
 

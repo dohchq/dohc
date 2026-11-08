@@ -38,11 +38,11 @@ export interface OwnerYDocFrameDeliveryOptions {
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, {once: true});
     work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    if (signal.aborted) abort();
   });
 }
 interface Transfer {begin: LiveFrameBegin; bytes: Uint8Array; begun: boolean; offset: number}
@@ -79,6 +79,8 @@ interface Attempt {
 export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   private active?: Attempt;
   private disposed = false;
+  /** An opening sync from the owner feed was installed during this delivery's life. */
+  synchronized = false;
   private readonly options: OwnerYDocFrameDeliveryOptions;
 
   constructor(options: OwnerYDocFrameDeliveryOptions) {
@@ -248,6 +250,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             const applied = await abortable(this.options.acceptedState.applyInitialSync({...sync, appliedThroughJournalCursor: begin.appliedThroughJournalCursor}, attempt.signal), attempt.signal); this.check(attempt);
             if (applied !== "applied") {this.stop(attempt); return;}
             attempt.cursor = begin.appliedThroughJournalCursor;
+            this.synchronized = true;
             attempt.controls.push({kind: "sync-applied", appliedThroughJournalCursor: attempt.cursor});
             attempt.ready.resolve({kind: "authority", authority: attempt.authority!});
           } else if (begin.purpose === "applied-update") {

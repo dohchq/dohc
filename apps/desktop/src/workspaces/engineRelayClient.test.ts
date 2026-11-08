@@ -25,6 +25,7 @@ import {
   EngineClientError,
   EngineRequestError,
   EngineWorkspaceSessions,
+  EngineWorkspaceShuttingDownError,
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -106,7 +107,9 @@ class MockDaemon implements EngineDaemonClient {
             changedPaths: [],
             sharingDeclined: [], refusals: [],
           };
-        case "sync.pull":
+        case "sync.fetchPull":
+          return { pageToken: "page-token" };
+        case "sync.applyPull":
           return {
             status: "complete", refused: 0,
             pushed: 0, ownerAdmissionPending: [],
@@ -262,15 +265,62 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
+  it("fetches off the capture chain and completes each batch before fetching another", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let held = false;
+    let pages = 0;
+    const events: string[] = [];
+    const daemon = new MockDaemon(request => {
+      if (request.method === "sync.applyPull") {
+        expect(held).toBe(true);
+        events.push("apply");
+        pages += 1;
+        return {status: "complete", refused: 0, fetched: 1, applied: 1, skipped: 0,
+          conflictsOpened: 0, hasMore: pages === 1, nextCursor: pages,
+          pendingCursor: {kind: "relay", token: `cursor-${pages}`}, sharingDeclined: [], refusals: [], changedPaths: []};
+      }
+      if (request.method === "sync.commitCursor") {
+        expect(held).toBe(true);
+        events.push("commit");
+      }
+      return undefined;
+    });
+    const send = daemon.sendRequest.bind(daemon);
+    vi.spyOn(daemon, "sendRequest").mockImplementation(async request => {
+      if (request.method === "sync.fetchPull") {
+        expect(held).toBe(false);
+        events.push("fetch");
+        entered.resolve();
+        await release.promise;
+      }
+      return send(request);
+    });
+    const {client, sessions} = await harness(daemon);
+    const pulling = client.pull(async apply => {
+      held = true;
+      try {
+        return await apply(async () => { expect(held).toBe(true); events.push("project"); });
+      } finally { held = false; }
+    });
+    await entered.promise;
+    expect(held).toBe(false);
+    expect(events).toEqual(["fetch"]);
+    release.resolve();
+    await pulling;
+    expect(events).toEqual(["fetch", "apply", "project", "commit", "fetch", "apply", "project", "commit"]);
+    await sessions.closeAll();
+  });
+
   it("commits engine-owned refusals before notifying Notices", async () => {
     const refusal = { workspaceId: "workspace-a", originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
-    const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
+    const daemon = new MockDaemon(request => request.method === "sync.applyPull" ? {
       status: "complete", refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
       nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
     } : undefined);
     const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));
     const { client } = await harness(daemon, changed);
-    await client.pull(async () => undefined);
+    await client.pull(async (apply) => apply(async () => undefined));
     expect(changed).toHaveBeenCalledOnce();
   });
 
@@ -376,7 +426,7 @@ describe("EngineRelayClient", () => {
       sharingDeclined: [],
     });
     const materializePage = vi.fn(async () => undefined);
-    const pull = await client.pull(materializePage);
+    const pull = await client.pull(async (apply) => apply(materializePage));
     expect(pull).toMatchObject({
       fetched: 4,
       applied: 2,
@@ -423,7 +473,8 @@ describe("EngineRelayClient", () => {
     expect(daemon.requests.map((request) => request.method)).toEqual([
       "workspace.open",
       "sync.push",
-      "sync.pull",
+      "sync.fetchPull",
+      "sync.applyPull",
       "sync.commitCursor",
       "sync.recoverOrigin",
       "sync.claim",
@@ -437,7 +488,8 @@ describe("EngineRelayClient", () => {
         .map((request) => ({ method: request.method, params: request.params })),
     ).toEqual([
       { method: "sync.push", params: { workspaceId: "workspace-a" } },
-      { method: "sync.pull", params: { workspaceId: "workspace-a" } },
+      { method: "sync.fetchPull", params: { workspaceId: "workspace-a" } },
+      { method: "sync.applyPull", params: { workspaceId: "workspace-a", pageToken: "page-token" } },
       {
         method: "sync.commitCursor",
         params: {
@@ -459,7 +511,7 @@ describe("EngineRelayClient", () => {
   it("carries sharing declines from every workspace pull page", async () => {
     let pulls = 0;
     const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.pull") return undefined;
+      if (request.method !== "sync.applyPull") return undefined;
       pulls += 1;
       return {
         status: "complete", refused: 0,
@@ -488,7 +540,7 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    const pull = await client.pull(async () => undefined);
+    const pull = await client.pull(async (apply) => apply(async () => undefined));
 
     expect(
       pull.sharingDeclined,
@@ -519,7 +571,7 @@ describe("EngineRelayClient", () => {
   it("keeps the same object in distinct versions across pull pages", async () => {
     let pulls = 0;
     const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.pull") return undefined;
+      if (request.method !== "sync.applyPull") return undefined;
       pulls += 1;
       return {
         status: "complete", refused: 0,
@@ -548,7 +600,7 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    const pull = await client.pull(async () => undefined);
+    const pull = await client.pull(async (apply) => apply(async () => undefined));
 
     expect(
       pull.sharingDeclined,
@@ -580,7 +632,7 @@ describe("EngineRelayClient", () => {
     let committedPages = 0;
     const materializedPaths: string[] = [];
     const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.pull") {
+      if (request.method === "sync.applyPull") {
         const page = committedPages + 1;
         return {
           status: "complete", refused: 0,
@@ -631,13 +683,13 @@ describe("EngineRelayClient", () => {
       },
     );
 
-    await expect(client.pull(materializePage)).rejects.toThrow(
+    await expect(client.pull(async (apply) => apply(materializePage))).rejects.toThrow(
       "disk unavailable",
     );
     expect(committedPages).toBe(1);
     expect(materializedPaths).toEqual(["notes/page-1.md"]);
 
-    const pulled = await client.pull(materializePage);
+    const pulled = await client.pull(async (apply) => apply(materializePage));
     expect(committedPages).toBe(2);
     expect(pulled.fastForwardedPaths).toEqual([
       expect.objectContaining({ path: "notes/page-2.md" }),
@@ -654,9 +706,23 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("retries a repair wait without materializing or reporting an error", async () => {
+    let attempts = 0;
+    const daemon = new MockDaemon(request => {
+      if (request.method === "sync.applyPull" && ++attempts === 1) return {status: "retry"};
+      return undefined;
+    });
+    const {sessions, client} = await harness(daemon);
+    const materialize = vi.fn(async () => undefined);
+    await expect(client.pull(apply => apply(materialize))).resolves.toBeDefined();
+    expect(attempts).toBe(2);
+    expect(materialize).toHaveBeenCalledTimes(1);
+    await sessions.closeAll();
+  });
+
   it("rejects a workspace materialization path without its producing version", async () => {
     const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.pull") return undefined;
+      if (request.method !== "sync.applyPull") return undefined;
       return {
         status: "complete", refused: 0,
         pushed: 0, ownerAdmissionPending: [],
@@ -680,8 +746,8 @@ describe("EngineRelayClient", () => {
     const { sessions, client } = await harness(daemon);
 
     const materialize = vi.fn(async () => undefined);
-    await expect(client.pull(materialize)).rejects.toThrow(
-      /sync\.pull result:[\s\S]*changedPaths[\s\S]*versionId/,
+    await expect(client.pull(async (apply) => apply(materialize))).rejects.toThrow(
+      /sync\.applyPull result:[\s\S]*changedPaths[\s\S]*versionId/,
     );
     expect(materialize).not.toHaveBeenCalled();
     expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
@@ -756,7 +822,7 @@ describe("EngineRelayClient", () => {
 
   it("adds a cursor-commit enrollment decline to the completed pull", async () => {
     const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.pull") {
+      if (request.method === "sync.applyPull") {
         return {
           status: "complete", refused: 0,
           pushed: 0, ownerAdmissionPending: [],
@@ -791,7 +857,7 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    const pull = await client.pull(async () => undefined);
+    const pull = await client.pull(async (apply) => apply(async () => undefined));
 
     expect(pull.sharingDeclined).toEqual([
       {
@@ -1846,7 +1912,7 @@ describe("EngineRelayClient", () => {
     expect(run).toHaveBeenCalledWith(
       { ...workspace, captureMode: "none" },
       expect.any(Function),
-      { retryTransportErrors: true },
+      { retryTransportErrors: true, abandonAtQuit: true },
     );
     expect(closeWorkspace).toHaveBeenCalledWith(workspace);
     await sessions.closeAll();
@@ -2222,7 +2288,7 @@ describe("EngineRelayClient", () => {
     let channelPulls = 0;
     let viewPulls = 0;
     const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.pull") {
+      if (request.method === "sync.applyPull") {
         workspacePulls += 1;
         const first = workspacePulls === 1;
         return {
@@ -2288,7 +2354,7 @@ describe("EngineRelayClient", () => {
     });
     const { client, sessions } = await harness(daemon);
 
-    const workspace = await client.pull(async () => undefined);
+    const workspace = await client.pull(async (apply) => apply(async () => undefined));
     expect(workspace).toMatchObject({
       fetched: 5,
       applied: 3,
@@ -2345,7 +2411,7 @@ describe("EngineRelayClient", () => {
           new Error("refused"),
         );
       }
-      if (request.method === "sync.pull") {
+      if (request.method === "sync.applyPull") {
         throw new DaemonRefusalError(
           { code: "WORKSPACE_UNAVAILABLE", message: "workspace operation failed", retry: "afterReconnect" },
           new Error("refused"),
@@ -2355,11 +2421,41 @@ describe("EngineRelayClient", () => {
     });
     const { client, sessions } = await harness(daemon);
     await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
-    await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
+    await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
+    // The session is fine, so neither request reopens it.
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+      "sync.push",
+    ]);
+    await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(
       RelayWorkspaceUnavailableError,
     );
     await expect(client.claim()).rejects.toBeInstanceOf(RelayUnreachableError);
     await sessions.closeAll();
+  });
+
+  it("stops waiting for the relay at quit, so the workspace closes", async () => {
+    const daemon = new MockDaemon();
+    const send = daemon.sendRequest.bind(daemon);
+    const pushSent = Promise.withResolvers<void>();
+    daemon.sendRequest = async (request) => {
+      if (request.method !== "sync.push") return await send(request);
+      daemon.requests.push(request);
+      pushSent.resolve();
+      return await new Promise<Response>(() => {});
+    };
+    const { client, sessions } = await harness(daemon);
+    const push = client.push();
+    await pushSent.promise;
+    sessions.beginShutdown();
+    await expect(push).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+    await sessions.closeAll();
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+      "workspace.close",
+    ]);
   });
 
   it.each(["workspace operation failed", "relay-workspace-unavailable"])(
@@ -2374,7 +2470,7 @@ describe("EngineRelayClient", () => {
       });
       const { client, sessions } = await harness(daemon);
       await expect(client.push()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
-      await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
+      await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
       await expect(client.commitCursor({})).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
       await expect(client.recoverOrigin()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
       await expect(client.probe()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
@@ -2478,7 +2574,7 @@ describe("EngineRelayClient", () => {
     let originMarker = false;
     let readOnlyMarker = false;
     const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push" || request.method === "sync.pull") {
+      if (request.method === "sync.push" || request.method === "sync.applyPull") {
         throw new DaemonRefusalError(
           {
             code: "INVALID_PARAMS",
@@ -2505,14 +2601,14 @@ describe("EngineRelayClient", () => {
     const { client, sessions } = await harness(daemon);
 
     await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
-    await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
+    await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(
       DaemonRefusalError,
     );
     originMarker = true;
     await expect(client.push()).rejects.toBeInstanceOf(
       RelayOriginDivergedError,
     );
-    await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
+    await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(
       RelayOriginDivergedError,
     );
     await expect(
@@ -2659,16 +2755,16 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(changed.size).toBe(0);
   });
 
-  it("preserves the inner client's optional workspace-session capabilities through the wrap", () => {
+  it("preserves request cancellation and optional workspace-session capabilities through the wrap", async () => {
     const seen: string[] = [];
     const unsubscribe = () => undefined;
     const inner: EngineDaemonClient = {
-      sendRequest: () => Promise.reject(new Error("unused")),
+      sendRequest: async (request, _signal, _progress, cancelSignal) => {
+        cancelSignal?.addEventListener("abort", () => seen.push(`cancel:${request.id}`), {once: true});
+        return {id: request.id, result: null};
+      },
       close: () => undefined,
       helloAck: { capabilities: ["blobs"] },
-      cancelRequest: async (requestId) => {
-        seen.push(`cancel:${requestId}`);
-      },
       onBlob: () => {
         seen.push("onBlob");
         return unsubscribe;
@@ -2691,7 +2787,9 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.helloAck).toEqual({ capabilities: ["blobs"] });
     expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
     expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
-    void wrapped.cancelRequest?.(7);
+    const cancel = new AbortController();
+    await wrapped.sendRequest({id: 7, method: "history.rewriteLinks", params: {}}, undefined, undefined, cancel.signal);
+    cancel.abort();
     expect(seen).toEqual(["onEvent", "onBlob", "cancel:7"]);
   });
 
@@ -2708,7 +2806,6 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.helloAck).toBeUndefined();
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
-    expect(wrapped.cancelRequest).toBeUndefined();
   });
 });
 
@@ -2721,7 +2818,7 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
     await source.currentClient().sendRequest({
       id: 1,
       method: "workspace.open",
-      params: { rootDir: "/root", workspaceId: "ws", ...params },
+      params: { rootDir: "/no-such-root", workspaceId: "ws", ...params },
     });
     return inner.requests.at(-1)?.params;
   }
@@ -2749,7 +2846,7 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
     const routes = new RelayTransportRouteGuard();
     const synced = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => false);
     expect(await openParams(synced, inner)).not.toHaveProperty("abandonOrdinaryPull");
-    routes.bind({ workspaceId: "ws", rootPath: "/root", relay: { baseUrl: "https://relay.test", token: "token" } });
+    routes.bind({ workspaceId: "ws", rootPath: "/no-such-root", relay: { baseUrl: "https://relay.test", token: "token" } });
     const routed = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => true);
     const params = await openParams(routed, inner);
     expect(params).toHaveProperty("relay");

@@ -18,8 +18,8 @@ export interface CompilerProcessRuntime {
   nodeExecutable: string;
   workerPath: string;
   workerArgs?: readonly string[];
-  /** macOS and Linux: the installed compiler-owner. The worker's directory is the only tree the build may read and run. */
-  ownerExecutable?: string;
+  /** The installed compiler owner. On macOS and Linux the worker's directory is the only tree the build may read and run. */
+  ownerExecutable: string;
   onOwnerSpawn?: (pid: number) => void;
 }
 export interface CompilerProcessRequest { input: Uint8Array; bounds: CompilerProcessBounds; signal?: AbortSignal }
@@ -34,7 +34,7 @@ export class CompilerProcessError extends Error {
   }
 }
 
-const STARTUP_STAGES = ["PowerShell running", "Add-Type done", "job assigned", "admitted", "worker spawned", "worker ready"] as const;
+const STARTUP_STAGES = ["owner running", "job assigned", "admitted", "worker spawned", "worker ready"] as const;
 const STAGE_PREFIX = "[dohc-compiler] ";
 const STDERR_TAIL_BYTES = 128;
 
@@ -56,7 +56,6 @@ interface CompilerOwner {
 
 /** Windows Job Object limits aggregate committed memory, including native esbuild. */
 function windowsOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): CompilerOwner {
-  const ownerPath = fileURLToPath(new URL("./windowsCompilerJob.ps1", import.meta.url));
   const relayPath = fileURLToPath(new URL("./compilerProcessRelay.mjs", import.meta.url));
   const payload = Buffer.from(JSON.stringify({ worker: runtime.workerPath, args: runtime.workerArgs ?? [] })).toString("base64");
   const environment: NodeJS.ProcessEnv = {};
@@ -64,10 +63,7 @@ function windowsOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBo
   for (const name of ["SystemRoot", "WINDIR", "TEMP", "TMP"]) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
-  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-  const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const command = `& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(ownerPath)}))) ${[runtime.nodeExecutable, relayPath, payload, String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes)].map(quote).join(" ")}`;
-  const child = spawn(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+  const child = spawn(runtime.ownerExecutable, [runtime.nodeExecutable, relayPath, payload, String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes)], {
     cwd: fileURLToPath(new URL(".", import.meta.url)), env: environment, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"],
   });
   return { child, stop: () => child.kill("SIGKILL"), finish: async () => {}, reasons: new Map([[124, { reason: "timeout", message: "Compiler owner timed out." }]]) };
@@ -110,7 +106,6 @@ async function killProcessGroup(group: number): Promise<void> {
  * process that escaped its tree may have put there.
  */
 async function confinedOwner(runtime: CompilerProcessRuntime, bounds: CompilerProcessBounds, inputBytes: number): Promise<CompilerOwner> {
-  if (!runtime.ownerExecutable || !isAbsolute(runtime.ownerExecutable)) throw new Error("Compiler runtime paths must be absolute.");
   const directory = await mkdtemp(join(tmpdir(), "dohc-app-compiler-"));
   const child = spawn(runtime.ownerExecutable, [String(bounds.maxMemoryBytes), String(bounds.maxProcesses), String(bounds.timeoutMs), String(inputBytes),
     dirname(runtime.workerPath), directory, runtime.nodeExecutable, runtime.workerPath, ...(runtime.workerArgs ?? [])],
@@ -159,7 +154,7 @@ export async function runOwnedCompilerProcess(runtime: CompilerProcessRuntime, r
   if (bounds.timeoutMs > 2_147_483_647) throw new Error("Compiler timeout exceeds the timer range.");
   if (bounds.maxProcesses > 4_294_967_295) throw new Error("Compiler process count exceeds the OS range.");
   if (!(request.input instanceof Uint8Array) || request.input.byteLength > bounds.maxInputBytes) throw new CompilerProcessError("input", "Compiler input bound exceeded.");
-  if (!isAbsolute(runtime.nodeExecutable) || !isAbsolute(runtime.workerPath)) throw new Error("Compiler runtime paths must be absolute.");
+  if (![runtime.ownerExecutable, runtime.nodeExecutable, runtime.workerPath].every(path => typeof path === "string" && isAbsolute(path))) throw new Error("Compiler runtime paths must be absolute.");
   if (signal?.aborted) throw new CompilerProcessError("cancelled", "Compiler cancelled.");
   const input = Buffer.from(request.input);
   const started = performance.now();

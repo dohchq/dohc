@@ -90,6 +90,15 @@ async function dragTabTo(page: Page, tab: Locator, group: Locator) {
   await page.mouse.up();
 }
 
+// Reaches a group's open tab from the keyboard: Tab from the group lands on
+// it. A click clears the keyboard mark and .focus() leaves it as it was, so
+// only a key sets the mark that draws focus for a keyboard user.
+async function tabToGroupTab(page: Page, group: Locator, tab: Locator) {
+  await group.focus();
+  await page.keyboard.press("Tab");
+  await expect(tab).toBeFocused();
+}
+
 test("editor groups keep mixed surfaces visible, resize, and collapse", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -180,7 +189,7 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await explorerRow(page, "a.md").click();
     const onlyTab = page.getByTestId(editorTabTestId("a.md"));
     await expect(onlyTab).toHaveAttribute("aria-selected", "true");
-    await onlyTab.focus();
+    await tabToGroupTab(page, group(1), onlyTab);
     await page.keyboard.press("Delete");
     await expect(onlyTab).toHaveCount(0);
     await expect(group(1)).toBeFocused();
@@ -191,7 +200,7 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     // with its ring drawn over its open file.
     await explorerRow(page, "a.md").click();
     await group(1).getByTestId("create-editor-group-right").click();
-    await group(2).getByTestId(editorTabTestId("a.md")).focus();
+    await tabToGroupTab(page, group(2), group(2).getByTestId(editorTabTestId("a.md")));
     await page.keyboard.press("Delete");
     await expect(group(2)).toHaveCount(0);
     await expect(group(1)).toBeFocused();
@@ -207,7 +216,7 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(3)).toBeVisible();
     await dragTabTo(page, group(2).getByTestId(editorTabTestId("a.md")), group(1));
     await expect(group(2).getByRole("tab")).toHaveCount(0);
-    await group(3).getByTestId(editorTabTestId("a.md")).focus();
+    await tabToGroupTab(page, group(3), group(3).getByTestId(editorTabTestId("a.md")));
     await page.keyboard.press("Delete");
     await expect(group(3)).toHaveCount(0);
     await expect(group(2)).toBeFocused();
@@ -233,7 +242,7 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
 
     // A keyboard close in forced colors: the left group collapses and the
     // empty group left alone takes focus with its ring on every edge.
-    await group(1).getByTestId(editorTabTestId("a.md")).focus();
+    await tabToGroupTab(page, group(1), group(1).getByTestId(editorTabTestId("a.md")));
     await page.keyboard.press("Delete");
     await expect(group(2)).toHaveCount(0);
     await expect(group(1)).toBeFocused();

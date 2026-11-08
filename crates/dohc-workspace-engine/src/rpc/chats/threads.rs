@@ -44,6 +44,8 @@ struct ChatThreadStartParams {
     message_id: String,
     title: Option<String>,
     lane: Option<String>,
+    #[serde(default)]
+    own_thread: bool,
     author_kind: String,
     author_display_name: String,
     author_owner_display_name: Option<String>,
@@ -59,6 +61,12 @@ struct ChatThreadStartParams {
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     automation: Option<ChatMessageAutomationParams>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_agent_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    named_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
 
@@ -245,6 +253,8 @@ struct OpeningMessageWire<'a> {
     author_owner_display_name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     automation: Option<AutomationWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
 }
 
 #[derive(Serialize)]
@@ -284,6 +294,7 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 author_user_id: opening.author_user_id.as_deref(),
                 author_owner_display_name: opening.author_owner_display_name.as_deref(),
                 automation: opening.automation.as_ref().map(AutomationWire::from),
+                author_reported: opening.author_reported.as_ref(),
             }),
     })
 }
@@ -314,6 +325,7 @@ impl EngineService {
                     message_id: params.message_id,
                     title: params.title,
                     lane,
+                    own_thread: params.own_thread,
                     author_kind,
                     author_display_name: params.author_display_name,
                     author_owner_display_name: params.author_owner_display_name,
@@ -329,6 +341,9 @@ impl EngineService {
                         .map(LocalAttachmentInput::from)
                         .collect(),
                     automation: params.automation.map(Into::into),
+                    author_agent_id: params.author_agent_id,
+                    author_reported: params.author_reported,
+                    named_agent_ids: params.named_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -732,6 +747,7 @@ mod tests {
                 chain_depth: 2,
             }),
             link_author: None,
+            author_reported: None,
             body_snippet: "hello".to_owned(),
             reactions: Vec::new(),
         };

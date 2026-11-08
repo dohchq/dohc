@@ -21,8 +21,10 @@ import { createDatasetReplicaHost } from "./replica-host.js";
 import { datasetHistoryLineage, historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled, hasUncommittedDatasetAttempts } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
-import { DatasetHostError, DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
+import { DatasetHostError, DatasetBindingPendingAttemptError, DatasetNotArchivedError } from "@dohc/app-backend-runtime/dataset-error";
 export { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
+/** An approval named a change, and the prepared change differs from it. */
+export const DATASET_CHANGE_EDITED = "This change differs from the one you were asked to apply. Review the change to apply it.";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 /** Resolve only immutable revisions already approved at this host; callers cannot supply compatibility. */
@@ -412,6 +414,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       journal.destroy({ expected, authorize: () => { owner(context,key); }, cleanup() {
           revision(key);
           if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
+          if (!lifecycle(key).archived) throw new DatasetNotArchivedError();
           if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
           automations.forget(key);
           for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])
@@ -438,13 +441,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       for(const [id,saved] of migrationCandidates)if(saved.candidate.expiresAtMs<=Date.now()||(saved.candidate.expected.workspaceId===key.workspaceId&&saved.candidate.expected.datasetId===key.datasetId))migrationCandidates.delete(id);
       migrationCandidates.set(candidate.candidateId,{candidate:structuredClone(candidate),authorityKey,approved,previous,schemaSql,source});return candidate;
     },
-    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;approvalAgent?:ApprovalAgent|null;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
+    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;changeSha256?:string;approvalAgent?:ApprovalAgent|null;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
       if(!options.supervisor.approveMigration)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
       const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));
       if(!saved||saved.candidate.expected.workspaceId!==key.workspaceId||saved.candidate.expected.datasetId!==key.datasetId)throw new DatasetHostError("conflict","This preview is no longer available. Preview the change again.");
       const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
       const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();assertDatasetAttemptsCommitted(db,key);};
       authorize();
+      if(raw.changeSha256!==undefined&&raw.changeSha256!==saved.candidate.changeSha256)throw new DatasetHostError("conflict",DATASET_CHANGE_EDITED);
       const cursor=await options.supervisor.approveMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,checkpointSha256:raw.checkpointSha256,approvalAgent:raw.approvalAgent === undefined ? undefined : parseApprovalAgent(raw.approvalAgent),authorityKey,authorize,signal:raw.signal,
         accountStage(allocation){if(options.accountCheckpointStage)synchronous(()=>options.accountCheckpointStage!(context,allocation));},
         account(allocation){
@@ -579,7 +583,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (!recovery?.install) throw new DatasetHostError("invalid", "This host cannot restore Collections.");
       const sourceCursor = structuredClone(raw.sourceCursor), manifestSha256 = raw.manifestSha256, transferId = text(raw.transferId), activate = raw.activate === true;
       if (sourceCursor.workspaceId !== key.workspaceId || sourceCursor.datasetId !== key.datasetId) throw new DatasetHostError("invalid", "This recovery file holds a different Collection.");
-      const ownerToken = JSON.stringify(owner(context, key)), authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const ownerToken = JSON.stringify(owner(context, key)), owns = () => { if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const authorize = () => { raw.signal?.throwIfAborted(); owns(); };
       const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
       const prior = installer.status({ ...key, transferId, authorize });
       if (prior) {
@@ -591,7 +596,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       try {
         if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "This recovery file is from a different point in the Collection's history.");
         if (activate && validated.manifest.sourceState !== "fenced") throw new DatasetHostError("invalid", "This recovery file was saved while the Collection still accepted changes, so it cannot move the Collection. Publish the Collection's app to your sharing server to move it.");
-        const result = await installer.install(context, { transferId, manifestSha256, recovery: validated, authorize });
+        // A request cut off by its deadline or its caller still clears its copy, so the next try starts again.
+        const result = await installer.install(context, { transferId, manifestSha256, recovery: validated, authorize, authorizeCleanup: owns });
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : result;
       } finally { await validated.dispose(); }
     },

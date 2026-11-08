@@ -5,7 +5,7 @@ import type { MenuItemConstructorOptions } from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopTray } from "./desktopTray";
 import { createChatDispatchService } from "../agents/chatDispatchService";
-import { DEFAULT_USER_SETTINGS, firstAgentWithLaunch } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, listAgents } from "../settings/userSettings";
 import { readCachedUserSettingsFile, replaceUserSettingsFile } from "../settings/userSettingsStore";
 import { settingsWithAgent } from "../testing/agentSettings";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -30,11 +30,12 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const service = createChatDispatchService({
     workspaceFor: () => null, listOpenWorkspaces: () => [], listSyncWorkspaces: () => [],
     assertMayStartAgent: async () => () => undefined,
+    agentToolVersion: async () => null,
     chatStoreFor: () => { throw new Error("No workspace should be opened"); },
     startSelfTestThread: async () => { throw new Error("No self-test should start"); },
     dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
-    readDispatchAgent: async () => firstAgentWithLaunch((await readCachedUserSettingsFile(stateRoot)).settings),
-    identityFor: async () => ({ displayName: "Nova", ownerDisplayName: "Local" }), stateDir: () => stateRoot,
+    readDispatchAgents: async () => listAgents((await readCachedUserSettingsFile(stateRoot)).settings),
+    stateDir: () => stateRoot,
     appRoot: () => root, isPackaged: () => packaged, queueSync: () => undefined,
     onMessagePosted: () => undefined,
     setRunAttribution: () => undefined,

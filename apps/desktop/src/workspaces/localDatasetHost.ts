@@ -22,6 +22,7 @@ import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import { createLocalApps } from "./localApps";
 import { createLocalDatasetApps, localDatasetAppStorage, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createLocalCollectionApps, localCollectionAppStorage, type LocalCollectionEngine } from "./localCollectionApps";
+import { createLocalUnconnectedApps, localUnconnectedAppStorage } from "./localUnconnectedApps";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
@@ -221,7 +222,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     assertCurrent(); const result = work(); active.add(result);
     try { return await result; } finally { active.delete(result); }
   }
-  /** Charges a Dataset's usage, or with null the Collection app ledger. */
+  /** Charges a Dataset's usage, or with null the ledger of apps outside a Dataset: Collection apps and apps that reach no workspace data. */
   function charge(datasetId: string | null, bytes: number) {
     if (!Number.isSafeInteger(bytes)) throw new Error("Invalid Collection storage allocation.");
     const changed = db.prepare("UPDATE local_dataset_budget SET bytes=bytes+? WHERE singleton=1 AND bytes+?>=0 AND bytes+?<=?").run(bytes, bytes, bytes, maxStoredBytes);
@@ -454,7 +455,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       return context;
     }
     const recovery = createLocalDatasetRecovery({workspaceId,maxBytes:maxStoredBytes+2*1024*1024,signal:lifetime.signal,assertCurrent,
-      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input)});
+      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input),
+      async discardUnfinished(datasetId) {
+        assertCurrent();
+        const row = db.prepare("SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND phase NOT IN ('installed','claimed')").get(workspaceId, datasetId);
+        if (row) await host.discardRecovery(owner, {workspaceId, datasetId, transferId: String(row.import_id)});
+      }});
     // After a change to which rules a dataset runs, or whether it runs.
     const changed = <T>(value: T): T => { if (!closed) options.onDatasetsChanged?.(); return value; };
     const local = {
@@ -519,10 +525,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
-      // Each end, failed or not, tells the automation runner, which reads the transfer record again.
+      transferInFlight(datasetId: string) { assertCurrent(); return transfers.inFlight(datasetId); },
+      // The fence and a finished move tell the automation runner, which reads the transfer record again. A stop
+      // changes nothing it reads: the reads a change sets off would resume the move, and its next stop would set off more.
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }))
-          .then(changed, (error: unknown) => { changed(undefined); throw error; });
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(changed);
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
@@ -676,7 +683,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         })();
       },
     };
-    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db), localCollectionAppStorage(db)], assertCurrent, transaction,
+    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db), localCollectionAppStorage(db), localUnconnectedAppStorage(db)], assertCurrent, transaction,
       charge: (kind, resourceId, bytes) => charge(kind === "dataset" ? resourceId : null, bytes) });
     const collections = createLocalCollectionApps({ db, store: appStore, workspaceId, assertCurrent, transaction: commit, charge: bytes => charge(null, bytes),
       engine() {
@@ -707,7 +714,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
     });
-    localApps = createLocalApps(appStore, apps, collections);
+    localApps = createLocalApps(appStore, apps, collections, createLocalUnconnectedApps({ store: appStore, workspaceId, assertCurrent }));
     return { ...local, apps: localApps };
   } catch (error) {
     closed = true; lifetime.abort();

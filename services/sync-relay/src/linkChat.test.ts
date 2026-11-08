@@ -187,7 +187,7 @@ describe("link chat on a Group share", () => {
     }
     for (const message of (JSON.parse(page) as { messages: Record<string, unknown>[] }).messages) {
       expect(Object.keys(message).sort()).toEqual([
-        "authorDisplayName", "authorKind", "authorOwnerDisplayName", "body", "bodyTooLarge", "createdAtMs", "messageId", "relaySeq", "threadId",
+        "authorDisplayName", "authorKind", "authorOwnerDisplayName", "body", "bodyTooLarge", "createdAtMs", "linkAgent", "messageId", "relaySeq", "threadId",
       ]);
     }
     expect((await readChat(f, capability, history.replace(channelWireId, "wire-private"))).status).toBe(404);

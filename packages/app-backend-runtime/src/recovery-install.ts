@@ -122,7 +122,8 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
     status(input: DatasetScope & { transferId: string; authorize(): void }): RecoveryImportReceipt | null {
       return tx(() => { const row = find(input, input.transferId, input.authorize); return row && (row.phase === "installed" || row.phase === "claimed") ? receipt(row) : null; });
     },
-    async install(context: Context, input: { transferId: string; manifestSha256: string; recovery: ValidatedDatasetRecovery; authorize(): void }): Promise<RecoveryImportReceipt> {
+    /** `authorizeCleanup` authorizes the cleanup after a failed install. It defaults to `authorize`. */
+    async install(context: Context, input: { transferId: string; manifestSha256: string; recovery: ValidatedDatasetRecovery; authorize(): void; authorizeCleanup?(): void }): Promise<RecoveryImportReceipt> {
       const { recovery } = input, scope = { workspaceId: recovery.manifest.cursor.workspaceId, datasetId: recovery.manifest.cursor.datasetId };
       const importId = identity(input.transferId), ownerToken = randomUUID();
       if (!/^[a-f0-9]{64}$/.test(input.manifestSha256)) throw new Error("Invalid recovery manifest digest.");
@@ -251,7 +252,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
         // A host transaction may commit and lose its acknowledgement. Never delete committed lineage.
         const row = db.prepare("SELECT * FROM dohc_dataset_imports WHERE import_id=?").get(importId);
         if (row && (row.phase === "installed" || row.phase === "claimed")) { input.authorize(); return receipt(row); }
-        try { await discard(context, { ...scope, transferId: importId, authorize: input.authorize }); } catch { /* Durable ownership rows allow an authorized cleanup retry. */ }
+        try { await discard(context, { ...scope, transferId: importId, authorize: input.authorizeCleanup ?? input.authorize }); } catch { /* Durable ownership rows allow an authorized cleanup retry. */ }
         throw error;
       }
     },

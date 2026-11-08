@@ -12,12 +12,14 @@ import {
   type LazyExoticComponent,
 } from "react";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
   excalidrawPresenceTopic,
   type ExcalidrawPresenceFactory,
 } from "./collab/excalidrawPresence";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
+import { pointExcalidrawAtAppFonts } from "./excalidrawFonts";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
   parseExcalidrawDocument,
@@ -35,7 +37,10 @@ import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
 
-const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
+const LazyExcalidrawCanvas = lazy(() => {
+  pointExcalidrawAtAppFonts();
+  return import("./ExcalidrawCanvas");
+}) as
   LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
 
 export function DrawingView({
@@ -62,6 +67,7 @@ export function DrawingView({
   onRetryEngineOpen,
   presenceFactory,
   localBuffer,
+  onButtonError,
 }: {
   body: string;
   contentHash: string | null;
@@ -86,6 +92,7 @@ export function DrawingView({
   presenceFactory?: ExcalidrawPresenceFactory | null;
   onSaveStateChange?: (state: SaveState) => void;
   localBuffer: SharedLocalDocument;
+  onButtonError?: ReportButtonError;
 }) {
   const engineMode = engine.available && engine.doc !== null;
   const engineReadOnly =
@@ -311,7 +318,7 @@ export function DrawingView({
         />
       ) : null}
       {engine.artifactAssetsInvalid ? (
-        <EngineArtifactAssetsInvalidNotice workspaceId={workspaceId} path={path} />
+        <EngineArtifactAssetsInvalidNotice workspaceId={workspaceId} path={path} onError={onButtonError} />
       ) : null}
       {assetRefused ? (
         <div
@@ -375,7 +382,7 @@ export function DrawingView({
           tone="danger"
           title={`dohc could not open this drawing. ${document.error ?? "The drawing is invalid."}`}
         >
-          <OpenExternallyButton workspaceId={workspaceId} path={path} />
+          <OpenExternallyButton workspaceId={workspaceId} path={path} onError={onButtonError} />
         </EmptyState>
       )}
     </div>

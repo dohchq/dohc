@@ -42,7 +42,7 @@ export interface DirectWriteFile {
 export type ReviewFile =
   | { path: string; reason: "changed-since"; changedBy?: string }
   | { path: string; reason: "folder-in-use" }
-  | { path: string; reason: "restore-refused"; detail: string }
+  | { path: string; reason: "restore-refused"; detail: string; refusal?: "synced-deletion" }
   | { path: string; reason: "rules-unreadable"; unreadable: WorkspacePolicyPath[] };
 
 export interface RestoreReceipt {
@@ -78,7 +78,7 @@ export interface StopAndRestoreDependencies {
     | { kind: "restored"; receipt: RestoreReceipt }
     | { kind: "changed" }
     | { kind: "folder-in-use" }
-    | { kind: "refused"; detail: string }
+    | { kind: "refused"; detail: string; refusal?: "synced-deletion" }
     // History's rules could not be read; `unreadable` names what to fix.
     | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
@@ -416,7 +416,7 @@ export async function restoreDirectWrites(
         }
         if (result.kind === "refused") {
           // History refuses some files, such as a shared live document.
-          review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500) });
+          review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500), refusal: result.refusal });
           continue;
         }
         if (result.kind === "rules-unreadable") {

@@ -22,6 +22,8 @@ export type UpdateFailure = "startup" | "window-crash" | "window-load" | "unfini
  */
 export function createUpdateAfterFailure(dependencies: {
   controller(): Promise<Pick<AutoUpdateController, "awaitUpdate"> | null>;
+  // Nothing downloads until the person answers yes.
+  confirmDownload(failure: UpdateFailure, version: string): Promise<boolean>;
   // Shows that a download is running until the signal aborts. Resolves when
   // the notice closes, by the signal or by the person.
   showDownloading(failure: UpdateFailure, version: string, signal: AbortSignal): Promise<void>;
@@ -37,11 +39,15 @@ export function createUpdateAfterFailure(dependencies: {
     // The person closing the notice stops the wait; the caller's exit runs.
     const closed = Promise.withResolvers<null>();
     const version = await Promise.race([
-      controller.awaitUpdate(dependencies.bounds ?? FAILURE_UPDATE_BOUNDS, (found) => {
-        void dependencies.showDownloading(failure, found, notice.signal).then(() => {
-          if (!notice.signal.aborted) closed.resolve(null);
-        });
-      }),
+      controller.awaitUpdate(
+        dependencies.bounds ?? FAILURE_UPDATE_BOUNDS,
+        (found) => dependencies.confirmDownload(failure, found),
+        (found) => {
+          void dependencies.showDownloading(failure, found, notice.signal).then(() => {
+            if (!notice.signal.aborted) closed.resolve(null);
+          });
+        },
+      ),
       closed.promise,
     ]).finally(() => notice.abort());
     if (!version) return false;

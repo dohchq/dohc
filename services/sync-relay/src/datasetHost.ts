@@ -10,7 +10,7 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
-import { type AppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type AppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -25,9 +25,12 @@ import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionI
 import { notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
+import { collectionFilePresent } from "./storage/collectionFilePresence";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const ownerPrincipalKey = (workspaceId: string) => hash(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
+// A moved folder can reach the server as a delete and a later write, and a deleted file can come straight back.
+const COLLECTION_MISSING_GRACE_MS = 120_000;
 export interface RelayDatasetHostOptions {
   storage: StorageContext;
   directory: string;
@@ -40,6 +43,16 @@ export interface RelayDatasetHostOptions {
   onShutdownError(error: unknown): void;
   /** The deployment writer lock must be held before startup stage maintenance runs. */
   startupExclusive?: boolean;
+}
+
+export function datasetReferenceReadContainsRecord(result: unknown, primaryKeyFieldId: string, recordId: string | number): boolean {
+  if (!result || typeof result !== "object" || !("rows" in result) || !Array.isArray(result.rows)) return false;
+  return result.rows.some(row => {
+    if (!row || typeof row !== "object" || !("values" in row)) return false;
+    const values = row.values;
+    return !!values && typeof values === "object" && !Array.isArray(values) &&
+      (values as Record<string, unknown>)[primaryKeyFieldId] === recordId;
+  });
 }
 
 /** The existing relay connection owns every authoritative dataset transaction. */
@@ -154,6 +167,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         targetVersionId(namedSelector) !== candidate.versionId || visibleSharePath(namedSelector, candidate.appRoot) !== candidate.appRoot) throw notFound();
     return {candidate, authorityRevision: Number(row.authority_revision), authority: {...authority, authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision]))}};
   }
+  // In memory, on this server's clock: a restart allows one more grace period.
+  const missingSince = new Map<string, number>();
+  /** The apps of a deleted Collection stop. Its records stay until its owner restores its files. */
+  function requireCollectionFile(workspaceId: string, datasetId: string): void {
+    const key = JSON.stringify([workspaceId, datasetId]), now = nowMs();
+    if (collectionFilePresent(storage, workspaceId, datasetId, now)) { missingSince.delete(key); return; }
+    const since = missingSince.get(key);
+    if (since !== undefined) { if (now - since >= COLLECTION_MISSING_GRACE_MS) throw relayError("app_collection_missing"); return; }
+    if (missingSince.size >= 1024) missingSince.delete(missingSince.keys().next().value!);
+    missingSince.set(key, now);
+  }
   function capability(candidate: AppPublicationCandidate, workspaceId: string, datasetId: string): AppDatasetCapability {
     const requested = candidate.capabilities.find(value => value.kind === "dataset" && value.datasetId === datasetId);
     if (!requested || requested.kind !== "dataset") throw notFound();
@@ -176,7 +200,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       if (auth.workspaceId !== workspaceId) throw notFound();
       ({candidate, authority} = namedPublication(auth, appId));
     }
-    return {capability: capability(candidate, workspaceId, datasetId), authority: {...authority, appId}};
+    const verified = capability(candidate, workspaceId, datasetId);
+    requireCollectionFile(workspaceId, datasetId);
+    return {capability: verified, authority: {...authority, appId}};
   }
   function resolveAuthority(auth: AppBackendAuth, request: {workspaceId: string; datasetId?: string; access: DatasetAccess}): DatasetAuthority {
     current();
@@ -214,7 +240,26 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
     const recoveryFiles = createDatasetRecoveryFiles(storage, (scope, bytes) => account(scope.workspaceId, scope.datasetId, bytes), current);
     createRecoveryInstaller({db: storage.db, transaction, journal});
+    // An import that ended without its Collection leaves an empty usage row, which would refuse creating the Collection here.
+    const dropEmptyUsage = (workspaceId: string, datasetId: string) => storage.tx(() => {
+      storage.db.prepare(`DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=? AND storage_bytes=0
+        AND NOT EXISTS(SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?)
+        AND NOT EXISTS(SELECT 1 FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`)
+        .run(workspaceId, datasetId, workspaceId, datasetId, workspaceId, datasetId);
+    });
     if (options.startupExclusive) {
+      // An import the relay left when it stopped blocks every retry. This process holds the
+      // deployment writer lock and has no host to serve requests yet, so no import is running.
+      const stopped = createRecoveryInstaller<undefined>({db: storage.db, transaction, journal,
+        account(_context, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+        discardAttachments(_context, input) { return recoveryFiles.discard(input); }});
+      for (;;) {
+        const row = storage.db.prepare("SELECT import_id,workspace_id,dataset_id FROM dohc_dataset_imports WHERE phase NOT IN ('installed','claimed') LIMIT 1").get();
+        if (!row) break;
+        const workspaceId = String(row.workspace_id), datasetId = String(row.dataset_id);
+        await stopped.discard(undefined, {workspaceId, datasetId, transferId: String(row.import_id), authorize: current});
+        dropEmptyUsage(workspaceId, datasetId);
+      }
       let stageCursor: string | undefined;
       do {
         stageCursor = journal.reclaimCheckpointStages({after: stageCursor, authorize: current,
@@ -285,6 +330,65 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_automation_failure_generations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
+    storage.workReferenceDatasetAccess = async input => {
+      try {
+        current();
+        const auth: AppBackendAuth = input.linkAuth ?? {kind: "named", workspaceId: input.workspaceId, userId: input.userId!, grantId: input.grantId};
+        const key = {workspaceId: input.workspaceId, datasetId: input.target.datasetId};
+        let request: Parameters<typeof host.authorize>[1] | undefined;
+        let primaryKeyFieldId: string | undefined;
+        if (auth.kind === "named") {
+          const description = host.describe(auth, key);
+          const table = description.tables.find(table => table.tableId === input.target.tableId);
+          const operation = description.operations.find(operation => operation.tableId === input.target.tableId &&
+            operation.kind === "read" && operation.readOnly && (input.target.kind === "transactionalCollection" ||
+              !!table?.primaryKeyFieldId && operation.fieldIds.includes(table.primaryKeyFieldId)));
+          if (!table || !operation) return null;
+          primaryKeyFieldId = table.primaryKeyFieldId;
+          request = {...key, revision: description.revision, revisionSha256: description.revisionSha256, operationId: operation.operationId};
+        } else {
+          const publications = storage.db.prepare("SELECT publication_id FROM sync_relay_app_publications WHERE workspace_id=? AND grant_id=? AND active=1 LIMIT 64")
+            .all(key.workspaceId, input.grantId!);
+          for (const row of publications) {
+            try {
+              const published = publication(auth, String(row.publication_id));
+              if (!published || published.datasetId !== key.datasetId) continue;
+              for (const operation of published.capability.operations.filter(operation => operation.readOnly)) {
+                const candidate = {...key, revision: published.capability.revision, revisionSha256: published.capability.revisionSha256,
+                  operationId: operation.operationId, access: {kind: "app" as const, appId: String(row.publication_id)}};
+                const permitted = host.authorize(auth, candidate);
+                if (permitted.operation.kind !== "read" || permitted.operation.tableId !== input.target.tableId) continue;
+                const table = permitted.revision.definition.tables.find(table => table.tableId === input.target.tableId)!;
+                const primary = datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey);
+                if (input.target.kind === "transactionalRecord" && (!primary || !permitted.operation.fieldIds.includes(primary.fieldId))) continue;
+                request = candidate; primaryKeyFieldId = primary?.fieldId; break;
+              }
+              if (request) break;
+            } catch { continue; }
+          }
+          if (!request) return null;
+        }
+        if (!request) return null;
+        const readRequest = request;
+        const authorization = host.authorize(auth, readRequest);
+        if (input.target.kind === "transactionalRecord" && !generatedRevision(authorization.revision)) return () => false;
+        const admitted = JSON.stringify(authorization);
+        const recordId = input.target.kind === "transactionalRecord" ? input.target.recordId : undefined;
+        return await host.readOperation(auth, {...readRequest, idempotencyKey: randomUUID(), signal: storage.unavailable,
+          input: recordId === undefined ? {limit: 1} : {limit: 1, filters: [{fieldId: primaryKeyFieldId!, value: recordId}]}}, (result, revision) => {
+          const found = recordId === undefined || datasetReferenceReadContainsRecord(result, primaryKeyFieldId!, recordId);
+          return () => {
+            try {
+              current();
+              if (JSON.stringify(host.authorize(auth, readRequest)) !== admitted) return false;
+              const head = storage.db.prepare("SELECT revision,active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?")
+                .get(key.workspaceId, key.datasetId);
+              return found && head?.active === 1 && head.revision === revision && head.approved_revision_hash === readRequest.revisionSha256;
+            } catch { return false; }
+          };
+        });
+      } catch { return null; }
+    };
     return {
       automations: createDatasetAutomations({ host, storage, current, authority: automationAuthority }),
       observeAutomationClaims(wake: (workspaceId: string, failed: boolean) => void) {
@@ -330,12 +434,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       async importRecovery(auth: AppBackendAuth, input: Parameters<typeof host.importRecovery>[1]) {
         try {return await host.importRecovery(auth, input);}
         finally {
-          if (!storage.unavailable.aborted) storage.tx(() => {
-            storage.db.prepare(`DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=? AND storage_bytes=0
-              AND NOT EXISTS(SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?)
-              AND NOT EXISTS(SELECT 1 FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`)
-              .run(input.workspaceId, input.datasetId, input.workspaceId, input.datasetId, input.workspaceId, input.datasetId);
-          });
+          if (!storage.unavailable.aborted) dropEmptyUsage(input.workspaceId, input.datasetId);
         }
       },
       replicaCapture: host.replicaCapture, replicaPage: host.replicaPage, replicaBlob: host.replicaBlob,

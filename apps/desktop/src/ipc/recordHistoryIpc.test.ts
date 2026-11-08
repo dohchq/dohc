@@ -69,7 +69,7 @@ describe("Record History live authors", () => {
     expect(() => GetCollectionRecordHistoryResult.parse({ ...page, entries: [{ ...page.entries[0], author: { ...linkAuthor } }] })).toThrow();
     expect(person).not.toHaveBeenCalled();
     expect(prepare).toHaveBeenCalledExactlyOnceWith([]);
-    expect(agent).toHaveBeenCalledExactlyOnceWith("public-holder");
+    expect(agent).toHaveBeenCalledExactlyOnceWith("helper", "public-holder");
   });
   it.each(["human", "agent"] as const)("keeps a %s row's local person unnamed and off account lookups", async actorKind => {
     const localId = "local:installation-1";

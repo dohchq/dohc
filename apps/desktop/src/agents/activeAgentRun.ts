@@ -12,8 +12,7 @@ export interface ActiveAgentRun {
 export type AgentRunDispatch = "run" | "self-test";
 
 /**
- * The agent a run's writes name when its agent gives no name, as a run dohc
- * dispatches does. It is the claim an unnamed `dohc chat --as-agent` reply
- * carries, so the run's files and replies are one actor.
+ * The agent a write names when an agent outside a run dohc dispatched gives
+ * no name. A dispatched run's writes name its agent's id instead.
  */
 export const UNNAMED_AGENT_ID = "dohc-mcp";

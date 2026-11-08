@@ -11,11 +11,12 @@ import {
 
 // Left-alignment audit for the WYSIWYG editor: the TEXT of every top-level
 // block type must share one left content edge — a straight vertical line down
-// the gutter touches all of it. Decorations (list markers, task checkboxes,
-// the quote bar) hang left of that edge, and framed blocks (code, tables,
-// callouts) extend --dohc-editor-block-inset past the column so their inner
-// padding lands their text back on the edge. This spec measures the first
-// text glyph of each block against a plain paragraph's.
+// the gutter touches all of it. Decorations (list markers, the quote bar)
+// hang left of that edge, and framed blocks (code, callouts) extend
+// --dohc-editor-block-inset past the column so their inner padding lands
+// their text back on the edge. A task list's checkboxes and a table's frame
+// start on the edge instead. This spec measures the first text glyph of each
+// block against a plain paragraph's.
 
 const ALIGNMENT_DOC = `# Heading one
 
@@ -29,6 +30,10 @@ A plain paragraph that defines the shared content edge.
   - Nested bullet text
 
 1. Ordered item text
+
+A paragraph before a list that starts at ten.
+
+10. Two-digit item text
 
 - [ ] Task item text
 - [x] Done task text
@@ -117,6 +122,91 @@ async function measure(page: import("@playwright/test").Page): Promise<BlockEdge
   });
 }
 
+// The hover +/⋮ cluster before each block that reaches left of its text into
+// the gutter. Outside list markers draw no box, so the bullet's and numbers'
+// left edges are measured: Inter at 15px puts a bullet's or one digit's ink
+// 17px left of the text, and two digits' 26.5px. A table's mark is its
+// leftmost row grip or ⋯ button, which stay laid out while hidden.
+async function measureClusters(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const editor = document.querySelector(".dohc-notion-editor");
+    if (!editor) throw new Error("editor not mounted");
+    const cluster = (block: Element | null) => {
+      let node = block?.previousElementSibling ?? null;
+      while (node && !node.classList.contains("dohc-block-affordance")) node = node.previousElementSibling;
+      const rect = node?.getBoundingClientRect();
+      return rect ? { left: rect.left, right: rect.right } : null;
+    };
+    const left = (el: Element | null | undefined) => el?.getBoundingClientRect().left ?? null;
+    const tasks = editor.querySelector(":scope > ul:has(> li[data-checked])");
+    const quote = editor.querySelector(":scope > blockquote");
+    const pre = editor.querySelector(":scope > pre");
+    const callout = editor.querySelector(":scope > .dohc-callout");
+    const table = editor.querySelector(":scope > .tableWrapper");
+    const tableChrome = [...(table?.querySelectorAll(".dohc-table-grip--row, .dohc-table-menu-btn") ?? [])];
+    return {
+      editorLeft: editor.getBoundingClientRect().left,
+      bullet: cluster(editor.querySelector(":scope > ul:not(:has(> li[data-checked]))")),
+      ordered: cluster(editor.querySelector(":scope > ol:not([start])")),
+      twoDigits: cluster(editor.querySelector(":scope > ol[start='10']")),
+      task: cluster(tasks),
+      checkboxLeft: left(tasks?.querySelector("input[type='checkbox']")),
+      quote: cluster(quote),
+      barLeft: quote
+        ? quote.getBoundingClientRect().left + parseFloat(getComputedStyle(quote, "::before").left)
+        : null,
+      code: cluster(pre),
+      codeLeft: left(pre),
+      callout: cluster(callout),
+      calloutLeft: left(callout),
+      table: cluster(table),
+      tableChromeLeft: tableChrome.length ? Math.min(...tableChrome.map((el) => el.getBoundingClientRect().left)) : null,
+    };
+  });
+}
+
+// Every cluster ends 6px (with subpixel slack) left of its block's mark,
+// inside the editor.
+function expectClustersClear(clusters: Awaited<ReturnType<typeof measureClusters>>, edge: number) {
+  const marks = {
+    bullet: edge - 17,
+    ordered: edge - 17,
+    twoDigits: edge - 26.5,
+    task: clusters.checkboxLeft,
+    quote: clusters.barLeft,
+    code: clusters.codeLeft,
+    callout: clusters.calloutLeft,
+    table: clusters.tableChromeLeft,
+  };
+  for (const [key, mark] of Object.entries(marks)) {
+    const cluster = clusters[key as keyof typeof marks];
+    expect(cluster, `${key} must have a cluster`).not.toBeNull();
+    expect(mark, `${key} must have a mark`).not.toBeNull();
+    expect.soft(cluster!.right, `${key} cluster clears its mark`).toBeLessThanOrEqual(mark! - 5.5);
+    expect.soft(cluster!.left, `${key} cluster stays in the editor`).toBeGreaterThanOrEqual(clusters.editorLeft);
+  }
+}
+
+// A task list's checkboxes and a table's frame start on the edge. Task text
+// follows one 15px checkbox and its 8px gap; a cell's text follows the
+// table's 1px border and the cell's 10px padding.
+function expectOnEdge({ edges, boxes }: BlockEdges, edge: number) {
+  for (const [key, left] of [
+    ["checkbox", boxes.checkbox?.left],
+    ["table", boxes.table?.left],
+  ] as const) {
+    expect(left, `${key} must render`).toBeDefined();
+    expect.soft(Math.abs(left! - edge), `${key} starts on the content edge`).toBeLessThanOrEqual(1.5);
+  }
+  for (const [key, offset] of [
+    ["task", 23],
+    ["tableCell", 11],
+  ] as const) {
+    expect(edges[key], `${key} must render text`).not.toBeNull();
+    expect.soft(Math.abs(edges[key]! - edge - offset), `${key} text sits ${offset}px in`).toBeLessThanOrEqual(1.5);
+  }
+}
+
 test("every block type's text sits on one shared left content edge", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
@@ -155,11 +245,9 @@ test("every block type's text sits on one shared left content edge", async () =>
       "h3",
       "bullet",
       "ordered",
-      "task",
       "blockquote",
       "callout",
       "code",
-      "tableCell",
     ] as const) {
       expect(edges[key], `${key} must render text`).not.toBeNull();
       expect
@@ -175,17 +263,44 @@ test("every block type's text sits on one shared left content edge", async () =>
     expect(boxes.hr).not.toBeNull();
     expect(Math.abs(boxes.hr!.left - edge!)).toBeLessThanOrEqual(1.5);
 
-    // Task checkboxes hang fully left of the edge (decoration, not content).
-    expect(boxes.checkbox).not.toBeNull();
-    expect(boxes.checkbox!.right).toBeLessThan(edge!);
+    expectOnEdge({ paneWidth, edges, boxes }, edge!);
 
-    // Framed blocks extend one block inset (16px) into both gutters.
-    for (const key of ["pre", "table", "callout"] as const) {
+    // Code and callout frames extend one block inset (16px) into both gutters.
+    for (const key of ["pre", "callout"] as const) {
       expect(boxes[key], `${key} frame must render`).not.toBeNull();
       expect
         .soft(Math.abs(edge! - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`)
         .toBeLessThanOrEqual(1.5);
     }
+
+    expectClustersClear(await measureClusters(page), edge!);
+
+    // A narrow pane leaves only the editor's 56px padding for the gutter.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setSize(1000, 950);
+    });
+    await expect.poll(async () => (await measure(page)).paneWidth).toBeLessThan(832);
+    const narrow = await measure(page);
+    const narrowEdge = narrow.edges.paragraph;
+    expect(narrowEdge).not.toBeNull();
+    // The table's wrapper still reaches 22px into the padding, so the frame,
+    // not the row grips, stays on the edge.
+    expectOnEdge(narrow, narrowEdge!);
+    expectClustersClear(await measureClusters(page), narrowEdge!);
+
+    // There the cluster stacks + above ⋮, and a one-item list's ⋮ runs below
+    // its line, over the next block's hidden cluster. The shown ⋮ takes the
+    // click there.
+    await page.locator(".dohc-notion-editor > ol:not([start])").hover();
+    const handleOnTop = await page.evaluate(() => {
+      let node = document.querySelector(".dohc-notion-editor > ol:not([start])")?.previousElementSibling ?? null;
+      while (node && !node.classList.contains("dohc-block-affordance")) node = node.previousElementSibling;
+      const handle = node?.querySelector(".dohc-block-handle");
+      if (!handle) throw new Error("list has no handle");
+      const rect = handle.getBoundingClientRect();
+      return handle.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.bottom - 0.5));
+    });
+    expect(handleOnTop).toBe(true);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

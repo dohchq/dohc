@@ -1,8 +1,8 @@
 import type { CSSProperties } from "react";
-import { START_TILE_ART, type StartKind } from "./workbench/StartTileArt";
+import { START_TILE_ART } from "./workbench/StartTileArt";
 
 // Four sheets tucked into the new-workspace folder: a Page, a Collection, a
-// Drawing and an App, with the pictures the start surface draws for them.
+// Drawing and an App, with the pictures of START_TILE_ART.
 // Only their tops show above the card, beside the name tab. They are a
 // picture of what a workspace holds, so they take no pointer, focus or name.
 
@@ -10,7 +10,7 @@ import { START_TILE_ART, type StartKind } from "./workbench/StartTileArt";
 // scaled about (82, 90). `left` and `top` place that box in the folder; the
 // card's front starts 31px below the folder's top, and each paper's top lands
 // 46 to 56px above it.
-const SHEETS: readonly { kind: StartKind; left: number; top: number; turn: number }[] = [
+const SHEETS: readonly { kind: keyof typeof START_TILE_ART; left: number; top: number; turn: number }[] = [
   { kind: "markdown", left: 94, top: -64, turn: -6 },
   { kind: "collection", left: 158, top: -70, turn: -2 },
   { kind: "drawing", left: 222, top: -66, turn: 2.5 },

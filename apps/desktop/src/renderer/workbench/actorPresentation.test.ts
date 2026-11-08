@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { identityHues, palette } from "../tokens";
-import { ownPresentation, neutralPresentation, presentationColor, presentationClasses, relayPresentation, setOwnPresentation, ownAgentPresentation, bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides, subscribePresentation } from "./actorPresentation";
+import { ownPresentation, neutralPresentation, presentationColor, presentationClasses, relayPresentation, setOwnPresentation, ownAgentPresentation, bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides, subscribePresentation, goneAgentPresentation, agentTextClass, canChooseAgentColor } from "./actorPresentation";
 import { setChosenColors } from "./chosenColors";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
@@ -16,6 +16,13 @@ it("maps frozen relay slots and neutral, own and chosen hues in both themes", ()
   expect(presentationClasses(ownPresentation)).toContain("text-hue-blue");
   expect(presentationClasses(ownPresentation, "agent")).toContain("text-hue-rose");
   expect(presentationColor(relayPresentation(0)).stroke).toBe(identityHues.light.rust);
+});
+
+it("marks an agent no longer in Settings in subtle ink, never the default olive", () => {
+  expect(presentationClasses(goneAgentPresentation, "agent")).toBe("border-subtle bg-panel text-subtle");
+  expect(agentTextClass(goneAgentPresentation)).toBe("text-subtle");
+  expect(presentationClasses(neutralPresentation, "agent")).toContain("text-agent");
+  expect(canChooseAgentColor(goneAgentPresentation)).toBe(false);
 });
 
 it("applies the main own hue and keeps chosen human and agent colours overriding it", () => {

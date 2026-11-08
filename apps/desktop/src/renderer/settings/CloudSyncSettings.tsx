@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
+import { Sparkles, TriangleAlert } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { formatChatTime } from "../time";
@@ -16,6 +16,7 @@ import { SettingRow, SwitchControl } from "./SettingRow";
 
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 const MIN_PASSPHRASE_LENGTH = 8;
+const PASSPHRASE_TOO_SHORT = "Enter at least 8 characters to protect synced secrets.";
 // What turning sync off leaves alone. Groups and received shares sync on
 // their own, so a pause here does not reach them.
 export const SYNC_OFF_KEEPS = "Turning this off keeps your work, history, and shares; groups you joined keep syncing.";
@@ -36,6 +37,11 @@ export type CloudSettings = {
   onChanged: () => void;
   // Opens the connect flow.
   onConnect: () => void;
+  // The server stopped accepting this computer's sign-in, which only the
+  // workspace's sync status knows: the saved session still matches.
+  signInExpired?: boolean;
+  // Signs in again to the same server, with no Disconnect first.
+  onSignInAgain?: () => void;
   // The same guard as onChanged applies.
   onError: (error: ConnectionErrorReport) => void;
   // A failure that reaches every workspace, such as Disconnect's. It goes to
@@ -104,17 +110,46 @@ export function CloudSyncSettings(props: {
     workspaceSecretState: status?.workspaceSecretState ?? "none",
     ...(status?.syncPause ? { syncPause: status.syncPause } : {}),
   };
+  // Sync is on, but nothing syncs. A switch can only read on or off, so the
+  // row offers Try again, or Sign in again, and Pause sync in its place.
+  const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
+  const expired = sync.workspaceSynced && sync.workspaceSyncConnected && props.cloud.signInExpired === true;
+  const held = unconfirmed || expired;
+  // The buttons go when either action works or the account is confirmed on
+  // its own. Focus they held moves to the switch that takes their place once
+  // it can be used, or to Connect server while signed out, where the switch
+  // can't turn on. Focus the person moved to another control stays there.
+  // A busy switch or a status still loading has nothing to focus yet, so the
+  // move waits for the next answer.
+  const syncSwitch = useRef<HTMLButtonElement | null>(null);
+  const connectButton = useRef<HTMLButtonElement | null>(null);
+  const actionHeldFocus = useRef(false);
+  useEffect(() => {
+    if (held || !actionHeldFocus.current) return;
+    const target = syncSwitch.current?.disabled === false ? syncSwitch.current : connectButton.current;
+    if (!target) return;
+    actionHeldFocus.current = false;
+    if (document.activeElement === document.body) target.focus();
+  }, [held, syncBusy, status]);
+  const holdsFocus = {
+    onFocus: () => {
+      actionHeldFocus.current = true;
+    },
+    onBlur: (event: FocusEvent) => {
+      if (event.relatedTarget) actionHeldFocus.current = false;
+    },
+  };
   const relayUrl = status?.relayUrl?.trim() ?? "";
   // The join handle: one copyable line carrying the workspace id and its
   // relay. Absent when anything it needs is missing.
   const syncCode = useMemo(() => {
-    if (!sync.workspaceSynced || !sync.workspaceSyncConnected || !relayUrl) return null;
+    if (!sync.workspaceSynced || !sync.workspaceSyncConnected || expired || !relayUrl) return null;
     try {
       return buildSyncCode({ workspaceId: props.workspaceId, relayUrl });
     } catch {
       return null;
     }
-  }, [props.workspaceId, relayUrl, sync.workspaceSyncConnected, sync.workspaceSynced]);
+  }, [expired, props.workspaceId, relayUrl, sync.workspaceSyncConnected, sync.workspaceSynced]);
 
   async function enableSync() {
     const request = requests.next();
@@ -149,7 +184,7 @@ export function CloudSyncSettings(props: {
         setSyncError(
           /could not/i.test(message)
             ? "That passphrase couldn't unlock synced secrets."
-            : "Enter at least 8 characters to protect synced secrets.",
+            : PASSPHRASE_TOO_SHORT,
         );
         return;
       }
@@ -215,10 +250,20 @@ export function CloudSyncSettings(props: {
     if (!props.cloud.unreadable) {
       return <SkeletonRows rows={2} label="Checking your server connection…" testId="settings-cloud-checking" />;
     }
-    // The shell already raised the failure, with its reason and Try again.
+    // The shell's toast and Notices row give the reason. The row says what
+    // failed, in the unconfirmed account line's look, and reads again.
     return (
-      <SettingRow title="Server" testId="settings-row-server">
-        <SecondaryButton size="compact" onClick={props.cloud.onChanged}>
+      <SettingRow
+        title="Server"
+        testId="settings-row-server"
+        description={
+          <span data-testid="settings-cloud-unreadable" className="flex gap-1 text-danger">
+            <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
+            <span>dohc could not read this workspace's sync status.</span>
+          </span>
+        }
+      >
+        <SecondaryButton onClick={props.cloud.onChanged}>
           Try again
         </SecondaryButton>
       </SettingRow>
@@ -227,7 +272,7 @@ export function CloudSyncSettings(props: {
 
   const connectRow = (
     <SettingRow title="Server" testId="settings-row-server">
-      <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+      <PrimaryButton ref={connectButton} data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
         Connect server
       </PrimaryButton>
     </SettingRow>
@@ -236,7 +281,6 @@ export function CloudSyncSettings(props: {
   // switch: pausing needs no account, and turning sync on does.
   if (!status.connected && !status.workspaceSyncOwned) return connectRow;
 
-  const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
   const syncPause = sync.workspaceSynced ? undefined : sync.syncPause;
   const needsServer = !status.connected && !sync.workspaceSynced;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
@@ -261,9 +305,14 @@ export function CloudSyncSettings(props: {
             title="Sync this workspace"
             testId="settings-row-sync-workspace"
             description={
-              unconfirmed ? (
-                <span data-testid="cloud-workspace-relink" className="text-danger">
-                  {SYNC_UNCONFIRMED_ACCOUNT}
+              unconfirmed && !status.connected ? (
+                // Disconnecting is a choice, not a fault: Connect server sits
+                // in the row above.
+                <span data-testid="cloud-workspace-not-connected">{SYNC_NOT_CONNECTED}</span>
+              ) : held ? (
+                <span data-testid={expired ? "cloud-workspace-sign-in-expired" : "cloud-workspace-relink"} className="flex gap-1 text-danger">
+                  <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
+                  <span>{expired ? SYNC_SIGN_IN_EXPIRED : SYNC_UNCONFIRMED_ACCOUNT}</span>
                 </span>
               ) : syncPause || needsServer ? (
                 <>
@@ -279,30 +328,56 @@ export function CloudSyncSettings(props: {
               ) : undefined
             }
           >
-            {/* Enabling again reads this account's saved session, which
-                resumes sync when it owns the workspace. Another account
-                gets main's reason in a notice, and Disconnect above is the
-                way to the right one. */}
-            {unconfirmed && status.connected ? (
-              <SecondaryButton
-                size="compact"
-                data-testid="cloud-relink-workspace"
-                disabled={syncBusy !== null}
-                onClick={() => void enableSync()}
-              >
-                Try again
-              </SecondaryButton>
-            ) : null}
-            {/* Off pauses sync on this computer, and on resumes it, so
-                neither asks first. The switch moves at the click and holds
-                still until main answers. */}
-            <SwitchControl
-              label="Sync this workspace"
-              checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
-              busy={syncBusy !== null}
-              disabled={syncBusy !== null || needsServer || (!sync.workspaceSynced && passphrasePurpose !== null)}
-              onChange={(on) => void (on ? enableSync() : stopSync())}
-            />
+            {held ? (
+              <>
+                {/* Enabling again reads this account's saved session, which
+                    resumes sync when it owns the workspace. Another account
+                    gets main's reason in a notice, and Disconnect above is
+                    the way to the right one. */}
+                {expired ? (
+                  // Main stopped this workspace's engine on the refused
+                  // sign-in. A new sign-in rebuilds it; enabling again can't.
+                  <SecondaryButton
+                    data-testid="cloud-sign-in-again"
+                    disabled={syncBusy !== null || !props.cloud.onSignInAgain}
+                    onClick={() => props.cloud.onSignInAgain?.()}
+                  >
+                    Sign in again
+                  </SecondaryButton>
+                ) : status.connected ? (
+                  <SecondaryButton
+                    data-testid="cloud-relink-workspace"
+                    disabled={syncBusy !== null}
+                    {...holdsFocus}
+                    onClick={() => void enableSync()}
+                  >
+                    Try again
+                  </SecondaryButton>
+                ) : null}
+                {/* The switch's off: it saves the pause, so neither a restart
+                    nor a sign-in resumes sync. */}
+                <SecondaryButton
+                  data-testid="cloud-pause-sync"
+                  disabled={syncBusy !== null}
+                  {...holdsFocus}
+                  onClick={() => void stopSync()}
+                >
+                  Pause sync
+                </SecondaryButton>
+              </>
+            ) : (
+              // Off pauses sync on this computer, and on resumes it, so
+              // neither asks first. The switch moves at the click and holds
+              // still until main answers.
+              <SwitchControl
+                ref={syncSwitch}
+                label="Sync this workspace"
+                checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
+                busy={syncBusy !== null}
+                disabled={syncBusy !== null || needsServer || (!sync.workspaceSynced && passphrasePurpose !== null)}
+                onChange={(on) => void (on ? enableSync() : stopSync())}
+              />
+            )}
           </SettingRow>
           {syncCode ? (
             <SettingRow title="Workspace code" testId="cloud-sync-code-block">
@@ -322,7 +397,11 @@ export function CloudSyncSettings(props: {
               busy={syncBusy !== null}
               onStart={setPassphrasePurpose}
               onPassphrase={setPassphrase}
-              onSubmit={() => void enableSync()}
+              onSubmit={() => {
+                // Try again asked for the passphrase; the form goes once it unlocks.
+                if (held) actionHeldFocus.current = true;
+                void enableSync();
+              }}
             />
           ) : null}
         </>
@@ -367,6 +446,12 @@ export function ProtectedFilesRow(props: {
     props.purpose === "protect"
       ? props.passphrase.length < MIN_PASSPHRASE_LENGTH
       : props.passphrase.length === 0;
+  // A passphrase left in the field, rather than taken to its button, says how
+  // to use it. Every other Settings field saves on leave; this one doesn't.
+  const [left, setLeft] = useState(false);
+  const hint = !left || !props.passphrase ? null
+    : props.purpose === "protect" && tooShort ? PASSPHRASE_TOO_SHORT
+    : `Press ${props.purpose === "protect" ? "Protect" : "Unlock"} to use this passphrase.`;
   return (
     <SettingRow
       title="Protected files"
@@ -375,6 +460,10 @@ export function ProtectedFilesRow(props: {
         props.error ? (
           <span data-testid="cloud-sync-error" role="alert" className="text-danger">
             {props.error}
+          </span>
+        ) : hint ? (
+          <span data-testid="cloud-sync-hint" role="alert" className="text-warning">
+            {hint}
           </span>
         ) : undefined
       }
@@ -386,20 +475,29 @@ export function ProtectedFilesRow(props: {
             event.preventDefault();
             if (!props.busy && !tooShort) props.onSubmit();
           }}
+          // Moving between the passphrase and its button isn't leaving.
+          onBlur={(event) => {
+            const next = event.relatedTarget;
+            setLeft(!(next instanceof Node && event.currentTarget.contains(next)));
+          }}
         >
           <input
             type="password"
             spellCheck={false}
             aria-label="Passphrase"
             aria-invalid={props.error !== null}
+            // A passphrase typed and not yet used is lost if Settings closes.
+            data-unsaved={props.passphrase ? true : undefined}
             data-testid="cloud-sync-passphrase"
             value={props.passphrase}
-            onChange={(event) => props.onPassphrase(event.currentTarget.value)}
-            className="h-7 w-40 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+            onChange={(event) => {
+              setLeft(false);
+              props.onPassphrase(event.currentTarget.value);
+            }}
+            className="h-8 w-40 rounded-md border border-line bg-bg px-2 text-[13px] text-ink focus:border-ink"
           />
           <PrimaryButton
             type="submit"
-            size="compact"
             data-testid="cloud-sync-passphrase-submit"
             disabled={props.busy || tooShort}
           >
@@ -410,7 +508,6 @@ export function ProtectedFilesRow(props: {
         </form>
       ) : props.secretState === "protected-key-present" ? (
         <SecondaryButton
-          size="compact"
           data-testid="cloud-protect-secrets"
           onClick={() => props.onStart("protect")}
         >
@@ -418,7 +515,6 @@ export function ProtectedFilesRow(props: {
         </SecondaryButton>
       ) : (
         <SecondaryButton
-          size="compact"
           data-testid="cloud-unlock-secrets"
           onClick={() => props.onStart("unlock")}
         >
