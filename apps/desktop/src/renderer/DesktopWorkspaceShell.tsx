@@ -976,6 +976,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     showSuccessNotice,
     reportShellFailure,
+    clearIdentity,
     onSharesChanged: sharesChanged,
   });
   // For surfaces that report a failure as one sentence, with the error that

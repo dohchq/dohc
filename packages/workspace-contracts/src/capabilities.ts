@@ -94,6 +94,8 @@ export const CAPABILITIES = {
   "share.link.access.set": capability("Change a share link's access level.", {ipc: ["retuneRelayShareLink"]}),
   "share.link.rotate": capability("Rotate a share link.", {ipc: ["rotateRelayShareLink"]}),
   "share.link.revoke": capability("Revoke a share link.", {ipc: ["revokeRelayShareLink"]}),
+  "share.link.agents.list": capability("List the agents connected through a share link.", {ipc: ["listRelayShareLinkAgents"]}),
+  "share.link.agent.disconnect": capability("Disconnect one agent from a share link.", {ipc: ["disconnectRelayShareLinkAgent"]}),
   "share.discussion.read": capability("Read a share's discussion.", {ipc: ["listRelayShareDiscussion"]}),
   "share.discussion.post": capability("Post to a share's discussion.", {ipc: ["appendRelayShareDiscussion"]}),
   "share.discussion.message.delete": capability("Delete a discussion message.", {ipc: ["deleteRelayShareDiscussionMessage"]}),

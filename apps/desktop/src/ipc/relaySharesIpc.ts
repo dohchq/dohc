@@ -38,6 +38,10 @@ import {
   RelayShareGrantRevokeResponse,
   RelayShareLinkCreateResponse,
   RelayShareLinkDependentConflict,
+  RelayShareLinkAgentDisconnectResponse,
+  RelayShareLinkAgentsResponse,
+  ListRelayShareLinkAgentsResult,
+  DisconnectRelayShareLinkAgentResult,
   RelayShareLinkEndResponse,
   RelayShareLinkListResponse,
   RelayShareLinkRotateResponse,
@@ -902,6 +906,50 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
+  // The relay answers only the owner of the share and its workspace, for an
+  // active link on that share. Main names the workspace this window holds.
+  const linkAgentsPath = (workspaceId: string, input: { shareId: string; grantId: string }) =>
+    `/sync/${encodeURIComponent(workspaceId)}/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/agents`;
+
+  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const query = input.cursor === undefined ? "" : `?cursor=${encodeURIComponent(input.cursor)}`;
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(credentials, `${linkAgentsPath(operation.workspace.workspaceId, input)}${query}`),
+        );
+        const parsed = RelayShareLinkAgentsResponse.safeParse(relayResult);
+        if (!parsed.success || parsed.data.nextCursor === input.cursor) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return ListRelayShareLinkAgentsResult.parse({ agents: parsed.data.agents, nextCursor: parsed.data.nextCursor });
+      },
+      assertOriginalWorkspace,
+    );
+  };
+
+  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `${linkAgentsPath(operation.workspace.workspaceId, input)}/${encodeURIComponent(input.connectionId)}/disconnect`,
+            { method: "POST" },
+          ),
+        );
+        const parsed = RelayShareLinkAgentDisconnectResponse.safeParse(relayResult);
+        if (!parsed.success || parsed.data.agent.connectionId !== input.connectionId) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return DisconnectRelayShareLinkAgentResult.parse({ connectionId: input.connectionId });
+      },
+      assertOriginalWorkspace,
+    );
+  };
+
   const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
       operation,
@@ -1281,6 +1329,8 @@ export function createRelaySharesIpcHandlers<
     retuneRelayShareLink,
     rotateRelayShareLink,
     revokeRelayShareLink,
+    listRelayShareLinkAgents,
+    disconnectRelayShareLinkAgent,
     listRelayShareDiscussion,
     pollRelayShareDiscussionActivity,
     cancelRelayShareDiscussionActivity,

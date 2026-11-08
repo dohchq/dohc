@@ -31,11 +31,16 @@ export type ShareRemovalFailure = {
   message: string;
   cause: unknown;
   retry?: () => void;
+  // What failed, such as one agent's Disconnect. A later failure of the same
+  // thing replaces its row, and `resolved` takes it back.
+  identity?: string;
 };
 
 export interface ShareRemovalNotices {
   removed: ReportShareRemoval;
   failed: (failure: ShareRemovalFailure) => void;
+  // The thing a failure named has since succeeded: its toast and row go.
+  resolved: (success: { workspaceId: string; identity: string }) => void;
 }
 
 // A removal an owner made: a toast and a Notices row with Undo. The notice is
@@ -48,14 +53,16 @@ export function useShareRemovalNotices(input: {
     message: string;
     cause?: unknown;
     retry?: (() => void) | null;
+    identity?: string;
   }) => void;
+  clearIdentity: (identity: string) => void;
   // A share ended or came back, whichever surface or retry did it, so a list
   // still open reads again.
   onSharesChanged?: () => void;
 }): ShareRemovalNotices {
   const workspaceIdRef = useRef(input.workspaceId);
   workspaceIdRef.current = input.workspaceId;
-  const { showSuccessNotice, reportShellFailure, onSharesChanged } = input;
+  const { showSuccessNotice, reportShellFailure, clearIdentity, onSharesChanged } = input;
   const removed = useCallback<ReportShareRemoval>(
     (removal) => {
       // A switch clears the shell's list, so an answer for the workspace this
@@ -108,9 +115,16 @@ export function useShareRemovalNotices(input: {
         message: withErrorWords(failure.message, failure.cause),
         cause: failure.cause,
         retry: failure.retry ?? null,
+        ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       });
     },
     [reportShellFailure],
   );
-  return useMemo(() => ({ removed, failed }), [removed, failed]);
+  const resolved = useCallback(
+    (success: { workspaceId: string; identity: string }) => {
+      if (workspaceIdRef.current === success.workspaceId) clearIdentity(success.identity);
+    },
+    [clearIdentity],
+  );
+  return useMemo(() => ({ removed, failed, resolved }), [removed, failed, resolved]);
 }

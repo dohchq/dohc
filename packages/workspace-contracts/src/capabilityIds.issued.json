@@ -273,5 +273,7 @@
   "file.reveal",
   "explorer.menu.read",
   "chat.message.link",
-  "work.link.resolve"
+  "work.link.resolve",
+  "share.link.agents.list",
+  "share.link.agent.disconnect"
 ]

@@ -33,6 +33,8 @@ import {
   RetuneRelayShareLinkPayload, RetuneRelayShareLinkResult,
   RotateRelayShareLinkPayload, RotateRelayShareLinkResult,
   RevokeRelayShareLinkPayload, RevokeRelayShareLinkResult,
+  ListRelayShareLinkAgentsPayload, ListRelayShareLinkAgentsResult,
+  DisconnectRelayShareLinkAgentPayload, DisconnectRelayShareLinkAgentResult,
   ListRelayShareDiscussionPayload, ListRelayShareDiscussionResult,
   AppendRelayShareDiscussionPayload, AppendRelayShareDiscussionResult,
   DeleteRelayShareDiscussionMessagePayload, DeleteRelayShareDiscussionMessageResult,
@@ -298,6 +300,18 @@ export const relayShareOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: RevokeRelayShareLinkPayload, result: RevokeRelayShareLinkResult,
+  },
+  listRelayShareLinkAgents: {
+    capabilityId: "share.link.agents.list", channel: "desktop:list-relay-share-link-agents",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Sharing stopped because this window changed workspaces.",
+    payload: ListRelayShareLinkAgentsPayload, result: ListRelayShareLinkAgentsResult,
+  },
+  disconnectRelayShareLinkAgent: {
+    capabilityId: "share.link.agent.disconnect", channel: "desktop:disconnect-relay-share-link-agent",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Sharing stopped because this window changed workspaces.",
+    payload: DisconnectRelayShareLinkAgentPayload, result: DisconnectRelayShareLinkAgentResult,
   },
   listRelayShareDiscussion: {
     capabilityId: "share.discussion.read", channel: "desktop:list-relay-share-discussion",

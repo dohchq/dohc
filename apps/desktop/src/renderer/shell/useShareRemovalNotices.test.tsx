@@ -30,6 +30,7 @@ function renderNotices(workspaceId = "ws-a") {
         workspaceId: id,
         showSuccessNotice: shell.showSuccessNotice,
         reportShellFailure: shell.reportShellFailure,
+        clearIdentity: shell.clearIdentity,
         onSharesChanged: sharesChanged,
       });
       return { shell, notices };
@@ -157,5 +158,23 @@ describe("useShareRemovalNotices", () => {
     act(() => result.current.shell.retryShellError(result.current.shell.shellErrors[0]!.id));
     expect(retry).toHaveBeenCalledTimes(1);
     expect(result.current.shell.shellErrors).toEqual([]);
+  });
+
+  // One thing's failure is one row: a repeat replaces it, and its later
+  // success takes it back. Another thing's row stays.
+  it("keeps one row per named failure and takes it back on success", () => {
+    const cause = new Error("busy");
+    const { result } = renderNotices();
+    act(() => {
+      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: "agent:c1" });
+      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: "agent:c1" });
+      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Agent.", cause, identity: "agent:c2" });
+    });
+    expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual(["agent:c1", "agent:c2"]);
+
+    act(() => result.current.notices.resolved({ workspaceId: "ws-other", identity: "agent:c1" }));
+    expect(result.current.shell.shellErrors).toHaveLength(2);
+    act(() => result.current.notices.resolved({ workspaceId: "ws-a", identity: "agent:c1" }));
+    expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual(["agent:c2"]);
   });
 });

@@ -1,4 +1,5 @@
 import { ipcErrorMessage } from "./ipcError";
+import { Bot } from "lucide-react";
 import {
   useLayoutEffect,
   useMemo,
@@ -20,7 +21,8 @@ import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
-import { CopyField, type CopySecret } from "./ui/CopyButton";
+import { CopyButton, CopyField, type CopySecret } from "./ui/CopyButton";
+import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor } from "./shareLinkAgents";
 
 // Share links are shown once, so a link whose copy is gone is reset, not
 // copied again.
@@ -429,6 +431,8 @@ export function useRelayShareLinkPane(props: {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
+  // Each read of the links reads each link's agents again.
+  const [linksRevision, setLinksRevision] = useState(0);
   const [linksLoading, setLinksLoading] = useState(false);
   const [linksError, setLinksError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<LinkConfirmation | null>(null);
@@ -1388,6 +1392,7 @@ export function useRelayShareLinkPane(props: {
       setLinkAccess(current => advertisedAccess!.includes(current) ? current : "view");
       setAddAccessByShareId(current => Object.fromEntries(Object.entries(current).map(([id, access]) => [id, advertisedAccess!.includes(access) ? access : "view"])));
       setLinks(inventory);
+      setLinksRevision((revision) => revision + 1);
       setIndependentGrants([...independentInventory.values()]);
       if (!options.preserveOwnerMutationError) {
         setOwnerMutationError((current) =>
@@ -1677,12 +1682,29 @@ export function useRelayShareLinkPane(props: {
             <p className="m-0 text-xs leading-relaxed text-muted">
               Copy the link now — dohc doesn't keep a copy.
             </p>
-            <CopyField
-              getText={() => minted.url}
-              sensitive={SHARE_LINK_SECRET}
-            >
-              <code data-testid="share-link-url" title={minted.url}>{minted.url}</code>
-            </CopyField>
+            <div className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <CopyField
+                  getText={() => minted.url}
+                  sensitive={SHARE_LINK_SECRET}
+                >
+                  <code data-testid="share-link-url" title={minted.url}>{minted.url}</code>
+                </CopyField>
+              </div>
+              {/* The same link, at the address an agent signs in with. Keyed
+                  by the link, so a reset link is a new control. */}
+              {agentAddressFor(minted.url) !== null ? (
+                <CopyButton
+                  key={minted.url}
+                  size="header"
+                  icon={Bot}
+                  label="Copy for an agent"
+                  getText={() => agentAddressFor(minted.url)}
+                  sensitive={AGENT_ADDRESS_SECRET}
+                  testId="share-link-agent-copy"
+                />
+              ) : null}
+            </div>
             <p className="m-0 text-[11px] leading-relaxed text-subtle">
               If you lose the link, reset it to get a new one.
             </p>
@@ -1878,6 +1900,16 @@ export function useRelayShareLinkPane(props: {
                             End link
                           </SecondaryButton>
                         </div>
+                      ) : null}
+                      {active && !damaged ? (
+                        <LinkAgentsList
+                          key={`${props.workspaceId}:${group.shareId}:${row.grantId}`}
+                          workspaceId={props.workspaceId}
+                          shareId={group.shareId}
+                          grantId={row.grantId}
+                          revision={linksRevision}
+                          notices={props.shareRemovals}
+                        />
                       ) : null}
                     </article>
                   );

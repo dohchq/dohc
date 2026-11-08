@@ -4318,6 +4318,71 @@ export type RevokeRelayShareLinkResult = z.infer<
   typeof RevokeRelayShareLinkResult
 >;
 
+// One agent connected through a link. Its name is the one its client
+// reported at sign-in, which dohc cannot check; null when it reported none.
+export const RelayShareLinkAgent = z.object({
+  connectionId: OPAQUE_ID,
+  reportedName: z.string().min(1).max(100).nullable(),
+  connectedAtMs: z.number().int().nonnegative(),
+  lastActionAtMs: z.number().int().nonnegative().nullable(),
+});
+export type RelayShareLinkAgent = z.infer<typeof RelayShareLinkAgent>;
+
+export const ListRelayShareLinkAgentsPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+    cursor: RELAY_SHARE_LINK_CURSOR.optional(),
+  })
+  .strict();
+export type ListRelayShareLinkAgentsPayload = z.infer<
+  typeof ListRelayShareLinkAgentsPayload
+>;
+
+// The relay answers 50 connections a page.
+export const ListRelayShareLinkAgentsResult = z
+  .object({
+    agents: z.array(RelayShareLinkAgent).max(50),
+    nextCursor: RELAY_SHARE_LINK_CURSOR.nullable(),
+  })
+  .strict();
+export type ListRelayShareLinkAgentsResult = z.infer<
+  typeof ListRelayShareLinkAgentsResult
+>;
+
+export const RelayShareLinkAgentsResponse = z.object({
+  ok: z.literal(true),
+  agents: z.array(RelayShareLinkAgent.extend({ status: z.literal("active") })).max(50),
+  nextCursor: RELAY_SHARE_LINK_CURSOR.nullable(),
+});
+
+export const DisconnectRelayShareLinkAgentPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+    connectionId: OPAQUE_ID,
+  })
+  .strict();
+export type DisconnectRelayShareLinkAgentPayload = z.infer<
+  typeof DisconnectRelayShareLinkAgentPayload
+>;
+
+export const DisconnectRelayShareLinkAgentResult = z
+  .object({ connectionId: OPAQUE_ID })
+  .strict();
+export type DisconnectRelayShareLinkAgentResult = z.infer<
+  typeof DisconnectRelayShareLinkAgentResult
+>;
+
+// Disconnect is idempotent: a connection that Reset link or End link already
+// ended answers with its row, retired.
+export const RelayShareLinkAgentDisconnectResponse = z.object({
+  ok: z.literal(true),
+  agent: RelayShareLinkAgent.extend({ status: z.enum(["disconnected", "retired"]) }),
+});
+
 const RELAY_SHARE_DISCUSSION_CURSOR = z
   .string()
   .min(1)

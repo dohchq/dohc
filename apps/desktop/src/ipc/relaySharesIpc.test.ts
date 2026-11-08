@@ -1539,6 +1539,61 @@ describe("registered discussion poll lifetime", () => {
   });
 });
 
+describe("a link's agents", () => {
+  const agent = {connectionId: "connection", reportedName: "Claude Code", connectedAtMs: 10, lastActionAtMs: 20};
+  const listInput = {workspaceId, shareId: "share/1", grantId: "grant"};
+  const disconnectInput = {...listInput, connectionId: "connection"};
+
+  it("reads one page for this window's workspace and keeps no relay status", async () => {
+    const h = harness();
+    h.request.mockResolvedValue({ok: true, agents: [{...agent, status: "active"}], nextCursor: "next"});
+    await expect(h.invoke(relayShareOperations.listRelayShareLinkAgents.channel, {...listInput, cursor: "a b"}))
+      .resolves.toEqual({agents: [agent], nextCursor: "next"});
+    expect(h.request).toHaveBeenCalledExactlyOnceWith(h.credentials, "/sync/workspace/shares/share%2F1/links/grant/agents?cursor=a%20b");
+  });
+
+  it.each([
+    ["an ended connection", {ok: true, agents: [{...agent, status: "disconnected"}], nextCursor: null}],
+    ["a page that names its own cursor as the next", {ok: true, agents: [], nextCursor: "same"}],
+    ["a name past the relay's limit", {ok: true, agents: [{...agent, reportedName: "x".repeat(101), status: "active"}], nextCursor: null}],
+  ])("refuses %s", async (_case, answer) => {
+    const h = harness();
+    h.request.mockResolvedValue(answer);
+    await expect(h.invoke(relayShareOperations.listRelayShareLinkAgents.channel, {...listInput, cursor: "same"}))
+      .rejects.toThrow("sharing failed (500)");
+  });
+
+  it("disconnects the named connection on the relay", async () => {
+    const h = harness();
+    h.request.mockResolvedValue({ok: true, agent: {...agent, status: "disconnected"}});
+    await expect(h.invoke(relayShareOperations.disconnectRelayShareLinkAgent.channel, disconnectInput))
+      .resolves.toEqual({connectionId: "connection"});
+    expect(h.request).toHaveBeenCalledExactlyOnceWith(h.credentials,
+      "/sync/workspace/shares/share%2F1/links/grant/agents/connection/disconnect", {method: "POST"});
+    expect(h.sharesChanged).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["another connection", {ok: true, agent: {...agent, connectionId: "other", status: "disconnected"}}],
+    ["a connection still active", {ok: true, agent: {...agent, status: "active"}}],
+  ])("refuses an answer about %s", async (_case, answer) => {
+    const h = harness();
+    h.request.mockResolvedValue(answer);
+    await expect(h.invoke(relayShareOperations.disconnectRelayShareLinkAgent.channel, disconnectInput))
+      .rejects.toThrow("sharing failed (500)");
+  });
+
+  it("drops an answer that arrives after the window changed workspaces", async () => {
+    const h = harness(), answer = deferred<unknown>();
+    h.request.mockReturnValue(answer.promise);
+    const listed = h.invoke(relayShareOperations.listRelayShareLinkAgents.channel, listInput);
+    await vi.waitFor(() => expect(h.request).toHaveBeenCalled());
+    h.retirePhysical();
+    answer.resolve({ok: true, agents: [{...agent, status: "active"}], nextCursor: null});
+    await expect(listed).rejects.toThrow();
+  });
+});
+
 const ownerInputs = {
   ownerRestore: {workspaceId, action: "options", path: "notes.md"},
   listOwnerLiveDocuments: {workspaceId},
@@ -1560,6 +1615,8 @@ const ownerInputs = {
   retuneRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "view"},
   rotateRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []},
   revokeRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []},
+  listRelayShareLinkAgents: {workspaceId, shareId: "share", grantId: "grant"},
+  disconnectRelayShareLinkAgent: {workspaceId, shareId: "share", grantId: "grant", connectionId: "connection"},
   listRelayShareDiscussion: {workspaceId, shareId: "share", direction: "newest-first"},
   appendRelayShareDiscussion: {workspaceId, shareId: "share", body: "Hello", idempotencyKey: "54df38bc-6863-46a7-964a-820d81e833aa"},
   deleteRelayShareDiscussionMessage: {workspaceId, shareId: "share", messageId: "message"},
