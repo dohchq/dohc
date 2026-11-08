@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, CheckCircle2, Diff, Merge, MoreHorizontal, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -2018,11 +2018,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="create">
           <EmptyPanel>
-            <EmptyState picture={EMPTY_ART.apps} title="No apps in this workspace yet.">
-              <PrimaryButton size="compact" className="inline-flex items-center gap-1.5">
-                <Plus size={12} aria-hidden />
-                Create app
-              </PrimaryButton>
+            <EmptyState icon={Globe2} title="No apps in this workspace yet.">
+              <PrimaryButton>Create app</PrimaryButton>
             </EmptyState>
           </EmptyPanel>
         </Specimen>

@@ -676,16 +676,18 @@ describe("VersionsPage", () => {
     expect(right.onSettled).not.toHaveBeenCalled();
   });
 
-  it("shows an empty state that names what stays the same when only Main exists", async () => {
+  it("shows the versions picture and New version when only Main exists, and names what stays the same in its field", async () => {
+    const user = userEvent.setup();
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     render(<Page />);
     const empty = await waitFor(() => screen.getByTestId("versions-page-empty"));
-    expect(empty.textContent).toContain("Make a version to try changes without touching Main.");
-    expect(screen.getByTestId("versions-page-same").textContent)
-      .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+    expect(empty.textContent).toBe("Make a version to try changes without touching Main.New version");
     // One New version, the empty state's. The header's shows once a version exists.
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
-    expect(within(empty).getByTestId("versions-page-new")).toBeTruthy();
+    await user.click(within(empty).getByTestId("versions-page-new"));
+    expect(within(empty).getByTestId("version-new-same").textContent)
+      .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
   });
 
   it("opens the name field in the header, and Escape or leaving it empty puts the button back", async () => {

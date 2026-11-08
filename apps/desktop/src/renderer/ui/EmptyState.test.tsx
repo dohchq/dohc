@@ -10,18 +10,18 @@ afterEach(cleanup);
 describe("EmptyState", () => {
   it("shows a hidden picture, one line, and the action under it", () => {
     const { container } = render(
-      <EmptyState data-testid="empty" picture={EMPTY_ART.files} title="This workspace has no files yet.">
+      <EmptyState data-testid="empty" picture={EMPTY_ART.history} title="No changes yet.">
         <SecondaryButton size="compact">New file</SecondaryButton>
       </EmptyState>,
     );
     const empty = screen.getByTestId("empty");
     const [picture, line, actions] = Array.from(empty.children);
     expect(picture!.getAttribute("aria-hidden")).toBe("true");
-    expect(line!.textContent).toBe("This workspace has no files yet.");
+    expect(line!.textContent).toBe("No changes yet.");
     expect(line!.className.split(" ")).toEqual(expect.arrayContaining(["mt-3", "text-[13px]", "text-muted"]));
     expect(actions!.className.split(" ")).toContain("mt-4");
     expect(screen.getByRole("button", { name: "New file" }).parentElement).toBe(actions);
-    expect(empty.textContent).toBe("This workspace has no files yet.New file");
+    expect(empty.textContent).toBe("No changes yet.New file");
     expect(container.querySelector("svg")).toBeNull();
   });
 

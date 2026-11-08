@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import type { ReactNode } from "react";
 
-export type EmptyArtKind = "files" | "apps" | "posts" | "history" | "shares" | "automations" | "table" | "versions" | "search";
+export type EmptyArtKind = "posts" | "history" | "shares" | "automations" | "table" | "versions" | "search";
 
 const CARD = "absolute inset-x-3 top-1.5 -bottom-2.5 overflow-hidden rounded-md border border-line bg-bg";
 const ROW = "flex items-center gap-1.25";
@@ -17,28 +17,6 @@ const CELLS = ["head", "head", "head", "text", "tag", "text", "text", "text", "t
 // The picture on each empty state: a sketch of what the surface holds once it
 // has items. Decorative; EmptyState hides it and its line names what is missing.
 export const EMPTY_ART: Record<EmptyArtKind, ReactNode> = {
-  files: (
-    <span className={`${CARD} flex flex-col gap-2 p-2`}>
-      <span className={ROW}><span className={`${SQUARE} border-[1.5px] border-subtle`} /><span className={`${LINE} w-[42%]`} /></span>
-      <span className={`${ROW} ml-3`}><span className={`${SQUARE} bg-ink/55`} /><span className={`${LINE} w-[52%]`} /></span>
-      <span className={`${ROW} ml-3`}><span className={`${SQUARE} bg-hue-teal`} /><span className={`${LINE} w-[38%]`} /></span>
-      <span className={ROW}><span className={`${SQUARE} bg-hue-plum`} /><span className={`${LINE} w-[46%]`} /></span>
-    </span>
-  ),
-  apps: (
-    <span className={`${CARD} flex flex-col`}>
-      <span className="flex h-3.25 shrink-0 items-center gap-0.75 border-b border-line px-1.5">
-        <span className={`${LINE} w-1.25`} />
-        <span className={`${LINE} w-1.25`} />
-        <span className={`${LINE} w-1.25`} />
-      </span>
-      <span className="mx-auto mt-2.5 flex w-[70%] flex-col gap-1.5">
-        <span className="h-2.5 rounded-xs border border-line" />
-        <span className="h-2.5 rounded-xs border border-line" />
-        <span className="h-2.75 w-1/2 rounded-[3px] bg-hue-amber/85" />
-      </span>
-    </span>
-  ),
   posts: (
     <span className={`${CARD} flex flex-col gap-2.5 p-2`}>
       <span className="flex items-start gap-1.5">
