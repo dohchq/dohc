@@ -19,6 +19,7 @@ import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun
 // app path, so the test writes one there and removes it afterwards.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture the update notice screenshots");
+test.skip(process.platform !== "win32", "the feed offers only a Windows installer");
 
 const CHOSEN = "0.1.1-nightly.20261030.158.1";
 const TITLE = "dohc could not install the update";
