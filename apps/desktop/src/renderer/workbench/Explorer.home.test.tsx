@@ -679,6 +679,33 @@ describe("selecting several rows in Home", () => {
     );
   });
 
+  it("names the row that did not go when the rest of the selection went, under one Undo for the rest", async () => {
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "tasks") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+      return { trashed: true, operationId: `dohc-operation:${relativePath}`, undo: { available: true as const } };
+    });
+    const undoHistoryOperation = vi.fn(async (_input: { operationId: string }) => ({
+      ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [],
+    }));
+    vi.stubGlobal("dohcDesktop", { ...bridge, deleteWorkspacePath, undoHistoryOperation });
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("collections:tasks/"), { ctrlKey: true });
+    fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
+    fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
+
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items", expect.any(Function)));
+    expect(props.onError).toHaveBeenCalledOnce();
+    expect(vi.mocked(props.onError).mock.calls[0]![0]).toMatch(/^dohc could not delete "tasks"\. \S/);
+
+    act(() => vi.mocked(props.onNotice).mock.calls[0]![1]!());
+    await waitFor(() => expect(props.onNotice).toHaveBeenLastCalledWith("Restored 2 items"));
+    expect(undoHistoryOperation.mock.calls.map(([input]) => input.operationId)).toEqual(
+      ["notes.md", "trip"].map((path) => `dohc-operation:${path}`),
+    );
+  });
+
   // A share view's delete has no trash, so it asks first, once.
   it("asks once in a share view to delete the whole selection, with the folders of apps and Collections", () => {
     render(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);

@@ -1132,11 +1132,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         for (const group of [live, ...folders.map((entry) => [entry]), rest]) {
           const [first] = group;
           if (!first) continue;
+          const verb = group.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder") ? "delete" : "move";
           if (group.length === 1) {
-            onError(ipcErrorMessage(first.cause, "dohc could not change these files."), first.cause, first.again, first.change, first.livePage);
+            // A row that failed beside others names itself, since the rest went.
+            const message = group === rest && changes.length > 1
+              ? [`dohc could not ${verb} ${namedList([sourcePath(first.change)])}.`, ipcErrorMessage(first.cause, "")].filter(Boolean).join(" ")
+              : ipcErrorMessage(first.cause, "dohc could not change these files.");
+            onError(message, first.cause, first.again, first.change, first.livePage);
             continue;
           }
-          const verb = group.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder") ? "delete" : "move";
           const names = group.map(({ change, livePage }) => (livePage && "path" in livePage ? livePage.path : sourcePath(change)));
           const retried = group.filter((entry) => entry.again).map(({ change }) => ({ ...change, id: nextChangeId() }));
           // The reason, when every failure gives the same one.
