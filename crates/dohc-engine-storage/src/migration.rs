@@ -9448,7 +9448,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(kept, [("key-1".to_owned(), None), ("key-2".to_owned(), None)]);
+        assert_eq!(
+            kept,
+            [("key-1".to_owned(), None), ("key-2".to_owned(), None)]
+        );
         // A run sits only beside a declared agent, and names one.
         let set = |a: &str, sequence: i64| {
             let sql = format!("UPDATE owner_ydoc_outbox_entries SET {a} WHERE sequence=?1");

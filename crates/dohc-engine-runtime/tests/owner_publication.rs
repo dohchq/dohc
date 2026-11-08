@@ -5410,7 +5410,10 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
         let mut stmt = conn.prepare("SELECT agent_run_id FROM ydoc_updates WHERE workspace_id='workspace' ORDER BY seq").unwrap();
         Ok::<_,dohc_engine_storage::StorageError>(stmt.query_map([],|r|r.get::<_,Option<String>>(0)).unwrap().map(|r|r.unwrap()).collect::<Vec<_>>())
     }).unwrap();
-    assert_eq!(runs, vec![None, Some("run-a".to_owned()), None, None, None, None, None]);
+    assert_eq!(
+        runs,
+        vec![None, Some("run-a".to_owned()), None, None, None, None, None]
+    );
     // Replaying successive credited rows proves that no later author's delta
     // leaked into an earlier group. The same rows are journaled for peers.
     let grouped = f.store.read_with(|conn| {

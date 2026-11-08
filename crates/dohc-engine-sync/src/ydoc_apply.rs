@@ -8743,10 +8743,12 @@ mod tests {
         };
         assert!(valid_attribution(Some(&agent)));
         // A replicated update cannot name an agent run for a person.
-        assert!(!valid_attribution(Some(&dohc_engine_domain::ChangeAttribution {
-            agent_run_id: Some("run-1".into()),
-            ..human
-        })));
+        assert!(!valid_attribution(Some(
+            &dohc_engine_domain::ChangeAttribution {
+                agent_run_id: Some("run-1".into()),
+                ..human
+            }
+        )));
         assert!(valid_attribution(None));
     }
 

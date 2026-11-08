@@ -2216,7 +2216,12 @@ fn own_entry(
     key: &DocKey,
     receipt: &LiveUpdateReceipt,
 ) -> Result<OwnEntry, ApplicationError> {
-    type Row = (Option<String>, Option<String>, Option<String>, Option<String>);
+    type Row = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
     let entry: Option<Row> = tx
         .query_row(
             "SELECT e.native_source_json,e.agent_declaration_json,e.accepted_receipt_json,e.agent_run_id \
@@ -5457,7 +5462,8 @@ mod tests {
     fn own_agent_updates_and_drafts_in_separate_runs_stay_separate_history_authors() {
         let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
         let source = Ydoc::wire();
-        for (cursor, run, journal) in [(1, "run-a", true), (2, "run-b", true), (3, "run-c", false)] {
+        for (cursor, run, journal) in [(1, "run-a", true), (2, "run-b", true), (3, "run-c", false)]
+        {
             let bytes = source.frontmatter_set("status", run).unwrap();
             let draft = crate::owner_outbox::append(
                 &mut store,
@@ -5502,17 +5508,20 @@ mod tests {
                     run.to_owned(),
                 )
             };
-            store.write_with(&NoFaults, |tx| {
-                tx.execute(
-                    sql,
-                    params![
-                        recorded,
-                        draft.delivery_id,
-                        serde_json::to_string(&declared("trip-agent").unwrap()).unwrap()
-                    ],
-                ).map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-            }).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        sql,
+                        params![
+                            recorded,
+                            draft.delivery_id,
+                            serde_json::to_string(&declared("trip-agent").unwrap()).unwrap()
+                        ],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
             let mut update = event(&draft.delivery_id, cursor, bytes);
             snapshot(&mut update.metadata, declared("trip-agent"));
             ack(apply(&mut store, &mut cache, &handle, update));
@@ -5534,13 +5543,18 @@ mod tests {
             .collect();
         assert_eq!(
             runs,
-            [&serde_json::json!("run-a"), &serde_json::json!("run-b"), &serde_json::json!("run-c")]
+            [
+                &serde_json::json!("run-a"),
+                &serde_json::json!("run-b"),
+                &serde_json::json!("run-c")
+            ]
         );
         // The canonical snapshot each delivery was accepted with names no run.
         let stored: Vec<String> = store
             .read_with(|conn| {
-                let mut statement =
-                    conn.prepare("SELECT admitted_metadata_json FROM live_device_update_applications")?;
+                let mut statement = conn.prepare(
+                    "SELECT admitted_metadata_json FROM live_device_update_applications",
+                )?;
                 let rows = statement
                     .query_map([], |row| row.get(0))?
                     .collect::<Result<Vec<_>, _>>()?;

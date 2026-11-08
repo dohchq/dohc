@@ -1837,13 +1837,19 @@ mod tests {
         owner.apply(&checkpoint).unwrap();
         let edit = owner.richdoc_append_paragraph("agent edit in a run");
         // A run names only a declared agent's edit, and is a bounded identifier.
-        for (declaration, run) in [(None, "run-1"), (declared.clone(), ""), (declared.clone(), "run\u{1}")] {
+        for (declaration, run) in [
+            (None, "run-1"),
+            (declared.clone(), ""),
+            (declared.clone(), "run\u{1}"),
+        ] {
             assert!(matches!(
                 drafts.append_in_run("refused", &edit, declaration, Some(run)),
                 Err(OwnerOutboxError::InvalidInput(_))
             ));
         }
-        let first = drafts.append_in_run("agent", &edit, declared.clone(), Some("run-1")).unwrap();
+        let first = drafts
+            .append_in_run("agent", &edit, declared.clone(), Some("run-1"))
+            .unwrap();
         let refuses = |drafts: &mut Drafts| {
             for run in [None, Some("run-2")] {
                 assert!(matches!(
@@ -1852,7 +1858,9 @@ mod tests {
                 ));
             }
             assert_eq!(
-                drafts.append_in_run("agent", &edit, declared.clone(), Some("run-1")).unwrap(),
+                drafts
+                    .append_in_run("agent", &edit, declared.clone(), Some("run-1"))
+                    .unwrap(),
                 first
             );
         };
@@ -1865,7 +1873,10 @@ mod tests {
                 .map(|entry| (entry.agent_declaration, entry.agent_run_id))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(pending(&drafts.store), vec![(declared.clone(), Some("run-1".into()))]);
+        assert_eq!(
+            pending(&drafts.store),
+            vec![(declared.clone(), Some("run-1".into()))]
+        );
         // The header names the run beside the declaration, never inside it.
         let header = entry_header(&drafts.store, &first.outbox_id, first.sequence);
         assert_eq!(header["agentRunId"], "run-1");
@@ -1877,7 +1888,10 @@ mod tests {
             cache: crate::WriterDocCache::with_limits_for_test(16, 0),
             binding: observed.binding.clone(),
         };
-        assert_eq!(pending(&drafts.store), vec![(declared.clone(), Some("run-1".into()))]);
+        assert_eq!(
+            pending(&drafts.store),
+            vec![(declared.clone(), Some("run-1".into()))]
+        );
         refuses(&mut drafts);
     }
 

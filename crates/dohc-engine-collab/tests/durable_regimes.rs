@@ -4307,7 +4307,10 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         history_attribution(&a.store, &key),
         vec![expected_row.clone()]
     );
-    type UpdateRow = ((Option<String>, Option<String>, Option<i64>), Option<String>);
+    type UpdateRow = (
+        (Option<String>, Option<String>, Option<i64>),
+        Option<String>,
+    );
     let update_row = |store: &dohc_engine_storage::EngineStore| -> UpdateRow {
         store
             .read_with(|conn| -> Result<_, CollabError> {
