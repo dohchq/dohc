@@ -326,8 +326,8 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
   }
 });
 
-test("@app-view an app keeps its page when its tab moves to another editor group", async () => {
-  test.setTimeout(120_000);
+test("@app-view an app keeps its page when its tab moves to another editor group, and takes focus from its tab", async () => {
+  test.setTimeout(180_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -398,6 +398,49 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await page.keyboard.press("Tab");
     await expect(divider).toBeFocused();
 
+    // With the note's group active, Tab from the sidebar reaches each control of the app's group in order. Focus on
+    // one makes that group active, and the app leaves focus there.
+    const webview = page.getByTestId("app-view-webview");
+    const noteGroupActive = async () => {
+      await rightGroup.getByTestId(editorTabTestId("notes.md")).click({ position: { x: 16, y: 16 } });
+      await expect(rightGroup).toHaveAttribute("data-active");
+    };
+    const sidebarEnd = page.getByTestId("sidebar-resize");
+    const allTabs = leftGroup.getByRole("button", { name: "All tabs in editor group 1", exact: true });
+    await noteGroupActive();
+    await sidebarEnd.focus();
+    for (const control of [
+      leftGroup.getByTestId(appTab),
+      allTabs,
+      page.getByTestId("app-view-reload"),
+      page.getByTestId("site-preview-show-source"),
+      page.getByTestId("site-preview-share"),
+      page.getByTestId("app-view-review"),
+      page.getByTestId("app-view-open-browser"),
+    ]) {
+      await page.keyboard.press("Tab");
+      await expect(control).toBeFocused();
+    }
+    await expect(leftGroup).toHaveAttribute("data-active");
+    // Enter on the app's tab puts focus in the app, and so does a click on it.
+    await noteGroupActive();
+    await sidebarEnd.focus();
+    await page.keyboard.press("Tab");
+    await expect(leftGroup.getByTestId(appTab)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(webview).toBeFocused();
+    await noteGroupActive();
+    await leftGroup.getByTestId(appTab).click({ position: { x: 16, y: 16 } });
+    await expect(webview).toBeFocused();
+    // A click on All tabs in the app's group opens its menu, and the menu keeps focus.
+    await noteGroupActive();
+    await allTabs.click();
+    const allTabsMenu = page.getByTestId("tabs-overflow-menu");
+    await expect(allTabsMenu).toBeVisible();
+    await expect.poll(() => allTabsMenu.evaluate(menu => menu.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(allTabsMenu).toBeHidden();
+
     await dragTabTo(page, leftGroup.getByTestId(appTab), rightGroup);
 
     await expect(rightGroup.getByTestId(appTab)).toBeVisible();
@@ -408,10 +451,20 @@ test("@app-view an app keeps its page when its tab moves to another editor group
       const [view, group] = [await page.getByTestId("app-view-webview").boundingBox(), await rightGroup.boundingBox()];
       return !!view && !!group && view.x >= group.x - 1 && view.x + view.width <= group.x + group.width + 1;
     }).toBe(true);
+    // The drop releases a press on the app's tab, so focus is in the app.
+    await expect(webview).toBeFocused();
     expect(await guestIds(electronApp)).toEqual([guestId]);
     expect(await inFrame(electronApp, guestId, "window.pageLoad")).toBe(load);
     expect(await inFrame(electronApp, guestId, "document.getElementById('focus').value")).toBe(typed);
     expect(await inFrame(electronApp, guestId, "document.getElementById('count').textContent")).toBe("2");
+
+    // Closing the note's group, which held focus, puts focus in the app.
+    await leftGroup.getByTestId(editorTabTestId("notes.md")).click({ position: { x: 16, y: 16 } });
+    await expect(leftGroup).toHaveAttribute("data-active");
+    await allTabs.click();
+    await allTabsMenu.getByRole("menuitem", { name: "Close group", exact: true }).click();
+    await expect(page.getByRole("region", { name: /^Editor group \d+$/ })).toHaveCount(1);
+    await expect(webview).toBeFocused();
   } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
   }

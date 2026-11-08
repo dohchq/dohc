@@ -46,6 +46,12 @@ function subscribeTheme(onChange: () => void): () => void {
   return () => observer.disconnect();
 }
 
+// Focus is on the page, or on the focused editor group's own area.
+function focusWentNowhere(): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || active.matches('[data-focus-surface="editor"][data-active]');
+}
+
 type ViewState =
   | { status: "checking" }
   // `ended`: this view had opened the app, so its approval ended since.
@@ -67,6 +73,8 @@ export function useAppView(options: {
   enabled: boolean;
   visible: boolean;
   focused: boolean;
+  // Changes each time the person presses the app's tab. 0 until then.
+  focusRequest: number;
   approvals: number;
   holdFocus: boolean;
   notices?: AppViewNotices | undefined;
@@ -257,17 +265,38 @@ export function useAppView(options: {
     void bridge().appView({ action: "colorScheme", workspaceId, colorScheme: theme }).catch(() => undefined);
   }, [enabled, theme, workspaceId]);
 
-  // Switching to the tab, or clicking it, puts focus in the app.
-  const wasFocused = useRef(options.focused);
+  // Switching to the tab puts focus in the app. Focus that only makes the app's group the focused one, such as Tab
+  // onto the group's tabs or a click on its toolbar, stays where it went. Focus that went nowhere when the other group
+  // closed, to the page or to this group's own area, goes to the app.
+  const wasVisible = useRef(options.visible);
   useEffect(() => {
-    const before = wasFocused.current;
-    wasFocused.current = options.focused;
+    const switched = !wasVisible.current;
+    wasVisible.current = options.visible;
     // Focus that moved elsewhere before the app finished opening stays there.
     if (!options.focused) { wantsFocus.current = false; return; }
-    if (before) return;
+    if (!switched && !focusWentNowhere()) return;
+    wantsFocus.current = true;
+    if (switched) { tryFocus(); return; }
+    // A press on the group's blank area makes it the focused one before the browser focuses that area, and focus
+    // stays where the person pressed. Focus that something put back, such as a closing palette, stays there too.
+    const press = () => { wantsFocus.current = false; };
+    document.addEventListener("mousedown", press, { capture: true, once: true });
+    const later = setTimeout(() => {
+      document.removeEventListener("mousedown", press, true);
+      if (focusWentNowhere()) tryFocus();
+      else wantsFocus.current = false;
+    });
+    return () => { clearTimeout(later); document.removeEventListener("mousedown", press, true); };
+  }, [options.visible, options.focused, tryFocus]);
+  // A click on the app's tab, or Enter or Space on it, puts focus in the app, also when the tab was already shown.
+  const pressSeen = useRef(options.focusRequest);
+  useEffect(() => {
+    if (pressSeen.current === options.focusRequest) return;
+    pressSeen.current = options.focusRequest;
+    if (!options.focusRequest) return;
     wantsFocus.current = true;
     tryFocus();
-  }, [options.focused, tryFocus]);
+  }, [options.focusRequest, tryFocus]);
   useEffect(() => {
     if (!options.holdFocus) tryFocus();
   }, [options.holdFocus, tryFocus]);

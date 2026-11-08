@@ -178,6 +178,7 @@ const Tab = memo(function Tab(props: {
   active: boolean;
   dirty: boolean;
   onActivate: (groupId: string, path: string) => void;
+  onPress: ((groupId: string, path: string) => void) | undefined;
   onClose: (groupId: string, path: string) => void;
   onContextMenu: (groupId: string, path: string) => void;
   onDragStart: (event: ReactPointerEvent<HTMLDivElement>, path: string) => void;
@@ -195,6 +196,7 @@ const Tab = memo(function Tab(props: {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           props.onActivate(props.groupId, props.path);
+          props.onPress?.(props.groupId, props.path);
         }
       }}
       // Middle-click closes (VS Code convention); auxclick is the only
@@ -401,6 +403,8 @@ interface TabDragHost {
   // new slot once that render has landed.
   settle: (tab: HTMLElement, visualLeft: number) => void;
   sync: () => void;
+  // The press on this tab ended in a release, after a drag or without one.
+  press: (groupId: string, path: string) => void;
 }
 
 // Pointer-drag reorder (no dnd dep). A press only becomes a drag after 4px
@@ -559,6 +563,8 @@ function createTabDrag(host: TabDragHost) {
       s.frame = 0;
     }
     if (!s.active) {
+      // After the browser has moved focus for the press.
+      if (release) host.press(host.groupId(), s.path);
       // A press that never became a drag may still hold a frozen settle.
       s.tab.style.transform = "";
       return;
@@ -587,9 +593,12 @@ function createTabDrag(host: TabDragHost) {
       for (const other of s.slots) other.el.style.transition = "";
     });
     const target = release && editorGroupAtPoint(release.clientX, release.clientY);
-    if (commit && target && target.groupId !== host.groupId()) {
+    const into = commit && target && target.groupId !== host.groupId() ? target : null;
+    // A drag ends with no click. The press belongs to the group that holds the tab after the drop.
+    if (release) host.press(into?.groupId ?? host.groupId(), s.path);
+    if (into) {
       s.tab.style.transform = "";
-      host.moveToGroup(target.groupId, s.path, target.toIndex);
+      host.moveToGroup(into.groupId, s.path, into.toIndex);
       return;
     }
     const visualLeft = slot ? slot.left + s.dx : 0;
@@ -743,6 +752,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // inactive tab keeps its marker.
   recoveryPaths: ReadonlySet<string>;
   onActivate: (groupId: string, path: string) => void;
+  // A press on a tab that ends in a release, Enter or Space on it, or a pick of it in All tabs, after any activation.
+  onPress?: (groupId: string, path: string) => void;
   onClose: (groupId: string, path: string) => void;
   onContextMenu: (groupId: string, path: string) => void;
   onMove: (groupId: string, path: string, toIndex: number) => void;
@@ -833,6 +844,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         });
       },
       sync: () => syncCorners.current(),
+      press: (groupId, path) => latest.current.onPress?.(groupId, path),
     });
   }
   const drag = tabDrag.current;
@@ -1016,6 +1028,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
               props.recoveryPaths.has(tab.path)
             }
             onActivate={props.onActivate}
+            onPress={props.onPress}
             onClose={props.onClose}
             onContextMenu={props.onContextMenu}
             onDragStart={drag.begin}
@@ -1190,7 +1203,10 @@ export const EditorTabs = memo(function EditorTabs(props: {
                 />
               ),
               current: tab.path === props.activeTab,
-              onSelect: () => props.onActivate(props.groupId, tab.path),
+              onSelect: () => {
+                props.onActivate(props.groupId, tab.path);
+                props.onPress?.(props.groupId, tab.path);
+              },
             })),
             ...groupActions,
           ]}
