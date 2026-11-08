@@ -691,7 +691,7 @@ function syncBlockedNotice(input: {
     body: input.body,
     ...(actions.length > 0 ? { actions } : {}),
     target: input.target,
-    ...(input.tone === "danger" ? { copyText: `${input.title}\n${input.body}` } : {}),
+    ...(input.tone === "danger" ? { copy: { report: `${input.title}\n${input.body}` } } : {}),
     Icon: input.Icon,
   };
 }
