@@ -4757,11 +4757,12 @@ describe("a folder refused in a delete of several rows", () => {
     await user.click(await row("box"));
     await user.keyboard("{/Shift}{Delete}");
     await user.click(await screen.findByTestId("confirm-delete"));
-    await screen.findAllByText(TITLE);
+    // Only the newest failure is a toast, so the folder's notice waits in Notices.
+    await screen.findByTestId("workspace-shell-error");
     expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["archive", "box"]);
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
-    const notice = within(notices).getByText(TITLE).closest("li")!;
+    const notice = (await within(notices).findByText(TITLE)).closest("li")!;
     expect(notice.textContent).toContain(BODY);
     expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
