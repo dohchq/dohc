@@ -328,7 +328,9 @@ function parse(error: unknown) {
 
 export interface ReadError {
   canRetry?: false;
-  refusal?: "synced-deletion";
+  // "not-a-workspace": the folder can never be a workspace, so the way out is
+  // another folder, or removing this one from the list.
+  refusal?: "synced-deletion" | "not-a-workspace";
   details?: string;
   title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
@@ -341,6 +343,8 @@ export interface ReadError {
   /** The error as it arrived, for Copy details; null when `words` says it all. */
   cause: string | null;
 }
+
+const NOT_A_WORKSPACE = { canRetry: false, refusal: "not-a-workspace" } as const;
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
@@ -363,8 +367,9 @@ export function readError(error: unknown): ReadError {
     return { title, words: body.join("\n"), mapped: false, cause: null };
   }
   if (name === "ReservedWorkspaceIdError") {
-    return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
+    return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
   }
+  if (name === "WorkspaceFolderRefusalError") return { words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };

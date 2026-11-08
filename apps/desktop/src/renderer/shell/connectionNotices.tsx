@@ -48,8 +48,10 @@ export function useConnectionNotices() {
     shellErrors,
     reportShellFailure,
     reportShellError,
+    reportOpenFolderFailure,
     showSuccessNotice,
     retryShellError,
+    runShellErrorAction,
     hideShellError,
     dismissShellError,
     clearKind,
@@ -90,6 +92,8 @@ export function useConnectionNotices() {
         ]) },
         atMs: error.atMs,
         canRetry: error.retry !== null,
+        ...(error.action ? { actionLabel: error.action.label } : {}),
+        ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map((action) => action.label) } : {}),
         seen: error.seen,
       })),
     [shellErrors],
@@ -99,9 +103,11 @@ export function useConnectionNotices() {
     reporter,
     reportError: reportShellError,
     reportFailure: reportShellFailure,
+    reportOpenFolderFailure,
     showSuccess: showSuccessNotice,
     notices,
     retryNotice: retryShellError,
+    runNoticeAction: runShellErrorAction,
     hideNotice: hideShellError,
     dismissNotice: dismissShellError,
     clearKind,
@@ -125,6 +131,7 @@ export function StandaloneNotices(props: { children: ReactNode }) {
         notices={own.notices}
         reportFailure={own.reportFailure}
         onRetry={own.retryNotice}
+        onAction={own.runNoticeAction}
         onHide={own.hideNotice}
         onDismiss={own.dismissNotice}
       />
@@ -142,6 +149,8 @@ export function ConnectionNotices(props: {
   // Where a copy from one of these notices reports its own failure.
   reportFailure: ReportShellFailure;
   onRetry: (id: string) => void;
+  // Runs a notice's own step, such as Choose another folder.
+  onAction?: (id: string, index?: number) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
   crashReport?: CrashReportNotice | null;
@@ -168,6 +177,7 @@ export function ConnectionNotices(props: {
         onRebuildEngineStore={NOOP}
         workspaceErrors={props.notices}
         onRetryWorkspaceError={props.onRetry}
+        {...(props.onAction ? { onWorkspaceErrorAction: props.onAction } : {})}
         onHideWorkspaceError={props.onHide}
         onDismissWorkspaceError={props.onDismiss}
         crashReport={props.crashReport ?? null}

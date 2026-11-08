@@ -1,6 +1,6 @@
 import { DohcMark } from "@dohc/brand";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FolderOpen, Laptop, Link, ListMinus, MoreHorizontal, type LucideIcon } from "lucide-react";
+import { FolderOpen, Laptop, Link, MoreHorizontal, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -16,7 +16,7 @@ import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { ipcErrorMessage } from "./ipcError";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
 import { GhostButton, IconButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
 import { removalFacts } from "./workspaceRemoval";
@@ -101,7 +101,6 @@ function writeListWidth(width: number): void {
 }
 
 const ROW_MENU_WIDTH = 176;
-const REMOVE_FAILED = "dohc could not remove this workspace from the list.";
 const LIST_REFRESH = "workspace-list:refresh";
 type RemovalDialog = { workspace: Workspace; busy: boolean; error: string | null };
 const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
@@ -261,12 +260,9 @@ export function WorkspaceManager(props: {
   }
 
   async function openExisting() {
-    try {
-      const workspace = await openExistingFolder();
-      if (workspace) await open(workspace);
-    } catch (cause) {
-      connectionNotices.reportError("Could not open that workspace folder.", cause, () => void openExisting());
-    }
+    const workspace = await openExistingFolder((cause, folder) =>
+      connectionNotices.reportOpenFolderFailure(cause, folder, () => void openExisting()));
+    if (workspace) await open(workspace);
   }
 
   async function reveal(workspace: Workspace) {
@@ -488,33 +484,19 @@ export function WorkspaceManager(props: {
         </div>
       </div>
       {removing ? (
-        <ConfirmDialog
-          icon={ListMinus}
-          title={`Remove ${workspaceName(removing.workspace)} from this list?`}
-          confirmLabel={removing.busy ? "Removing…" : "Remove from list"}
-          confirmDisabled={removing.busy}
-          testId="workspace-remove-confirm"
-          cancelTestId="workspace-remove-cancel"
-          confirmTestId="workspace-remove-confirm-button"
-          onCancel={() => {
-            if (!removing.busy) setRemoving(null);
-          }}
+        <RemoveFromListDialog
+          workspace={removing.workspace}
+          busy={removing.busy}
+          error={removing.error}
+          onCancel={() => setRemoving(null)}
           onConfirm={() => void confirmRemoval(removing.workspace)}
-        >
-          {removalFacts(removing.workspace).map((fact) => (
-            <p key={fact} className="m-0">{fact}</p>
-          ))}
-          {removing.error ? (
-            <p data-testid="workspace-remove-error" role="alert" className="m-0 text-danger">
-              {removing.error}
-            </p>
-          ) : null}
-        </ConfirmDialog>
+        />
       ) : null}
       <ConnectionNotices
         notices={connectionNotices.notices}
         reportFailure={connectionNotices.reportFailure}
         onRetry={connectionNotices.retryNotice}
+        onAction={connectionNotices.runNoticeAction}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}
         {...crashReportNotice}

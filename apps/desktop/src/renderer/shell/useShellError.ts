@@ -456,6 +456,28 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     },
     [push, privacySettingsAction, reportSharedViewRefusal],
   );
+  // A folder Open folder could not open. The reason leads, with no title
+  // before it, and the folder goes in the report. Choose another folder
+  // opens the picker again for every reason, so there is no Try again. A
+  // macOS privacy refusal leads with its settings.
+  const reportOpenFolderFailure = useCallback(
+    (error: unknown, folder: string | null, chooseAgain: () => void) => {
+      const { words, cause } = readError(error);
+      const choose = { label: "Choose another folder", run: chooseAgain, ends: true };
+      const details: ErrorDetailField[] = [
+        ...(folder ? [["Chosen folder", folder, folder.length] as const] : []),
+        ...(cause ? [["Cause", cause] as const] : []),
+      ];
+      push({
+        message: words ?? "dohc could not open that folder.",
+        ...(details.length ? { details } : {}),
+        retry: null,
+        action: isPrivacyDenied(error) ? { ...privacySettingsAction, additional: [choose] } : choose,
+        identity: "open-folder",
+      });
+    },
+    [push, privacySettingsAction],
+  );
   // Content search lives in the shell so its results survive panel switches.
   // Invocation failures use the shell's persistent error and retry contract;
   // they must not look like a successful search with no matches.
@@ -1032,6 +1054,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     reportShellError,
     reportButtonError,
     reportShellFailure,
+    reportOpenFolderFailure,
     reportShareCapture,
     reportLaneFailure,
     reportSearchError,

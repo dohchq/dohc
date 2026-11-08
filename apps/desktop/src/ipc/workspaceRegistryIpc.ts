@@ -2,6 +2,7 @@ import {
   defaultWorkspaceRoot,
   normalizeRootPath,
   validateWorkspaceRootChoice,
+  WorkspaceFolderRefusalError,
 } from "@dohc/workspace-core";
 import type {
   CreatedWorkspace,
@@ -58,7 +59,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
     const check = validateWorkspaceRootChoice(rootPath, effectiveHome(), process.platform);
-    if (!check.ok) throw new Error(check.reason);
+    if (!check.ok) throw new WorkspaceFolderRefusalError(check.reason);
     if (!isApprovedRoot(check.normalized)) {
       throw new Error(
         "Workspace root must be chosen through dohc (the default location or the folder picker).",

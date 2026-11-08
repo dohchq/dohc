@@ -7,7 +7,7 @@ import { createTestScratch } from "../workspaces/testTemp";
 import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
-import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
+import { ReservedWorkspaceIdError, stateFolderRefusal, WorkspaceFolderRefusalError } from "@dohc/workspace-core";
 import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
@@ -254,12 +254,29 @@ describe("error words", () => {
     const error = new ReservedWorkspaceIdError(workspaceId);
     const expected = {
       title: "dohc can't open this folder",
-      words: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      words: `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
       mapped: false,
       cause: error.toString(),
+      canRetry: false,
+      refusal: "not-a-workspace",
     };
     expect(readError(error)).toEqual(expected);
     expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
+  });
+
+  // The screen for a listed workspace offers Remove from list for this, and
+  // Open folder offers another folder. Neither offers Try again.
+  it("marks a folder that can never be a workspace across IPC", () => {
+    const error = new WorkspaceFolderRefusalError(stateFolderRefusal("inside"));
+    const expected = {
+      words: "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace.",
+      mapped: false,
+      cause: error.toString(),
+      canRetry: false,
+      refusal: "not-a-workspace",
+    };
+    expect(readError(error)).toEqual(expected);
+    expect(readError(acrossIpc(error, "desktop:open-workspace"))).toEqual(expected);
   });
 
   it("says why a folder's manifest stops it opening, and keeps the parser's reason for Copy", () => {
