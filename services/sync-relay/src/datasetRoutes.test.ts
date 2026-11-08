@@ -473,6 +473,23 @@ it("refuses a missing Collection's app calls with the same words for people and 
   expect(await refused.json()).toEqual({ok: false, error: "This app can't find its data. Ask the person who shared it with you.", code: "app_collection_missing"});
 });
 
+it("refuses a missing Collection's app to a link visitor before it loads, as it does a signed-in person", async () => {
+  const f = await attachmentsFixture();
+  const descriptor = () => f.http(`link/app-publications/${f.publicationId}`, undefined, f.publicHeaders);
+  const loaded = await descriptor(); expect(loaded.status).toBe(200);
+  const {authorityRevision, files} = await loaded.json() as {authorityRevision: number; files: {sha256: string}[]};
+  const bundle = () => f.http(`link/app-publications/${f.publicationId}/blobs/${files[0]!.sha256}?authorityRevision=${authorityRevision}`, undefined, f.publicHeaders);
+  expect((await bundle()).status).toBe(200);
+  pushFile(f.storage, "dataset-file", {path: "data/dataset.json", text: JSON.stringify({datasetId: id(1)})}, null);
+  // The first request after the file goes starts the grace period, as an app call does.
+  expect((await descriptor()).status).toBe(200);
+  f.advance(120_000);
+  for (const refused of [await descriptor(), await bundle(), await f.named("descriptor", undefined)]) {
+    expect(refused.status).toBe(410);
+    expect(await refused.json()).toEqual({ok: false, error: "This app can't find its data. Ask the person who shared it with you.", code: "app_collection_missing"});
+  }
+});
+
 it("uploads and atomically attaches a receipt, then discloses bytes only through the approved read operation", async () => {
   const f = await attachmentsFixture();
   expect((await f.app("upload", upload)).status).toBe(404);

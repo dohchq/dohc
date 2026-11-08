@@ -16,6 +16,8 @@ export function createLinkAppPublicationRoutes(options: {
   linkKey: string | Uint8Array;
   publicEditRelease?: PublicEditRelease;
   nowMs(): number;
+  /** The dataset host's check, which refuses a deleted Collection's app once its grace period ends. */
+  requireCollectionFile?(workspaceId: string, datasetId: string): void;
   requireLinkRead(request: Request, capabilityLimiter: TokenBucketLimiter, grantLimiter: TokenBucketLimiter): {
     capabilityToken: string; capability: ValidatedLinkCapability;
   };
@@ -64,6 +66,8 @@ export function createLinkAppPublicationRoutes(options: {
     const signal = AbortSignal.any([request.signal, options.storage.unavailable]);
     signal.throwIfAborted();
     const admitted = options.storage.authorizeLinkAppPublication({...input, nowMs: options.nowMs()});
+    // A link visitor's app stops before it loads, as a signed-in person's does.
+    if (admitted.datasetId !== null) options.requireCollectionFile?.(admitted.workspaceId, admitted.datasetId);
     const pinned = {...input, expectedAuthorityRevision: admitted.descriptor.authorityRevision};
     const file = route.sha256 ? admitted.descriptor.files.find(file => file.sha256 === route.sha256) : undefined;
     if (route.sha256 && (!file || file.byteLength > MAX_BLOB_BYTES)) throw notFound();
