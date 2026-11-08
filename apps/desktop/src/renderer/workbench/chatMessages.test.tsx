@@ -568,6 +568,24 @@ describe("chat authorship display", () => {
   });
 });
 
+describe("an empty chat", () => {
+  it("shows the picture its caller gives over the label, centered in the list", () => {
+    render(<ChatMessageList testIdPrefix="lane" messages={[]} loading={false} emptyLabel="No messages yet."
+      emptyPicture={<svg data-testid="empty-picture" />} />);
+    const label = screen.getByText("No messages yet.");
+    expect(screen.getByTestId("empty-picture")).toBeTruthy();
+    expect(label.tagName).toBe("SPAN");
+  });
+
+  it("says it in one muted line, with no picture or glyph, when the caller gives none", () => {
+    const { container } = render(<ChatMessageList testIdPrefix="linked-chat" messages={[]} loading={false} emptyLabel="No messages yet about notes.md." />);
+    const label = screen.getByText("No messages yet about notes.md.");
+    expect(label.tagName).toBe("P");
+    expect(label.className).toContain("text-muted");
+    expect(container.querySelector("svg")).toBeNull();
+  });
+});
+
 describe("formatChatTime", () => {
   it("includes the year only for day labels outside the current year", () => {
     const now = new Date(2026, 8, 17).getTime();

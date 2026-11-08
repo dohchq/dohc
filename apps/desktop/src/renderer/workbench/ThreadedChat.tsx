@@ -5,6 +5,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu } from "../ui/Menu";
 import { ChatMessageList, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import { EMPTY_ART } from "./EmptyArt";
 import { ChatThreadPanel, splitThreads, ThreadSummary, WorkingLine, WorkingRow, type ChatWorking } from "./ChatThreadPanel";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { RunDetails } from "./ChatPosts";
@@ -289,6 +290,7 @@ export function ThreadedChat(props: {
             messages={stream}
             loading={props.loading}
             emptyLabel={props.emptyLabel}
+            emptyPicture={EMPTY_ART.posts}
             listRef={streamListRef}
             mentionCandidates={mentionCandidates}
             onOpenPath={props.onOpenPath}
