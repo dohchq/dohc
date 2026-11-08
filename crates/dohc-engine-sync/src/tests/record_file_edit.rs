@@ -253,6 +253,7 @@ fn b_types(b: &mut EngineStore, cache: &mut WriterDocCache, doc: &Ydoc, typing: 
         on_behalf_of: None,
         depth: 0,
         run: None,
+        agent_run_id: None,
     };
     for (index, paragraph) in typing.iter().enumerate() {
         dohc_engine_collab::record_local_update(

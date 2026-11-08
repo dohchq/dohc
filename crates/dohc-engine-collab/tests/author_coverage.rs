@@ -15,6 +15,7 @@ fn author(scope: &str) -> ChangeAttribution {
         on_behalf_of: Some(scope.into()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     }
 }
 
@@ -474,6 +475,63 @@ fn record(
     )
 }
 
+fn record_in_run(
+    ts: &mut TempStore,
+    key: &dohc_engine_collab::DocKey,
+    update: &[u8],
+    agent_run_id: Option<&str>,
+) {
+    let attribution = ChangeAttribution {
+        agent_run_id: agent_run_id.map(str::to_owned),
+        ..author("person")
+    };
+    record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        key,
+        update,
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some("authors.txt"),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            actor_origin_id: Some("codex"),
+            attribution: Some(&attribution),
+            ..LocalAppend::default()
+        },
+        &NoFaults,
+        1,
+        |_, _, _| Ok(()),
+    )
+    .expect("agent edit");
+}
+
+/// Two runs by one agent, neither settled, are two authors. A row written
+/// before agent runs were recorded stays an author with no run.
+#[test]
+fn two_unsettled_runs_by_one_agent_stay_two_authors_through_compaction() {
+    let mut ts = fresh_store("two-agent-runs");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    let doc = Ydoc::wire();
+    record_in_run(&mut ts, &key, &doc.plaintext_insert(0, "a"), Some("run-a"));
+    record_in_run(&mut ts, &key, &doc.plaintext_insert(1, "b"), Some("run-b"));
+    record_in_run(&mut ts, &key, &doc.plaintext_insert(2, "c"), Some("run-a"));
+    record_in_run(&mut ts, &key, &doc.plaintext_insert(3, "d"), None);
+    // Coverage lists authors in identity order: a run sorts before none.
+    let expected = serde_json::json!([
+        {"kind":"agent", "agentId":"codex", "onBehalfOf":"person", "agentRunId":"run-a"},
+        {"kind":"agent", "agentId":"codex", "onBehalfOf":"person", "agentRunId":"run-b"},
+        {"kind":"agent", "agentId":"codex", "onBehalfOf":"person"},
+    ]);
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
+    assert_eq!(covered_count(&ts.store, &key), 3);
+    maybe_compact(&mut ts.store, &key, 0, &NoFaults, 2).expect("fold coverage");
+    assert_eq!(interval_authors(&ts, &key, i64::MAX), expected);
+    assert_eq!(covered_count(&ts.store, &key), 3);
+}
+
 #[test]
 fn identities_are_scoped_bounded_and_known_authors_still_enter_at_capacity() {
     let mut ts = fresh_store("author-capacity");
@@ -759,6 +817,7 @@ fn record_human(
         on_behalf_of: Some(person.into()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     };
     record_local_update(
         store,
@@ -1093,6 +1152,7 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
                 dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH
             },
             run: None,
+            agent_run_id: (actor_kind == ChangeActorKind::Agent).then(|| longest.clone()),
         };
         dohc_engine_collab::apply_remote_update(
             &mut ts.store,
@@ -1128,8 +1188,8 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
         serde_json::from_str(&authors.json()).expect("author list");
     assert_eq!(
         entries.iter().map(|entry| entry.to_string().len()).max(),
-        Some(2_114),
-        "the automation entry is the largest local one: a 66-byte skeleton and two escaped fields"
+        Some(author_coverage::MAX_AUTHOR_ENTRY_BYTES),
+        "the agent in a run is the largest local entry: a 72-byte skeleton and three escaped fields"
     );
 }
 
@@ -1165,7 +1225,8 @@ fn the_largest_declared_agent_fits_one_entry_and_a_larger_one_does_not() {
         .expect("the host admits the largest declared agent");
     let json = serde_json::to_string(&[&largest]).expect("entry");
     assert_eq!(json.len() - "[]".len(), 3_143);
-    assert_eq!(author_coverage::MAX_AUTHOR_ENTRY_BYTES, 3_143);
+    // An agent in a run on the owner's devices sets the bound, one byte over.
+    assert_eq!(author_coverage::MAX_AUTHOR_ENTRY_BYTES, 3_144);
     ts.store
         .write_with(&NoFaults, |tx| {
             author_coverage::admit_accepted_in(tx, &key, &[json])

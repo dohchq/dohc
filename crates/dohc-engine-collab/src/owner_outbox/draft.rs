@@ -1602,6 +1602,7 @@ mod tests {
                     claim_id: "claim".into(),
                     automation_name: "Mark done".into(),
                 }),
+                agent_run_id: None,
             },
         };
         let input = OwnerDraftAppendInput {

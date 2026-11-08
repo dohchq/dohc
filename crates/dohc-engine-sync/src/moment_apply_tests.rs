@@ -206,6 +206,7 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
                 on_behalf_of: Some("\"".repeat(field)),
                 depth: dohc_engine_domain::MAX_CHANGE_ATTRIBUTION_DEPTH,
                 run: None,
+                agent_run_id: None,
             }),
         )
         .expect("entry");
@@ -292,6 +293,8 @@ fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automation
                         0
                     },
                     run: None,
+                    // The owner's other device keeps the run a live edit named.
+                    agent_run_id: (kind == ChangeActorKind::Agent).then(|| "run-live".to_owned()),
                 }),
             )
             .expect("declared creator");

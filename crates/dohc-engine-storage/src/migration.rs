@@ -3632,6 +3632,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_agent_connection_author.sql"),
         sets_user_version: None,
     },
+    // A live edit an agent made in a run names that run.
+    Migration {
+        ordinal: 88,
+        id: "v2-ydoc-update-agent-run",
+        sql: include_str!("ydoc_update_agent_run.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5635,6 +5642,10 @@ mod tests {
             (
                 "v2-chat-agent-connection-author",
                 "1566c6535a6a8ce8ef35f5c690e6ce2441c4cf95a6ae2dcf9e2642844b40b28d",
+            ),
+            (
+                "v2-ydoc-update-agent-run",
+                "72189aa7652bc1bc1f37b0da476e3ceb6f778623d57b9e7c69ba95c1f0b71ec9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

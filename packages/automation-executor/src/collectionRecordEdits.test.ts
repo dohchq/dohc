@@ -852,6 +852,12 @@ describe("setCollectionRecordFields", () => {
       onBehalfOf: "local",
       depth: 0,
     });
+    expect(attributionFor({ ...AGENT, agentRunId: "run-1" })).toEqual({
+      actorKind: "agent",
+      onBehalfOf: "local",
+      depth: 0,
+      agentRunId: "run-1",
+    });
     expect(attributionFor({ kind: "user", userId: "local" })).toEqual({
       actorKind: "human",
     });

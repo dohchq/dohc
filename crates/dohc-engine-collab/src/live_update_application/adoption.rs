@@ -671,6 +671,7 @@ mod tests {
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             });
             crate::record_local_update(
                 &mut f.store,

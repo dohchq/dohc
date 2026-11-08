@@ -676,6 +676,7 @@ impl AdmittedLiveUpdateMetadata {
                     on_behalf_of: Some(person.clone()),
                     depth: 0,
                     run: None,
+                    agent_run_id: None,
                 },
             ),
         })
@@ -3414,6 +3415,7 @@ mod tests {
                 on_behalf_of: Some("presser".into()),
                 depth: 1,
                 run: None,
+                agent_run_id: None,
             },
         };
         snapshot(&mut metadata, None);
@@ -4781,6 +4783,7 @@ mod tests {
                     on_behalf_of: Some("person-1".into()),
                     chain_depth: Some(2),
                     recorded_at_ms: 1,
+                    agent_run_id: None,
                 },
             };
             store
@@ -5335,6 +5338,7 @@ mod tests {
                 on_behalf_of: Some("person-1".into()),
                 depth: 2,
                 run: None,
+                agent_run_id: None,
             },
         }]);
         ack(apply(&mut store, &mut cache, &handle, update));
@@ -5379,6 +5383,7 @@ mod tests {
                 on_behalf_of: Some("local-person".into()),
                 chain_depth: Some(0),
                 recorded_at_ms: 1,
+                agent_run_id: None,
             },
         };
         store.write_with(&NoFaults, |tx| {

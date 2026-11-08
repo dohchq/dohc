@@ -69,7 +69,12 @@ impl Authors {
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no identity"))?;
         let scope = author.get(scope_field).and_then(Value::as_str);
-        let identity = serde_json::json!([kind, scope, id]).to_string();
+        // Two runs by one agent are two authors.
+        let identity = match author.get("agentRunId").and_then(Value::as_str) {
+            Some(run) if kind == "agent" => serde_json::json!([kind, scope, id, run]),
+            _ => serde_json::json!([kind, scope, id]),
+        }
+        .to_string();
         let previous = self.0.get(&identity);
         if previous.is_some_and(|previous| {
             previous.get("relayConfirmed") != Some(&Value::Bool(true))
@@ -190,11 +195,11 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     // Admission caps the named identities retained above the boundary.
     let mut stmt = conn
         .prepare_cached(
-            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth), agent_run_id FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
          AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
          AND actor_kind IN ('human','agent','automation') AND actor_origin_id IS NOT NULL \
-         GROUP BY actor_kind, on_behalf_of, actor_origin_id",
+         GROUP BY actor_kind, on_behalf_of, actor_origin_id, agent_run_id",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -212,12 +217,13 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<u32>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .map_err(sql)?;
     for row in rows {
-        let (actor, kind, on_behalf_of, depth) = row.map_err(sql)?;
+        let (actor, kind, on_behalf_of, depth, agent_run_id) = row.map_err(sql)?;
         let attribution = kind
             .as_deref()
             .and_then(ChangeActorKind::parse)
@@ -226,6 +232,7 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
                 on_behalf_of,
                 depth: depth.unwrap_or(0),
                 run: None,
+                agent_run_id,
             });
         if let Some(json) =
             dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())

@@ -118,6 +118,7 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
             on_behalf_of: None,
             depth: 0,
             run: None,
+            agent_run_id: None,
         }),
         source: Some(("origin-a".to_owned(), origin_seq)),
         recorded_at_ms: 40,
@@ -160,6 +161,7 @@ fn seed_claims(scratch: &ScratchDir) {
                 on_behalf_of: None,
                 depth: AUTOMATION_CHAIN_DEPTH_CAP,
                 run: None,
+                agent_run_id: None,
             });
             claim_automation_triggers_in_tx(tx, WORKSPACE_ID, &stopped, 40)?;
             Ok::<_, dohc_engine_domain::DomainError>(())

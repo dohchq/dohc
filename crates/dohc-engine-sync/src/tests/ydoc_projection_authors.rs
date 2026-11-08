@@ -145,6 +145,7 @@ fn replay_keeps_authors(converged: bool) {
                             on_behalf_of: None,
                             depth: 0,
                             run: None,
+                            agent_run_id: None,
                         })
                         .as_ref(),
                     ..LocalAppend::default()

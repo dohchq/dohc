@@ -586,11 +586,16 @@ fn author_credit(author: &Value) -> Option<crate::owner_outbox::EntryCredit> {
         None => 0,
         Some(value) => u32::try_from(value.as_u64()?).ok()?,
     };
+    let agent_run_id = match author.get("agentRunId") {
+        None => None,
+        Some(value) => Some(value.as_str()?.to_owned()),
+    };
     let attribution = ChangeAttribution {
         actor_kind,
         on_behalf_of,
         depth,
         run: None,
+        agent_run_id,
     };
     crate::validate_actor_origin_id(&actor).ok()?;
     attribution.validate().ok()?;
@@ -889,6 +894,7 @@ mod tests {
                 on_behalf_of: on_behalf_of.map(str::to_owned),
                 depth,
                 run: None,
+                agent_run_id: None,
             }),
         )
         .unwrap()
@@ -1334,6 +1340,7 @@ mod tests {
                     on_behalf_of: None,
                     depth: 0,
                     run: None,
+                    agent_run_id: None,
                 })
             ),
         );

@@ -50,14 +50,16 @@ export type YdocOpenParams = JsonObject & {
 
 // Declared write provenance beside the actor origin: the kind of actor that
 // wrote (a human, an agent, or an automation), the principal it acted for,
-// its automation-chain depth, and for an automation the run that wrote it.
-// Optional provenance, never a second authority; the engine records it on
-// every history row the apply derives, and replicates it with the update.
+// its automation-chain depth, for an automation the run that wrote it, and
+// for an agent the run it made the change in. Optional provenance, never a
+// second authority; the engine records it on every history row the apply
+// derives, and replicates it to the owner's devices with the update.
 export type ChangeAttributionWire = JsonObject & {
   actorKind: "human" | "agent" | "automation";
   onBehalfOf?: string;
   depth?: number;
   run?: AutomationRunAttribution;
+  agentRunId?: string;
 };
 
 export type YdocRecordUpdateParams = JsonObject & {

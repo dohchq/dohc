@@ -177,6 +177,7 @@ fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix(
                     on_behalf_of: Some("presser".into()),
                     depth: 1,
                     run: None,
+                    agent_run_id: None,
                 },
             }),
         },

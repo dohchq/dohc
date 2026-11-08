@@ -356,6 +356,7 @@ async fn type_human(
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             opened.lineage_claim_id.clone(),
             false,

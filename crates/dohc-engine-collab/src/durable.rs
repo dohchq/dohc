@@ -3298,8 +3298,8 @@ pub(crate) fn append_row(
     conn.execute(
         "INSERT INTO ydoc_updates \
          (workspace_id, version_id, object_id, seq, update_blob_sha256, \
-          actor_origin_id, actor_kind, on_behalf_of, chain_depth, recorded_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+          actor_origin_id, actor_kind, on_behalf_of, chain_depth, recorded_at_ms, agent_run_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             key.workspace_id,
             key.version_id,
@@ -3311,6 +3311,7 @@ pub(crate) fn append_row(
             attribution.and_then(|attribution| attribution.on_behalf_of.as_deref()),
             attribution.map(|attribution| i64::from(attribution.depth)),
             now_ms,
+            attribution.and_then(|attribution| attribution.agent_run_id.as_deref()),
         ],
     )
     .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;

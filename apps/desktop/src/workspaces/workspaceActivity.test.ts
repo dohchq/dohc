@@ -538,6 +538,23 @@ describe("workspaceActivity agent run state", () => {
     await activity.stopAll();
   });
 
+  it("names the run in an agent's writes for a dispatched or Settings run, and not for a self-test", async () => {
+    const { activity } = await opened();
+    expect(activity.agentWriteRunId(id)).toBeNull();
+    // A run started from Settings has no dispatch.
+    await activity.claimAgentRun(id, run("settings-run"));
+    expect(activity.agentWriteRunId(id)).toBe("settings-run");
+    await activity.clearAgentRun(id, "settings-run");
+    await activity.claimAgentRun(id, { ...run("dispatch-1", "codex"), dispatch: "run" });
+    expect(activity.agentWriteRunId(id)).toBe("dispatch-1");
+    await activity.clearAgentRun(id, "dispatch-1");
+    await activity.claimAgentRun(id, { ...run("self-test", "default"), dispatch: "self-test" });
+    expect(activity.agentWriteRunId(id)).toBeNull();
+    await activity.clearAgentRun(id, "self-test");
+    expect(activity.agentWriteRunId(id)).toBeNull();
+    await activity.stopAll();
+  });
+
   it("pushes nothing for a refused claim and returns to idle after a failed one", async () => {
     const { activity, capture, pushed } = await opened();
     expect(await activity.claimAgentRun(id, run("run-1"))).toBe(true);

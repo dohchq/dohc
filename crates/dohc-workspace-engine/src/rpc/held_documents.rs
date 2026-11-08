@@ -928,6 +928,7 @@ mod tests {
             on_behalf_of: Some("owner".into()),
             depth: 1,
             run: None,
+            agent_run_id: None,
         };
         let actor = format!("agent-{index}");
         let authors = if index.is_multiple_of(2) {

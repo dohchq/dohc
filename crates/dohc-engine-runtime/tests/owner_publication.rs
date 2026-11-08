@@ -682,6 +682,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         on_behalf_of: Some("owner".into()),
         depth: 1,
         run: None,
+        agent_run_id: None,
     };
     f.record_by(
         &actor,
@@ -979,6 +980,7 @@ async fn projection_neutral_settlements_keep_the_application_interval_bounded() 
         on_behalf_of: Some("owner".into()),
         depth: 1,
         run: None,
+        agent_run_id: None,
     };
     f.record_by(
         &actor,
@@ -5310,6 +5312,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
                                     on_behalf_of: Some("person-B".into()),
                                     depth: 1,
                                     run: None,
+                                    agent_run_id: None,
                                 },
                             }
                         }),
@@ -5334,6 +5337,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
             origin: dohc_engine_collab::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
                 actor_origin_id: Some("native-agent".into()), actor_kind: Some("agent".into()),
                 on_behalf_of: Some("native-person".into()), chain_depth: Some(3), recorded_at_ms: 9,
+                agent_run_id: None,
             },
         };
         // The entry declares the agent its native row recorded, as an adopted append writes it.

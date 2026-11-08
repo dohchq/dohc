@@ -66,6 +66,7 @@ async fn append(actor: &ActorHandle, key: &DocKey, bytes: Vec<u8>) {
                 on_behalf_of: Some("owner".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,
@@ -394,6 +395,7 @@ async fn seed_and_accepted_prefix_coverage_skip_only_redundant_history() {
                                 on_behalf_of: Some("owner".into()),
                                 depth: 0,
                                 run: None,
+                                agent_run_id: None,
                             }),
                             4,
                         )

@@ -1805,8 +1805,9 @@ export type NonEmptyLocalAuthorLabel = string & {
 export type ChangeAuthor =
   | { kind: "user"; userId: string }
   // depth is the chain depth of the agent's run: 0 unless an automation
-  // started it.
-  | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number }
+  // started it. agentRunId names the run it wrote in, when one held the
+  // workspace's run slot.
+  | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number; agentRunId?: string }
   // An automation's write, derived main-side from the claim the executor is
   // running, never from a request. automationId is the engine subscription
   // id ("collection:<collection id>#<automation id>"), and depth is the

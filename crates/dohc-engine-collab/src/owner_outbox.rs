@@ -2620,6 +2620,7 @@ pub(crate) fn entry_credit(
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
         )
     } else {
@@ -2830,6 +2831,7 @@ mod tests {
                 on_behalf_of: Some("person-1".to_owned()),
                 chain_depth: Some(1),
                 recorded_at_ms: 5,
+                agent_run_id: None,
             },
         };
         let json = serde_json::to_string(&source).expect("source");

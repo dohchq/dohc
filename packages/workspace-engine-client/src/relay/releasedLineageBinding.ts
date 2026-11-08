@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
  */
 type RetainedAuthor =
   | { kind: "unattributed" }
-  | { kind: "agent"; agentId: string; onBehalfOf?: string; depth?: number }
+  | { kind: "agent"; agentId: string; onBehalfOf?: string; depth?: number; agentRunId?: string }
   | { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number }
   | { kind: "human"; humanId: string; onBehalfOf?: string };
 
@@ -123,7 +123,8 @@ function compareContribution(a: RetainedContribution, b: RetainedContribution): 
 
 /**
  * One author exactly as a moment records a write's: an agent names a chain
- * depth only from 1, an automation always names one, a person none.
+ * depth only from 1 and the run it wrote in when it had one, an automation
+ * always names a depth, a person none.
  */
 function author(value: unknown): RetainedAuthor {
   const kind = typeof value === "object" && value !== null ? (value as {kind?: unknown}).kind : undefined;
@@ -138,9 +139,10 @@ function author(value: unknown): RetainedAuthor {
       fields(value, ["kind"], "author");
       return {kind};
     case "agent": {
-      fields(value, ["agentId", "kind", ...optional("depth", "onBehalfOf")], "author");
+      fields(value, ["agentId", "kind", ...optional("agentRunId", "depth", "onBehalfOf")], "author");
       const decoded = behalf({kind, agentId: identifier(row.agentId, "author agentId")}) as RetainedAuthor & {kind: "agent"};
       if (Object.hasOwn(row, "depth")) decoded.depth = integer(row.depth, 1, "author depth", MAX_CHAIN_DEPTH);
+      if (Object.hasOwn(row, "agentRunId")) decoded.agentRunId = identifier(row.agentRunId, "author agentRunId");
       return decoded;
     }
     case "automation":

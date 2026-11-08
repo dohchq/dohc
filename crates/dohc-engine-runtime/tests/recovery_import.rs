@@ -64,6 +64,7 @@ async fn append(actor: &ActorHandle, key: &DocKey, bytes: Vec<u8>) {
                 on_behalf_of: Some("owner".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,
@@ -106,6 +107,7 @@ fn checkpoint(state: &YdocOpenState, doc: &Ydoc, bytes: Vec<u8>) -> RecoveryImpo
                 on_behalf_of: Some("owner".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: Some("outage-run".into()),
             }),
         }],
     }
@@ -232,6 +234,8 @@ async fn unchanged_lineage_replays_once_and_preserves_original_author_and_reques
                     .unwrap()
                     .json();
                 assert!(authors.contains("writer"));
+                // The outage typing's agent run survives the restart.
+                assert!(authors.contains(r#""agentRunId":"outage-run""#));
                 Ok::<_, StorageError>(())
             })
             .unwrap()
@@ -823,6 +827,7 @@ fn agent() -> Option<ChangeAttribution> {
         on_behalf_of: Some("owner".into()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     })
 }
 fn typed(request_id: &str, update: Vec<u8>) -> RecoveryUpdate {

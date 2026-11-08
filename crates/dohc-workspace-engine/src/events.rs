@@ -646,6 +646,7 @@ mod tests {
                 on_behalf_of: Some("automation:triage".to_owned()),
                 depth: 1,
                 run: None,
+                agent_run_id: None,
             }),
             source: Some(("origin-a".to_owned(), 41)),
             recorded_at_ms: 1_100,

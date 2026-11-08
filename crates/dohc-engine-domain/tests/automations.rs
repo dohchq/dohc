@@ -86,6 +86,7 @@ fn facts(
             on_behalf_of: Some("user:ice".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         }),
         source: source.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms: 50,
@@ -443,6 +444,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
         on_behalf_of: Some("user:ice".to_owned()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     });
     applied.fields = vec![
         CollectionFieldChangeFact {
@@ -540,6 +542,7 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
             on_behalf_of: Some("claimed-person".to_owned()),
             depth: 0,
             run: None,
+            agent_run_id: None,
         });
         let claims = claim_for(&mut store, WS, &applied, 10 + origin_seq);
         assert_eq!(claims[0].change.shared_author.as_ref(), Some(&author));
@@ -2044,6 +2047,7 @@ fn changed_by(
             on_behalf_of: Some("local".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         });
     }
     applied
@@ -2390,6 +2394,7 @@ fn an_agents_moment_author_carries_its_runs_depth() {
             on_behalf_of: Some("local".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         };
         let author =
             moment_author_json(Some("dohc-chat-runner"), Some(&attribution)).expect("author");

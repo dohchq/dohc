@@ -382,6 +382,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
                 on_behalf_of: Some("user:ice".to_owned()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             base.lineage_claim_id.clone(),
             false,
@@ -519,6 +520,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
                 on_behalf_of: Some("user:ice".to_owned()),
                 depth: dohc_engine_domain::AUTOMATION_CHAIN_DEPTH_CAP,
                 run: None,
+                agent_run_id: None,
             }),
             replay.lineage_claim_id.clone(),
             false,
@@ -563,6 +565,7 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             at_cap.lineage_claim_id.clone(),
             false,
@@ -735,6 +738,7 @@ async fn an_automations_write_replicated_to_the_live_host_keeps_its_depth_and_cl
                 on_behalf_of: Some("owner".to_owned()),
                 depth: 2,
                 run: None,
+                agent_run_id: None,
             }),
             base.lineage_claim_id.clone(),
             false,
@@ -878,6 +882,7 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
             on_behalf_of: Some("user:ice".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         })
     };
 
@@ -957,6 +962,7 @@ async fn a_record_created_in_a_document_session_credits_its_interval_authors() {
                     on_behalf_of: case.principal.map(str::to_owned),
                     depth,
                     run: None,
+                    agent_run_id: None,
                 }),
                 None,
                 true,
