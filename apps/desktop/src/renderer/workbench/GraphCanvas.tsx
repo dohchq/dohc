@@ -27,6 +27,7 @@ type Model = {
 };
 
 type Options = { display: GraphDisplay; forces: GraphForces; local: boolean };
+type Camera = { k: number; tx: number; ty: number };
 
 type Palette = {
   bg: string;
@@ -88,11 +89,20 @@ function readPalette(surface: "bg" | "panel"): Palette {
 
 // Frames a graph's bounds in a view with a 16 px margin. A node never draws
 // larger than at 100% zoom, so a small graph doesn't blow up to fill the view.
-export function fitCamera(x0: number, y0: number, x1: number, y1: number, width: number, height: number): { k: number; tx: number; ty: number } {
+export function fitCamera(x0: number, y0: number, x1: number, y1: number, width: number, height: number): Camera {
   const margin = 16;
   const scale = Math.min((width - margin * 2) / Math.max(1, x1 - x0), (height - margin * 2) / Math.max(1, y1 - y0));
   const k = Math.max(0.02, Math.min(1, scale));
   return { k, tx: width / 2 - ((x0 + x1) / 2) * k, ty: height / 2 - ((y0 + y1) / 2) * k };
+}
+
+// Moves the camera one frame toward the fit, 15% of the way. While the layout
+// cools, a fit that zooms out is taken at once, so the spreading graph never
+// leaves the view.
+export function followCamera(camera: Camera, goal: Camera, cooling: boolean): Camera {
+  if (cooling && goal.k < camera.k) return goal;
+  const ease = 0.15;
+  return { k: camera.k + (goal.k - camera.k) * ease, tx: camera.tx + (goal.tx - camera.tx) * ease, ty: camera.ty + (goal.ty - camera.ty) * ease };
 }
 
 function nodeRadius(degree: number, display: GraphDisplay): number {
@@ -375,7 +385,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     wake();
   }
 
-  function fitTarget(): { k: number; tx: number; ty: number } {
+  function fitTarget(): Camera {
     const count = model.nodes.length;
     if (count === 0 || width === 0 || height === 0) return { k: 1, tx: width / 2, ty: height / 2 };
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -412,11 +422,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     let easing = false;
     if (followLayout && !awaitingLayout) {
       const goal = fitTarget();
-      const ease = reduced || snapCamera ? 1 : 0.15;
+      ({ k, tx, ty } = reduced || snapCamera ? goal : followCamera({ k, tx, ty }, goal, !layoutSettled && !held));
       snapCamera = false;
-      k += (goal.k - k) * ease;
-      tx += (goal.tx - tx) * ease;
-      ty += (goal.ty - ty) * ease;
       easing = Math.abs(goal.k - k) > k * 1e-3 || Math.abs(goal.tx - tx) > 0.5 || Math.abs(goal.ty - ty) > 0.5;
       if (!easing && layoutSettled) followLayout = options.local;
     }

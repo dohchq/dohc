@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { contrastRatio, mixHex } from "../accentColor";
 import { identityHues, palette } from "../tokens";
-import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, fitCamera, labelOpacity } from "./GraphCanvas";
+import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, fitCamera, followCamera, labelOpacity } from "./GraphCanvas";
 
 // The Graph page draws on bg, the side panel on panel.
 const SURFACES = ["bg", "panel"] as const;
@@ -55,5 +55,14 @@ describe("fitting the Graph to its view", () => {
 
   it("never draws a node larger than at 100% zoom", () => {
     expect(fitCamera(0, 0, 40, 20, 300, 288)).toEqual({ k: 1, tx: 130, ty: 134 });
+  });
+
+  it("zooms out to the fit at once while the layout cools, and eases otherwise", () => {
+    const camera = { k: 1, tx: 100, ty: 100 };
+    const out = { k: 0.5, tx: 200, ty: 0 };
+    const zoomIn = { k: 2, tx: 200, ty: 0 };
+    expect(followCamera(camera, out, true)).toEqual(out);
+    expect(followCamera(camera, zoomIn, true)).toEqual({ k: 1.15, tx: 115, ty: 85 });
+    expect(followCamera(camera, out, false)).toEqual({ k: 0.925, tx: 115, ty: 85 });
   });
 });
