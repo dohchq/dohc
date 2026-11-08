@@ -2600,12 +2600,14 @@ pub(crate) type EntryCredit = (
 
 /// What an outbox entry's evidence credits: a native entry's journal row,
 /// whose declarations must be the ones its source derives, or what a draft
-/// declared. An automation outranks an agent, and either a person's edit.
-/// An adoption seed, and a draft that declared nothing, credit nobody; a
-/// caller treats that as unattributed, never as whoever reads the entry.
+/// declared, with the run its declared agent made it in. An automation
+/// outranks an agent, and either a person's edit. An adoption seed, and a
+/// draft that declared nothing, credit nobody; a caller treats that as
+/// unattributed, never as whoever reads the entry.
 pub(crate) fn entry_credit(
     native: Option<&OwnerOutboxNativeSource>,
     agent: Option<String>,
+    agent_run_id: Option<String>,
     automation: Option<String>,
     person: Option<i64>,
 ) -> Result<EntryCredit, OwnerOutboxError> {
@@ -2616,7 +2618,11 @@ pub(crate) fn entry_credit(
     };
     let agent = stored_declaration(agent)?;
     let automation = stored_automation_declaration(automation)?;
-    if agent.is_some() && automation.is_some() {
+    // A native update's run stays in its source; only a declared agent's
+    // draft names one beside its declaration.
+    if (agent.is_some() && automation.is_some())
+        || (agent_run_id.is_some() && (agent.is_none() || native.is_some()))
+    {
         return Err(OwnerOutboxError::Corrupt);
     }
     if let Some(source) = native {
@@ -2633,7 +2639,10 @@ pub(crate) fn entry_credit(
     } else if let Some(declared) = agent {
         (
             Some(declared.agent_id.clone()),
-            Some(declared.attribution()),
+            Some(dohc_engine_domain::ChangeAttribution {
+                agent_run_id,
+                ..declared.attribution()
+            }),
         )
     } else if person {
         (

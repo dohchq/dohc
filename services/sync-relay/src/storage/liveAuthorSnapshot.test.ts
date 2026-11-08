@@ -58,6 +58,15 @@ it.each([undefined, "reader"])("binds the owner's agent even when onBehalfOf is 
     .toEqual([{kind: "human", humanId: "owner", humanName: "Trusted owner"}, {kind: "agent", ...agent}]);
 });
 
+// The owner's draft delivery declares its agent with no name. Its engine names
+// the draft's run in History only beside an unnamed agent entry.
+it("names an owner draft's agent without a name", () => {
+  const {agentName: _name, ...declared} = agent;
+  const snapshot = deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner", agent: declared}, account);
+  expect(snapshot).toEqual([{kind: "human", humanId: "owner", humanName: "Trusted owner"}, {kind: "agent", ...declared}]);
+  expect(snapshot[1]).not.toHaveProperty("agentName");
+});
+
 it.each(["", "x".repeat(513), "ü".repeat(257), "Owner\u0000", "\ud800"])("keeps owner attribution bounded when the trusted name is invalid", name => {
   expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner"}, {...account, name}))
     .toEqual([{kind: "human", humanId: "owner", humanName: "Unnamed"}]);

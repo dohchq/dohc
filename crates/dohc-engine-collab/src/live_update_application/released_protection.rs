@@ -1662,6 +1662,7 @@ pub(super) fn lineage_evidence(
                coalesce(sum(octet_length(e.outbox_id)+octet_length(e.delivery_id)
                  +octet_length(e.update_digest)+coalesce(octet_length(e.native_source_json),0)
                  +coalesce(octet_length(e.agent_declaration_json),0)
+                 +coalesce(octet_length(e.agent_run_id),0)
                  +coalesce(octet_length(e.automation_declaration_json),0)),0),
                coalesce(max(octet_length(e.outbox_id)+octet_length(e.append_key)
                  +octet_length(e.delivery_id)+octet_length(e.update_digest)
@@ -1669,6 +1670,7 @@ pub(super) fn lineage_evidence(
                  +coalesce(octet_length(e.accepted_receipt_json),0)
                  +coalesce(octet_length(e.terminal_reason),0)
                  +coalesce(octet_length(e.agent_declaration_json),0)
+                 +coalesce(octet_length(e.agent_run_id),0)
                  +coalesce(octet_length(e.automation_declaration_json),0)),0)
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3

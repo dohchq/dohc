@@ -5309,7 +5309,9 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
                             ),
                             depth: if *kind == "agent" { 2 } else { 3 },
                         }),
-                        agent_run_id: None,
+                        // Stop releases this draft before any acceptance; its
+                        // run must still reach History.
+                        agent_run_id: (*kind == "agent").then(|| "run-a".into()),
                         automation_declaration: (*kind == "automation").then(|| {
                             dohc_engine_domain::AutomationDeclaration {
                                 automation_id: "automation-A".into(),
@@ -5404,6 +5406,11 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
         .flat_map(|credit| std::iter::repeat_n(credit, 1))
         .collect::<Vec<_>>()
     );
+    let runs = f.store.read_with(|conn| {
+        let mut stmt = conn.prepare("SELECT agent_run_id FROM ydoc_updates WHERE workspace_id='workspace' ORDER BY seq").unwrap();
+        Ok::<_,dohc_engine_storage::StorageError>(stmt.query_map([],|r|r.get::<_,Option<String>>(0)).unwrap().map(|r|r.unwrap()).collect::<Vec<_>>())
+    }).unwrap();
+    assert_eq!(runs, vec![None, Some("run-a".to_owned()), None, None, None, None, None]);
     // Replaying successive credited rows proves that no later author's delta
     // leaked into an earlier group. The same rows are journaled for peers.
     let grouped = f.store.read_with(|conn| {
@@ -5462,7 +5469,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     let authors: Vec<serde_json::Value> = serde_json::from_str(&authors).unwrap();
     let expected = serde_json::json!([
         {"kind":"human","humanId":"local-person"},
-        {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-A","depth":2},
+        {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-A","depth":2,"agentRunId":"run-a"},
         {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-C","depth":3},
         {"kind":"automation","automationId":"automation-A","onBehalfOf":"person-B","depth":1},
         {"kind":"unattributed"},

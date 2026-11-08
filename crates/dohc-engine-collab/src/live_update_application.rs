@@ -1878,7 +1878,7 @@ pub fn apply_committed_with_settlement_limit(
             }) {
                 return Err(ApplicationError::Conflict.into());
             }
-            let own = own_draft(tx, &key, &event.metadata.accepted.receipt)?;
+            let (own, draft_run) = own_entry(tx, &key, &event.metadata.accepted.receipt)?;
             if own.as_ref().is_some_and(|own| {
                 !event.metadata.matches_draft_declaration(own.declaration.as_ref())
             }) {
@@ -1902,11 +1902,6 @@ pub fn apply_committed_with_settlement_limit(
             // This computer's own agent update names, in its History only, the
             // run its journal or draft recorded, so two runs stay two authors.
             // The canonical snapshot keeps no run.
-            let draft_run = if own.is_some() {
-                None
-            } else {
-                own_draft_run(tx, &key, &event.metadata.accepted.receipt)?
-            };
             let own_run = own_agent_run(own.as_ref())
                 .or_else(|| draft_run.as_ref().map(|(agent, run)| (agent.as_str(), run.as_str())));
             let mut authors = snapshot.iter()
@@ -2211,18 +2206,25 @@ fn seed_hold(
     }))
 }
 
-fn own_draft(
+/// This computer's own entry for the accepted frame's delivery: its adopted
+/// native update, or the declared agent and run of an owner draft its agent
+/// made in a run.
+type OwnEntry = (Option<OwnDraft>, Option<(String, String)>);
+
+fn own_entry(
     tx: &Transaction<'_>,
     key: &DocKey,
     receipt: &LiveUpdateReceipt,
-) -> Result<Option<OwnDraft>, ApplicationError> {
-    let entry: Option<(String, Option<String>, Option<String>)> = tx
+) -> Result<OwnEntry, ApplicationError> {
+    type Row = (Option<String>, Option<String>, Option<String>, Option<String>);
+    let entry: Option<Row> = tx
         .query_row(
-            "SELECT e.native_source_json,e.agent_declaration_json,e.accepted_receipt_json FROM owner_ydoc_outbox_entries e \
+            "SELECT e.native_source_json,e.agent_declaration_json,e.accepted_receipt_json,e.agent_run_id \
+             FROM owner_ydoc_outbox_entries e \
              JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
              WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
                AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
-               AND e.native_source_json IS NOT NULL",
+               AND (e.native_source_json IS NOT NULL OR e.agent_run_id IS NOT NULL)",
             params![
                 receipt.delivery_id,
                 receipt.update_digest,
@@ -2230,12 +2232,12 @@ fn own_draft(
                 key.version_id,
                 key.object_id
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some((source, declaration, saved)) = entry else {
-        return Ok(None);
+    let Some((source, declaration, saved, run)) = entry else {
+        return Ok((None, None));
     };
     // An acknowledged entry keeps the receipt the relay gave it; only that
     // acceptance applies as this entry.
@@ -2248,49 +2250,30 @@ fn own_draft(
             return Err(ApplicationError::Conflict);
         }
     }
-    let source: crate::owner_outbox::OwnerOutboxNativeSource =
-        serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
-    Ok(Some(OwnDraft {
-        author: source
-            .native_author()
-            .map_err(|_| ApplicationError::Corrupt)?,
-        declaration: crate::owner_outbox::stored_declaration(declaration)
-            .map_err(|_| ApplicationError::Corrupt)?,
-    }))
-}
-
-/// The declared agent and run of this computer's own owner draft, when the
-/// accepted frame is its delivery and the agent made it in a run.
-fn own_draft_run(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    receipt: &LiveUpdateReceipt,
-) -> Result<Option<(String, String)>, ApplicationError> {
-    let entry: Option<(Option<String>, String)> = tx
-        .query_row(
-            "SELECT e.agent_declaration_json,e.agent_run_id FROM owner_ydoc_outbox_entries e \
-             JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
-             WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
-               AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
-               AND e.native_source_json IS NULL AND e.agent_run_id IS NOT NULL",
-            params![
-                receipt.delivery_id,
-                receipt.update_digest,
-                key.workspace_id,
-                key.version_id,
-                key.object_id
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(read_sql)?;
-    let Some((declaration, run)) = entry else {
-        return Ok(None);
-    };
     let declaration = crate::owner_outbox::stored_declaration(declaration)
-        .map_err(|_| ApplicationError::Corrupt)?
-        .ok_or(ApplicationError::Corrupt)?;
-    Ok(Some((declaration.agent_id, run)))
+        .map_err(|_| ApplicationError::Corrupt)?;
+    match (source, run) {
+        (Some(source), None) => {
+            let source: crate::owner_outbox::OwnerOutboxNativeSource =
+                serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
+            let author = source
+                .native_author()
+                .map_err(|_| ApplicationError::Corrupt)?;
+            Ok((
+                Some(OwnDraft {
+                    author,
+                    declaration,
+                }),
+                None,
+            ))
+        }
+        (None, Some(run)) => {
+            let agent = declaration.ok_or(ApplicationError::Corrupt)?.agent_id;
+            Ok((None, Some((agent, run))))
+        }
+        // A native update's run stays in its source.
+        _ => Err(ApplicationError::Corrupt),
+    }
 }
 
 /// The agent and run this computer's own native update recorded, when an agent

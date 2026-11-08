@@ -1005,8 +1005,9 @@ pub(crate) fn unproven_retained(
             continue;
         };
         let authors = (|| -> Result<RetainedAuthors, ApplicationError> {
-            let (agent, automation, person) = declarations(conn, &entry.outbox_id, entry.sequence)?;
-            retained_authors(Some(&entry.source), agent, automation, person)
+            let (agent, run, automation, person) =
+                declarations(conn, &entry.outbox_id, entry.sequence)?;
+            retained_authors(Some(&entry.source), agent, run, automation, person)
         })();
         work.authored(locator, authors)?;
     }
@@ -1014,7 +1015,7 @@ pub(crate) fn unproven_retained(
         .prepare(
             "SELECT e.outbox_id,e.sequence,e.append_key,e.delivery_id,e.update_digest,e.native_source_json,
                 length(CAST(e.native_source_json AS BLOB)),e.pending,e.accepted_receipt_json,e.terminal_reason,
-                e.agent_declaration_json,e.automation_declaration_json,e.person_edit
+                e.agent_declaration_json,e.automation_declaration_json,e.person_edit,e.agent_run_id
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
              ORDER BY e.outbox_id,e.sequence",
@@ -1043,6 +1044,7 @@ pub(crate) fn unproven_retained(
         let agent: Option<String> = row.get(10).map_err(read_sql)?;
         let automation: Option<String> = row.get(11).map_err(read_sql)?;
         let person: Option<i64> = row.get(12).map_err(read_sql)?;
+        let run: Option<String> = row.get(13).map_err(read_sql)?;
         let locator = ContributionLocator::Outbox {
             outbox_id: outbox_id.clone(),
             sequence,
@@ -1133,7 +1135,7 @@ pub(crate) fn unproven_retained(
         if work.checked(&locator, unproven)? != Some(true) {
             continue;
         }
-        let authors = retained_authors(source.as_ref(), agent, automation, person);
+        let authors = retained_authors(source.as_ref(), agent, run, automation, person);
         work.authored(locator, authors)?;
     }
     let mut tail = work.tail;
@@ -1212,17 +1214,20 @@ impl Found<'_, '_> {
 fn retained_authors(
     native: Option<&OwnerOutboxNativeSource>,
     agent: Option<String>,
+    agent_run_id: Option<String>,
     automation: Option<String>,
     person: Option<i64>,
 ) -> Result<RetainedAuthors, ApplicationError> {
-    let (actor, attribution) = crate::owner_outbox::entry_credit(native, agent, automation, person)
-        .map_err(outbox_error)?;
+    let (actor, attribution) =
+        crate::owner_outbox::entry_credit(native, agent, agent_run_id, automation, person)
+            .map_err(outbox_error)?;
     RetainedAuthors::credited(actor.as_deref(), attribution.as_ref())
         .ok_or(ApplicationError::Corrupt)
 }
 
-/// An entry's agent and automation declarations and person edit.
-type Declarations = (Option<String>, Option<String>, Option<i64>);
+/// An entry's agent declaration and the run a draft named beside it, its
+/// automation declaration, and its person edit.
+type Declarations = (Option<String>, Option<String>, Option<String>, Option<i64>);
 
 /// The declarations the entry at `sequence` of `outbox_id` keeps.
 fn declarations(
@@ -1231,12 +1236,12 @@ fn declarations(
     sequence: i64,
 ) -> Result<Declarations, ApplicationError> {
     conn.prepare_cached(
-        "SELECT agent_declaration_json,automation_declaration_json,person_edit
+        "SELECT agent_declaration_json,agent_run_id,automation_declaration_json,person_edit
          FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",
     )
     .map_err(read_sql)?
     .query_row(params![outbox_id, sequence], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })
     .map_err(read_sql)
 }

@@ -343,7 +343,7 @@ pub fn release_in_tx(
     let mut blobs = BTreeSet::from([observed.checkpoint_digest.clone()]);
     for id in &current {
         let entries = {
-            let mut stmt=tx.prepare("SELECT sequence,update_digest,byte_length,native_source_json,agent_declaration_json,automation_declaration_json,person_edit FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
+            let mut stmt=tx.prepare("SELECT sequence,update_digest,byte_length,native_source_json,agent_declaration_json,automation_declaration_json,person_edit,agent_run_id FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
             let rows = stmt
                 .query_map([&id], |r| {
                     Ok((
@@ -354,13 +354,14 @@ pub fn release_in_tx(
                         r.get::<_, Option<String>>(4)?,
                         r.get::<_, Option<String>>(5)?,
                         r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<String>>(7)?,
                     ))
                 })
                 .map_err(read_sql)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
         };
 
-        for (_, digest, length, native, agent, automation, person) in entries {
+        for (_, digest, length, native, agent, automation, person, run) in entries {
             let bytes = bounded_blob(tx, &digest)?;
             if bytes.len() as i64 != length {
                 return Err(OwnerOutboxError::Corrupt);
@@ -378,7 +379,7 @@ pub fn release_in_tx(
                     },
                 )
                 .transpose()?;
-            let credit = super::entry_credit(source.as_ref(), agent, automation, person)?;
+            let credit = super::entry_credit(source.as_ref(), agent, run, automation, person)?;
             credited.push((credit, bytes));
         }
     }
