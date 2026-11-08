@@ -96,7 +96,7 @@ import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from ".
 import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, Explorer, TreeRow, explorerMenuItems, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
 import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice, signInExpiredNotice } from "../workbench/NoticeCenter";
-import { undoRefusedNotice } from "../workbench/explorerOperationNotices";
+import { doneNotice, undoRefusedNotice } from "../workbench/explorerOperationNotices";
 import { EMPTY_ART, type EmptyArtKind } from "../workbench/EmptyArt";
 import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
@@ -1594,8 +1594,12 @@ const EXPLORER_SCOPE: ExplorerMenuScope = {
 
 // A finished delete offers Undo; a refused Undo says what is in the way, with
 // Try again, and Copy keeps the engine's text.
+const DELETED_BUDGET = doneNotice([{
+  change: { id: "budget", kind: "delete-file", path: "docs/budget.md" },
+  operationId: "dohc-operation:33333333-3333-4333-8333-333333333333", undoable: true, trashed: true,
+}]).message;
 const UNDO_TOAST = {
-  id: "undo", tone: "success" as const, message: "Deleted budget.md", details: "Deleted budget.md",
+  id: "undo", tone: "success" as const, message: DELETED_BUDGET, details: DELETED_BUDGET,
   atMs: 0, canRetry: false, actionLabel: "Undo", seen: false,
 };
 const REFUSED_UNDO_TOAST = {

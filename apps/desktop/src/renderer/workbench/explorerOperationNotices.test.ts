@@ -8,6 +8,11 @@ const moved = (fromPath: string, toPath: string, undoable = true, noUndo?: strin
 const deleted = (path: string): RecordedTreeChange => ({
   change: { id: path, kind: "delete-file", path }, operationId: id, undoable: true,
 });
+// A delete main answered with its place: the system trash (true) or the
+// workspace's own trash (false).
+const trashed = (path: string, system: boolean, kind: "delete-file" | "delete-folder" = "delete-file", noUndo?: string): RecordedTreeChange => ({
+  change: { id: path, kind, path }, operationId: id, undoable: noUndo === undefined, trashed: system, ...(noUndo ? { noUndo } : {}),
+});
 
 describe("what a finished tree change says", () => {
   it("names one item, and counts several as items", () => {
@@ -25,6 +30,32 @@ describe("what a finished tree change says", () => {
       message: `Moved 2 items to x. ${reason}`, undoable: false,
     });
     expect(doneNotice([moved("a.md", "x/a.md", false)])).toEqual({ message: "Moved a.md to x", undoable: false });
+  });
+
+  it("says a delete went to the system trash, beside Undo", () => {
+    expect(doneNotice([trashed("notes/report.md", true)])).toEqual({ message: "Deleted report.md. It's in the system trash.", undoable: true });
+    expect(doneNotice([trashed("a.md", true), trashed("b", true, "delete-folder"), trashed("c.md", true)]).message)
+      .toBe("Deleted 3 items. They're in the system trash.");
+  });
+
+  it("names the workspace's own trash when the system trash refused", () => {
+    expect(doneNotice([trashed("Photos", false, "delete-folder")]).message).toBe("Deleted Photos. It's in .dohc/local/trash in this workspace.");
+    expect(doneNotice([trashed("a.md", false), trashed("b.md", false)]).message)
+      .toBe("Deleted 2 items. They're in .dohc/local/trash in this workspace.");
+  });
+
+  it("counts the rows in each place when a selection went to both", () => {
+    expect(doneNotice([trashed("a.md", true), trashed("b.md", false), trashed("c.md", true)]).message)
+      .toBe("Deleted 3 items. 2 are in the system trash, and 1 is in .dohc/local/trash in this workspace.");
+    expect(doneNotice([trashed("a.md", true), trashed("b.md", false)]).message)
+      .toBe("Deleted 2 items. 1 is in the system trash, and 1 is in .dohc/local/trash in this workspace.");
+  });
+
+  it("adds no place without Undo, because main's reason names it", () => {
+    const reason = "Cannot undo the delete. big.bin is in the Recycle Bin. Restore it there.";
+    expect(doneNotice([trashed("a.md", true), trashed("big.bin", true, "delete-file", reason)])).toEqual({
+      message: `Deleted 2 items. ${reason}`, undoable: false,
+    });
   });
 
   it("says what Undo put back", () => {

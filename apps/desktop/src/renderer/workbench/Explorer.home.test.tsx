@@ -509,7 +509,7 @@ describe("Explorer Home", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" }));
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted notes.md", expect.any(Function)));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted notes.md. It's in the system trash.", expect.any(Function)));
   });
 
   it("measures the Pages window again while Open editors above it is resized", () => {
@@ -668,7 +668,7 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 3 items", expect.any(Function)));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 3 items. They're in the system trash.", expect.any(Function)));
     expect(props.onNotice).toHaveBeenCalledOnce();
     expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["notes.md", "tasks", "trip"]);
 
@@ -677,6 +677,25 @@ describe("selecting several rows in Home", () => {
     expect(undoHistoryOperation.mock.calls.map(([input]) => input.operationId)).toEqual(
       ["notes.md", "tasks", "trip"].map((path) => `dohc-operation:${path}`),
     );
+  });
+
+  // Once the notice is gone, the trash is the way back, so the notice says
+  // which trash took each row, as main answered.
+  it("says where each row of the selection went", async () => {
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => ({
+      trashed: relativePath !== "tasks", operationId: `dohc-operation:${relativePath}`, undo: { available: true as const },
+    }));
+    vi.stubGlobal("dohcDesktop", { ...bridge, deleteWorkspacePath });
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("collections:tasks/"), { ctrlKey: true });
+    fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
+    fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(
+      "Deleted 3 items. 2 are in the system trash, and 1 is in .dohc/local/trash in this workspace.",
+      expect.any(Function),
+    ));
   });
 
   it("names the row that did not go when the rest of the selection went, under one Undo for the rest", async () => {
@@ -695,7 +714,7 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
 
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items", expect.any(Function)));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items. They're in the system trash.", expect.any(Function)));
     expect(props.onError).toHaveBeenCalledOnce();
     expect(vi.mocked(props.onError).mock.calls[0]![0]).toMatch(/^dohc could not delete "tasks"\. \S/);
 
@@ -763,7 +782,7 @@ describe("selecting several rows in Home", () => {
     expect(deleted).toContain("Plans");
     expect(deleted.filter((path) => path.startsWith("Plans/"))).toEqual([]);
     // The notice counts what the delete took, not every selected row.
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(`Deleted ${deleted.length} items`, expect.any(Function)));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(`Deleted ${deleted.length} items. They're in the system trash.`, expect.any(Function)));
   });
 
   it("drags a selected folder without its selected contents", () => {
@@ -797,7 +816,7 @@ describe("selecting several rows in Home", () => {
     fireEvent.contextMenu(homeRow("other:budget.csv"));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items", expect.any(Function)));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items. They're in the system trash.", expect.any(Function)));
     expect(bridge.deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["notes.md", "budget.csv"]);
   });
 });

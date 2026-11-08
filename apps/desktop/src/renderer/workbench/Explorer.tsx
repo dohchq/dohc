@@ -601,7 +601,8 @@ function undoableKind(change: PendingTreeChange): change is RecordedTreeChange["
 }
 
 // What a rename, move or delete answers about its History operation.
-type OperationAnswer = Pick<MoveWorkspacePathResult & DeleteWorkspacePathResult, "operationId" | "undo">;
+type OperationAnswer = Pick<MoveWorkspacePathResult & DeleteWorkspacePathResult, "operationId" | "undo">
+  & Partial<Pick<DeleteWorkspacePathResult, "trashed">>;
 
 // A change main recorded as a History operation, which its notice can undo.
 function recordedChange(
@@ -615,6 +616,7 @@ function recordedChange(
     operationId: result.operationId,
     undoable: undo?.available === true,
     ...(undo?.available === false ? { noUndo: undo.reason } : {}),
+    ...(result.trashed === undefined ? {} : { trashed: result.trashed }),
   };
 }
 

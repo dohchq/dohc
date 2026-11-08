@@ -12,6 +12,9 @@ export type RecordedTreeChange = {
   undoable: boolean;
   // Why main offers no Undo, in its own words, when it says.
   noUndo?: string;
+  // Where main put a deleted row: the system trash (true) or the workspace's
+  // own .dohc/local/trash (false).
+  trashed?: boolean;
 };
 
 // The workspace's top level, named as the Explorer's own section header names it.
@@ -34,6 +37,20 @@ export function operationWord(change: RecordedTreeChange["change"]): "delete" | 
   return dirnameOf(change.fromPath) === dirnameOf(change.toPath) ? "rename" : "move";
 }
 
+const WORKSPACE_TRASH = ".dohc/local/trash in this workspace";
+
+// Where a delete's rows went, counted as its subject counts them. Once the
+// notice is gone, that place is the way back.
+function deletedPlace(done: readonly RecordedTreeChange[]): string | undefined {
+  const system = done.filter((recorded) => recorded.trashed === true).length;
+  const workspace = done.filter((recorded) => recorded.trashed === false).length;
+  if (system + workspace !== done.length) return undefined;
+  if (workspace === 0) return done.length === 1 ? "It's in the system trash." : "They're in the system trash.";
+  if (system === 0) return done.length === 1 ? `It's in ${WORKSPACE_TRASH}.` : `They're in ${WORKSPACE_TRASH}.`;
+  const are = (count: number) => `${count} ${count === 1 ? "is" : "are"}`;
+  return `${are(system)} in the system trash, and ${are(workspace)} in ${WORKSPACE_TRASH}.`;
+}
+
 // One action's changes are all deletes or all moves to one folder.
 export function doneNotice(done: readonly RecordedTreeChange[]): { message: string; undoable: boolean } {
   const first = done[0]!.change;
@@ -44,7 +61,11 @@ export function doneNotice(done: readonly RecordedTreeChange[]): { message: stri
       ? `Renamed ${basenameOf(first.fromPath)} to ${basenameOf(first.toPath)}`
       : `Moved ${subject(done, pathOf)} to ${folderOf(first.toPath)}`;
   const refused = done.find((recorded) => !recorded.undoable);
-  if (!refused) return { message, undoable: true };
+  // Without Undo, main's reason already says where the rows are.
+  if (!refused) {
+    const place = "path" in first ? deletedPlace(done) : undefined;
+    return { message: place ? `${message}. ${place}` : message, undoable: true };
+  }
   return { message: refused.noUndo ? `${message}. ${refused.noUndo}` : message, undoable: false };
 }
 

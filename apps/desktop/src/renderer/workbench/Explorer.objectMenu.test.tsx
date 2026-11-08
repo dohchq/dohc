@@ -267,7 +267,7 @@ describe("the Explorer's menu", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-a", relativePath: "notes.md" }));
-    await noticeWithUndo(props, "Deleted notes.md");
+    await noticeWithUndo(props, "Deleted notes.md. It's in the system trash.");
   });
 
   it("still asks in a share view, whose delete has no trash", async () => {
@@ -299,7 +299,7 @@ describe("Undo after a rename, a move or a delete", () => {
     render(<Explorer {...props} />);
     fireEvent.click(row("plan.md"));
     fireEvent.keyDown(row("plan.md"), { key: "Delete" });
-    const undo = await noticeWithUndo(props, "Deleted plan.md");
+    const undo = await noticeWithUndo(props, "Deleted plan.md. It's in the system trash.");
     act(() => undo());
     await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledWith({ workspaceId: "workspace-a", operationId: DELETED }));
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Restored plan.md"));
@@ -312,7 +312,7 @@ describe("Undo after a rename, a move or a delete", () => {
     const view = render(<Explorer {...props} />);
     fireEvent.click(row("plan.md"));
     fireEvent.keyDown(row("plan.md"), { key: "Delete" });
-    const undoDelete = await noticeWithUndo(props, "Deleted plan.md");
+    const undoDelete = await noticeWithUndo(props, "Deleted plan.md. It's in the system trash.");
     expect(shownPaths()).not.toContain("plan.md");
     act(() => undoDelete());
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Restored plan.md"));
@@ -370,7 +370,7 @@ describe("Undo after a rename, a move or a delete", () => {
     render(<Explorer {...props} />);
     fireEvent.click(row("plan.md"));
     fireEvent.keyDown(row("plan.md"), { key: "Delete" });
-    const undo = await noticeWithUndo(props, "Deleted plan.md");
+    const undo = await noticeWithUndo(props, "Deleted plan.md. It's in the system trash.");
     act(() => undo());
     await waitFor(() => expect(props.onError).toHaveBeenCalledWith(
       "dohc could not put plan.md back. It stays at drafts/plan.md.", undefined, undefined));
@@ -438,7 +438,7 @@ describe("a listing after main's answer", () => {
     const view = render(<Explorer {...props} />);
     fireEvent.click(row("plan.md"));
     fireEvent.keyDown(row("plan.md"), { key: "Delete" });
-    await noticeWithUndo(props, "Deleted plan.md");
+    await noticeWithUndo(props, "Deleted plan.md. It's in the system trash.");
     expect(shownPaths()).not.toContain("plan.md");
     view.rerender(<Explorer {...props} listingRequest={2} />);
     expect(shownPaths()).toContain("plan.md");
@@ -458,7 +458,7 @@ describe("a listing after main's answer", () => {
     const view = render(<Explorer {...props} />);
     fireEvent.click(row("plan.md"));
     fireEvent.keyDown(row("plan.md"), { key: "Delete" });
-    await noticeWithUndo(props, "Deleted plan.md");
+    await noticeWithUndo(props, "Deleted plan.md. It's in the system trash.");
     view.rerender(<Explorer {...props} listingRequest={2} />);
     expect(shownPaths()).not.toContain("plan.md");
     view.rerender(<Explorer {...props} files={props.files.filter((file) => file.path !== "plan.md")} listingRequest={3} />);
