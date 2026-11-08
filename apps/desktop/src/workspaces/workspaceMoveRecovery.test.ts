@@ -550,18 +550,23 @@ it.each([false, true])("returns a person's rename operation through IPC and keep
   expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("typed after rename");
   expect(f.objects.get("a.txt")).toBe(object);
 });
-it.each([false, true])("keeps a person's folder on the base capture path with unavailable Undo, rename=%s", async renameOnly => {
+it.each([false, true])("keeps a person's folder on the base capture path and records why it has no Undo, rename=%s", async renameOnly => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/node_modules/pkg/index.js");
   const finished = vi.fn(async () => undefined);
   const begin = vi.fn(async () => finished);
   Object.assign(f.capture, { beginFileRename: begin });
   const authored = vi.spyOn(f.capture, "changePathsAs");
-  const moved = await f.move("folder", renameOnly ? "renamed" : "archive/folder");
-  expect(moved).toEqual({ path: renameOnly ? "renamed" : "archive/folder", undo: { available: false, paths: [],
-    reason: `Undo for a folder ${renameOnly ? "rename" : "move"} isn't available yet. ${renameOnly ? "Rename" : "Move"} it back yourself.` } });
-  expect(begin).toHaveBeenCalledWith("folder", renameOnly ? "renamed" : "archive/folder", true);
+  const to = renameOnly ? "renamed" : "archive/folder";
+  const reason = `Undo for a folder ${renameOnly ? "rename" : "move"} isn't available yet. ${renameOnly ? "Rename" : "Move"} it back yourself.`;
+  const moved = await f.move("folder", to);
+  expect(moved).toEqual({ path: to, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: false, reason, paths: [] } });
+  expect(begin).toHaveBeenCalledWith("folder", to, true);
   expect(finished).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
-  await expect(readdir(join(f.rootPath, ".dohc/local/trash"))).rejects.toMatchObject({ code: "ENOENT" });
+  const operationId = String(moved.operationId);
+  expect(await readdir(join(f.rootPath, ".dohc/local/trash"))).toEqual([`move-${createHash("sha256").update(operationId).digest("hex")}.json`]);
+  expect(await f.undo(operationId)).toEqual(refused(reason));
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  expect(await readFile(join(f.rootPath, to, "tracked.txt"), "utf8")).toBe("folder/tracked.txt");
 });
 it.each([false, true])("records only an agent folder kind and refuses both authors without engine work, rename=%s", async renameOnly => {
   const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin");

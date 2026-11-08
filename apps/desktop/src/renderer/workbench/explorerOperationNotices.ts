@@ -71,7 +71,7 @@ export function doneNotice(done: readonly RecordedTreeChange[]): { message: stri
 
 // A refused Undo fits a notice's two lines: what failed, then the one thing to
 // do before Try again. A refusal main did not name says only what failed. The
-// cause, in main's own text, goes to Copy.
+// cause, in main's own text, goes to Details.
 export function undoRefusedNotice(change: RecordedTreeChange["change"], refusal: UndoHistoryOperationRefusal): string {
   const word = operationWord(change);
   const failed = word === "delete"

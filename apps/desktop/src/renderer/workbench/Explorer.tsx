@@ -632,7 +632,8 @@ function fromMenuKey(keyboardMenu: { current: boolean }): boolean {
 // The message is main's own text, which Copy keeps when the words differ.
 class UndoRefusedError extends Error {
   // `livePage` is the page this computer owns live, when that refused it.
-  constructor(reason: string, readonly retry: boolean, readonly words = reason, readonly livePage?: string) {
+  // `mayHaveRun` is false only when main named what refused it before any change.
+  constructor(reason: string, readonly retry: boolean, readonly words = reason, readonly livePage?: string, readonly mayHaveRun = true) {
     super(reason);
     this.name = "UndoRefusedError";
   }
@@ -1063,6 +1064,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // and ask for a listing, which settles the successes. Hands `answered`
   // each success with what its IPC returned, including a Try again's.
   // `failed` reports a failure in the caller's own words instead.
+  // `mayHaveRun` says a failure may still have changed paths, such as an
+  // Undo whose reply was lost, so drafts settle as they do after a change.
   const runChanges = useCallback(
     async function runChangesOnce<Result>(
       changes: PendingTreeChange[],
@@ -1070,6 +1073,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       options: {
         afterBegin?: () => void;
         failed?: (change: PendingTreeChange, cause: unknown) => void;
+        mayHaveRun?: (cause: unknown) => boolean;
         answered?: (succeeded: { change: PendingTreeChange; result: Result }[]) => void;
         // What a refused file change did, for its live-page words.
         action?: "move" | "rename";
@@ -1098,6 +1102,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         // The rest still go when some fail, and the failures report once.
         const failed: Array<{ change: PendingTreeChange; cause: unknown; livePage?: LivePageRefused; again?: () => void }> = [];
+        let mayHaveRun = false;
         for (const change of changes) {
           try {
             const result = await run(change);
@@ -1105,6 +1110,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             succeeded.push({ change, result });
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
+            if (options.mayHaveRun?.(cause)) mayHaveRun = true;
             if (options.failed) {
               options.failed(change, cause);
               continue;
@@ -1157,7 +1163,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             group === live ? { paths: names, action: verb } : undefined,
           );
         }
-        const changedExistingPath = succeeded.some(
+        const changedExistingPath = mayHaveRun || succeeded.some(
           ({ change }) => change.kind !== "create-file" && change.kind !== "create-folder",
         );
         try {
@@ -1210,7 +1216,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           });
           if (!result.ok) {
             throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal),
-              result.refusal.code === "live-page-owned" ? result.refusal.path : undefined);
+              result.refusal.code === "live-page-owned" ? result.refusal.path : undefined, result.refusal.code === "unexplained");
           }
           const reasons = result.remaining.map((left) => left.reason).join(" ");
           // A move whose row went back is undone even when other pages keep
@@ -1225,6 +1231,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           return entry;
         },
         {
+          // A lost reply reads as refused, though the Undo may have run.
+          mayHaveRun: (cause) => !(cause instanceof UndoRefusedError) || cause.mayHaveRun,
           failed: (change, cause) => {
             const entry = byChange.get(change.id)!;
             const refused = cause instanceof UndoRefusedError;

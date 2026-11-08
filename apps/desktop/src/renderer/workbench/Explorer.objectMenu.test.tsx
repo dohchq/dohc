@@ -428,6 +428,26 @@ describe("Undo after a rename, a move or a delete", () => {
       words, expect.objectContaining({ message: reason }), expect.any(Function)));
   });
 
+  // A lost reply reads as refused, but the rename may be undone, so a draft
+  // that fails to save is kept, as after any move. A refusal main names came
+  // before any change.
+  it.each([
+    ["reply lost after placement", { code: "unexplained" } as const, { captureOnFailure: true }],
+    ["domain error: Undo refused: old path occupied: notes.md", { code: "old-path-occupied", path: "notes.md" } as const, undefined],
+  ])("keeps a draft that fails to save when a refused Undo may have run: %s", async (reason, refusal, settled) => {
+    const settle = vi.fn(async () => undefined);
+    const props = explorerProps({ onBeginChanges: vi.fn(async () => ({ settle, release: vi.fn() })) });
+    render(<Explorer {...props} />);
+    await renameTo("notes.md", "ideas");
+    const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal });
+    settle.mockClear();
+    act(() => undo());
+    await waitFor(() => expect(settle).toHaveBeenCalledOnce());
+    expect(settle).toHaveBeenCalledWith(settled);
+    expect(props.onError).toHaveBeenCalledWith(expect.stringMatching(/^Cannot undo the rename\./), expect.anything(), expect.any(Function));
+  });
+
   it("names the live page a refused Undo waits on, so the shell offers Live documents", async () => {
     const reason = "dohc can't undo renaming \"ideas.md\" while it has live editing on\nIn Live documents, stop live editing for this page, then try again.";
     bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal: { code: "live-page-owned", path: "ideas.md" } });

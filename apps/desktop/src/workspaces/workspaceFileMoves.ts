@@ -18,7 +18,7 @@ import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPa
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
-import { finishMoveRecovery, finishFolderMoveRecovery, folderMoveReason, moveBack, moveWord } from "./workspaceMoveRecovery";
+import { finishMoveRecovery, finishFolderMoveRecovery, moveBack, moveWord } from "./workspaceMoveRecovery";
 import { scheduleLinkRewrite, type LinkRewriteContext } from "./workspaceLinkRewrites";
 import { ICloudCheckRefusal } from "./workspaceICloudOnly";
 import { WORKSPACE_TRASH } from "./workspaceTrash";
@@ -332,8 +332,8 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
         await movePath(operation.workspace.rootPath, prepared.physicalFromPath, prepared.physicalToPath);
         markChanged();
         await finishRename(true);
-        return { path: prepared.visibleResultPath, undo: { available: false,
-          reason: folderMoveReason(prepared.physicalFromPath, prepared.physicalToPath), paths: [] } };
+        return { path: prepared.visibleResultPath, ...await finishFolderMoveRecovery(operation.workspace,
+          `${OPERATION_ID_PREFIX}${randomUUID()}`, prepared.physicalFromPath, prepared.physicalToPath) };
       } catch (error) {
         await finishRename(false);
         throw error;
