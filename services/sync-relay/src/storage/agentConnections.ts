@@ -11,12 +11,16 @@ import { constantTimeHashEqual } from "../linkSecurity";
 // An agent connection is one agent's MCP sign-in through one share link. It
 // binds the link's grant, its current credential and generation, and a link
 // principal the relay mints for it. Its refresh tokens are one family: reusing
-// a rotated refresh token ends the connection. The relay keeps only HMACs of
-// request ids, codes, tokens, and the secret-bearing resource address.
+// a rotated refresh token within 30 days of its use ends the connection. The
+// relay keeps only keyed hashes of request ids, codes, tokens, and the
+// secret-bearing resource address.
 
 export const AGENT_AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1_000;
 export const AGENT_AUTHORIZATION_CODE_TTL_MS = 60 * 1_000;
 export const AGENT_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1_000;
+// How long a used refresh token's hash stays, so its reuse ends the connection.
+// After that it is unknown, and a refresh prunes it.
+export const AGENT_USED_REFRESH_TOKEN_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 export const AGENT_PENDING_AUTHORIZATIONS_PER_GRANT_LIMIT = 32;
 export const AGENT_REDEEMED_AUTHORIZATION_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export const AGENT_CLIENT_LIMIT = 50_000;
@@ -516,7 +520,11 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
   });
 }
 
-/** Rotates a refresh token. Reusing a rotated one ends its connection. */
+/**
+ * Rotates a refresh token. Reusing one used in the last 30 days ends its
+ * connection; one used before that is unknown. The refresh prunes the
+ * connection's older used tokens, so their number stays bounded.
+ */
 export function refreshAgentTokens(storage: StorageContext, input: {
   refreshTokenHash: string;
   clientId: string;
@@ -534,8 +542,11 @@ export function refreshAgentTokens(storage: StorageContext, input: {
       WHERE token.token_hash = ? AND token.kind = 'refresh'`).get(input.refreshTokenHash);
     if (!row) return { ok: false };
     const connection = rowToConnection(row);
+    const forgottenBeforeMs = nowMs - AGENT_USED_REFRESH_TOKEN_RETENTION_MS;
     if (row.used_at_ms !== null) {
-      retireConnections(storage, "connection_id", connection.connectionId, "retired", nowMs);
+      if (Number(row.used_at_ms) > forgottenBeforeMs) {
+        retireConnections(storage, "connection_id", connection.connectionId, "retired", nowMs);
+      }
       return { ok: false };
     }
     if (
@@ -548,9 +559,9 @@ export function refreshAgentTokens(storage: StorageContext, input: {
       return { ok: false };
     }
     storage.db.prepare("UPDATE sync_relay_agent_tokens SET used_at_ms = ? WHERE token_hash = ?").run(nowMs, input.refreshTokenHash);
-    // Used refresh tokens stay until the connection ends, so reusing any of them ends it.
-    storage.db.prepare(`DELETE FROM sync_relay_agent_tokens WHERE connection_id = ? AND kind = 'access' AND expires_at_ms <= ?`)
-      .run(connection.connectionId, nowMs);
+    storage.db.prepare(`DELETE FROM sync_relay_agent_tokens WHERE connection_id = ? AND
+      ((kind = 'access' AND expires_at_ms <= ?) OR (kind = 'refresh' AND used_at_ms <= ?))`)
+      .run(connection.connectionId, nowMs, forgottenBeforeMs);
     insertTokens(storage, connection.connectionId, { accessTokenHash: input.accessTokenHash, refreshTokenHash: input.nextRefreshTokenHash }, nowMs);
     return { ok: true, connection };
   });
@@ -584,19 +595,17 @@ export interface AgentAccessCheck {
 }
 
 /**
- * Call inside the caller's transaction. The token is an unexpired access
- * token of an active connection, the request names the address the agent
- * signed in at, and the connection's link is still current.
+ * The token is an unexpired access token of an active connection, the
+ * request names the address the agent signed in at, and the connection's
+ * link is still current. It opens no transaction, as a link holder's
+ * capability check opens none: inside a read's snapshot, such as a replica
+ * read's, it reads that snapshot, and inside a write it reads the write's.
  */
-export function agentAuthorityInTransaction(storage: StorageContext, check: AgentAccessCheck, nowMs: number): AgentConnectionRow | null {
+export function readAgentAuthority(storage: StorageContext, check: AgentAccessCheck, nowMs: number): AgentConnectionRow | null {
   const row = activeConnectionRow(storage, check.accessTokenHash, nowMs);
   if (!row || !constantTimeHashEqual(check.resourceHash, String(row.resource_hash))) return null;
   const connection = rowToConnection(row);
   return linkBindingIsCurrent(storage, connection) ? connection : null;
-}
-
-export function authenticateAgentAuthority(storage: StorageContext, check: AgentAccessCheck, nowMs: number): AgentConnectionRow | null {
-  return storage.readTx(() => agentAuthorityInTransaction(storage, check, nowMs));
 }
 
 /**
@@ -610,7 +619,7 @@ export function agentWriteAuthorityInTransaction(
   check: AgentAccessCheck,
   nowMs: number,
 ): { connection: AgentConnectionRow; enrollment: LinkEnrollment & { principal: SyncRelayLinkPrincipalRow } } | null {
-  const connection = agentAuthorityInTransaction(storage, check, nowMs);
+  const connection = readAgentAuthority(storage, check, nowMs);
   if (!connection) return null;
   const authority = storage.db.prepare(`SELECT grant.grant_id, grant.share_id, grant.generation AS grant_generation,
       grant.access, share.workspace_id, share.link_writes_paused_at_ms, share.discussion_revision

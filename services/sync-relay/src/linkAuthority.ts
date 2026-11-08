@@ -32,6 +32,17 @@ export interface LinkAuthority {
   credential: LinkCredential;
 }
 
+/**
+ * Answers a link route with JSON for an authority, or for a holder's
+ * capability on a route agents cannot use. An agent's answer authenticates
+ * it again before each chunk, as its blob downloads do.
+ */
+export type LinkJsonResponse = (
+  authority: LinkAuthority | (Pick<LinkAuthority, "shareId" | "grantId"> & { credential?: undefined }),
+  body: unknown,
+  signal: AbortSignal,
+) => Response;
+
 export interface LinkAuthorityResolver {
   /** Authenticates the request. */
   resolve(request: Request): LinkAuthority;

@@ -97,11 +97,12 @@ function utf8Bytes(...values: Array<string | null>): number {
 /**
  * A link holder writes with its capability and profile. An agent writes
  * with its access token and MCP address, under its connection's principal,
- * and never claims a name.
+ * and never claims a name. Its token is checked with the clock read inside
+ * the write, so a token that expired while the write waited writes nothing.
  */
 export type AppendLinkDiscussionMessageInput = (
-  | { capabilityHash: string; profileTokenHash: string; agent?: undefined }
-  | { agent: AgentAccessCheck; capabilityHash?: undefined; profileTokenHash?: undefined }
+  | { capabilityHash: string; profileTokenHash: string; agent?: undefined; now?: undefined }
+  | { agent: AgentAccessCheck; now: () => number; capabilityHash?: undefined; profileTokenHash?: undefined }
 ) & {
   claimedName?: string | null;
   body: string;
@@ -138,7 +139,7 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: Appe
     // the final live-authority decision below.
     input.guard?.();
     return storage.tx(() => {
-      const agent = input.agent === undefined ? null : agentWriteAuthorityInTransaction(storage, input.agent, createdAtMs);
+      const agent = input.agent === undefined ? null : agentWriteAuthorityInTransaction(storage, input.agent, input.now());
       const enrollment = holder ? readLinkEnrollment(storage, holder, createdAtMs) : agent?.enrollment ?? null;
       if (!enrollment) return { ok: false, reason: "not-authorized" };
       const { authority } = enrollment;

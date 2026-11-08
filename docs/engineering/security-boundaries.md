@@ -29,13 +29,14 @@ that does not exist.
 
 Each read and write checks the access token's expiry, the connection's status,
 the MCP address, the link's current credential and generation, and the current
-access. A blob download checks again before each chunk. A discussion post or
-Collection write checks again in its transaction. The agent writes as its
-connection's link principal, so pause and block apply to it. Each message and
-Collection write it makes records its agent connection.
+access. A response, blob or JSON, checks again before each chunk. A write
+checks again in its transaction, with the clock read there. The agent writes as
+its connection's link principal, so pause and block apply to it. Each message
+and Collection write it makes records its agent connection.
 
-The relay keeps every used refresh token until the connection ends. Reuse of
-any of them ends the connection. With this header, an agent reads the share,
+The relay keeps a used refresh token for 30 days after its use. Reuse in that
+time ends the connection. After that the token is unknown, and the next refresh
+deletes it. With this header, an agent reads the share,
 its files, its discussion, and a Group link's messages. It posts to the
 discussion and writes a Collection through an Edit link. Agent chat takes the
 access token and the MCP address in its request body and makes the same

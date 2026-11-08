@@ -9,6 +9,7 @@ import { messageFromOp } from "./namedRecipientChat";
 import { LINK_CHAT_MESSAGE_ID_PREFIX, LINK_CHAT_ORIGIN_PREFIX } from "./relayLogInputs";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import { AGENT_ACCESS_TOKEN_TTL_MS } from "./storage/agentConnections";
 import {
   RELAY_EXCHANGE_KEY,
   SHARE_WEB_ORIGIN,
@@ -19,6 +20,7 @@ import {
   closeTestStorages,
   createShare,
   inspectDatabase,
+  interceptStorage,
   json,
   jsonBody,
   linkSecret,
@@ -287,6 +289,23 @@ describe("an agent's posts through its link", () => {
     expect(f.storage.setShareLinkWritesPaused({ shareId: f.shareId, workspaceId, actorUserId: OWNER, pausedAtMs: 2_500 })).toBe(true);
     const before = ownerLog(f).length;
     await expectCode(await post(f, other, { idempotencyKey: "post-2" }), 403, "link_discussion_paused");
+    expect(ownerLog(f)).toHaveLength(before);
+  });
+
+  it("refuses a post whose token expires while it waits for the write, reading the clock inside the write", async () => {
+    const f = await fixture();
+    const agent = await connect(f, "read-write");
+    await ok(await post(f, agent));
+    const before = ownerLog(f).length;
+    // The route reads the clock for the message's time; the token expires before the write reads it again.
+    const storage = interceptStorage(f.storage, {
+      appendAgentChatPost: (target, input) => {
+        f.clock.value += AGENT_ACCESS_TOKEN_TTL_MS;
+        return target.appendAgentChatPost(input);
+      },
+    });
+    const h = testHandler(storage, { ...released, discussionActivity: f.activity, nowMs: () => f.clock.value });
+    await expectRefused(await post({ ...f, h }, agent, { idempotencyKey: "post-2" }));
     expect(ownerLog(f)).toHaveLength(before);
   });
 

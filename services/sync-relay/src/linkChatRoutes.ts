@@ -3,7 +3,7 @@ import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { linkRefusal } from "./linkRefusal";
-import { isAgentRequest, type LinkAuthorityResolver } from "./linkAuthority";
+import { isAgentRequest, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE, messageFromOp, readSharedChannelPage, type NamedChatMessage } from "./namedRecipientChat";
 import { parseString } from "./requestInputs";
@@ -75,7 +75,7 @@ export function createLinkChatRoutes(options: {
   linkKey: string | Uint8Array | undefined;
   nowMs: () => number;
   linkAuthority: Pick<LinkAuthorityResolver, "require" | "fresh">;
-  linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response;
+  linkJsonResponse: LinkJsonResponse;
   readLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
   followLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
   activity: Pick<DiscussionActivityHub, "wait" | "wake" | "wakeLog">;
@@ -137,7 +137,7 @@ export function createLinkChatRoutes(options: {
     const message = messageFromOp({ relaySeq: result.row.relaySeq, opKind: result.row.opKind, payload: JSON.parse(result.row.payloadJson) },
       result.row.originId);
     if (!message) throw new Error("stored link post is not a chat message");
-    const response = options.linkJsonResponse(fresh.shareId, fresh.grantId, { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) });
+    const response = options.linkJsonResponse(fresh, { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) }, request.signal);
     response.headers.set("cache-control", "private, no-store");
     return response;
   };
@@ -166,7 +166,7 @@ export function createLinkChatRoutes(options: {
     const { share } = authority;
     const { channelWireId } = authority.effectiveSelector;
     const respond = (body: unknown) => {
-      const response = options.linkJsonResponse(share.shareId, capability.grantId, body);
+      const response = options.linkJsonResponse(capability, body, request.signal);
       response.headers.set("cache-control", "private, no-store");
       return response;
     };

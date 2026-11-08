@@ -15,7 +15,7 @@ import {
   relayError,
   RelayError,
 } from "./errors";
-import { isAgentRequest, type LinkAuthorityResolver } from "./linkAuthority";
+import { isAgentRequest, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
 import {
   hashLinkProfileSecret,
   type ValidatedLinkCapability,
@@ -79,7 +79,7 @@ export function createDiscussionRoutes(
     capabilityToken: string,
     expected: { shareId: string; grantId: string; generation: number },
   ) => ValidatedLinkCapability,
-  linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response,
+  linkJsonResponse: LinkJsonResponse,
   linkReadRateLimiter: TokenBucketLimiter,
   linkGrantReadRateLimiter: TokenBucketLimiter,
   discussionActivity: Pick<DiscussionActivityHub, "wait" | "wake">,
@@ -298,7 +298,7 @@ export function createDiscussionRoutes(
         );
         requireFresh();
         return privateResponse(
-          linkJsonResponse(capability.shareId, capability.grantId, page),
+          linkJsonResponse(capability, page, request.signal),
         );
       }
 
@@ -306,7 +306,7 @@ export function createDiscussionRoutes(
       requireFresh();
       if (capability.access === "view") return linkRefusal("link_view_access");
       const writer = credential.kind === "agent"
-        ? { agent: credential.check }
+        ? { agent: credential.check, now: nowMs }
         : {
             capabilityHash: credential.capability.session.capabilityHash,
             profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
@@ -364,10 +364,10 @@ export function createDiscussionRoutes(
       }
       if (!result.replayed) discussionActivity.wake(capability.shareId);
       return privateResponse(
-        linkJsonResponse(capability.shareId, capability.grantId, {
+        linkJsonResponse(capability, {
           ok: true,
           message: projectDiscussionMessage(result.message, "public"),
-        }),
+        }, request.signal),
       );
     } catch (error) {
       if (
@@ -455,14 +455,14 @@ export function createDiscussionRoutes(
       const fresh = requireFreshLinkRead(capabilityToken, capability);
       return privateResponse(
         linkJsonResponse(
-          capability.shareId,
-          capability.grantId,
+          { shareId: capability.shareId, grantId: capability.grantId },
           publicDiscussionActivityPage(
             page,
             fresh.access,
             composerState,
             principal?.displayName ?? null,
           ),
+          request.signal,
         ),
       );
     } catch (error) {

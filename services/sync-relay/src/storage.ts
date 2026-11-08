@@ -1682,8 +1682,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return agentConnectionStorage.authenticateAgentAccessToken(this, accessTokenHash, nowMs);
   }
 
+  // Opens no transaction, so a read inside a replica read's snapshot uses that snapshot.
   authenticateAgentAuthority(check: agentConnectionStorage.AgentAccessCheck, nowMs: number): agentConnectionStorage.AgentConnectionRow | null {
-    return agentConnectionStorage.authenticateAgentAuthority(this, check, nowMs);
+    return agentConnectionStorage.readAgentAuthority(this, check, nowMs);
   }
 
   recordAgentConnectionAction(connectionId: string, atMs: number): void {

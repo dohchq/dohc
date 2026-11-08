@@ -9,7 +9,7 @@ import { commitLinkEnrollment, linkPrincipalLimitReached, linkPrincipalStorageBy
 import { appendLogBatchInTransaction, fetchChatMessage, maxOriginSeq } from "./log";
 import type { SyncRelayLogRow } from "./types";
 import { workspaceUsageBytes } from "./workspaces";
-import { agentAuthorityInTransaction, agentName, recordAgentConnectionActionInTransaction, type AgentAccessCheck } from "./agentConnections";
+import { agentName, readAgentAuthority, recordAgentConnectionActionInTransaction, type AgentAccessCheck } from "./agentConnections";
 
 export type AppendLinkChatPostResult =
   | { ok: true; replayed: boolean; workspaceId: string; shareId: string; enrolled: boolean; row: SyncRelayLogRow }
@@ -195,11 +195,15 @@ export type AppendAgentChatPostResult =
  * author is the connection the access token names, sent to the MCP address
  * it signed in at, under its link principal and with its agent name. The
  * caller names only the body, an optional thread of the link's channel, and
- * a retry key, so it can neither choose nor forge the author. The connection, its link and the Group are
- * read again inside the transaction that writes the post.
+ * a retry key, so it can neither choose nor forge the author. The connection,
+ * its link and the Group are read again inside the transaction that writes
+ * the post, with the clock read there too, so a token that expired while the
+ * write waited for the lock writes nothing.
  */
 export function appendAgentChatPost(storage: StorageContext, input: {
   agent: AgentAccessCheck;
+  /** The relay's clock, read inside the write. */
+  now: () => number;
   threadId: string | null;
   body: string;
   idempotencyKey: string;
@@ -213,7 +217,7 @@ export function appendAgentChatPost(storage: StorageContext, input: {
     return { ok: false, reason: "invalid-input" };
   }
   return storage.tx((): AppendAgentChatPostResult => {
-    const connection = agentAuthorityInTransaction(storage, input.agent, createdAtMs);
+    const connection = readAgentAuthority(storage, input.agent, input.now());
     if (!connection) return { ok: false, reason: "not-authorized" };
     const authorized = authorizeLinkChatAction({ storage, grantId: connection.grantId, action: "append" });
     if (!authorized.ok) return { ok: false, reason: authorized.reason === "denied" ? "read-only" : "not-authorized" };

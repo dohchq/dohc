@@ -4,7 +4,7 @@ import { pkceS256Challenge } from "./linkSecurity";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
-import { agentName } from "./storage/agentConnections";
+import { AGENT_USED_REFRESH_TOKEN_RETENTION_MS, agentName } from "./storage/agentConnections";
 import type { StorageContext } from "./storage/context";
 import { LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES } from "./storage/limits";
 import {
@@ -360,7 +360,7 @@ describe("agent sign-in for share links", () => {
     expect(await agentStatuses(f, link)).toEqual({});
   });
 
-  it("keeps every used refresh token until the connection ends, so reusing the oldest still ends it", async () => {
+  it("keeps every refresh token used in the last 30 days, so reusing the oldest still ends the connection", async () => {
     const f = await fixture();
     const link = await createLink(f);
     const agent = await connect(f, link);
@@ -375,6 +375,30 @@ describe("agent sign-in for share links", () => {
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
     await expectRefused(await introspect(f, latest.accessToken));
     await expectRefused(await refresh(f, agent.clientId, latest.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+  });
+
+  it("forgets a refresh token 30 days after its use, refusing it as unknown and keeping the connection", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const agent = await connect(f, link);
+    const refreshTokens = () => inspect(f.dbPath, (db) => db.prepare(`SELECT COUNT(*) AS count FROM sync_relay_agent_tokens
+      WHERE connection_id = ? AND kind = 'refresh'`).get(agent.connectionId)?.count);
+    const first = await ok(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    f.now.value += AGENT_USED_REFRESH_TOKEN_RETENTION_MS;
+
+    // Used 30 days ago, and not yet pruned: unknown, so the connection stays.
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(refreshTokens()).toBe(2);
+    const second = await ok(await refresh(f, agent.clientId, String(first.refreshToken), link.resource));
+    expect(await ok(await introspect(f, String(second.accessToken)))).toMatchObject({ connectionId: agent.connectionId });
+    // That refresh pruned the old token's hash; the one it used and the new one remain.
+    expect(refreshTokens()).toBe(2);
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId).status).toBe("active");
+
+    // A token used just now still ends the connection when reused.
+    await expectRefused(await refresh(f, agent.clientId, String(first.refreshToken), link.resource));
     expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
   });
 

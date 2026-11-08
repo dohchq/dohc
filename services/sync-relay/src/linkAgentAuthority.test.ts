@@ -37,6 +37,7 @@ import {
   testStorage,
   type HandlerOverrides,
 } from "./testing";
+import { fixture as replicaFixture } from "./testing/replicaLink";
 
 // A connected agent reads and writes its link through the routes share-web's
 // MCP tools call, with `Authorization: DohcAgent <access token>` and the MCP
@@ -119,28 +120,29 @@ async function mintLink(f: Fixture, shareId: string, access: string, workspaceId
   return { shareId, grantId: String(link.grantId), secret, resource: `${SHARE_WEB_ORIGIN}/mcp/s/${secret}` };
 }
 
-function internal(f: Fixture, path: string, body: unknown): Promise<Response> {
+function internal(f: Pick<Fixture, "h">, path: string, body: unknown, exchangeKey = RELAY_EXCHANGE_KEY): Promise<Response> {
   return f.h(request(null, `/sync/link/${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY },
+    headers: { "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey },
     body: JSON.stringify(body),
   }));
 }
 
 // Signs an agent in on `link`, as share-web's sign-in does.
-async function connect(f: Fixture, link: Link): Promise<Agent> {
-  const clientId = String((await ok(await internal(f, "agent-clients", {
+async function connect(f: Pick<Fixture, "h">, link: Link, exchangeKey = RELAY_EXCHANGE_KEY): Promise<Agent> {
+  const send = (path: string, body: unknown) => internal(f, path, body, exchangeKey);
+  const clientId = String((await ok(await send("agent-clients", {
     registration: "registered", redirectUris: [REDIRECT], clientName: "Test agent",
   }))).clientId);
-  const requestId = String((await ok(await internal(f, "agent-authorizations", {
+  const requestId = String((await ok(await send("agent-authorizations", {
     clientId, resource: link.resource, redirectUri: REDIRECT, codeChallenge: pkceS256Challenge(VERIFIER), codeChallengeMethod: "S256",
   }))).requestId);
-  const code = String((await ok(await internal(f, "agent-authorizations/decision", { requestId, decision: "allow" }))).code);
-  const tokens = await ok(await internal(f, "agent-token", {
+  const code = String((await ok(await send("agent-authorizations/decision", { requestId, decision: "allow" }))).code);
+  const tokens = await ok(await send("agent-token", {
     grantType: "authorization_code", clientId, code, redirectUri: REDIRECT, codeVerifier: VERIFIER, resource: link.resource,
   }));
   const accessToken = String(tokens.accessToken);
-  const { connectionId } = await ok(await internal(f, "agent-introspect", { accessToken }));
+  const { connectionId } = await ok(await send("agent-introspect", { accessToken }));
   return { ...link, clientId, accessToken, refreshToken: String(tokens.refreshToken), connectionId: String(connectionId) };
 }
 
@@ -185,6 +187,31 @@ function sql(f: Fixture, statement: string, ...values: Array<string | number>): 
     db.close();
   }
 }
+
+// What ends an agent's access between a route's check and its write, or
+// between two chunks of a response. Each commits straight in storage, as a
+// racing owner request would, so the route's own stream ending is not what
+// stops it: only the check in the write or before the chunk can.
+const racedEnds: Array<[string, (f: Fixture, storage: SyncRelayStorage, agent: Agent) => void]> = [
+  ["the owner disconnects it", (f, storage, agent) => {
+    expect(storage.disconnectAgentConnection({
+      workspaceId: WORKSPACE, shareId: agent.shareId, grantId: agent.grantId, connectionId: agent.connectionId,
+      nowMs: f.now.value, guard: () => undefined,
+    })).not.toBeNull();
+  }],
+  ["the owner resets the link", (f, storage, agent) => {
+    expect(storage.rotateLinkGrant({
+      shareId: agent.shareId, grantId: agent.grantId, rotatedAtMs: f.now.value, expectedDependentGrantIds: [], guard: () => {},
+      mintCredential: () => ({ credentialId: "raced-credential", secretHash: "raced-secret-hash" }),
+    }).ok).toBe(true);
+  }],
+  ["the owner ends the link", (f, storage, agent) => {
+    expect(storage.revokeShareGrant({ shareId: agent.shareId, grantId: agent.grantId, revokedAtMs: f.now.value }).ok).toBe(true);
+  }],
+  ["its access token expires", (f) => {
+    f.now.value += AGENT_ACCESS_TOKEN_TTL_MS;
+  }],
+];
 
 describe("an agent reading its link", () => {
   it("reads the share, its current files, its log, and a blob as the link's holder does", async () => {
@@ -293,27 +320,69 @@ describe("an agent reading its link", () => {
     await ok(await f.h(linkRequest(holder, "/sync/link/share")));
   });
 
-  // Each pull of the stream checks the token again.
-  it.each([
-    ["the owner disconnects it", async (f: Fixture, agent: Agent) => { await ok(await disconnect(f, agent)); }],
-    ["its access token expires", async (f: Fixture) => { f.now.value += AGENT_ACCESS_TOKEN_TTL_MS; }],
-  ] as const)("ends a blob download between chunks once %s", async (_name, end) => {
-    const f = await fixture();
-    const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
-    await ownerWrites(f, "docs/large.md", content);
-    const agent = await connect(f, await createLink(f));
+  // Each pull of a response checks the token again: a blob, and the current
+  // listing, whose JSON spans several chunks once the share holds enough files.
+  const streams: Array<[string, (f: Fixture) => Promise<string>]> = [
+    ["a blob download", async (f) => {
+      const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
+      await ownerWrites(f, "docs/large.md", content);
+      return `/sync/link/blobs/${sha256(content)}`;
+    }],
+    ["the current listing", async (f) => {
+      await appendLog(f.h, OWNER, WORKSPACE, Array.from({ length: 450 }, () => {
+        const originSeq = ownerSeq++;
+        return moment(`docs/many/${String(originSeq).padStart(3, "0")}-${"x".repeat(200)}.md`, SHARED, {
+          originSeq, payload: { payloadAfterContentKind: "text", payloadAfterByteLength: Buffer.byteLength(SHARED) },
+        });
+      }), { originId: "origin-owner" });
+      return "/sync/link/current";
+    }],
+  ];
 
-    const whole = await f.h(agentRequest(agent, `/sync/link/blobs/${sha256(content)}`));
-    expect(await whole.text()).toBe(content);
+  describe.each(streams)("%s", (_stream, setup) => {
+    it.each(racedEnds)("ends between chunks once %s", async (_name, end) => {
+      const f = await fixture();
+      const path = await setup(f);
+      const agent = await connect(f, await createLink(f));
 
-    const response = await f.h(agentRequest(agent, `/sync/link/blobs/${sha256(content)}`));
-    expect(response.status).toBe(200);
-    const reader = response.body!.getReader();
-    const first = await reader.read();
-    expect(first.done).toBe(false);
-    expect(first.value?.byteLength).toBe(64 * 1024);
-    await end(f, agent);
-    await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
+      const whole = await f.h(agentRequest(agent, path));
+      expect(whole.status).toBe(200);
+      expect((await whole.arrayBuffer()).byteLength).toBeGreaterThan(64 * 1024);
+
+      const response = await f.h(agentRequest(agent, path));
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      expect(first.value?.byteLength).toBe(64 * 1024);
+      end(f, f.storage, agent);
+      await expect(reader.read()).rejects.toMatchObject({ code: "not_found" });
+    });
+  });
+
+  // A relay serving current reads from the owner's replica authenticates the
+  // agent inside the replica read's own snapshot.
+  it("reads the replica's current files and streams its blobs", async () => {
+    const f = await replicaFixture();
+    try {
+      const exchangeKey = "e".repeat(64);
+      const resource = `https://viewer.dohc.test/mcp/s/${f.secret}`;
+      const agent = await connect(f, { shareId: "s", grantId: "link", secret: f.secret, resource }, exchangeKey);
+      const asAgent = (path: string) => f.h(agentRequest(agent, path, {}, { "x-dohc-relay-exchange-key": exchangeKey }));
+      const text = "x".repeat(200_000);
+      f.publish(text);
+
+      const current = await ok(await asAgent("/sync/link/current"));
+      expect(current.files).toEqual([expect.objectContaining({ path: "docs/a.md", blobSha256: sha256(text) })]);
+      expect(current).toEqual(await ok(await f.send("/sync/link/current")));
+      await ok(await asAgent("/sync/link/log?current=true&since=0"));
+      // Four chunks, each checked again inside the replica read.
+      const blob = await asAgent(`/sync/link/blobs/${sha256(text)}`);
+      expect(blob.status).toBe(200);
+      expect(await blob.text()).toBe(text);
+    } finally {
+      f.dispose();
+    }
   });
 });
 
@@ -377,22 +446,19 @@ describe("an agent in its link's discussion", () => {
     expect(connection(f, comment).last_action_at_ms).toBeNull();
   });
 
-  it("refuses a post whose connection ends inside the write, storing nothing", async () => {
+  it.each(racedEnds)("refuses a post once %s inside the write, storing nothing", async (_name, end) => {
     const f = await fixture();
     const agent = await connect(f, await createLink(f, ["docs"], "comment"));
-    // The route's own check passes, then the owner disconnects before the write's transaction.
+    await ok(await agentPost(f, agent, { body: "first", idempotencyKey: "first" }));
+    // The route's own check passes, then access ends before the write's transaction reads the clock.
     const storage = interceptStorage(f.storage, {
       appendLinkDiscussionMessage: (target, input) => target.appendLinkDiscussionMessage({ ...input, guard: () => {
         input.guard?.();
-        expect(target.disconnectAgentConnection({
-          workspaceId: WORKSPACE, shareId: agent.shareId, grantId: agent.grantId, connectionId: agent.connectionId,
-          nowMs: f.now.value, guard: () => undefined,
-        })).not.toBeNull();
+        end(f, target, agent);
       } }),
     });
     await expectRefused(await handler(storage, f.now)(agentRequest(agent, "/sync/link/discussion", jsonBody({ body: "late", idempotencyKey: "late" }))));
-    expect(messages(f)).toEqual([]);
-    expect(connection(f, agent)).toMatchObject({ status: "disconnected", last_action_at_ms: null });
+    expect(messages(f).map((message) => message.body)).toEqual(["first"]);
   });
 });
 
@@ -468,24 +534,23 @@ describe("an agent writing a Collection through an Edit link", () => {
     expect(ledger(f)).toEqual([]);
   });
 
-  it("refuses a write whose connection ends after the route authenticated it, storing nothing", async () => {
+  it.each(racedEnds)("refuses a write once %s after the route authenticated it, storing nothing", async (_name, end) => {
     const { f, link } = await collectionFixture();
     const agent = await connect(f, link);
     const one = automations(STAMP);
+    const two = automations(STAMP.replace("Packed", "Ready"));
+    await ok(await f.h(agentRequest(agent, "/sync/link/collection-writes",
+      writeBody("agent-1", [linkCreate(`${PACKING}/automations.yaml`, one)]))));
     const storage = interceptStorage(f.storage, {
       commitCollectionWrite: (target, input) => {
-        expect(target.disconnectAgentConnection({
-          workspaceId: WORKSPACE, shareId: agent.shareId, grantId: agent.grantId, connectionId: agent.connectionId,
-          nowMs: f.now.value, guard: () => undefined,
-        })).not.toBeNull();
+        end(f, target, agent);
         return target.commitCollectionWrite(input);
       },
     });
     await expectRefused(await handler(storage, f.now)(agentRequest(agent, "/sync/link/collection-writes",
-      writeBody("agent-1", [linkCreate(`${PACKING}/automations.yaml`, one)]))));
-    expect(ledger(f)).toEqual([]);
-    expect(f.storage.getBlob(WORKSPACE, sha256(one))).toBeNull();
-    expect(connection(f, agent)).toMatchObject({ status: "disconnected", last_action_at_ms: null });
+      writeBody("agent-2", [linkEdit(`${PACKING}/automations.yaml`, one, two)]))));
+    expect(ledger(f).map((row) => row.submit_id)).toEqual(["agent-1"]);
+    expect(f.storage.getBlob(WORKSPACE, sha256(two))).toBeNull();
   });
 
   it("refuses a write whose token expires while it waits, reading the clock inside the write", async () => {

@@ -8,7 +8,7 @@ import {
 } from "./discussionActivity";
 import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
-import type { LinkAuthorityResolver } from "./linkAuthority";
+import type { LinkAuthorityResolver, LinkJsonResponse } from "./linkAuthority";
 import type { LinkEgressRateLimiter } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
@@ -42,7 +42,7 @@ export function createLinkReadRoutes(
   nowMs: () => number,
   linkCurrentFileLimit: number,
   linkAuthority: Pick<LinkAuthorityResolver, "require" | "fresh">,
-  linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response,
+  linkJsonResponse: LinkJsonResponse,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   newestFilteredOpFreshness: ReturnType<typeof createShareReadQueries>["newestFilteredOpFreshness"],
   linkRevisionByteLength: ReturnType<typeof createShareReadQueries>["linkRevisionByteLength"],
@@ -96,7 +96,7 @@ export function createLinkReadRoutes(
       const presentation = createAccountlessPathProjection(
         fresh.effectiveSelector,
       );
-      return linkJsonResponse(fresh.shareId, fresh.grantId, {
+      return linkJsonResponse(fresh, {
         ok: true,
         receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
         effectiveSelector: presentation.selector,
@@ -104,7 +104,7 @@ export function createLinkReadRoutes(
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
         ...linkChannel(fresh.grantId),
         ...freshness,
-      });
+      }, request.signal);
     }
 
     if (route.route === "link-current") {
@@ -112,7 +112,7 @@ export function createLinkReadRoutes(
         const body=replica.inventory({grantId:capability.grantId,generation:capability.generation},
           ()=>requireFresh(),new URL(request.url).searchParams.get("collectionPath"));
         if(body.files.length>linkCurrentFileLimit)throw notFound();
-        return linkJsonResponse(capability.shareId,capability.grantId,{...body,...linkChannel(capability.grantId)});
+        return linkJsonResponse(capability,{...body,...linkChannel(capability.grantId)},request.signal);
       }
       const snapshot = storage.readCurrentFileState({
         workspaceId: share.workspaceId,
@@ -152,7 +152,7 @@ export function createLinkReadRoutes(
         };
       });
       storage.indexReceivedWorkTargets(observed);
-      return linkJsonResponse(fresh.shareId, fresh.grantId, {
+      return linkJsonResponse(fresh, {
         ok: true,
         effectiveSelector: presentation.selector,
         access: fresh.access,
@@ -162,7 +162,7 @@ export function createLinkReadRoutes(
         nextCursor: snapshot.nextCursor,
         epochLogFloor: snapshot.epochLogFloor,
         ...freshness,
-      });
+      }, request.signal);
     }
 
     const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
@@ -190,7 +190,7 @@ export function createLinkReadRoutes(
           }
           page=read();
         }
-        return linkJsonResponse(capability.shareId,capability.grantId,{ok:true,...page});
+        return linkJsonResponse(capability,{ok:true,...page},request.signal);
       }
       if (!currentOnly && capability.access !== "edit") throw notFound();
       const freshRead = () => {
@@ -299,11 +299,11 @@ export function createLinkReadRoutes(
             request.signal.aborted
           ) {
             freshRead();
-            return linkJsonResponse(capability.shareId, capability.grantId, {
+            return linkJsonResponse(capability, {
               ok: true,
               ...page,
               epochLogFloor: currentEpochLogFloor,
-            });
+            }, request.signal);
           }
         }
         const fresh = freshRead();
@@ -325,18 +325,18 @@ export function createLinkReadRoutes(
           currentEpochLogFloor,
         );
         freshRead();
-        return linkJsonResponse(capability.shareId, capability.grantId, {
+        return linkJsonResponse(capability, {
           ok: true,
           ...page,
           epochLogFloor: currentEpochLogFloor,
-        });
+        }, request.signal);
       }
       freshRead();
-      return linkJsonResponse(capability.shareId, capability.grantId, {
+      return linkJsonResponse(capability, {
         ok: true,
         ...page,
         epochLogFloor,
-      });
+      }, request.signal);
     }
 
     assertSha256(route.sha256);

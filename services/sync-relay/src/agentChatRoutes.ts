@@ -137,6 +137,7 @@ export function createAgentChatRoutes(input: {
         (body.threadId !== undefined && typeof body.threadId !== "string")) throw new Refused();
     const result = storage.appendAgentChatPost({
       agent: credential(body),
+      now: nowMs,
       threadId: body.threadId ?? null,
       body: body.body,
       idempotencyKey: body.idempotencyKey,

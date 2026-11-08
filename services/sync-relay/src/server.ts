@@ -66,7 +66,7 @@ import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/sha
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkChatRoutes } from "./linkChatRoutes";
 import { createLinkReadRoutes } from "./linkReadRoutes";
-import { createLinkAuthorityResolver } from "./linkAuthority";
+import { createLinkAuthorityResolver, type LinkAuthority, type LinkJsonResponse } from "./linkAuthority";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
 import { createShareInventoryRoutes } from "./shareInventoryRoutes";
@@ -652,25 +652,28 @@ export function createSyncRelayHandler({
     discussionActivity,
   }) : null;
 
-  const linkJsonResponse = (
-    shareId: string,
-    grantId: string,
-    body: unknown,
-  ): Response => {
+  const linkJsonResponse: LinkJsonResponse = (authority, body, signal) => {
     const bytes = new TextEncoder().encode(JSON.stringify(body));
     const settleEgress = linkGrantEgressRateLimiter.reserve(
-      grantId,
+      authority.grantId,
       bytes.byteLength,
       nowMs(),
     );
     if (!settleEgress) throw relayError("link_read_rate_limited");
+    // An agent's answer stops once its token expires or its connection or link ends.
+    let stream: { signal: AbortSignal; guard(): void } | undefined;
+    if (authority.credential !== undefined && authority.credential.kind === "agent") {
+      const agent: LinkAuthority = authority;
+      stream = { signal, guard: () => { linkAuthority.fresh(agent); } };
+    }
     return respondWithLinkBytes(
       bytes,
-      shareId,
-      grantId,
+      authority.shareId,
+      authority.grantId,
       () => undefined,
       settleEgress,
       { "content-type": "application/json" },
+      stream,
     );
   };
 
