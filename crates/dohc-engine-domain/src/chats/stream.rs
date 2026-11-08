@@ -2,10 +2,10 @@
 //! one list, oldest first, read a page at a time from the newest end.
 
 use super::{
-    ChatActorKind, ChatChannel, ChatMessage, ChatMessageLinkAuthor, ChatReaction, ChatThread,
-    ChatThreadLane, FEED_LIMIT_MAX, LinkedChatStore, active_reactions_for_messages, collect,
-    hydrate_attachments_for_messages, map_message_row, message_count_for_thread,
-    persisted_nonnegative_safe, require_channel, require_thread,
+    ChatActorKind, ChatChannel, ChatDecision, ChatMessage, ChatMessageLinkAuthor, ChatReaction,
+    ChatThread, ChatThreadLane, FEED_LIMIT_MAX, LinkedChatStore, active_reactions_for_messages,
+    collect, hydrate_attachments_for_messages, map_decision_row, map_message_row,
+    message_count_for_thread, persisted_nonnegative_safe, require_channel, require_thread,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, params};
@@ -127,6 +127,7 @@ pub struct StreamAgentRequest {
 pub struct StreamItem {
     pub position: StreamPosition,
     pub message: ChatMessage,
+    pub decision: Option<ChatDecision>,
     pub reactions: Vec<ChatReaction>,
     pub agent_requests: Vec<StreamAgentRequest>,
     /// Set for, and only for, a post.
@@ -316,6 +317,7 @@ impl<'a> LinkedChatStore<'a> {
             hydrate_attachments_for_messages(conn, workspace_id, messages.values_mut())?;
             let mut agent_replies = messages_by_id(conn, workspace_id, &agent_reply_ids)?;
             let mut reactions = active_reactions_for_messages(conn, workspace_id, &item_ids)?;
+            let mut decisions = decisions_for_messages(conn, workspace_id, &item_ids)?;
             let mut requests = agent_requests_for_messages(conn, workspace_id, &item_ids)?;
 
             let mut items = Vec::with_capacity(keys.len());
@@ -348,6 +350,7 @@ impl<'a> LinkedChatStore<'a> {
                     .remove(&message_id)
                     .ok_or_else(|| corrupt("stream item message is missing"))?;
                 items.push(StreamItem {
+                    decision: decisions.remove(&message_id),
                     reactions: reactions.remove(&message_id).unwrap_or_default(),
                     agent_requests: requests.remove(&message_id).unwrap_or_default(),
                     position,
@@ -563,6 +566,34 @@ fn post_repliers(
         repliers.truncate(STREAM_REPLIERS_MAX);
     }
     Ok(grouped)
+}
+
+fn decisions_for_messages(
+    conn: &Connection,
+    workspace_id: &str,
+    message_ids: &[String],
+) -> Result<HashMap<String, ChatDecision>, DomainError> {
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms, \
+                    d.options_json, d.chosen_option \
+             FROM json_each(?2) ids \
+             CROSS JOIN chat_decisions d ON d.workspace_id = ?1 AND d.message_id = ids.value",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, json_ids(message_ids)?],
+            map_decision_row,
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(collect(rows)?
+        .into_iter()
+        .map(|decision| (decision.message_id.clone(), decision))
+        .collect())
 }
 
 fn messages_by_id(

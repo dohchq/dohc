@@ -83,6 +83,15 @@ describe("chat presentation admission", () => {
     expect(await r.present(foreign, "t")).toMatchObject({ self: false });
     expect((await r.present(message({ author: { kind: "human", displayName: "A different label" } }), "t")).group).toBe(account.group);
   });
+  it("names the agent only on your agent's message from one of its runs", async () => {
+    const r = request();
+    expect(await r.present({ ...local("agent"), authorAgentId: "codex" }, "t")).toMatchObject({ self: true, agentId: "codex" });
+    expect(await r.present(local("agent"), "t")).not.toHaveProperty("agentId");
+    const theirs = message({ author: { kind: "agent", displayName: "Codex" }, authorUserId: "someone", authorAgentId: "codex" });
+    const token = await r.present(theirs, "t");
+    expect(token.self).toBe(false);
+    expect(token).not.toHaveProperty("agentId");
+  });
   it.each([credentials, null])("uses the own message hue for the own token %#", async (account) => {
     const r = request();
     const own = ownActorPresentation("device", account);

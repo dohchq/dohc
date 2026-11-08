@@ -2447,6 +2447,7 @@ mod tests {
                 Some(first_handle.clone()),
                 json!({
                     "runId": "run-survives",
+                    "agentId": "default",
                     "command": "agent",
                     "nowMs": 20,
                 }),

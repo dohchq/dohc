@@ -1021,6 +1021,49 @@ fn channel_summary_uses_earliest_message_and_500_char_snippet() {
 }
 
 #[test]
+fn channel_summary_names_the_agent_that_wrote_the_opening_message() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "opening".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Agent,
+                author_display_name: "Codex".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                origin: None,
+                body: "Done".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: Some("codex".to_owned()),
+                author_reported: None,
+                named_agent_ids: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    let opening = summaries[0]
+        .opening_message
+        .as_ref()
+        .expect("opening message");
+    assert_eq!(opening.author_agent_id.as_deref(), Some("codex"));
+}
+
+#[test]
 fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);

@@ -8,6 +8,7 @@ import { initTheme } from "./theme";
 import { initKeyboardNavigation } from "./keyboardNavigation";
 import { initReducedMotion } from "./reducedMotion";
 import { initWindowFullScreen } from "./windowFullScreen";
+import { initWindowFocus } from "./windowFocus";
 import "@fontsource-variable/inter";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
@@ -20,6 +21,7 @@ initTheme();
 const stopReducedMotion = initReducedMotion();
 window.addEventListener("pagehide", stopReducedMotion, { once: true });
 initWindowFullScreen();
+initWindowFocus();
 initKeyboardNavigation();
 installGlobalErrorReporters();
 // Before the root renders: the set-aside recoveries the last app run

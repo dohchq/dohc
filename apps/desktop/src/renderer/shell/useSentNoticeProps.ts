@@ -177,25 +177,30 @@ export function useSentNoticeProps(input: {
     () => (sentNotices?.notices ?? []).filter(notice => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
     [describe, sentNotices?.notices, workspaceId],
   );
-  // An agent's reply the person can already see needs no notice: no toast,
-  // and no row once the dismiss lands. A notice names its reply only when the
-  // run finished with one; a failed run still tells the person.
-  const seenReply = useMemo(() => {
+  // An agent run the person can already see in its chat posts no toast. A
+  // notice names its reply only when the run finished with one; that notice
+  // leaves no row once the dismiss lands. A failed run's notice says why in
+  // its body, and its row stays, read, for Copy and Try again.
+  const seenRun = useMemo(() => {
     const notice = sentNotices?.toast;
     const run = notice ? agentRunOfNotice(notice, workspaceId) : null;
-    return notice && run && notice.target?.message !== undefined && chatOnScreen(run.threadId) ? notice : null;
+    const replied = notice?.target?.message !== undefined;
+    return notice && run && (replied || notice.body !== "") && chatOnScreen(run.threadId) ? { notice, replied } : null;
   }, [sentNotices?.toast, workspaceId]);
   const dismissNotice = sentNotices?.dismiss;
+  const readNotices = sentNotices?.read;
   const hideToast = sentNotices?.hideToast;
   useEffect(() => {
-    if (!seenReply || !dismissNotice || !hideToast) return;
+    if (!seenRun || !dismissNotice || !readNotices || !hideToast) return;
     hideToast();
-    // A dismiss that fails leaves the row in Notices, which is harmless.
-    dismissNotice(sentNoticeRef(seenReply)).catch(() => undefined);
-  }, [dismissNotice, hideToast, seenReply]);
+    // A dismiss or read that fails leaves the row in Notices, unread, which
+    // is harmless.
+    const ref = sentNoticeRef(seenRun.notice);
+    (seenRun.replied ? dismissNotice(ref) : readNotices([ref])).catch(() => undefined);
+  }, [dismissNotice, hideToast, readNotices, seenRun]);
   const toast = useMemo(
-    () => (sentNotices?.toast && sentNotices.toast !== seenReply && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
-    [describe, seenReply, sentNotices?.toast, workspaceId],
+    () => (sentNotices?.toast && sentNotices.toast !== seenRun?.notice && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    [describe, seenRun, sentNotices?.toast, workspaceId],
   );
 
   // A list main could not read is a failure with a way to ask again.

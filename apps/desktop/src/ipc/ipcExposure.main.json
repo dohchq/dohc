@@ -343,6 +343,7 @@
     "desktop:user-settings-changed",
     "desktop:version-round",
     "desktop:version-round-answer",
+    "desktop:window-focused",
     "desktop:window-full-screen",
     "desktop:withdraw-share-changes",
     "desktop:workspace-activated",

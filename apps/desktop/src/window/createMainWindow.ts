@@ -362,6 +362,14 @@ export function createMainWindow(options?: {
   window.on("enter-full-screen", () => sendFullScreen(true));
   window.on("leave-full-screen", () => sendFullScreen(false));
   contents.on("dom-ready", () => sendFullScreen(window.isFullScreen()));
+  // The same for whether the window has focus. Focus that moves into an
+  // app's webview leaves the window focused.
+  const sendFocused = (focused: boolean) => {
+    if (!contents.isDestroyed()) contents.send(CHANNELS.windowFocused, { focused });
+  };
+  window.on("focus", () => sendFocused(true));
+  window.on("blur", () => sendFocused(false));
+  contents.on("dom-ready", () => sendFocused(window.isFocused()));
 
   const devServer = devServerUrl();
   const query = role === "manager" ? { view: "manager" } : undefined;

@@ -1669,6 +1669,8 @@ export const ActorPresentation = z.object({
   group: z.string(),
   hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
+  // The Settings agent that wrote your agent's message in one of its runs. Its Settings color wins over `hue`.
+  agentId: z.string().min(1).max(64).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
 export const AgentColorChangedEvent = z.object({
@@ -6067,6 +6069,11 @@ export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 export const WindowFullScreenEvent = z.object({ fullScreen: z.boolean() });
 export type WindowFullScreenEvent = z.infer<typeof WindowFullScreenEvent>;
 
+// Main sends whether a window has focus to its renderer on every load and every
+// change. Focus that moves into an app's webview leaves the window focused.
+export const WindowFocusedEvent = z.object({ focused: z.boolean() });
+export type WindowFocusedEvent = z.infer<typeof WindowFocusedEvent>;
+
 // One zoom mutation, owned by main: it persists appearance.zoomLevel before
 // applying it to the windows, and answers with the settings now on disk so
 // the caller can paint the level in effect. The menu accelerators call the
@@ -6895,14 +6902,14 @@ export const chatDispatchNoticeOperations = {
     scope: "workspace",
     channel: "desktop:register-chat-dispatch-notices",
     payload: WorkspaceIdPayload, result: ChatDispatchNoticesEvent,
-    guard: "active-workspace", inactiveMessage: "Open this workspace to read its dispatch notices.",
+    guard: "active-workspace", inactiveMessage: "Open this workspace to read its notices about agent replies.",
   },
   dismissChatDispatchNotice: {
     capabilityId: "chat.dispatch.notice.dismiss",
     scope: "workspace",
     channel: "desktop:dismiss-chat-dispatch-notice",
     payload: WorkspaceIdPayload.extend({ id: z.string().min(1) }),
-    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its dispatch notice.",
+    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its notice about agent replies.",
   },
 } as const satisfies OperationTable;
 
@@ -7705,6 +7712,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onWindowFocused(listener: (event: WindowFocusedEvent) => void): () => void;
   onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,

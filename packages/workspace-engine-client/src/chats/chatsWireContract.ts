@@ -329,6 +329,7 @@ type ChatDispatchEnqueueParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatDispatchClaimParams = ChatsJsonObject & {
+  agentId: string;
   runId: string;
   command?: string;
   logPath?: string;
@@ -769,6 +770,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   bodySnippet: Schema.String,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   authorReported: Schema.optionalKey(ChatReportedAgentSchema),
+  authorAgentId: Schema.optionalKey(Schema.String),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 }).check(noAccountOnLinkMessage);
 const ChatChannelThreadSummarySchema = mutableStruct({
@@ -850,6 +852,7 @@ const ChatStreamPageSchema = mutableStruct({
       mutableStruct({
         position: ChatStreamPositionSchema,
         message: ChatMessageSchema,
+        decision: Schema.optionalKey(ChatDecisionSchema),
         reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
         post: Schema.optionalKey(ChatStreamPostSchema),
       }),

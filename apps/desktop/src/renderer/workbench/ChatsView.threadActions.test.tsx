@@ -2,8 +2,10 @@ import "../../testing/legendListMock";
 // @vitest-environment jsdom
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileResolvedChatDecision } from "./ChatsView";
+import { chatOnScreen } from "./chatsOnScreen";
+import { tellWindowFocused } from "../../testing/windowFocus";
 import {
   NOW,
   thread,
@@ -764,5 +766,30 @@ describe("ChatsView runs that didn't reply", () => {
     await act(async () => fail(new Error("This workspace is not open. Open it again.")));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
     expect(onError.mock.calls[0]![0]).toContain("dohc could not start your agent's run in \"Should we ship on Friday?\" again.");
+  });
+});
+
+describe("ChatsView post on screen", () => {
+  beforeEach(() => {
+    tellWindowFocused(true);
+  });
+  afterEach(() => {
+    tellWindowFocused(false);
+  });
+
+  it("counts an open post as on screen, so a notice about its run is skipped", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect(chatOnScreen("thread-1")).toBe(false);
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    expect(chatOnScreen("thread-1")).toBe(true);
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await screen.findByTestId("chats-channel-view");
+    expect(chatOnScreen("thread-1")).toBe(false);
   });
 });

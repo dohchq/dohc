@@ -18,16 +18,23 @@ const windows = { skip: process.platform !== "win32" || process.arch !== "x64", 
 const source = name => fileURLToPath(new URL(`../src/agents/${name}`, import.meta.url));
 const descendant = `import { createServer } from "node:net"; import { writeFileSync } from "node:fs";
 const [marker, mode] = process.argv.slice(2);
-const server = createServer(socket => { socket.destroy(); if (mode === "drain") process.stdout.write("drained\\n", () => process.exit(0)); });
+const server = createServer(socket => socket.destroy());
 server.listen(0, "127.0.0.1", () => {
   writeFileSync(marker, JSON.stringify({ port: server.address().port }));
   if (mode === "flood") process.stdout.write(Buffer.alloc(70 * 1024, 120));
 });`;
 // Detached keeps the descendant out of the launcher's libuv job; it still holds the inherited pipes.
-const launcher = `import { spawn } from "node:child_process"; import { fileURLToPath } from "node:url";
+// The launcher works on, which keeps the wrapper running, unless its third argument is "exits":
+// then it exits once the descendant listens.
+const launcher = `import { spawn } from "node:child_process"; import { readFileSync, watch } from "node:fs";
+import { dirname } from "node:path"; import { fileURLToPath } from "node:url";
+const [marker, , then] = process.argv.slice(2);
 spawn(process.execPath, [fileURLToPath(new URL("./descendant.mjs", import.meta.url
 )), ...process.argv.slice(2)],
-  { detached: true, windowsHide: true, stdio: ["ignore", "inherit", "inherit"] }).unref();`;
+  { detached: true, windowsHide: true, stdio: ["ignore", "inherit", "inherit"] }).unref();
+const ready = () => { try { JSON.parse(readFileSync(marker, "utf8")); return true; } catch { return false; } };
+if (then !== "exits") setInterval(() => {}, 1000);
+else if (!ready()) { const watcher = watch(dirname(marker), () => { if (ready()) watcher.close(); }); if (ready()) watcher.close(); }`;
 
 function waitForFile(path) {
   const directory = join(path, "..");
@@ -54,9 +61,9 @@ function prepared() {
     await compileOwner([source("agentProbeOwner.cs")], executable);
     await writeFile(join(directory, "descendant.mjs"), descendant);
     await writeFile(join(directory, "launcher.mjs"), launcher);
-    // The wrapper prints a version, starts the descendant, marks its own last step, and exits.
+    // The wrapper prints a version and runs the launcher, which starts the descendant.
     await writeFile(join(directory, "probe.cmd"), ["@echo off", "echo probe 1.2.3",
-      `"${process.execPath}" "${join(directory, "launcher.mjs")}" %*`, 'echo {}> "%~1.wrapper"', "exit /b 0", ""].join("\r\n"));
+      `"${process.execPath}" "${join(directory, "launcher.mjs")}" %*`, "exit /b 0", ""].join("\r\n"));
     // Unrelated control: a process this test owns, outside every probe.
     const sleeperMarker = join(directory, "sleeper.json");
     const sleeper = spawn(process.execPath, [join(directory, "descendant.mjs"), sleeperMarker, "hold"], { windowsHide: true, stdio: "ignore" });
@@ -73,9 +80,9 @@ after(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function probe(context, name, mode, signal = new AbortController().signal) {
+function probe(context, name, mode, signal = new AbortController().signal, ...then) {
   const marker = join(context.directory, `${name}.json`);
-  const command = resolveSpawnCommand(join(context.directory, "probe.cmd"), [marker, mode], { cwd: homedir() });
+  const command = resolveSpawnCommand(join(context.directory, "probe.cmd"), [marker, mode, ...then], { cwd: homedir() });
   return { marker, running: runProbeProcess(command, signal, context.owner) };
 }
 const admission = (context, marker) => Buffer.from(JSON.stringify({
@@ -90,12 +97,11 @@ function startOwner(context, args) {
   return { child, closed };
 }
 
-test("cancelling a probe ends a descendant that holds its pipes after the wrapper exits", windows, async () => {
+test("cancelling a probe ends its wrapper and a descendant that holds its pipes", windows, async () => {
   const context = await prepared();
   const controller = new AbortController(), reason = new Error("cancelled");
   const { marker, running } = probe(context, "cancel", "hold", controller.signal);
   const { port } = await waitForFile(marker);
-  await waitForFile(`${marker}.wrapper`);
   assert.equal(await listening(port), true);
   controller.abort(reason);
   await assert.rejects(running, error => error === reason);
@@ -116,15 +122,14 @@ test("the deadline ends a descendant that holds the pipes and keeps the partial 
   assert.equal(await listening(context.sleeper.port), true);
 });
 
-test("a descendant that releases the pipes lets the probe finish with the wrapper's code", windows, async () => {
+test("the wrapper's exit finishes the probe with its code and ends what it left running", windows, async () => {
   const context = await prepared();
-  const { marker, running } = probe(context, "drain", "drain");
-  await waitForFile(`${marker}.wrapper`);
-  const { port } = await waitForFile(marker);
-  assert.equal(await listening(port), true); // Connecting releases the descendant.
+  const { marker, running } = probe(context, "exits", "hold", undefined, "exits");
   const result = await running;
   assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /probe 1\.2\.3[\s\S]*drained/);
+  assert.match(result.stdout, /probe 1\.2\.3/);
+  const { port } = JSON.parse(await readFile(marker, "utf8"));
+  assert.equal(await listening(port), false);
   assert.equal(await listening(context.sleeper.port), true);
 });
 

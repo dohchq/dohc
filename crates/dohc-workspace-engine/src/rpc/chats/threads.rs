@@ -255,6 +255,8 @@ struct OpeningMessageWire<'a> {
     automation: Option<AutomationWire<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_agent_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +297,7 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 author_owner_display_name: opening.author_owner_display_name.as_deref(),
                 automation: opening.automation.as_ref().map(AutomationWire::from),
                 author_reported: opening.author_reported.as_ref(),
+                author_agent_id: opening.author_agent_id.as_deref(),
             }),
     })
 }
@@ -748,6 +751,7 @@ mod tests {
             }),
             link_author: None,
             author_reported: None,
+            author_agent_id: None,
             body_snippet: "hello".to_owned(),
             reactions: Vec::new(),
         };
@@ -768,6 +772,20 @@ mod tests {
                 "authorUserId": "user",
                 "automation": { "automationId": "collection:tasks#stamp" },
             })
+        );
+        let agent = ChannelOpeningMessage {
+            author_kind: ChatActorKind::Agent,
+            automation: None,
+            author_agent_id: Some("codex".to_owned()),
+            ..summary.opening_message.clone().expect("opening message")
+        };
+        let summary = ChannelThreadSummary {
+            opening_message: Some(agent),
+            ..summary
+        };
+        assert_eq!(
+            channel_thread_summary_json(&summary)["openingMessage"]["authorAgentId"],
+            json!("codex")
         );
     }
 

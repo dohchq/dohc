@@ -78,6 +78,87 @@ async fn call_error(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_claim_requires_an_agent_and_takes_only_its_requests() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-claim-agent").await;
+    let mut id = 1;
+    for params in [
+        json!({ "runId": "run" }),
+        json!({ "runId": "run", "agentId": null }),
+        json!({ "runId": "run", "agentId": 7 }),
+        json!({ "runId": "run", "agentId": "" }),
+        json!({ "runId": "run", "agentId": "Not an id" }),
+    ] {
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.claimNextPending",
+            params,
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+    for (trigger, agent, at) in [("other-first", "other", 10), ("listed", "default", 20)] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.enqueue",
+            json!({
+                "triggerMessageId": trigger,
+                "agentId": agent,
+                "threadId": "thread",
+                "nowMs": at,
+            }),
+        )
+        .await;
+    }
+    let claimed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "agentId": "default", "runId": "run", "command": "listed-command", "nowMs": 30 }),
+    )
+    .await;
+    assert_eq!(claimed["dispatch"]["triggerMessageId"], json!("listed"));
+    assert_eq!(claimed["dispatch"]["agentId"], json!("default"));
+    assert_eq!(claimed["run"]["agentId"], json!("default"));
+    assert_eq!(claimed["run"]["command"], json!("listed-command"));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.complete",
+        json!({ "runId": "run", "exitCode": 0, "nowMs": 40 }),
+    )
+    .await;
+    let empty = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "agentId": "default", "runId": "run-empty", "nowMs": 50 }),
+    )
+    .await;
+    assert_eq!(empty, Value::Null);
+    let pending = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending["dispatches"].as_array().expect("pending").len(), 1);
+    assert_eq!(pending["dispatches"][0]["agentId"], json!("other"));
+    assert_eq!(pending["dispatches"][0]["attemptCount"], json!(0));
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_thread_revision_is_zero_until_the_first_visible_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -1426,7 +1507,7 @@ async fn persisted_chat_identities_are_normalized() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-round-7", "nowMs": 41 }),
+        json!({ "agentId": "default", "runId": "run-round-7", "nowMs": 41 }),
     )
     .await;
     assert_eq!(
@@ -1524,7 +1605,7 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-round-8", "nowMs": 22 }),
+        json!({ "agentId": "default", "runId": "run-round-8", "nowMs": 22 }),
     )
     .await;
     assert_eq!(running["dispatch"]["state"], json!("running"));
@@ -1552,7 +1633,7 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-round-8", "nowMs": 24 }),
+        json!({ "agentId": "default", "runId": "run-round-8", "nowMs": 24 }),
     )
     .await;
     assert_eq!(retried, running);
@@ -2851,7 +2932,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             &first_handle,
             &mut id,
             "chats.dispatch.claimNextPending",
-            json!({ "runId": run_id, "command": "agent", "nowMs": 2401 }),
+            json!({ "agentId": "default", "runId": run_id, "command": "agent", "nowMs": 2401 }),
         )
         .await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
@@ -2862,7 +2943,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             &first_handle,
             &mut id,
             "chats.dispatch.claimNextPending",
-            json!({ "runId": "run-1", "command": invalid_command, "nowMs": 2401 }),
+            json!({ "agentId": "default", "runId": "run-1", "command": invalid_command, "nowMs": 2401 }),
         )
         .await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
@@ -2874,6 +2955,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             &mut id,
             "chats.dispatch.claimNextPending",
             json!({
+                "agentId": "default",
                 "runId": "run-1",
                 "command": "agent",
                 "logPath": invalid_path,
@@ -2889,6 +2971,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &mut id,
         "chats.dispatch.claimNextPending",
         json!({
+            "agentId": "default",
             "runId": " run-1 ",
             "command": "  runner --once  ",
             "logPath": "  logs/run-1.log  ",
@@ -2915,6 +2998,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &mut id,
         "chats.dispatch.claimNextPending",
         json!({
+            "agentId": "default",
             "runId": "run-1",
             "command": "ignored retry command",
             "nowMs": 2402,
@@ -2927,7 +3011,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-other", "nowMs": 2402 }),
+        json!({ "agentId": "default", "runId": "run-other", "nowMs": 2402 }),
     )
     .await;
     assert!(blocked_claim.is_null());
@@ -2962,7 +3046,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-fail", "nowMs": 2411 }),
+        json!({ "agentId": "default", "runId": "run-fail", "nowMs": 2411 }),
     )
     .await;
     for invalid_reason in [json!("   "), json!("x".repeat(16_385)), json!(7)] {
@@ -3003,7 +3087,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-crashed", "nowMs": 2421 }),
+        json!({ "agentId": "default", "runId": "run-crashed", "nowMs": 2421 }),
     )
     .await;
     // No worker is killed here: closing the workspace simulates the process
@@ -3023,7 +3107,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-retry", "nowMs": 2423 }),
+        json!({ "agentId": "default", "runId": "run-retry", "nowMs": 2423 }),
     )
     .await;
     assert_eq!(retry["dispatch"]["attemptCount"], json!(2));
@@ -3044,7 +3128,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-none", "nowMs": 2425 }),
+        json!({ "agentId": "default", "runId": "run-none", "nowMs": 2425 }),
     )
     .await;
     assert!(no_claim.is_null());
@@ -3318,7 +3402,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-r11", "nowMs": 21 }),
+        json!({ "agentId": "default", "runId": "run-r11", "nowMs": 21 }),
     )
     .await;
     assert_eq!(claimed["run"]["command"], json!(""));
@@ -3343,7 +3427,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-r11b", "command": "   ", "nowMs": 24 }),
+        json!({ "agentId": "default", "runId": "run-r11b", "command": "   ", "nowMs": 24 }),
     )
     .await;
     assert_eq!(whitespace["run"]["command"], json!("   "));
@@ -3425,6 +3509,7 @@ async fn malformed_ready_generation_and_null_claim_metadata_are_rejected() {
     // proceeds, failing both refusal assertions.
     for field in ["command", "logPath"] {
         let mut params = serde_json::Map::new();
+        params.insert("agentId".into(), json!("default"));
         params.insert("runId".into(), json!("run-r12"));
         params.insert(field.into(), Value::Null);
         params.insert("nowMs".into(), json!(20));
@@ -4107,7 +4192,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run", "command": "agent" }),
+        json!({ "agentId": "default", "runId": "run", "command": "agent" }),
     )
     .await;
     assert_eq!(no_claim, Value::Null);
@@ -4124,7 +4209,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run", "command": "agent" }),
+        json!({ "agentId": "default", "runId": "run", "command": "agent" }),
     )
     .await;
     assert_eq!(claim["run"]["runId"], json!("run"));
@@ -5862,6 +5947,8 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
             json!({
                 "channelId": "group", "threadId": thread, "messageId": message, "lane": lane,
                 "authorKind": "agent", "authorDisplayName": "Scout", "body": message, "nowMs": at,
+                "needsDecision": message == "p-1" || message == "c-1",
+                "options": if message == "p-1" || message == "c-1" { vec!["Train", "Bus"] } else { vec![] },
             }),
         )
         .await;
@@ -5895,6 +5982,8 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
             .collect()
     };
     assert_eq!(ids(&newest), ["c-2", "p-2"]);
+    assert!(newest["items"][0].get("decision").is_none());
+    assert!(newest["items"][1].get("decision").is_none());
     assert_eq!(
         newest["items"][0]["message"]["agentRequests"],
         json!([
@@ -5917,7 +6006,45 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     )
     .await;
     assert_eq!(ids(&older), ["p-1", "c-1"]);
+    for (index, thread, message, at) in [(0, "post-1", "p-1", 10), (1, "chat", "c-1", 20)] {
+        assert_eq!(
+            older["items"][index]["decision"],
+            json!({
+                "threadId": thread, "messageId": message, "state": "open", "atMs": at,
+                "options": ["Train", "Bus"],
+            })
+        );
+    }
     assert_eq!(older["nextBefore"], Value::Null);
+
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve-stream-root",
+        json!({
+            "threadId": "post-1", "messageId": "p-1", "resolvedByMessageId": "p-1",
+            "chosenOption": "Train", "nowMs": 50,
+        }),
+    )
+    .await;
+    let resolved = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "before": newest["nextBefore"].clone() }),
+    )
+    .await;
+    assert_eq!(
+        resolved["items"][0]["decision"],
+        json!({
+            "threadId": "post-1", "messageId": "p-1", "state": "resolved", "atMs": 50,
+            "options": ["Train", "Bus"], "chosenOption": "Train", "resolvedByMessageId": "p-1",
+        })
+    );
+    assert_eq!(resolved["items"][0]["post"]["openDecisionCount"], json!(0));
 
     let messages = call(
         &transport,

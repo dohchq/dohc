@@ -1,12 +1,12 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { installFakeAgentTools } from "./helpers/agentTools";
+import { installFakeAgentTools, openMyAgent } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import {
   cleanupDesktopWorkspace,
@@ -47,6 +47,13 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
+
+    // The Codex run's log starts with the thread's id, not with its prompt,
+    // which holds the whole chat.
+    await page.getByTestId("chats-message").filter({ hasText: REPORT }).getByTestId("chats-run-chip").click();
+    const log = await readFile((await page.getByTestId("chats-run-log-path").textContent())!, "utf8");
+    expect(log).toContain('"type":"thread.started"');
+    expect(log).not.toContain("check the exports");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -73,38 +80,6 @@ async function seedRunnerSettings(
     `${JSON.stringify(settings, null, 2)}\n`,
   );
   return command;
-}
-
-async function openMyAgent(page: Page): Promise<void> {
-  // Workspace open starts the UI-independent dispatch scan, which provisions
-  // the owner-only agent channel. Wait on that real main-process result before
-  // mounting Chats so its one-shot overview load cannot race provisioning.
-  await expect
-    .poll(() =>
-      page.evaluate(async () => {
-        const api = (window as unknown as {
-          dohcDesktop: {
-            getWorkspaceRegistry(): Promise<{
-              workspaces: Array<{ workspaceId: string }>;
-            }>;
-            listChatChannels(payload: { workspaceId: string }): Promise<{
-              channels: Array<{ kind: string }>;
-            }>;
-          };
-        }).dohcDesktop;
-        const registry = await api.getWorkspaceRegistry();
-        const workspace = registry.workspaces[0];
-        if (!workspace) return false;
-        const result = await api.listChatChannels({ workspaceId: workspace.workspaceId });
-        return result.channels.some((channel) => channel.kind === "agent");
-      }),
-    )
-    .toBe(true);
-
-  await page.getByTestId(activityPin("chats")).click();
-  await expect(page.getByTestId("chats-view")).toBeVisible();
-  await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
-  await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
 }
 
 test("picking the agent in a group's post says it runs when you send, and the offer leaves after the send", async () => {
@@ -424,36 +399,22 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // The failure's toast sits above the message box, so Send stays in reach.
-    const toasts = page.getByTestId("notice-toasts");
-    await expect(toasts).toContainText("Nova didn't reply");
-    // The same words sit under the message that asked. Running it again
-    // would repeat what it did, so the line offers no Try again. In its own
-    // chat a message asks it, so its button readies the box. The thread
-    // panel, away from that box, says it in words.
+    // The words sit under the message that asked. Running it again would
+    // repeat what it did, so the line offers no Try again. In its own chat
+    // a message asks it, so its button readies the box. The thread panel,
+    // away from that box, says it in words.
     const words = "Nova didn't reply. Its run ended with an error.";
     const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
     await expect(line.getByRole("status")).toHaveText([words]);
     await expect(line.getByRole("button", { name: "Message Nova" })).toBeVisible();
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
-    await waitForVisibleAnimations(page);
-    if (process.env.UI_AUDIT_SHOT_DIR) {
-      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
-      for (const theme of ["light", "dark"]) {
-        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-        await waitForVisibleAnimations(page);
-        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
-      }
-    }
-    const box = page.getByTestId("chats-lane-composer").locator("xpath=ancestor::form[1]");
-    const boxTop = await box.evaluate((node) => node.getBoundingClientRect().top);
-    const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
-    expect(toastsBottom).toBeLessThanOrEqual(boxTop);
 
-    // The failure is a row in Notices. The conversation keeps only what
-    // people and the agent wrote, so once the notice is there it still holds
-    // one message.
+    // The failure is a row in Notices. Its chat was on screen, so it posts no
+    // toast in a focused window; focus differs between test hosts, so the
+    // unit tests check that part. The conversation keeps only what people
+    // and the agent wrote, so once the notice is there it still holds one
+    // message.
     await page.getByTestId("notice-center-toggle").click();
     // An agent DM's conversation has no title, so the title names no thread.
     const center = page.getByTestId("notice-center");
@@ -473,6 +434,7 @@ test("a runner that exits silently says why under the message and posts a notice
     const panelLine = panel.getByTestId("chats-lane-run-failed");
     await expect(panelLine.getByRole("status")).toHaveText([words, nextStep]);
     if (process.env.UI_AUDIT_SHOT_DIR) {
+      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
         await waitForVisibleAnimations(page);
@@ -480,11 +442,38 @@ test("a runner that exits silently says why under the message and posts a notice
       }
     }
 
-    // A post in a group says it under its opening message, with a button
-    // that readies a comment to @Nova and sends nothing.
+    // A run that fails while the person is in another chat posts a toast.
+    // Agent replies wait while paused, so the post's run starts only once
+    // the person is back in Nova's DM.
+    await setDispatchPaused(page, true);
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
+    await setDispatchPaused(page, false);
+
+    // The toast sits above the message box, so Send stays in reach.
+    const toasts = page.getByTestId("notice-toasts");
+    await expect(toasts).toContainText("Nova didn't reply in \"");
+    await waitForVisibleAnimations(page);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `toast-above-composer-${theme}.png`) });
+      }
+    }
+    const box = page.getByTestId("chats-lane-composer").locator("xpath=ancestor::form[1]");
+    const boxTop = await box.evaluate((node) => node.getBoundingClientRect().top);
+    const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
+    expect(toastsBottom).toBeLessThanOrEqual(boxTop);
+
+    // Its Open goes to the post, which says the same under its opening
+    // message, with a button that readies a comment to @Nova and sends
+    // nothing.
+    await toasts.getByTestId("sent-notice-toast-open").click();
     const postLine = page.getByTestId("chats-run-failed");
     await expect(postLine.getByRole("status")).toHaveText([words]);
     await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
@@ -505,6 +494,16 @@ test("a runner that exits silently says why under the message and posts a notice
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+// Pauses or resumes agent replies on this computer, as Settings does.
+async function setDispatchPaused(page: Page, paused: boolean): Promise<void> {
+  await page.evaluate(
+    (value) => (window as unknown as {
+      dohcDesktop: { setChatDispatchPaused(payload: { paused: boolean }): Promise<void> };
+    }).dohcDesktop.setChatDispatchPaused({ paused: value }),
+    paused,
+  );
+}
 
 // What the pointer reaches at a toast's center: the toast, a workbench
 // modal (`data-dohc-modal` on its backdrop), something else, or nothing.
