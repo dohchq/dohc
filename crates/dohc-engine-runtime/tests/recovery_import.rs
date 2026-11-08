@@ -429,7 +429,10 @@ async fn racing_capture_and_import_leave_outside_head_and_one_recovery() {
 async fn a_remote_human_is_a_typed_refusal_without_writing() {
     let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
     let mut input = checkpoint(&state, &doc, bytes);
-    input.updates[0].attribution.as_mut().unwrap().actor_kind = ChangeActorKind::Human;
+    // Only an agent names a run, so the human here names none.
+    let attribution = input.updates[0].attribution.as_mut().unwrap();
+    attribution.actor_kind = ChangeActorKind::Human;
+    attribution.agent_run_id = None;
     let error = import(&actor, scratch.path(), input).await.unwrap_err();
     assert!(matches!(
         error,

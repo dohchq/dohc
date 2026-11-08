@@ -5487,9 +5487,12 @@ mod tests {
                 native_sequence: cursor,
                 update_digest: draft.update_digest.clone(),
                 origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                    // The entry declares the agent its native row recorded,
+                    // as an adopted append writes it, so the journal row and
+                    // the snapshot name one author.
                     actor_origin_id: Some("trip-agent".into()),
                     actor_kind: Some("agent".into()),
-                    on_behalf_of: Some("local-person".into()),
+                    on_behalf_of: Some("owner-1".into()),
                     chain_depth: Some(1),
                     recorded_at_ms: 1,
                     agent_run_id: Some(run.into()),

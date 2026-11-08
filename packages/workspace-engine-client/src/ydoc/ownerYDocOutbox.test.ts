@@ -458,6 +458,8 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
 
   it("reads the run a declared agent's draft was made in beside its declaration", async () => {
     const result = pendingResult();
+    result.entries.push({ ...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3" });
+    result.pendingBytes = 6;
     const agentDeclaration = { agentId: "trip-agent", onBehalfOf: "local-person", depth: 1 };
     Object.assign(result.entries[0]!, { agentDeclaration, agentRunId: "run-1" });
     Object.assign(result.entries[1]!, { agentDeclaration });

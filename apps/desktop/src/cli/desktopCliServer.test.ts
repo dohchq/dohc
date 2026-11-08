@@ -913,7 +913,8 @@ describe("desktop CLI workspace context", () => {
       await expect(context.documents!.create({ path: "later.md", markdown: "Text", origin }))
         .rejects.toThrow("dohc created later.md, but could not write its text (engine busy). Edit the document to add it.");
       expect(await readFile(join(root, "later.md"), "utf8")).toBe("");
-      expect(edit).toHaveBeenCalledTimes(5);
+      // Five creates wrote their text, and later.md tried once.
+      expect(edit).toHaveBeenCalledTimes(6);
 
       // Two creates of one path: one creates it, the other is told it exists.
       const race = await Promise.allSettled([
