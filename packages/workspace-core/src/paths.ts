@@ -119,13 +119,19 @@ export function validateWorkspaceRootChoice(
   return { ok: true, normalized };
 }
 
+// A folder that can never be a workspace, whatever changes in it: only
+// another folder works. Its name crosses IPC, so the screen that shows the
+// refusal offers that folder's way out, not Try again. The message says why
+// and leaves the next step to that screen.
+export class WorkspaceFolderRefusalError extends Error {
+  override name = "WorkspaceFolderRefusalError";
+}
+
 export type StateFolderOverlap = "holds" | "inside";
 
-// A workspace already in the list can only be removed from the list.
-export function stateFolderRefusal(overlap: StateFolderOverlap, workspace: "new" | "listed"): string {
+export function stateFolderRefusal(overlap: StateFolderOverlap): string {
   const where = overlap === "holds" ? "holds dohc's own settings" : "is inside the folder that holds dohc's own settings";
-  const next = workspace === "listed" ? "In Manage workspaces, choose Remove from list on its row." : "Choose another folder.";
-  return `This folder ${where}, so it cannot be a workspace. ${next}`;
+  return `This folder ${where}, so it cannot be a workspace.`;
 }
 
 // How a workspace root overlaps the folder where dohc keeps its own settings

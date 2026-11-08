@@ -5,6 +5,7 @@ import {
   ReservedWorkspaceIdError,
   stateFolderOverlap,
   stateFolderRefusal,
+  WorkspaceFolderRefusalError,
   createWorkspaceManifest,
   defaultWorkspaceMode,
   normalizeRootPath,
@@ -44,9 +45,9 @@ export function overlapsStateFolder(realRoot: string, stateDir: string): boolean
   return stateFolderOverlap(realRoot, canonicalWorkspaceRoot(stateDir), process.platform) !== null;
 }
 
-export function assertNotStateFolder(realRoot: string, { stateDir, workspace }: { stateDir: string; workspace: "new" | "listed" }): void {
+export function assertNotStateFolder(realRoot: string, stateDir: string): void {
   const overlap = stateFolderOverlap(realRoot, canonicalWorkspaceRoot(stateDir), process.platform);
-  if (overlap !== null) throw new Error(stateFolderRefusal(overlap, workspace));
+  if (overlap !== null) throw new WorkspaceFolderRefusalError(stateFolderRefusal(overlap));
 }
 
 // Forward slashes on Windows, as the app spells paths there. Elsewhere the
@@ -131,7 +132,7 @@ async function realFolderPath(path: string): Promise<string> {
   // A drive's root is refused here, while its real path still reads "C:\".
   // The app spells it "C:", which names the drive's current folder instead.
   const real = realpathSync.native(path);
-  if (parse(real).root === real) throw new Error(DISK_ROOT_REFUSAL);
+  if (parse(real).root === real) throw new WorkspaceFolderRefusalError(DISK_ROOT_REFUSAL);
   return rootSpelling(real);
 }
 
@@ -230,11 +231,11 @@ export async function createWorkspaceFolderWithFreshness(input: {
   const folder = await folderAt(rootPath);
   const home = await homeFolder(input.homeDir);
   const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
-  if (!rootCheck.ok) throw new Error(rootCheck.reason);
-  if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
-  assertNotStateFolder(rootPath, { stateDir: input.stateDir, workspace: "new" });
-  if (await isFilesystemRoot(folder)) throw new Error(DISK_ROOT_REFUSAL);
-  if (await isDiskRoot(rootPath, folder)) throw new Error(DISK_ROOT_REFUSAL);
+  if (!rootCheck.ok) throw new WorkspaceFolderRefusalError(rootCheck.reason);
+  if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new WorkspaceFolderRefusalError(HOME_FOLDER_REFUSAL);
+  assertNotStateFolder(rootPath, input.stateDir);
+  if (await isFilesystemRoot(folder)) throw new WorkspaceFolderRefusalError(DISK_ROOT_REFUSAL);
+  if (await isDiskRoot(rootPath, folder)) throw new WorkspaceFolderRefusalError(DISK_ROOT_REFUSAL);
   const startedEmpty = (await readdir(rootPath)).length === 0;
   // Node cannot create files relative to an open folder, so writes go by path.
   // Each step below first checks that the path still leads to the folder

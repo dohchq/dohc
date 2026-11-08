@@ -253,9 +253,19 @@ export function NewWorkspaceCard(props: {
 }
 
 // "Open an existing folder as a workspace": one picker, then attach. Shared
-// by first run and the switcher so both spell the route the same way.
-export async function openExistingFolder(): Promise<Workspace | null> {
-  const picked = await bridge().pickWorkspaceRoot();
-  if (!picked) return null;
-  return bridge().attachWorkspaceFolder({ rootPath: picked });
+// by Manage workspaces and the workspace's Open folder so both spell the
+// route the same way. A failure goes to `refused` with the folder chosen,
+// or null when the picker itself failed, and the answer is null.
+export async function openExistingFolder(
+  refused: (error: unknown, folder: string | null) => void,
+): Promise<Workspace | null> {
+  let picked: string | null = null;
+  try {
+    picked = await bridge().pickWorkspaceRoot();
+    if (!picked) return null;
+    return await bridge().attachWorkspaceFolder({ rootPath: picked });
+  } catch (error) {
+    refused(error, picked);
+    return null;
+  }
 }

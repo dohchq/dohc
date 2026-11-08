@@ -203,6 +203,10 @@ import {
 } from "./settings/settingsRegistry";
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
+import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
+import { removalFacts } from "./workspaceRemoval";
+import { PathLine } from "./ui/PathLine";
+import { displayPath, openExistingFolder } from "./NewWorkspaceCard";
 import { toggleTheme } from "./theme";
 import {
   IconButton,
@@ -933,6 +937,9 @@ export function DesktopWorkspaceShell(props: {
     message: string;
     // The error as it arrived, for Copy details.
     cause?: string;
+    // The folder can never be a workspace, so Remove from list replaces Try
+    // again.
+    notAWorkspace?: true;
     // Admission stopped on pending writes or retained failures from another
     // workspace. Resolving the last blocker retries the open without a click.
     blockedOnCollectionWrites?: boolean;
@@ -991,6 +998,7 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     reportButtonError,
     reportShellFailure,
+    reportOpenFolderFailure,
     reportShareCapture,
     clearKind,
     reportLaneFailure,
@@ -4694,12 +4702,13 @@ export function DesktopWorkspaceShell(props: {
         status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
-          const { words, cause } = readError(error);
+          const { words, cause, refusal } = readError(error);
           setWorkspaceOpenFailedFor({
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
             message: words ?? "dohc could not open this workspace.",
             ...(cause ? { cause } : {}),
+            ...(refusal === "not-a-workspace" ? { notAWorkspace: true } : {}),
           });
         }
         return;
@@ -4867,15 +4876,47 @@ export function DesktopWorkspaceShell(props: {
   ]);
 
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
+    const attached = await openExistingFolder((error, folder) =>
+      reportOpenFolderFailure(error, folder, () => void openWorkspaceFolder()));
+    if (attached) props.onSwitchWorkspace(attached);
+  }, [props.onSwitchWorkspace, reportOpenFolderFailure]);
+
+  // Remove from list for a folder that can never be a workspace: the step
+  // its row in Manage workspaces takes, asking first when the row holds more
+  // than its place. The folder stays. The list main answers with opens the
+  // next workspace, or the empty startup screen.
+  const [failedRemoval, setFailedRemoval] = useState<{ busy: boolean; error: string | null } | null>(null);
+  const removingFailed = useRef(false);
+  async function removeFailedWorkspace(asked: boolean) {
+    if (removingFailed.current) return;
+    removingFailed.current = true;
+    if (asked) setFailedRemoval({ busy: true, error: null });
     try {
-      const picked = await bridge().pickWorkspaceRoot();
-      if (!picked) return;
-      const attached = await bridge().attachWorkspaceFolder({ rootPath: picked });
-      props.onSwitchWorkspace(attached);
+      await bridge().forgetWorkspace({ workspaceId });
     } catch (error) {
-      reportShellError("Could not open that workspace folder.", error, () => void openWorkspaceFolder());
+      removingFailed.current = false;
+      if (asked) setFailedRemoval({ busy: false, error: ipcErrorMessage(error, REMOVE_FAILED) });
+      else reportShellError(REMOVE_FAILED, error, requestFailedRemoval);
+      return;
     }
-  }, [props.onSwitchWorkspace, reportShellError]);
+    await refreshAfterFailedRemoval();
+    // A list that could not be read leaves this screen up, and its toast
+    // reads the list again.
+    removingFailed.current = false;
+    setFailedRemoval(null);
+  }
+  // The removal already worked, so trying again only reads the list.
+  async function refreshAfterFailedRemoval() {
+    try {
+      await props.refreshWorkspaceRegistry();
+    } catch (error) {
+      reportShellError("dohc could not refresh the workspace list.", error, () => void refreshAfterFailedRemoval());
+    }
+  }
+  function requestFailedRemoval() {
+    if (removalFacts(props.workspace).length > 0) setFailedRemoval({ busy: false, error: null });
+    else void removeFailedWorkspace(false);
+  }
 
   // The file Share… shares: the active editor's, wherever it draws Share file.
   const activeSharePath =
@@ -7296,41 +7337,60 @@ export function DesktopWorkspaceShell(props: {
           </div>
         </div>
       ) : !workspaceIsReady && workspaceOpenFailure ? (
-        <div
-          data-testid="workspace-open-failed"
-          role="alert"
-          className="absolute left-12 right-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
-        >
-          <div className="max-w-md select-text cursor-text space-y-1.5">
-            <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
-            <p className="text-xs text-muted">{workspaceOpenFailure.message}</p>
-            <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
+        <>
+          <div
+            data-testid="workspace-open-failed"
+            role="alert"
+            className="absolute left-12 right-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
+          >
+            <div className="max-w-md select-text cursor-text space-y-1.5">
+              <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
+              <p className="text-xs text-balance text-muted">{workspaceOpenFailure.message}</p>
+              <p data-testid="workspace-open-failed-folder" title={displayPath(props.workspace.rootPath)}>
+                <PathLine path={displayPath(props.workspace.rootPath)} className="justify-center font-mono text-[11px] leading-4 text-muted" />
+              </p>
+              {/* The button is the next step for a folder that can never be a workspace. */}
+              {workspaceOpenFailure.notAWorkspace ? null : (
+                <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {workspaceOpenFailure.notAWorkspace ? (
+                <PrimaryButton autoFocus onClick={requestFailedRemoval}>Remove from list</PrimaryButton>
+              ) : isPrivacyDenied(workspaceOpenFailure.message) ? (
+                <>
+                  <PrimaryButton onClick={privacySettingsAction.run}>
+                    {privacySettingsAction.label}
+                  </PrimaryButton>
+                  <SecondaryButton onClick={retryWorkspaceOpen}>Try again</SecondaryButton>
+                </>
+              ) : (
+                <PrimaryButton onClick={retryWorkspaceOpen}>Try again</PrimaryButton>
+              )}
+              <CopyButton
+                label="Copy details"
+                pinName
+                getText={() =>
+                  errorDetails([
+                    ["Error", "Couldn't open this workspace"],
+                    ["Detail", workspaceOpenFailure.message],
+                    ["Cause", workspaceOpenFailure.cause],
+                    ...reportFacts(Date.now()),
+                  ])
+                }
+              />
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            {isPrivacyDenied(workspaceOpenFailure.message) ? (
-              <>
-                <PrimaryButton onClick={privacySettingsAction.run}>
-                  {privacySettingsAction.label}
-                </PrimaryButton>
-                <SecondaryButton onClick={retryWorkspaceOpen}>Try again</SecondaryButton>
-              </>
-            ) : (
-              <PrimaryButton onClick={retryWorkspaceOpen}>Try again</PrimaryButton>
-            )}
-            <CopyButton
-              label="Copy details"
-              pinName
-              getText={() =>
-                errorDetails([
-                  ["Error", "Couldn't open this workspace"],
-                  ["Detail", workspaceOpenFailure.message],
-                  ["Cause", workspaceOpenFailure.cause],
-                  ...reportFacts(Date.now()),
-                ])
-              }
+          {failedRemoval ? (
+            <RemoveFromListDialog
+              workspace={props.workspace}
+              busy={failedRemoval.busy}
+              error={failedRemoval.error}
+              onCancel={() => setFailedRemoval(null)}
+              onConfirm={() => void removeFailedWorkspace(true)}
             />
-          </div>
-        </div>
+          ) : null}
+        </>
       ) : !workbenchRestored ? (
         <div
           data-testid="workspace-preparing"
