@@ -504,9 +504,14 @@ describe("delete recovery placement and receipts", () => {
     try {
       await f.undo(id);
       faults.failCopy = ""; faults.failRemove = false;
-      if (change === "replace" || change === "link") await rm(faults.copyTarget);
-      if (change === "link") await symlink(join(f.root, ".dohc/local/trash"), faults.copyTarget, process.platform === "win32" ? "junction" : "dir");
-      else await writeFile(faults.copyTarget, change === "edit" ? "edit" : change === "grow" ? "not retained plus a later edit" : "not ");
+      if (change === "link") {
+        await rm(faults.copyTarget);
+        await symlink(join(f.root, ".dohc/local/trash"), faults.copyTarget, process.platform === "win32" ? "junction" : "dir");
+      } else if (change === "replace") {
+        // Rename over the copy so the replacement cannot reuse the copy's freed inode.
+        await writeFile(`${faults.copyTarget}.new`, "not ");
+        await rename(`${faults.copyTarget}.new`, faults.copyTarget);
+      } else await writeFile(faults.copyTarget, change === "edit" ? "edit" : "not retained plus a later edit");
       const before = await stat(faults.copyTarget);
       expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
       expect((await stat(faults.copyTarget)).ino).toBe(before.ino);
