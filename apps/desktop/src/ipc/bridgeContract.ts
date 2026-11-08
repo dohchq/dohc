@@ -5958,8 +5958,8 @@ export const ChatDispatchFailedRun = z.object({
   triggerMessageId: OPAQUE_ID,
   // "Nova didn't reply. Its run ended with an error."
   words: z.string().min(1).max(1_000),
-  // For a run that ended without its reply, what the person can do instead,
-  // on its own line. Its notice leaves it out.
+  // When Try again can't run the request, what the person can do instead,
+  // on its own line. Its toast and Notices row end with the same sentence.
   nextStep: z.discriminatedUnion("kind", [
     // An agent that is set up and on, asked again in a message. The chat
     // words it: "Message Nova to ask again." in the agent's own chat, where
@@ -5984,6 +5984,22 @@ export const ChatDispatchFailedRun = z.object({
   retryable: z.boolean(),
 }).strict();
 export type ChatDispatchFailedRun = z.infer<typeof ChatDispatchFailedRun>;
+export type ChatDispatchNextStep = NonNullable<ChatDispatchFailedRun["nextStep"]>;
+
+// What a step in Settings asks the person to do.
+export function nextStepSettingsAction(step: Exclude<ChatDispatchNextStep, { kind: "message" }>): string {
+  return step.kind === "add-agent" ? "Add an agent" : step.kind === "turn-on" ? `Turn ${step.name} on` : `Set up ${step.name}`;
+}
+
+// A failed run's next step as one sentence, for the line under its message,
+// its toast and its Notices row. `chatAgentId` is the agent whose own chat
+// the run answered in, if any.
+export function nextStepWords(step: ChatDispatchNextStep, chatAgentId: string | undefined): string {
+  if (step.kind !== "message") return `${nextStepSettingsAction(step)} in Settings to ask again.`;
+  return step.agentId === chatAgentId ? `Message ${step.name} to ask again.`
+    : step.handle ? `Mention @${step.handle} to ask again.`
+    : `Message ${step.name} in its own chat to ask again.`;
+}
 
 export const ChatDispatchStateForThreadResult = z.object({
   liveRunId: OPAQUE_ID.nullable(),

@@ -171,7 +171,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
     method: CHATS_METHOD.dispatchRequeueFailedTrigger,
     params: { triggerMessageId: "m", runId: "r" },
   },
-  { method: CHATS_METHOD.dispatchListAppQuitRecoveries, params: {} },
+  { method: CHATS_METHOD.dispatchListFailedRunRecoveries, params: {} },
   {
     method: CHATS_METHOD.dispatchComplete,
     params: { runId: "r", exitCode: 0 },

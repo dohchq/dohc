@@ -36,7 +36,6 @@ import {
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 const MAX_PAGE_LIMIT = 500;
 const DEFAULT_PAGE_LIMIT = 200;
-const APP_QUIT_EXIT_CODE = 143;
 
 interface WorkspaceState {
   channels: Map<string, ChatChannel & { wireId: string | null }>;
@@ -781,7 +780,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
       return ["pageLimit", "cursor"];
-    case CHATS_METHOD.dispatchListAppQuitRecoveries: return ["threadId", "pageLimit", "cursor"];
+    case CHATS_METHOD.dispatchListFailedRunRecoveries: return ["threadId", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
       return ["runId", "threadId", "upTo", "expectedRevision"];
     case CHATS_METHOD.followsSet:
@@ -1089,8 +1088,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.markFailureHandled(state, workspace, params);
       case CHATS_METHOD.dispatchRequeueFailedTrigger:
         return this.requeueFailed(state, workspace, params);
-      case CHATS_METHOD.dispatchListAppQuitRecoveries:
-        return this.appQuitRecoveries(state, workspace, params);
+      case CHATS_METHOD.dispatchListFailedRunRecoveries:
+        return this.failedRunRecoveries(state, workspace, params);
       case CHATS_METHOD.dispatchComplete:
         return this.dispatchComplete(state, workspace, params);
       case CHATS_METHOD.dispatchFail:
@@ -3263,7 +3262,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const applies =
       run?.workspaceId === workspace &&
       run.endedAtMs !== undefined &&
-      dispatch?.state === "failed" &&
+      (dispatch?.state === "failed" || (dispatch?.state === "done" &&
+        triggerMessageId === run.triggerMessageId && this.failedCompletedRun(state, run))) &&
       dispatch.runId === runId &&
       dispatch.attemptCount < 2;
     if (!applies || !dispatch) return jsonResult(false);
@@ -3289,7 +3289,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
   }
 
-  private appQuitRecoveries(
+  private failedCompletedRun(state: WorkspaceState, run: ChatRun): boolean {
+    return ((run.exitCode !== undefined && run.exitCode !== 0) || run.failureHandled) &&
+      ![...state.runLinks.values()].includes(run.runId);
+  }
+
+  private failedRunRecoveries(
     state: WorkspaceState,
     workspace: string,
     params: ChatsJsonObject,
@@ -3298,15 +3303,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const rows = [...state.runs.values()]
       .filter((run) => {
         const dispatch = state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId));
-        const recoverableFailure =
-          (run.exitCode === APP_QUIT_EXIT_CODE && run.failureReason === "app-quit") ||
-          run.failureReason === "app restart during run";
         return (
           run.workspaceId === workspace &&
           (threadId === undefined || run.threadId === threadId) &&
           run.endedAtMs !== undefined &&
-          recoverableFailure &&
-          dispatch?.state === "failed" &&
+          (dispatch?.state === "failed" || (dispatch?.state === "done" && this.failedCompletedRun(state, run))) &&
           dispatch.runId === run.runId
         );
       })
@@ -3315,7 +3316,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run,
         attemptCount: state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId))?.attemptCount ?? 0,
       }));
-    const result = page(rows, params, `${workspace}\0appQuitRecoveries\0${threadId ?? ""}`);
+    const result = page(rows, params, `${workspace}\0failedRunRecoveries\0${threadId ?? ""}`);
     return jsonResult({ recoveries: result.values, nextCursor: result.nextCursor });
   }
 

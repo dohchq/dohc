@@ -1,6 +1,9 @@
 import { AtSign, ChevronLeft, LoaderCircle, MessageSquare, RotateCw, Settings, Square, TriangleAlert, X } from "lucide-react";
 import { Children, useEffect, useRef, type ReactNode, type RefObject } from "react";
-import type { ActorPresentation, ChatDispatchFailedRun, ChatMessageRecord, ChatRunRecord } from "../../ipc/bridgeContract";
+import {
+  nextStepSettingsAction, nextStepWords,
+  type ActorPresentation, type ChatDispatchFailedRun, type ChatMessageRecord, type ChatRunRecord,
+} from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { formatClock, formatShortTime, sameChatDay } from "../time";
 import { SecondaryButton } from "../ui/controls";
@@ -179,11 +182,11 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
 }
 
 // Under the message an agent didn't answer, one shape whatever the cause:
-// why, in its notice's words, then the next step on a line of its own that
-// starts under the words. The step is a control where one is at hand: Try
-// again while the request can run once more, a button that readies a
-// message to the agent (nothing sends), or one that opens the Agents page.
-// Without one, the same line says it in words.
+// why, in its notice's words, with the icon on their first line, then the
+// next step on a line of its own that starts under the words. The step is a
+// control where one is at hand: Try again while the request can run once
+// more, a button that readies a message to the agent (nothing sends), or one
+// that opens the Agents page. Without one, the same line says it in words.
 export function FailedRunLine(props: {
   testIdPrefix: string;
   failed: ChatDispatchFailedRun;
@@ -209,13 +212,17 @@ export function FailedRunLine(props: {
       data-testid={`${props.testIdPrefix}-run-failed`}
       className={`flex flex-col gap-1 text-[13px] text-muted ${props.className ?? ""}`}
     >
-      <span className="flex min-h-7 items-center gap-2">
-        <TriangleAlert size={14} aria-hidden className="shrink-0 text-danger" />
-        <span role="status" className="min-w-0">{props.failed.words}</span>
+      <span className="flex min-h-7 items-center">
+        <span className="flex min-w-0 items-start gap-x-2">
+          <span aria-hidden className="flex h-[1lh] shrink-0 items-center">
+            <TriangleAlert size={14} className="text-danger" />
+          </span>
+          <span role="status" className="min-w-0">{props.failed.words}</span>
+        </span>
       </span>
       {sentence ? (
         <span data-testid={`${props.testIdPrefix}-run-next-step`} role="status" className="min-w-0 pl-[22px] wrap-anywhere">
-          <FailedRunNextStep step={sentence} chatAgentId={props.chatAgentId} />
+          {nextStepWords(sentence, props.chatAgentId)}
         </span>
       ) : null}
       {actions ? (
@@ -251,7 +258,7 @@ export function FailedRunLine(props: {
               onClick={props.onOpenAgentSettings}
             >
               <Settings size={12} aria-hidden />
-              {`${settingsStep(inSettings)} in Settings`}
+              {`${nextStepSettingsAction(inSettings)} in Settings`}
             </SecondaryButton>
           ) : null}
           {props.children}
@@ -259,29 +266,6 @@ export function FailedRunLine(props: {
       ) : null}
     </div>
   );
-}
-
-// What a step in Settings asks for, as the start of its button or sentence.
-function settingsStep(step: Exclude<NonNullable<ChatDispatchFailedRun["nextStep"]>, { kind: "message" }>): string {
-  return step.kind === "add-agent" ? "Add an agent"
-    : step.kind === "turn-on" ? `Turn ${step.name} on`
-    : `Set up ${step.name}`;
-}
-
-// The next step in words, where no control is at hand: message the agent,
-// in its own chat or by its @handle elsewhere, or, when a message won't wake
-// it, a step in Settings.
-function FailedRunNextStep(props: {
-  step: NonNullable<ChatDispatchFailedRun["nextStep"]>;
-  chatAgentId?: string;
-}) {
-  const { step } = props;
-  if (step.kind === "message") {
-    return <>{step.agentId === props.chatAgentId ? `Message ${step.name} to ask again.`
-      : step.handle ? `Mention @${step.handle} to ask again.`
-      : `Message ${step.name} in its own chat to ask again.`}</>;
-  }
-  return <>{settingsStep(step)} in Settings to ask again.</>;
 }
 
 // Where a failed run's line goes: under its last post, by when it was

@@ -2,8 +2,8 @@ use dohc_engine_domain::{
     BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, ChatThreadLane,
     LinkedChatStore, NoFaults, SaveBookmark, SendMessage, StartChannelThread,
 };
-use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::params;
 
 const WS: &str = "b2-ws";
@@ -1240,6 +1240,211 @@ fn requeue_clears_run_and_failure_atomically() {
 }
 
 #[test]
+fn every_failed_ending_can_requeue_once() {
+    for (reason, exit_code) in [
+        (None, Some(7)),
+        (None, Some(0)),
+        (Some("timed out after 15m"), Some(124)),
+        (Some("runner failed to start: command missing"), None),
+        (Some("app-quit"), Some(143)),
+        (Some("app restart during run"), None),
+    ] {
+        let (_scratch, mut store) = open_store();
+        claimed_run(&mut store, "trigger", "thread", "run-1", 20);
+        let mut chats = LinkedChatStore::new(&mut store);
+        for (run, attempt, at) in [("run-1", 1, 30), ("run-2", 2, 50)] {
+            if let Some(reason) = reason {
+                chats
+                    .fail_dispatch(WS, run, reason, exit_code, at, &NO_FAULTS)
+                    .expect("fail");
+            } else {
+                chats
+                    .complete_dispatch(WS, run, exit_code.unwrap(), at, &NO_FAULTS)
+                    .expect("complete");
+                if exit_code == Some(0) {
+                    chats
+                        .mark_failure_handled(WS, run, &NO_FAULTS)
+                        .expect("no reply");
+                }
+            }
+            let rows = chats
+                .list_failed_run_recoveries(WS, Some("thread"), None, 10)
+                .expect("recoveries");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].run.run_id, run);
+            assert_eq!(rows[0].attempt_count, attempt);
+            assert!(
+                !chats
+                    .requeue_failed_trigger(OTHER_WS, "trigger", run, at + 1, &NO_FAULTS)
+                    .expect("other workspace")
+            );
+            assert!(
+                !chats
+                    .requeue_failed_trigger(WS, "other", run, at + 1, &NO_FAULTS)
+                    .expect("other trigger")
+            );
+            let requeued = chats
+                .requeue_failed_trigger(WS, "trigger", run, at + 1, &NO_FAULTS)
+                .expect("try again");
+            assert_eq!(requeued, attempt == 1);
+            if attempt == 1 {
+                assert!(
+                    chats
+                        .list_failed_run_recoveries(WS, None, None, 10)
+                        .expect("back in line")
+                        .is_empty()
+                );
+                let claim = chats
+                    .claim_next_pending(WS, "default", "run-2", "agent", None, 40, &NO_FAULTS)
+                    .expect("claim")
+                    .expect("second attempt");
+                assert_eq!(claim.dispatch.attempt_count, 2);
+                assert!(
+                    !chats
+                        .requeue_failed_trigger(WS, "trigger", "run-1", 41, &NO_FAULTS)
+                        .expect("stale run")
+                );
+            } else {
+                assert!(
+                    chats
+                        .list_pending_dispatches(WS, None, 10)
+                        .expect("capped")
+                        .is_empty()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn completed_error_with_a_reply_is_not_listed_or_requeued() {
+    for handled in [false, true] {
+        let (_scratch, mut store) = open_store();
+        claimed_run(&mut store, "trigger", "thread", "run", 20);
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .complete_dispatch(WS, "run", 7, 30, &NO_FAULTS)
+            .expect("complete");
+        chats
+            .record_run_message(WS, "reply", "run", &NO_FAULTS)
+            .expect("reply");
+        if handled {
+            chats
+                .mark_failure_handled(WS, "run", &NO_FAULTS)
+                .expect("handled");
+        }
+        assert!(
+            chats
+                .list_failed_run_recoveries(WS, None, None, 10)
+                .expect("no recovery")
+                .is_empty()
+        );
+        assert!(
+            !chats
+                .requeue_failed_trigger(WS, "trigger", "run", 31, &NO_FAULTS)
+                .expect("no second reply")
+        );
+    }
+}
+
+#[test]
+fn clean_exit_needs_a_confirmed_missing_reply_before_requeue() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger", "thread", "run", 20);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .complete_dispatch(WS, "run", 0, 30, &NO_FAULTS)
+        .expect("complete");
+    for handled in [false, true] {
+        if handled {
+            chats
+                .mark_failure_handled(WS, "run", &NO_FAULTS)
+                .expect("handled");
+            chats
+                .record_run_message(WS, "reply", "run", &NO_FAULTS)
+                .expect("late reply");
+        }
+        assert!(
+            chats
+                .list_failed_run_recoveries(WS, None, None, 10)
+                .expect("not failed")
+                .is_empty()
+        );
+        assert!(
+            !chats
+                .requeue_failed_trigger(WS, "trigger", "run", 31, &NO_FAULTS)
+                .expect("not failed")
+        );
+    }
+}
+
+#[test]
+fn requeue_of_a_completed_failure_and_its_covered_requests_is_atomic() {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let (scratch, mut store) = open_store();
+        let db = engine_db_path(&scratch).expect("db");
+        let mut chats = LinkedChatStore::new(&mut store);
+        for (trigger, at) in [("first", 10), ("covered", 11)] {
+            chats
+                .enqueue_dispatch(WS, trigger, "default", "thread", at, &NO_FAULTS)
+                .expect("enqueue");
+        }
+        chats
+            .claim_next_pending(WS, "default", "run", "agent", None, 20, &NO_FAULTS)
+            .expect("claim")
+            .expect("some claim");
+        chats
+            .complete_dispatch(WS, "run", 7, 30, &NO_FAULTS)
+            .expect("complete");
+        assert!(
+            !chats
+                .requeue_failed_trigger(WS, "covered", "run", 31, &NO_FAULTS)
+                .expect("only the run's own trigger can requeue it")
+        );
+        let faults = ScriptedFaults::crash_at(point);
+        assert!(
+            chats
+                .requeue_failed_trigger(WS, "first", "run", 32, faults.as_ref())
+                .is_err()
+        );
+        drop(store);
+        let mut store = EngineStore::open(&db, 33).expect("reopen");
+        let mut chats = LinkedChatStore::new(&mut store);
+        let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
+        let pending = chats
+            .list_pending_dispatches(WS, None, 10)
+            .expect("pending");
+        assert_eq!(pending.len(), if committed { 2 } else { 0 });
+        assert!(pending.iter().all(|row| {
+            row.run_id.is_none() && row.failure_reason.is_none() && row.attempt_count == 1
+        }));
+        assert_eq!(
+            chats
+                .list_failed_run_recoveries(WS, None, None, 10)
+                .expect("recoveries")
+                .len(),
+            usize::from(!committed)
+        );
+        assert_eq!(
+            chats
+                .requeue_failed_trigger(WS, "first", "run", 34, &NO_FAULTS)
+                .expect("repeat"),
+            !committed
+        );
+        assert_eq!(
+            chats
+                .list_pending_dispatches(WS, None, 10)
+                .expect("both requests")
+                .len(),
+            2
+        );
+    }
+}
+
+#[test]
 fn requeue_returns_the_interrupted_runs_covered_triggers_to_the_queue() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
@@ -1284,7 +1489,7 @@ fn app_quit_failure_remains_durably_recoverable_after_handling() {
         .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, None, 10)
+        .list_failed_run_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         (rows.len(), rows[0].attempt_count),
@@ -1307,7 +1512,7 @@ fn app_quit_recoveries_for_a_thread_skip_other_threads() {
     let chats = LinkedChatStore::new(&mut store);
     let runs = |thread_id| {
         chats
-            .list_app_quit_recoveries(WS, thread_id, None, 10)
+            .list_failed_run_recoveries(WS, thread_id, None, 10)
             .expect("recoveries")
             .into_iter()
             .map(|recovery| recovery.run.run_id)
@@ -1333,7 +1538,7 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
         .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
         .expect("fail");
     let rows = LinkedChatStore::new(&mut store)
-        .list_app_quit_recoveries(WS, None, None, 10)
+        .list_failed_run_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         rows.first()
@@ -1464,7 +1669,7 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
     let mut store = EngineStore::open(&db, 1).expect("migrate");
     let mut chats = LinkedChatStore::new(&mut store);
     let recoveries = chats
-        .list_app_quit_recoveries(WS, None, None, 10)
+        .list_failed_run_recoveries(WS, None, None, 10)
         .expect("recoveries");
     assert_eq!(
         recoveries

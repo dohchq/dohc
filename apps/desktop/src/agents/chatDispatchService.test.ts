@@ -420,7 +420,7 @@ async function fakeDispatchDaemon(
   const dispatch = liveDispatch.store;
   let serviceDispatch: AwaitableAgentDispatchStore = dispatch;
   const requeueRaw = liveDispatch.requeueFailedTrigger;
-  const listRecoveriesRaw = liveDispatch.listAppQuitRecoveries;
+  const listRecoveriesRaw = liveDispatch.listFailedRunRecoveries;
   const closeDispatch = liveDispatch.close;
   let signalClaimStarted: (() => void) | undefined;
   let releaseClaim: (() => void) | undefined;
@@ -665,7 +665,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       if (error) throw error;
       return requeueRaw(input);
     },
-    listAppQuitRecoveries: (dispatchWorkspace, threadId) =>
+    listFailedRunRecoveries: (dispatchWorkspace, threadId) =>
       listRecoveriesRaw(dispatchWorkspace.workspaceId, threadId),
     spawnRunner,
     killProcessGroup,
@@ -924,7 +924,9 @@ describe("chatDispatchService", () => {
     expect(fixture.notices).toHaveLength(1);
     expect(fixture.notices[0]!.body).toBe(!nodePresent && !replied
       ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
-      : exitCode !== 0 ? "Its run ended with an error." : replied ? "" : "Its run ended without a reply.");
+      : exitCode !== 0
+        ? `Its run ended with an error.${replied ? " Mention @Nova to ask again." : ""}`
+        : replied ? "" : "Its run ended without a reply.");
   });
 
   it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
@@ -2679,7 +2681,7 @@ describe("chatDispatchService", () => {
       "chats.dispatch.listRunMessages",
       "chats.dispatch.getRunRecord",
       "chats.dispatch.markFailureHandled",
-      "chats.dispatch.listAppQuitRecoveries",
+      "chats.dispatch.listFailedRunRecoveries",
     ]);
     const requests = fixture.dispatchRequests.filter(({ method }) =>
       methods.has(method),
@@ -2749,6 +2751,8 @@ describe("chatDispatchService", () => {
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
       "Nova didn't reply in \"Run silently.\"",
     ]);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun)
+      .toMatchObject({ runId: claim.run.runId, retryable: true });
   });
 
   it("does not report no reply while CLI provenance recovery is pending", async () => {
@@ -2775,6 +2779,9 @@ describe("chatDispatchService", () => {
       messages.some((message) => message.body.includes("produced no reply")),
     ).toBe(false);
     expect(fixture.notices).toEqual([]);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toBeUndefined();
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
 
     linkPending = false;
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
@@ -3158,7 +3165,7 @@ describe("chatDispatchService", () => {
     expect(fixture.agentRequestGroups).toContain(channelId);
   });
 
-  describe("Try again on a run dohc's restart or quit stopped", () => {
+  describe("Try again on a failed run", () => {
     // A run of the conversation's request that dohc stopped before the
     // next startup.
     async function stoppedRun(fixture: Fixture, ending: "restarted" | "quit", body = "Plan day 2.") {
@@ -3178,6 +3185,212 @@ describe("chatDispatchService", () => {
       (await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).failedRun;
     const wordsFor = (ending: "restarted" | "quit") =>
       `Nova didn't reply. dohc ${ending} during its run.`;
+
+    it("checks only the newest failed run per agent when a later run finished", async () => {
+      const fixture = await createFixture({ restricted: true });
+      const first = await stoppedRun(fixture, "quit");
+      for (let index = 0; index < 3; index += 1) {
+        await fixture.dispatch.recordTrigger({
+          workspaceId: WORKSPACE_ID, triggerMessageId: `later-${index}`,
+          threadId: first.threadId, agentId: "default",
+        });
+        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
+        if (!claim) throw new Error("Expected a run.");
+        if (index === 2) {
+          await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
+        } else {
+          await fixture.dispatch.failRun({ runId: claim.run.runId, reason: "app-quit", exitCode: APP_QUIT_EXIT_CODE });
+        }
+      }
+      await activate(fixture);
+      const latest = vi.spyOn(fixture.serviceOptions.dispatchStoreFor(fixture.workspace), "latestRunForThread");
+
+      expect(await stateOf(fixture, first.threadId)).toBeUndefined();
+      expect(latest.mock.calls.filter(([, , agentId]) => agentId === "default")).toHaveLength(1);
+    });
+
+    it.each(["recoveries", "thread"] as const)(
+      "posts the failure notice when its next-step %s read fails",
+      async (read) => {
+        const fixture = await createFixture();
+        const trigger = await createAgentThread(fixture, { body: "Finish the request.", authorUserId: "user_local" });
+        await activate(fixture);
+        const run = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!.run;
+        // Only a run Try again may offer reads its attempts, and only a run
+        // with a step reads its chat.
+        if (read === "thread") await linkAgentReply(fixture, trigger.threadId, run.runId);
+        const error = new Error("Next step unavailable");
+        if (read === "recoveries") {
+          vi.spyOn(fixture.serviceOptions, "listFailedRunRecoveries").mockRejectedValueOnce(error);
+        } else {
+          vi.spyOn(fixture.chat, "getThread").mockRejectedValueOnce(error);
+        }
+
+        fixture.spawnCalls[0]!.process.emitExit(7);
+        await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+        expect(fixture.errors).toContain(error);
+        expect(fixture.notices).toEqual([expect.objectContaining({
+          title: `Nova ${read === "thread" ? "stopped before finishing" : "didn't reply"} in "Finish the request."`,
+          body: "Its run ended with an error.",
+        })]);
+        expect(await owedRuns(fixture)).toEqual([]);
+      },
+    );
+
+    it.each(["timed-out", "quit", "restarted"] as const)(
+      "offers a posted run again only after quit or restart: %s",
+      async (ending) => {
+        const fixture = await createFixture({ restricted: true });
+        const run = await stoppedRun(fixture, "restarted");
+        await linkAgentReply(fixture, run.threadId, run.runId);
+        await fixture.dispatch.failRun({
+          runId: run.runId,
+          reason: ending === "timed-out" ? "timed out after 15m"
+            : ending === "quit" ? "app-quit" : "app restart during run",
+          ...(ending === "quit" ? { exitCode: APP_QUIT_EXIT_CODE } : {}),
+        });
+        await fixture.owedRunNotices.add(WORKSPACE_ID, run.runId);
+        await activate(fixture);
+        const retryable = ending !== "timed-out";
+        const failed = await stateOf(fixture, run.threadId);
+        expect(failed).toMatchObject({ runId: run.runId, retryable });
+        expect(failed?.nextStep).toEqual(retryable ? undefined : { kind: "message", agentId: "default", name: "Nova", handle: "Nova" });
+        expect(`Nova stopped before finishing. ${fixture.notices[0]!.body}`)
+          .toBe(`${failed?.words}${retryable ? "" : " Mention @Nova to ask again."}`);
+        await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(retryable);
+        expect(fixture.requeues).toHaveLength(retryable ? 1 : 0);
+      },
+    );
+
+    it.each(["posted", "capped"] as const)("asks to add an agent when the run's agent left Settings: %s", async (failure) => {
+      const fixture = await createFixture({ restricted: true });
+      await stubRunnerPath(fixture, { node: true });
+      const first = await stoppedRun(fixture, "quit");
+      await activate(fixture);
+      let runId = first.runId;
+      if (failure === "capped") {
+        await fixture.service.retryStoppedRun(WORKSPACE_ID, first.threadId, runId);
+        const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
+        if (!second) throw new Error("Expected the second attempt.");
+        runId = second.run.runId;
+      } else {
+        await fixture.dispatch.recordTrigger({
+          workspaceId: WORKSPACE_ID, threadId: first.threadId, triggerMessageId: "posted", agentId: "default",
+        });
+        const posted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
+        if (!posted) throw new Error("Expected a run.");
+        runId = posted.run.runId;
+        await linkAgentReply(fixture, first.threadId, runId);
+      }
+      await fixture.dispatch.completeRun({ runId, exitCode: 7 });
+      vi.spyOn(fixture.serviceOptions, "readDispatchAgents").mockResolvedValue([]);
+      await fixture.owedRunNotices.add(WORKSPACE_ID, runId);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+      const lead = failure === "posted" ? "Your agent stopped before finishing" : "Your agent didn't reply";
+      expect(await stateOf(fixture, first.threadId)).toMatchObject({
+        runId, retryable: false, words: `${lead}. Its run ended with an error.`, nextStep: { kind: "add-agent" },
+      });
+      expect(fixture.notices.find((notice) => notice.target?.run === runId))
+        .toMatchObject({ body: "Its run ended with an error. Add an agent in Settings to ask again." });
+    });
+
+    it.each(["error", "timeout", "not-started", "no-reply"] as const)(
+      "runs a request once more after %s and keeps the second failure capped",
+      async (ending) => {
+        const fixture = await createFixture({ restricted: true });
+        await stubRunnerPath(fixture, { node: true });
+        const run = await stoppedRun(fixture, "restarted");
+        const finish = async (runId: string) => {
+          if (ending === "error" || ending === "no-reply") {
+            await fixture.dispatch.completeRun({ runId, exitCode: ending === "error" ? 7 : 0 });
+            if (ending === "no-reply") {
+              await fixture.dispatch.markFailureHandled(runId);
+            }
+          } else {
+            await fixture.dispatch.failRun({
+              runId,
+              ...(ending === "timeout" ? { exitCode: 124 } : {}),
+              reason: ending === "timeout" ? "timed out after 15m" : "runner failed to start: command missing",
+            });
+          }
+        };
+        await finish(run.runId);
+        await activate(fixture);
+        expect(await stateOf(fixture, run.threadId)).toMatchObject({ runId: run.runId, retryable: true });
+        await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
+        expect(await stateOf(fixture, run.threadId)).toBeUndefined();
+        const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
+        if (!second) throw new Error("Expected the second attempt.");
+        await finish(second.run.runId);
+        await fixture.owedRunNotices.add(WORKSPACE_ID, second.run.runId);
+        await fixture.service.scanWorkspace(WORKSPACE_ID);
+        const failed = await stateOf(fixture, run.threadId);
+        const step = ending !== "not-started";
+        expect(failed).toMatchObject({ runId: second.run.runId, retryable: false });
+        expect(failed?.nextStep).toEqual(step ? { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } : undefined);
+        const notice = fixture.notices.find((each) => each.target?.run === second.run.runId);
+        expect(`Nova didn't reply. ${notice?.body}`).toBe(`${failed?.words}${step ? " Mention @Nova to ask again." : ""}`);
+        await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, second.run.runId)).resolves.toBe(false);
+        expect(fixture.requeues).toHaveLength(1);
+      },
+    );
+
+    it.each(["DM", "DM thread", "group post", "another agent's DM"].flatMap((place) =>
+      (["capped", "posted"] as const).map((failure) => ({ place, failure }))))(
+      "ends the notice with the line's next step for a $failure failure in a $place",
+      async ({ place, failure }) => {
+        const fixture = await createFixture({ restricted: true });
+        const channel = place === "group post"
+          ? await fixture.chat.ensureGeneralChannel({ workspaceId: WORKSPACE_ID })
+          : await fixture.chat.ensureAgentChannel({
+            workspaceId: WORKSPACE_ID, agentId: place === "another agent's DM" ? "other" : "default", name: "Nova",
+          });
+        const trigger = await fixture.chat.startChannelThread({
+          authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: channel.id,
+          author: { kind: "human", displayName: "Sam" }, authorUserId: "user_local", origin: "cli", body: "Plan day 2.",
+        });
+        const message = place === "DM thread"
+          ? await fixture.chat.sendMessage({
+            authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: trigger.thread.id,
+            parentMessageId: trigger.message.id, author: { kind: "human", displayName: "Sam" },
+            authorUserId: "user_local", origin: "cli", body: "Plan day 3.",
+          }) : trigger.message;
+        const threadId = trigger.thread.id;
+        await fixture.dispatch.recordTrigger({
+          workspaceId: WORKSPACE_ID, triggerMessageId: message.id, threadId, agentId: "default",
+        });
+        const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
+        if (!first) throw new Error("Expected a run.");
+        let runId = first.run.runId;
+        if (failure === "posted") {
+          await linkAgentReply(fixture, threadId, runId);
+          await fixture.dispatch.completeRun({ runId, exitCode: 7 });
+          await fixture.owedRunNotices.add(WORKSPACE_ID, runId);
+          await activate(fixture);
+        } else {
+          await fixture.dispatch.failRun({ runId, reason: "app restart during run" });
+          await activate(fixture);
+          await fixture.service.retryStoppedRun(WORKSPACE_ID, threadId, runId);
+          const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
+          if (!second) throw new Error("Expected the second attempt.");
+          runId = second.run.runId;
+          // The next launch records the interrupted second attempt and owes its notice.
+          await fixture.service.stop();
+          fixture.service = createChatDispatchService(fixture.serviceOptions);
+          await activate(fixture);
+        }
+        const next = place === "DM" || place === "DM thread" ? "Message Nova to ask again." : "Mention @Nova to ask again.";
+        const lead = failure === "posted" ? "Nova stopped before finishing" : "Nova didn't reply";
+        const reason = failure === "posted" ? "Its run ended with an error." : "dohc restarted during its run.";
+        expect(await stateOf(fixture, threadId)).toEqual({
+          runId, triggerMessageId: message.id, words: `${lead}. ${reason}`, nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" }, retryable: false,
+        });
+        expect(fixture.notices.find((notice) => notice.target?.run === runId)).toMatchObject({ body: `${reason} ${next}` });
+        await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, threadId, runId)).resolves.toBe(false);
+      },
+    );
 
     it.each(["restarted", "quit"] as const)("runs the request of a run stopped when dohc %s once more", async (ending) => {
       const fixture = await createFixture();
@@ -3282,18 +3495,21 @@ describe("chatDispatchService", () => {
       expect(fixture.requeues.map(({ agentId }) => agentId)).toEqual(["codex", "default"]);
     });
 
-    it("leaves the request stopped and says why when its agent is off", async () => {
-      const fixture = await createFixture({ runner: { enabled: false } });
+    it.each([
+      { runner: { enabled: false }, why: "Nova is off." },
+      { runner: { command: "" }, why: "Nova has no command to start it." },
+    ])("leaves the request stopped and says why: $why", async ({ runner, why }) => {
+      const fixture = await createFixture({ runner });
       const run = await stoppedRun(fixture, "quit");
       await activate(fixture);
 
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId))
-        .rejects.toThrow("Nova is off. Check it in Settings → Agents, then try again.");
+        .rejects.toThrow(`${why} Check it in Settings → Agents, then try again.`);
       expect(fixture.requeues).toEqual([]);
       expect(await stateOf(fixture, run.threadId)).toMatchObject({ runId: run.runId, retryable: true });
     });
 
-    it("keeps the words but not the button once the request has had its second attempt", async () => {
+    it("gives the next step instead of the button once the request has had its second attempt", async () => {
       const fixture = await createFixture({ restricted: true });
       const run = await stoppedRun(fixture, "restarted");
       await activate(fixture);
@@ -3303,7 +3519,8 @@ describe("chatDispatchService", () => {
       await fixture.dispatch.failRun({ runId: second.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
 
       expect(await stateOf(fixture, run.threadId)).toEqual({
-        runId: second.run.runId, triggerMessageId: run.messageId, words: wordsFor("quit"), retryable: false,
+        runId: second.run.runId, triggerMessageId: run.messageId,
+        words: wordsFor("quit"), nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" }, retryable: false,
       });
       await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, second.run.runId)).resolves.toBe(false);
       expect(fixture.requeues).toHaveLength(1);
@@ -3331,61 +3548,73 @@ describe("chatDispatchService", () => {
   });
 
   it.each([
-    { replied: false, words: "Nova didn't reply. Its run ended with an error." },
-    { replied: true, words: "Nova stopped before finishing. Its run ended with an error." },
-  ])("says why a run didn't finish and to mention its agent, with no Try again: %j", async ({ replied, words }) => {
-    const fixture = await createFixture();
+    { reply: "none", lead: "Nova didn't reply" },
+    { reply: "linked", lead: "Nova stopped before finishing" },
+    { reply: "link pending", lead: "Nova stopped before finishing" },
+  ] as const)("offers Try again after an error only when no reply was posted, and the next step after one: %j", async ({ reply, lead }) => {
+    const fixture = await createFixture({ hasPendingRunMessageLink: () => reply === "link pending" });
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
-    if (replied) await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    if (reply === "linked") await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+    const replied = reply !== "none";
 
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
-      runId: claim.run.runId, triggerMessageId: trigger.messageId, words,
-      nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" }, retryable: false,
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words: `${lead}. Its run ended with an error.`,
+      ...(replied ? { nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } } : {}), retryable: !replied,
     });
-    // The notice keeps its words. The mention is for the conversation only.
-    expect(fixture.notices[0]!.title).toBe(`${words.split(".")[0]} in "Run the request."`);
-    expect(fixture.notices[0]!.body).toBe("Its run ended with an error.");
-    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
-    expect(fixture.requeues).toEqual([]);
+    // The toast and Notices row end with the step the line shows.
+    expect(fixture.notices[0]!.title).toBe(`${lead} in "Run the request."`);
+    expect(fixture.notices[0]!.body).toBe(`Its run ended with an error.${replied ? " Mention @Nova to ask again." : ""}`);
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(!replied);
+    expect(fixture.requeues).toEqual(replied ? [] : [expect.objectContaining({ runId: claim.run.runId })]);
   });
 
   // The step carries the agent's id, so its own chat can say to message it,
   // and the @handle the composer inserts, which drops spaces and
-  // punctuation. A name with no handle carries none: elsewhere the line says
-  // to message it in its own chat.
+  // punctuation. A name with no handle carries none: elsewhere the line and
+  // notice say to message it in its own chat.
   it.each([
-    { agentName: "Codex (Work)", nextStep: { kind: "message", agentId: "default", name: "Codex (Work)", handle: "CodexWork" } },
-    { agentName: "\u{1F98A}", nextStep: { kind: "message", agentId: "default", name: "\u{1F98A}" } },
-  ])("names the agent and its handle in the step to ask again: %j", async ({ agentName, nextStep }) => {
+    {
+      agentName: "Codex (Work)", next: "Mention @CodexWork to ask again.",
+      nextStep: { kind: "message", agentId: "default", name: "Codex (Work)", handle: "CodexWork" },
+    },
+    {
+      agentName: "\u{1F98A}", next: "Message \u{1F98A} in its own chat to ask again.",
+      nextStep: { kind: "message", agentId: "default", name: "\u{1F98A}" },
+    },
+  ])("names the agent and its handle in the step to ask again: %j", async ({ agentName, next, nextStep }) => {
     const fixture = await createFixture({ agentName });
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.nextStep).toEqual(nextStep);
+    expect(fixture.notices[0]!.body).toBe(`Its run ended with an error. ${next}`);
   });
 
   // An agent the @ menu can't offer can't be mentioned, so the line gives
   // the step in Settings. A removed agent's name is gone with it, so the row
-  // calls it your agent. The notice keeps its words.
+  // calls it your agent.
   it.each([
-    { agent: "removed", words: "Your agent didn't reply. Its run ended with an error.", nextStep: { kind: "add-agent" } },
-    { agent: "off", words: "Nova didn't reply. Its run ended with an error.", nextStep: { kind: "turn-on", name: "Nova" } },
-    { agent: "not set up", words: "Nova didn't reply. Its run ended with an error.", nextStep: { kind: "set-up", name: "Nova" } },
+    { agent: "removed", words: "Your agent stopped before finishing. Its run ended with an error.", nextStep: { kind: "add-agent" } },
+    { agent: "off", words: "Nova stopped before finishing. Its run ended with an error.", nextStep: { kind: "turn-on", name: "Nova" } },
+    { agent: "not set up", words: "Nova stopped before finishing. Its run ended with an error.", nextStep: { kind: "set-up", name: "Nova" } },
   ] as const)("gives the step in Settings when the run's agent is now $agent", async ({ agent, words, nextStep }) => {
     const fixture = await createFixture();
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     const [nova] = await fixture.serviceOptions.readDispatchAgents();
@@ -3395,20 +3624,14 @@ describe("chatDispatchService", () => {
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
       runId: claim.run.runId, triggerMessageId: trigger.messageId, words, nextStep, retryable: false,
     });
-    expect(fixture.notices[0]!.body).toBe("Its run ended with an error.");
   });
 
-  // A run with nothing to try again says to mention its agent. A run that
-  // couldn't start, or needs Node.js, keeps its own next step instead.
+  // While Try again can run the request, the line shows no step. A run that
+  // needs Node.js says what to do in its words.
   it.each([
-    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply.", nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } },
-    {
-      exitCode: 7,
-      node: false,
-      words: "Nova didn't reply. Agent replies need Node.js. Install Node.js, restart dohc, then try again.",
-      nextStep: undefined,
-    },
-  ])("says what to do next, with no Try again, on a run that exited %j", async ({ exitCode, node, words, nextStep }) => {
+    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply." },
+    { exitCode: 7, node: false, words: "Nova didn't reply. Agent replies need Node.js. Install Node.js, restart dohc, then try again." },
+  ])("offers Try again with no next step on a run that exited %j", async ({ exitCode, node, words }) => {
     const fixture = await createFixture();
     await stubRunnerPath(fixture, { node });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
@@ -3419,14 +3642,14 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
-      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, ...(nextStep ? { nextStep } : {}), retryable: false,
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, retryable: true,
     });
   });
 
   it.each([
-    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit.", nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } },
-    { reason: "runner failed to start: spawn ENOENT", words: "Nova didn't reply. It couldn't start: spawn ENOENT", nextStep: undefined },
-  ])("says what to do next, with no Try again, on a run that ended with %j", async ({ reason, words, nextStep }) => {
+    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit." },
+    { reason: "runner failed to start: spawn ENOENT", words: "Nova didn't reply. It couldn't start: spawn ENOENT" },
+  ])("offers Try again with no next step on a run that ended with %j", async ({ reason, words }) => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await fixture.dispatch.recordTrigger({
@@ -3439,7 +3662,7 @@ describe("chatDispatchService", () => {
     await activate(fixture);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
-      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, ...(nextStep ? { nextStep } : {}), retryable: false,
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, retryable: true,
     });
   });
 
@@ -3736,6 +3959,29 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(queued.threadId);
+  });
+
+  it("offers Try again after a timeout only once the run's process exits", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({ runner: { timeoutMinutes: 1 } });
+    const trigger = await createAgentThread(fixture, { body: "This harness will hang.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun)
+      .toMatchObject({ runId: claim.run.runId, retryable: false });
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
+
+    const updatesBeforeExit = fixture.runUpdatedWorkspaces.length;
+    fixture.spawnCalls[0]!.process.emitExit(null, "SIGTERM");
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.runUpdatedWorkspaces.length).toBeGreaterThan(updatesBeforeExit);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun)
+      .toMatchObject({ runId: claim.run.runId, retryable: true });
+    await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(true);
+    expect(fixture.requeues).toEqual([expect.objectContaining({ runId: claim.run.runId })]);
   });
 
   it("retries timeout persistence for a local-only live workspace", async () => {

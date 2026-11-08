@@ -401,16 +401,15 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // The words sit under the message that asked. Running it again would
-    // repeat what it did, so the line offers no Try again. In its own chat
-    // a message asks it, so its button readies the box. The thread panel,
-    // away from that box, says it in words.
+    // The words sit under the message that asked, with Try again, since
+    // the request has had one attempt and posted nothing. While Try again
+    // can run, nothing offers to ask the agent again.
     const words = "Nova didn't reply. Its run ended with an error.";
     const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
     await expect(line.getByRole("status")).toHaveText([words]);
-    await expect(line.getByRole("button", { name: "Message Nova" })).toBeVisible();
-    await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
+    await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(1);
+    await expect(line.getByRole("button", { name: "Message Nova" })).toHaveCount(0);
 
     // The failure is a row in Notices. Its chat was on screen, so it posts no
     // toast in a focused window; focus differs between test hosts, so the
@@ -422,7 +421,6 @@ test("a runner that exits silently says why under the message and posts a notice
     const center = page.getByTestId("notice-center");
     await expect(center.getByText("Nova didn't reply", { exact: true })).toBeVisible();
     await expect(center.getByText("Its run ended with an error.", { exact: true })).toBeVisible();
-    await expect(center).not.toContainText(nextStep);
     const messages = page.getByTestId("chats-lane-message");
     await expect(messages).toHaveCount(1);
     await expect(messages.getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "human");
@@ -434,7 +432,17 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-reply-in-thread").click();
     const panel = page.getByTestId("chats-lane-thread-panel");
     const panelLine = panel.getByTestId("chats-lane-run-failed");
+    await expect(panelLine.getByRole("status")).toHaveText([words]);
+
+    // The second attempt fails the same way. With no Try again left, the
+    // line says to ask the agent again, and so does its Notices row. In its
+    // own chat a message asks it.
+    await panelLine.getByTestId("chats-lane-run-try-again").click();
     await expect(panelLine.getByRole("status")).toHaveText([words, nextStep]);
+    await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(center.getByText(`Its run ended with an error. ${nextStep}`, { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
     if (process.env.UI_AUDIT_SHOT_DIR) {
       await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
       for (const theme of ["light", "dark"]) {
@@ -473,14 +481,16 @@ test("a runner that exits silently says why under the message and posts a notice
     expect(toastsBottom).toBeLessThanOrEqual(boxTop);
 
     // Its Open goes to the post, which says the same under its opening
-    // message, with a button that readies a comment to @Nova and sends
-    // nothing.
+    // message, with Try again. After the second attempt, a button readies a
+    // comment to @Nova and sends nothing.
     await toasts.getByTestId("sent-notice-toast-open").click();
     const postLine = page.getByTestId("chats-run-failed");
     await expect(postLine.getByRole("status")).toHaveText([words]);
-    await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
+    await postLine.getByTestId("chats-run-try-again").click();
     const mention = postLine.getByRole("button", { name: "Mention @Nova" });
     await expect(mention).toBeVisible();
+    await expect(postLine.getByRole("status")).toHaveText([words]);
+    await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
