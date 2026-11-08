@@ -158,10 +158,11 @@ describe("layout engine", () => {
       return frames.length;
     };
     // From alpha 1, the layout settles after 281 steps.
-    expect(framesToSettle()).toBe(71);
-    let clock = 0;
-    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 20));
+    const now = vi.spyOn(performance, "now").mockReturnValue(0);
     try {
+      expect(framesToSettle()).toBe(71);
+      let clock = 0;
+      now.mockImplementation(() => (clock += 20));
       expect(framesToSettle()).toBe(281);
     } finally {
       now.mockRestore();
