@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
-import { errorResponse, notFound } from "./errors";
 import { hashAgentCredential, pkceS256Challenge } from "./linkSecurity";
-import { linkRefusal } from "./linkRefusal";
+import { linkRefusal, opaqueLinkRefusal } from "./linkRefusal";
 import type { SyncRelayHandler } from "./server";
 import { filterCollectionWriteForShare, type ProposedChange } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
@@ -104,7 +103,7 @@ async function ok(response: Response): Promise<Record<string, unknown>> {
 
 // Every refusal is the same bytes as a link that never existed.
 async function expectRefused(response: Response): Promise<void> {
-  const refusal = errorResponse(notFound());
+  const refusal = opaqueLinkRefusal();
   expect({ status: response.status, body: await response.text() })
     .toEqual({ status: refusal.status, body: await refusal.text() });
 }
