@@ -179,7 +179,7 @@ it("rolls bounded expiry cleanup back when retained capacity refuses", async () 
     const stale = another(9);
     state.raw.prepare(`INSERT INTO ${table} SELECT ?, ?, audience, workspace_id, main_version_id, object_id, lineage_claim_id,
       current_path, selector_paths_json, restore_fence_generation, principal_kind, principal_id, grant_id, grant_generation,
-      host_epoch, 0, 30000, NULL, NULL FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
+      host_epoch, 0, 30000, NULL, link_session_id, agent_connection_id FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
     state.setTime(31000);
     const before = rows(state);
     expect(state.storage.mintLiveTicket(another(3))).toBeNull();

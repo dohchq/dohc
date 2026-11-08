@@ -856,7 +856,7 @@ async function namedMember(f: Awaited<ReturnType<typeof fixture>>) {
     selectorJson: JSON.stringify({paths: [binding.currentPath], versionId: null}), createdAtMs: 1},
     grant: {grantId: "named-other-grant", shareId: "named-other-share", principalKind: "user", principalUserId: scope.userId,
       principalEmail: null, access: "edit", generation: 1, status: "active", revokedAtMs: null, createdAtMs: 1, parentGrantId: null}});
-  const boot = await f.post("/sync/live/named-sessions", {grantId: "named-other-grant"});
+  const boot = await f.post("/sync/live/named-sessions", {grantId: "named-other-grant"}, "account=reader");
   const {discriminator} = await boot.json() as {discriminator: string};
   const context = await f.application.resolveNamedBrowserSession(new Request("https://relay.example.test", {headers: {cookie: "account=reader"}}), discriminator);
   if (!context) throw new Error("Named member authentication missing");
