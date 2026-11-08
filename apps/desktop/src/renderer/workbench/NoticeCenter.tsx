@@ -4,7 +4,7 @@ import { onOverlayOpen } from "../overlayStack";
 import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { AlertTriangle, Bell, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -1806,7 +1806,7 @@ export function NoticeCenter(props: {
         body: "Workspace changes from this run will be attributed in history.",
         actions: [{ label: "Open History", onClick: props.onOpenHistory }],
         target: { to: "history" },
-        Icon: Bot,
+        Icon: Sparkles,
       });
     }
 

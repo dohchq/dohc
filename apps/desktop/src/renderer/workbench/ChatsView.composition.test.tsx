@@ -231,6 +231,12 @@ describe("ChatsView agents' chats", () => {
     expect(within(rows[2]!).getByTestId("chats-my-agent-state").textContent).toBe("not set up");
     expect(within(rows[1]!).getByTestId("chats-my-agent-unread").textContent).toBe("3");
     expect(within(rows[2]!).getByTestId("chats-my-agent-unread").textContent).toBe("1");
+    // An unread agent chat's name goes bold beside its ink count; a read one stays regular.
+    const name = (row: HTMLElement) => within(row).getByTestId("chats-my-agent-name").className;
+    expect(name(rows[0]!)).not.toContain("font-medium");
+    expect(name(rows[1]!)).toContain("font-medium");
+    expect(name(rows[2]!)).toContain("font-medium");
+    expect(within(rows[1]!).getByTestId("chats-my-agent-unread").className).toContain("bg-ink");
 
     await user.click(rows[1]!);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Ranger");

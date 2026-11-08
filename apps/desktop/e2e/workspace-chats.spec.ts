@@ -148,7 +148,8 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
     // The panel's channel row rolls the unread up.
-    await expect(panel.getByTestId("chats-channel-unread")).toHaveText("1");
+    await expect(panel.getByTestId("chats-channel-unread")).toHaveText("1 unread");
+    await expect(panel.getByTestId("chats-channel-name")).toHaveClass(/font-medium/);
 
     // Opening the thread marks it read; the badges clear at both levels.
     await panel.getByTestId("chats-channel").click();

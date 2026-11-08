@@ -1,5 +1,4 @@
 import {
-  Bot,
   Cloud,
   FolderOpen,
   Keyboard,
@@ -7,6 +6,7 @@ import {
   Settings,
   Shield,
   SlidersHorizontal,
+  Sparkles,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -63,7 +63,7 @@ export const SETTINGS_SECTIONS = [
     scope: "Mixed",
     group: "you",
     keywords: ["agent", "identity", "name", "mcp", "claude", "codex", "server", "runner", "dispatch", "timeout"],
-    Icon: Bot,
+    Icon: Sparkles,
   },
   {
     id: "files",
