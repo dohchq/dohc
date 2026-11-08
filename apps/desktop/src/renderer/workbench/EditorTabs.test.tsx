@@ -389,19 +389,29 @@ describe("EditorTabs strip scrolling", () => {
       expect(span("c.md")).toEqual({ start: 0, end: 100 });
     });
 
-    // The margin gives way only to keep 49px of the tab in view: a 150px
-    // strip keeps all of it, and an 80px one keeps 31px.
-    it("shows the start of a tab wider than the strip as clear of the fade as the room allows", () => {
+    // A tab that can't clear both fades starts at the strip's start, and the
+    // left fade gives way to it while the right one still shows more tabs.
+    it("shows a tab wider than the strip from the strip's start, with no left fade", () => {
       width.current = 150;
       const span = layOut(640, { "a.md": [0, 100], "c.md": [100, 200] });
       const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
       rerender(renderStrip("c.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 51, behavior: "smooth" });
-      expect(span("c.md")).toEqual({ start: 49, end: 249 });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 100, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 0, end: 200 });
+      expect(strip.hasAttribute("data-overflow-left")).toBe(false);
+      expect(strip.hasAttribute("data-overflow-right")).toBe(true);
 
+      // Narrower still, it stays where it is.
+      scrollTo.mockClear();
       resize(80);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 69, behavior: "auto" });
-      expect(span("c.md")).toEqual({ start: 31, end: 231 });
+      expect(scrollTo).not.toHaveBeenCalled();
+      expect(span("c.md")).toEqual({ start: 0, end: 200 });
+
+      // Scrolled by hand off the strip's start, the left fade comes back.
+      strip.scrollLeft = 30;
+      fireEvent.scroll(strip);
+      expect(strip.hasAttribute("data-overflow-left")).toBe(true);
     });
 
     it("reveals a middle tab with room for both margins clear of both fades, and leaves it where it is clear", () => {
@@ -411,6 +421,8 @@ describe("EditorTabs strip scrolling", () => {
       rerender(renderStrip("c.md"));
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 249, behavior: "smooth" });
       expect(span("c.md")).toEqual({ start: 51, end: 201 });
+      expect(strip.hasAttribute("data-overflow-left")).toBe(true);
+      expect(strip.hasAttribute("data-overflow-right")).toBe(true);
 
       strip.scrollLeft = 250;
       scrollTo.mockClear();
@@ -418,14 +430,17 @@ describe("EditorTabs strip scrolling", () => {
       expect(scrollTo).not.toHaveBeenCalled();
     });
 
-    it("reveals a middle tab with no room for both margins whole, as clear of both fades as the room allows", () => {
+    it("reveals a middle tab with no room for both margins whole, clear of both fades or at the strip's start", () => {
       const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 160] });
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
-      // 30px of room: 15px on each side.
+      // 30px of room can't clear both fades: the tab starts at the strip's
+      // start, with no left fade.
       rerender(renderStrip("c.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 285, behavior: "smooth" });
-      expect(span("c.md")).toEqual({ start: 15, end: 235 });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 300, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 0, end: 220 });
+      expect(strip.hasAttribute("data-overflow-left")).toBe(false);
+      expect(strip.hasAttribute("data-overflow-right")).toBe(true);
 
       // 90px of room clears both 40px fades, if not the joins beside them:
       // the nearest such scroll, and none while the tab is already clear.
