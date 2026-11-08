@@ -50,9 +50,13 @@ test("concurrent stagers publish one Node, and later stagers never touch it", po
   const parent = scratch(t);
   let release;
   const firstPublished = new Promise(resolve => { release = resolve; });
+  let secondChecked;
+  const secondFoundNone = new Promise(resolve => { secondChecked = resolve; });
   let secondRead = false;
-  const first = stageReaderTestNode({ parent, hash, readNode });
-  const second = stageReaderTestNode({ parent, hash, readNode: async () => { secondRead = true; await firstPublished; return bytes; } });
+  // The first stager publishes only once the second has found no Node, or has stopped.
+  const first = stageReaderTestNode({ parent, hash, readNode: async () => { await secondFoundNone; return bytes; } });
+  const second = stageReaderTestNode({ parent, hash, readNode: async () => { secondRead = true; secondChecked(); await firstPublished; return bytes; } });
+  second.then(secondChecked, secondChecked);
   const node = await first;
   const published = identity(node);
   // Nothing changed the file after its bytes were written: no link, unlink or chmod.
