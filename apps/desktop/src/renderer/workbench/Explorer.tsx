@@ -6,8 +6,10 @@ import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 import { useRequestSequence } from "../useRequestSequence";
 import { SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { deleteConfirmText } from "./deleteConfirm";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { MiddleCutName } from "../ui/MiddleCutName";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -17,6 +19,7 @@ import {
   FolderPlus,
   FolderOpen,
   Laptop,
+  ListX,
   RefreshCw,
   TriangleAlert,
   X,
@@ -25,6 +28,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -69,7 +73,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import type { ExplorerApps } from "./AppsSection";
 import { ExplorerHome } from "./ExplorerHome";
-import type { DataCollection } from "./explorerHomeModel";
+import { pageTitle, type DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
@@ -107,8 +111,6 @@ export interface ExplorerProps {
   onModeChange: (mode: ExplorerMode) => void;
   // Whether the workspace's first listing has landed. Home waits for it.
   listed: boolean;
-  // Opened paths and tabs, most recent first, for Home's Recent.
-  recentFiles: readonly string[];
   files: WorkspaceFileEntry[];
   folders: string[];
   // The request of the listing `files` and `folders` came from.
@@ -143,7 +145,6 @@ export interface ExplorerProps {
   onActivateTab: (groupId: string, path: string) => void;
   onCloseTab: (groupId: string, path: string) => void;
   onCloseAllTabs: () => void;
-  onNewUntitledTextFile: () => void;
   onCollapseFolders: () => void;
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
@@ -161,6 +162,9 @@ export interface ExplorerProps {
   apps?: ExplorerApps;
   dataCollections?: readonly DataCollection[];
   includeArchivedCollections?: boolean;
+  // The list was cleared for another read, such as the archived list, and no
+  // read has landed since. It is being read, or that read failed.
+  collectionsUnknown?: "reading" | "failed";
   onIncludeArchivedCollections?(enabled: boolean): void;
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
@@ -243,10 +247,14 @@ function draftFileKind(value: string, renameFrom: string): FileKindRecord {
 // Every Explorer row draws its glyph at the drawing's 15px.
 const GLYPH_SIZE = 15;
 
-// The glyph is ink on a row with the selected fill and subtle elsewhere.
-function glyphTone(selected: boolean): string {
-  return selected ? "text-ink" : "text-subtle";
+// The glyph is ink on an active or picked row and subtle elsewhere.
+function glyphTone(marked: boolean): string {
+  return marked ? "text-ink" : "text-subtle";
 }
+
+// Disclosure chevrons and the section toolbars take the secondary voice in
+// dark, where the hint voice reads too dim on the panel. Light keeps it.
+const CHEVRON_TONE = "text-subtle dark:text-muted";
 
 type DropPreview = {
   targetPath: string | null;
@@ -286,6 +294,12 @@ export function editorTitle(path: string, label?: string): string {
   return TAB_KINDS[tab.kind].explorerTitle(tab, label);
 }
 
+// Home names a page by its title, as its Pages section does.
+function homeEditorTitle(path: string, label?: string): string {
+  const page = parseTab(path).kind === "file" && fileKindForPath(path).displayKind === "markdown";
+  return page ? pageTitle(path) : editorTitle(path, label);
+}
+
 function SectionActionButton(props: {
   label: string;
   onClick: () => void;
@@ -299,7 +313,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-30"
+      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink dark:text-muted dark:hover:text-ink disabled:pointer-events-none disabled:opacity-30"
     >
       {props.children}
     </button>
@@ -355,7 +369,11 @@ export const TreeRow = memo(function TreeRow(props: {
   // Main recognizes this folder as an app: the row draws the app glyph in
   // the folder glyph's place, and says so as data-app.
   app: boolean;
+  // In the selection, for aria-selected.
   selected: boolean;
+  // In a selection an action would act on that is not just the open file.
+  picked: boolean;
+  // The active editor's file.
   active: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
@@ -371,18 +389,24 @@ export const TreeRow = memo(function TreeRow(props: {
   onRowDragEnd: () => void;
 }) {
   const { row } = props;
-  // A drop preview colors the whole row, glyph included.
-  const glyphClass = props.dropPreview ? "" : glyphTone(props.selected || props.active);
-  const dropClass =
-    props.dropPreview?.kind === "blocked"
-      ? props.dropPreview.role === "target"
-        ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
-        : "bg-danger/5 text-danger"
-      : props.dropPreview
-        ? props.dropPreview.role === "target"
-          ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
-          : "bg-line/35 text-ink"
-        : "";
+  const name = basenameOf(row.fullPath);
+  const blocked = props.dropPreview?.kind === "blocked";
+  const target = props.dropPreview?.role === "target";
+  // A drop preview colors the whole row, glyph included. An allowed target's
+  // glyph takes the success color.
+  const glyphClass = props.dropPreview
+    ? target && !blocked
+      ? "text-success"
+      : ""
+    : glyphTone(props.picked || props.active);
+  const openEdge = !props.dropPreview && props.picked && props.active;
+  const dropClass = blocked
+    ? target
+      ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
+      : "bg-danger/5 text-danger"
+    : target
+      ? "bg-success/16 text-ink"
+      : "bg-line/35 text-ink";
   return (
     <li role="none" className="px-1">
       <button
@@ -398,6 +422,10 @@ export const TreeRow = memo(function TreeRow(props: {
         aria-posinset={row.positionInSet}
         aria-setsize={row.setSize}
         aria-selected={props.selected}
+        // The whole name, read once, though MiddleCutName draws it in two
+        // parts. The tooltip shows what a cut row hides.
+        aria-label={name}
+        title={name}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
@@ -410,37 +438,34 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // One selected fill and a weight (VS Code list semantics): the
-        // ACTIVE-tab row and selected-not-active rows share the selected
-        // fill (Delete/drag act on the whole selection), and the active row
-        // alone is medium weight so it still reads inside a multi-selection
-        // once the tree loses focus. An attenuated fill for the
-        // selected-not-active rows sat between hover and selected, too close
-        // to either to read. The keyboard-focused row draws the row's 1px
-        // accent line inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
-        // Background style).
+        // The open file's row is active: the selected fill and medium weight.
+        // Picked rows, the ones Delete and drag would act on when they are
+        // not just the open file, take the text-selection tint instead. An
+        // open file among them keeps its weight and gains a 2px ink edge. The
+        // keyboard-focused row draws the 1px accent line inside its own
+        // rounded box, so the tree's scroller cannot clip it on a row
+        // scrolled to an edge. An allowed drop target is a success tint with
+        // no ring or bar, so it never reads as focus. A blocked target adds a
+        // danger ring and a danger bar. A drop preview hides the edge.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
             ? dropClass
-            : props.active
-              ? "bg-selected font-medium text-ink"
-              : props.selected
-                ? "bg-selected text-ink"
+            : props.picked
+              ? `bg-(--dohc-selection) text-ink${props.active ? " font-medium" : ""}`
+              : props.active
+                ? "bg-selected font-medium text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
-        {props.dropPreview ? (
+        {blocked && target ? (
+          <span aria-hidden className="absolute bottom-1 left-0 top-1 w-0.5 rounded-full bg-danger" />
+        ) : null}
+        {openEdge ? (
           <span
             aria-hidden
-            className={`absolute bottom-1 left-0 top-1 w-0.5 rounded-full ${
-              props.dropPreview.role === "target"
-                ? props.dropPreview.kind === "blocked"
-                  ? "bg-danger"
-                  : "bg-ink"
-                : "bg-transparent"
-            }`}
+            data-testid="tree-row-open-edge"
+            className="absolute bottom-1.5 left-0.5 top-1.5 w-0.5 rounded-full bg-ink"
           />
         ) : null}
         <IndentGuides depth={row.depth} />
@@ -457,7 +482,7 @@ export const TreeRow = memo(function TreeRow(props: {
               <ChevronRight
                 size={12}
                 aria-hidden
-                className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 ${CHEVRON_TONE} transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
               />
             </span>
             {props.app ? (
@@ -479,7 +504,7 @@ export const TreeRow = memo(function TreeRow(props: {
             />
           </>
         )}
-        <span className="min-w-0 flex-1 truncate">{basenameOf(row.fullPath)}</span>
+        <MiddleCutName name={name} />
       </button>
     </li>
   );
@@ -672,6 +697,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     openEditorsResize.previewValue ?? props.openEditorsHeight,
     viewportCap,
   );
+  // Changes whenever Open editors may change height, so the rows below it
+  // are measured again. A second group adds headings with no new tab.
+  const openEditorsLayout = `${openEditorsExpanded} ${openEditorsHeight} ${openEditorCount} ${props.editorGroups.length}`;
+  // The line Open editors shows with nothing open, which its toggle reads.
+  const openEditorsEmptyId = useId();
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
   // fires with a stale closure — without this latch the edit would commit
@@ -875,13 +905,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   useLayoutEffect(() => {
     updateVirtualRange();
-  }, [
-    updateVirtualRange,
-    filesExpanded,
-    openEditorsExpanded,
-    openEditorsHeight,
-    openEditorCount,
-  ]);
+  }, [updateVirtualRange, filesExpanded, openEditorsLayout]);
 
   useEffect(() => {
     const container = fileTreeRef.current;
@@ -1299,6 +1323,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setAnchorPath(null);
     setFocusedPath(null);
   }
+
+  // A selection that is only the open file goes when another editor becomes
+  // active, so the tree marks nothing for a page it does not list. A
+  // selection made on purpose, of other rows, stays.
+  const [selectionTab, setSelectionTab] = useState(activeTab);
+  if (selectionTab !== activeTab) {
+    setSelectionTab(activeTab);
+    if (selectionTab !== null && selection.size === 1 && selection.has(selectionTab)) {
+      setSelection(new Set());
+    }
+  }
+  const selectionIsOpenFile = activeTab !== null && selection.size === 1 && selection.has(activeTab);
 
   // Home's Show in Files asks for a reveal of its own; the shell's comes in
   // revealPaths. Either one switches to Files first.
@@ -1889,7 +1925,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           <ChevronRight
             size={12}
             aria-hidden
-            className={`shrink-0 text-subtle transition-transform ${folderEditExpanded ? "rotate-90" : ""}`}
+            className={`shrink-0 ${CHEVRON_TONE} transition-transform ${folderEditExpanded ? "rotate-90" : ""}`}
           />
         ) : (
           <span aria-hidden className="w-3 shrink-0" />
@@ -2051,6 +2087,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
           app={row.isFolder && (props.appFolders?.has(row.fullPath) ?? false)}
           selected={selection.has(row.fullPath)}
+          picked={!selectionIsOpenFile && selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewFor(row.fullPath)}
@@ -2106,25 +2143,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {home ? (
-          <ExplorerHome
-            explorer={props}
-            files={projected.files}
-            fileByPath={fileByPath}
-            folders={folderPathSet}
-            activePath={activeTab}
-            scrollerRef={fileTreeRef}
-            editingPath={editing?.mode === "rename" ? editing.path : null}
-            renderEditRow={editRow}
-            onMenu={onHomeMenu}
-            onRename={beginRename}
-            onDelete={requestDelete}
-            onShowInFiles={showInFiles}
-            drag={homeDrag}
-            dropPreviewFor={dropPreviewFor}
-          />
-        ) : (
-        <>
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
@@ -2138,6 +2156,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
+              aria-describedby={openEditorsExpanded && openEditorCount === 0 ? openEditorsEmptyId : undefined}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
               className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
@@ -2153,22 +2172,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <ChevronRight
                 size={11}
                 aria-hidden
-                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 dark:text-muted transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
-              <SectionActionButton
-                label="New untitled text file"
-                onClick={props.onNewUntitledTextFile}
-              >
-                <FilePlus2 size={13} aria-hidden />
-              </SectionActionButton>
               <SectionActionButton
                 label="Close all editors"
                 disabled={openEditorCount === 0}
                 onClick={props.onCloseAllTabs}
               >
-                <X size={13} aria-hidden />
+                <ListX size={13} aria-hidden />
               </SectionActionButton>
             </div>
           </header>
@@ -2215,7 +2228,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                         const dirty =
                           props.dirtyPaths.has(tab.path) ||
                           props.recoveryPaths.has(tab.path);
-                        const title = editorTitle(
+                        const title = (home ? homeEditorTitle : editorTitle)(
                           tab.path,
                           props.tabLabels?.get(tab.path),
                         );
@@ -2231,13 +2244,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             // button sits on top at the right.
                             className={`group relative mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
-                                ? "bg-selected text-ink"
+                                ? "bg-selected text-ink font-medium"
                                 : "text-muted hover:bg-hover hover:text-ink"
                             }`}
                           >
                             <button
                               type="button"
                               title={tab.path}
+                              // The whole title, read once, though
+                              // MiddleCutName draws it in two parts.
+                              aria-label={dirty ? `${title}, unsaved changes` : title}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
                               className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
@@ -2246,7 +2262,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                                 size={GLYPH_SIZE}
                                 className={glyphTone(active)}
                               />
-                              <span className="min-w-0 flex-1 truncate">{title}</span>
+                              <MiddleCutName name={title} />
                               {dirty ? (
                                 <span
                                   data-testid="open-editor-dirty"
@@ -2278,9 +2294,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ))}
               </ul>
             ) : (
-              <div className="px-3 py-1.5 text-[11px] text-subtle">
-                No open editors
-              </div>
+              <p id={openEditorsEmptyId} data-testid="open-editors-empty" className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                No files open.
+              </p>
             )
           ) : null}
           {openEditorsExpanded && openEditorCount > 0 ? (
@@ -2328,6 +2344,25 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ) : null}
         </section>
 
+        {home ? (
+          <ExplorerHome
+            explorer={props}
+            files={projected.files}
+            fileByPath={fileByPath}
+            folders={folderPathSet}
+            activePath={activeTab}
+            scrollerRef={fileTreeRef}
+            aboveLayout={openEditorsLayout}
+            editingPath={editing?.mode === "rename" ? editing.path : null}
+            renderEditRow={editRow}
+            onMenu={onHomeMenu}
+            onRename={beginRename}
+            onDelete={requestDelete}
+            onShowInFiles={showInFiles}
+            drag={homeDrag}
+            dropPreviewFor={dropPreviewFor}
+          />
+        ) : (
         <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header
             data-testid="explorer-files-header"
@@ -2344,7 +2379,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <ChevronRight
                 size={11}
                 aria-hidden
-                className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -2372,14 +2407,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           {filesExpanded ? (
             <>
               {empty ? (
-                <button
-                  type="button"
-                  onClick={() => props.onNewPage("")}
-                  className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
-                >
-                  <FilePlus2 size={13} aria-hidden />
-                  Create your first file
-                </button>
+                props.listed ? (
+                  <p className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                    No files yet.
+                  </p>
+                ) : null
               ) : (
                 <ul
                   ref={workspaceTreeRef}
@@ -2393,7 +2425,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             </>
           ) : null}
         </section>
-        </>
         )}
       </nav>
 
@@ -2416,11 +2447,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         />
       ) : null}
 
-      {confirmDelete ? (
+      {confirmDelete && props.shareView ? (
         <ConfirmDialog
-          title={`Delete ${confirmDelete.length === 1 ? basenameOf(confirmDelete[0]!) : `${confirmDelete.length} items`}?`}
-          confirmLabel="Delete"
-          intent="danger"
+          {...deleteConfirmText(confirmDelete, props.shareView)}
           testId="delete-confirm"
           cancelTestId="cancel-delete"
           confirmTestId="confirm-delete"
@@ -2429,30 +2458,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             performDeletes(confirmDelete);
             setConfirmDelete(null);
           }}
-          details={
-            confirmDelete.length > 1 ? (
-              <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-                {confirmDelete.map((path) => (
-                  <li
-                    key={path}
-                    className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
-                  >
-                    <span className="break-all">{path}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null
-          }
-        >
-          {/* Only a share view asks: its delete has no trash behind it. */}
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            {`${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-              confirmDelete.length === 1 ? "it" : "them"
-            } from. ${
-              props.shareView?.granterEmail ?? "The person who shared it"
-            } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
-          </p>
-        </ConfirmDialog>
+        />
       ) : null}
     </>
   );

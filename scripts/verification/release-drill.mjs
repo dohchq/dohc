@@ -230,6 +230,7 @@ function launchEnv(scratch, logPath, feedUrl) {
     ...process.env,
     DOHC_DESKTOP_TEST: "1",
     DOHC_TEST_HOME: join(scratch, "home"),
+    DOHC_TEST_USER_HOME: scratch,
     DOHC_DESKTOP_MOCK_UPDATES: "1",
     DOHC_UPDATE_URL: feedUrl,
     DOHC_DRILL_LOG: logPath,

@@ -355,6 +355,17 @@ describe("chat message IPC identity", () => {
     expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation))).not.toHaveProperty("authorAgentId");
   });
 
+  it("marks an agent that joined with a link, and never bridges its connection", () => {
+    const { message } = fixture();
+    const link = { kind: "link" as const, displayName: "Helper", grantId: "grant-1", principalId: "principal-1" };
+    const agent = ChatMessageRecord.parse(chatMessageForIpc(
+      { ...message, author: { ...link, agentConnectionId: "connection-1" } }, () => null, neutralPresentation));
+    expect(agent).toMatchObject({ authorKind: "link", authorDisplayName: "Helper", linkAgent: true });
+    expect(JSON.stringify(agent)).not.toMatch(/connection-1|grant-1|principal-1/);
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, author: link }, () => null, neutralPresentation)))
+      .not.toHaveProperty("linkAgent");
+  });
+
   it("carries an automation author, the automation that wrote the message, and where its Collection is now", () => {
     const { message } = fixture();
     const automated = {

@@ -64,6 +64,16 @@ function stateWithin(read: Promise<object>): Promise<string> {
   );
 }
 
+/** The renderer's startup marks, in ms since its page started, for a failure message. */
+function describeRenderer(page: Page): Promise<string> {
+  return stateWithin(page.evaluate(() => ({
+    now: Math.round(performance.now()),
+    visibilityState: document.visibilityState,
+    marks: performance.getEntriesByType("mark").filter(mark => mark.name.startsWith("dohc:"))
+      .map(mark => `${mark.name} ${Math.round(mark.startTime)}`),
+  })));
+}
+
 /** What Electron says about the page's window, for a failure message. */
 function describeWindow(page: Page): Promise<string> {
   const app = launchedApps.get(page);
@@ -165,7 +175,10 @@ function launchEnv(input: {
     // The e2e relay is a local plain-http server; the daemon transport only
     // accepts it when this explicit flag is set (and the URL is loopback).
     DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "1",
+    // dohc keeps its state in the test home. The person's home folder, where
+    // a new workspace goes by default, is the folder that holds it.
     DOHC_TEST_HOME: input.workspace.homeDir,
+    DOHC_TEST_USER_HOME: dirname(input.workspace.homeDir),
     DOHC_TEST_PICK_PATH: input.workspace.rootPath,
     // The app's own home folder, so agent detection and the tools it runs
     // never read the tester's installs or sign-ins.
@@ -264,7 +277,10 @@ export async function launchDesktopApp(input: {
     try {
       const shown = await within(window.evaluate(window => window.isVisible()
         || new Promise<boolean>(resolve => window.once("show", () => resolve(true)))), 20_000);
-      if (!shown) throw new Error(`The desktop window didn't show within 20 s. Window: ${await describeWindow(page)}.`);
+      if (!shown) {
+        throw new Error(`The desktop window didn't show within 20 s. Window: ${
+          await describeWindow(page)}. Renderer: ${await describeRenderer(page)}.`);
+      }
     } finally {
       await window.dispose();
     }

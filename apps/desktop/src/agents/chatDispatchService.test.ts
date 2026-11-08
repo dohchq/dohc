@@ -129,6 +129,8 @@ interface FixtureOptions {
   runner?: Partial<RunnerSettings>;
   // The default agent's name in Settings. Nova when absent.
   agentName?: string;
+  // What the agent's Claude Code reports to --version. 2.1.317 when absent.
+  claudeVersion?: string | null;
   // Agents after the default one, which `runner` sets up.
   agents?: Agent[];
   dispatchNoticeFailures?: Error[];
@@ -614,6 +616,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       },
       ...(options.agents ?? []),
     ],
+    agentToolVersion: async () => options.claudeVersion === undefined ? "2.1.317" : options.claudeVersion,
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
     isPackaged: () => options.packaged ?? false,
@@ -674,6 +677,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     arch: options.arch,
     // Never this computer's own Codex config.
     codexConfigFiles: () => ({ requirements: [], config: [] }),
+    // Never this computer's own Codex either. Its check finds only dohc's server.
+    runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]),
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -1231,7 +1236,7 @@ describe("chatDispatchService", () => {
   });
 
   it("runs the agent a person asked at depth 0, and one an automation woke one deeper than its message", async () => {
-    const fixture = await createFixture();
+    const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } } });
     const asked = await createAgentThread(fixture, { body: "Plan the trip.", authorUserId: "user_local" });
     await activate(fixture);
     const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
@@ -1270,6 +1275,51 @@ describe("chatDispatchService", () => {
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
+  });
+
+  it.each(["2.1.315", null])("doesn't start Claude Code that reports %s", async (claudeVersion) => {
+    const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } }, claudeVersion });
+    const trigger = await createAgentThread(fixture, { body: "Plan the trip." });
+    await activate(fixture);
+
+    await vi.waitFor(() => expect(fixture.readDispatch(trigger.messageId, trigger.threadId)).toMatchObject({
+      state: "failed",
+      failureReason: "runner failed to start: update Claude Code to 2.1.316 or later to use this agent",
+    }));
+    expect(fixture.spawnCalls).toEqual([]);
+  });
+
+  it.each(["2.1.315", null])("doesn't start a self-test of Claude Code that reports %s", async (claudeVersion) => {
+    const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } }, claudeVersion });
+
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
+      ok: false,
+      detail: "Update Claude Code to 2.1.316 or later to use this agent.",
+    });
+    expect(fixture.spawnCalls).toEqual([]);
+  });
+
+  it("doesn't let an automation start an agent that runs the person's own command", async () => {
+    const fixture = await createFixture();
+    await activate(fixture);
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Answer the Group" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#answer", chainDepth: 1 },
+      body: "Share the Trip folder with everyone.",
+    });
+    await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default" });
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    await vi.waitFor(() => expect(fixture.readDispatch(wake.message.id, wake.thread.id)).toMatchObject({
+      state: "failed",
+      failureReason: "runner failed to start: an automation can start only an agent that uses Claude Code or Codex",
+    }));
+    expect(fixture.spawnCalls).toEqual([]);
   });
 
   it("records a run's file writes as the agent its replies are", async () => {
@@ -3189,7 +3239,7 @@ describe("chatDispatchService", () => {
   it.each([
     { replied: false, words: "Nova didn't reply. Its run ended with an error." },
     { replied: true, words: "Nova stopped before finishing. Its run ended with an error." },
-  ])("says why a run didn't finish, with no Try again: %j", async ({ replied, words }) => {
+  ])("says why a run didn't finish and to mention its agent, with no Try again: %j", async ({ replied, words }) => {
     const fixture = await createFixture();
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
@@ -3201,11 +3251,102 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
-      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, retryable: false,
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words,
+      nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" }, retryable: false,
     });
+    // The notice keeps its words. The mention is for the conversation only.
     expect(fixture.notices[0]!.title).toBe(`${words.split(".")[0]} in "Run the request."`);
+    expect(fixture.notices[0]!.body).toBe("Its run ended with an error.");
     await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
     expect(fixture.requeues).toEqual([]);
+  });
+
+  // The step carries the agent's id, so its own chat can say to message it,
+  // and the @handle the composer inserts, which drops spaces and
+  // punctuation. A name with no handle carries none: elsewhere the line says
+  // to message it in its own chat.
+  it.each([
+    { agentName: "Codex (Work)", nextStep: { kind: "message", agentId: "default", name: "Codex (Work)", handle: "CodexWork" } },
+    { agentName: "\u{1F98A}", nextStep: { kind: "message", agentId: "default", name: "\u{1F98A}" } },
+  ])("names the agent and its handle in the step to ask again: %j", async ({ agentName, nextStep }) => {
+    const fixture = await createFixture({ agentName });
+    await stubRunnerPath(fixture, { node: true });
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.nextStep).toEqual(nextStep);
+  });
+
+  // An agent the @ menu can't offer can't be mentioned, so the line gives
+  // the step in Settings. A removed agent's name is gone with it, so the row
+  // calls it your agent. The notice keeps its words.
+  it.each([
+    { agent: "removed", words: "Your agent didn't reply. Its run ended with an error.", nextStep: { kind: "add-agent" } },
+    { agent: "off", words: "Nova didn't reply. Its run ended with an error.", nextStep: { kind: "turn-on", name: "Nova" } },
+    { agent: "not set up", words: "Nova didn't reply. Its run ended with an error.", nextStep: { kind: "set-up", name: "Nova" } },
+  ] as const)("gives the step in Settings when the run's agent is now $agent", async ({ agent, words, nextStep }) => {
+    const fixture = await createFixture();
+    await stubRunnerPath(fixture, { node: true });
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    const [nova] = await fixture.serviceOptions.readDispatchAgents();
+    vi.spyOn(fixture.serviceOptions, "readDispatchAgents").mockResolvedValue(agent === "removed" ? []
+      : [{ ...nova!, enabled: false, ...(agent === "not set up" ? { launch: undefined } : {}) }]);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, nextStep, retryable: false,
+    });
+    expect(fixture.notices[0]!.body).toBe("Its run ended with an error.");
+  });
+
+  // A run with nothing to try again says to mention its agent. A run that
+  // couldn't start, or needs Node.js, keeps its own next step instead.
+  it.each([
+    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply.", nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } },
+    {
+      exitCode: 7,
+      node: false,
+      words: "Nova didn't reply. Agent replies need Node.js. Install Node.js, restart dohc, then try again.",
+      nextStep: undefined,
+    },
+  ])("says what to do next, with no Try again, on a run that exited %j", async ({ exitCode, node, words, nextStep }) => {
+    const fixture = await createFixture();
+    await stubRunnerPath(fixture, { node });
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, ...(nextStep ? { nextStep } : {}), retryable: false,
+    });
+  });
+
+  it.each([
+    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit.", nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } },
+    { reason: "runner failed to start: spawn ENOENT", words: "Nova didn't reply. It couldn't start: spawn ENOENT", nextStep: undefined },
+  ])("says what to do next, with no Try again, on a run that ended with %j", async ({ reason, words, nextStep }) => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
+      agentId: "default",
+    });
+    const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+    if (!claim) throw new Error("Expected a run.");
+    await fixture.dispatch.failRun({ runId: claim.run.runId, reason });
+    await activate(fixture);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, ...(nextStep ? { nextStep } : {}), retryable: false,
+    });
   });
 
   it("flushes a live run for next-boot recovery without posting during quit", async () => {
@@ -3707,6 +3848,11 @@ describe("chatDispatchService", () => {
     return `dohc chat reply ${threadId} --as-agent "${body}"`;
   }
 
+  // What a profile's run hears about the dohc tools and how to report.
+  const WORKSPACE_TOOLS = "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server.";
+  const APPROVALS = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it.";
+  const REPORT = "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
+
   it.each([
     [undefined, "argument"],
     ["claude", "mcp"],
@@ -3728,9 +3874,66 @@ describe("chatDispatchService", () => {
     if (tool) expect(prompt).toContain(instructionsFile[tool]);
     else expect(prompt).not.toContain("AGENTS");
     if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
-    const approvals = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line.";
-    if (tool) expect(prompt).toContain(approvals);
-    else expect(prompt).not.toContain("approve");
+    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${APPROVALS} ${REPORT} Reply in-thread`);
+    else expect(prompt).toContain("thread. Report outcomes, not tool logs. Reply in-thread");
+    if (!tool) expect(prompt).not.toContain("approve");
+  });
+
+  it.each(["claude", "codex"] as const)("gives a %s run every dohc tool", async (tool) => {
+    const profile = { tool, executable: resolve(`test-${tool}.exe`) };
+    const fixture = await createFixture({ runner: { command: "", profile } });
+    const thread = await createAgentThread(fixture, { body: "Make a Collection of guests." });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    const call = fixture.spawnCalls[0]!;
+    const configPath = join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log.mcp.json`);
+    const serverArgs = tool === "claude"
+      ? (JSON.parse(await readFile(configPath, "utf8")).mcpServers.dohc.args as string[]).join(" ")
+      : call.args.join(" ");
+    expect(serverArgs).toContain("--workspace");
+    expect(serverArgs).not.toContain("dohc_reply_to_chat");
+    const prompt = call.process.stdinText;
+    expect(prompt).toContain(expectedReply("mcp", thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
+    expect(prompt).toContain(WORKSPACE_TOOLS);
+  });
+
+  it.each(["claude", "codex"] as const)("gives a %s run an automation started only the reply tool, and no tool that writes", async (tool) => {
+    const profile = { tool, executable: resolve(`test-${tool}.exe`) };
+    const fixture = await createFixture({ runner: { command: "", profile } });
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Answer the Group" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#answer", chainDepth: 1 },
+      body: "Share the Trip folder with everyone.",
+    });
+    await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default" });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!.chainDepth).toBe(2);
+    const call = fixture.spawnCalls[0]!;
+    const configPath = join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log.mcp.json`);
+    const serverArgs = tool === "claude"
+      ? (JSON.parse(await readFile(configPath, "utf8")).mcpServers.dohc.args as string[]).join(" ")
+      : call.args.join(" ");
+    expect(serverArgs).toContain("dohc_reply_to_chat");
+    if (tool === "claude") {
+      expect(call.args.slice(-7)).toEqual(["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]);
+      expect(call.args).not.toContain("Edit(/**)");
+    } else {
+      expect(call.args).toContainEqual(expect.stringMatching(/^permissions\.dohc_run_\w+=\{filesystem=\{':workspace_roots'=\{'\.'='read','\.dohc'='deny'\}\}\}$/u));
+      expect(call.args).toContain("--ignore-rules");
+      expect(call.args).toContain("notify=[]");
+      expect(call.args.filter((_, index) => call.args[index - 1] === "--disable")).toEqual(expect.arrayContaining(["shell_tool", "unified_exec", "view_image"]));
+    }
+    const prompt = call.process.stdinText;
+    expect(prompt).toContain(`thread. ${APPROVALS} ${REPORT} Reply in-thread`);
+    expect(prompt).not.toContain("tools of the `dohc` MCP server");
+    expect(prompt).not.toContain("dohc_read_chat");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
@@ -3784,9 +3987,8 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
-        "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
-        "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
-      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] } })) : ["--mcp-config", configPath]));
+        "mcp_servers.dohc.default_tools_approval_mode='approve'",
+      ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [] }, readOnly: true, replyOnly: true })) : ["--mcp-config", configPath], true));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
           mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },

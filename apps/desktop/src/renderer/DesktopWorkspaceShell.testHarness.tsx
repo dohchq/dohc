@@ -473,6 +473,7 @@ function makeBaseBridge(
     })),
     getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
     openUserSettingsFile: vi.fn(async () => undefined),
+    openWorkspacePolicyFile: vi.fn(async () => undefined),
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
@@ -1003,7 +1004,10 @@ export async function enterMarkdownSource(
   const toggle = (await queries.findByTestId(
     "markdown-edit-toggle",
   )) as HTMLButtonElement;
-  await waitFor(() => expect(toggle.disabled).toBe(false));
+  await waitFor(() => {
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
+  });
 
   // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
   // WYSIWYG (source).

@@ -58,6 +58,7 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
+import { createAgentChatRoutes } from "./agentChatRoutes";
 import { createAgentConnectionRoutes } from "./agentConnectionRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
@@ -722,6 +723,17 @@ export function createSyncRelayHandler({
     linkExchangeGlobalRateLimiter,
     requireShareWorkspace,
     publicEditRelease,
+    activity: discussionActivity,
+  });
+
+  const respondToAgentChat = createAgentChatRoutes({
+    storage,
+    linkKey,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    activity: discussionActivity,
+    reads: { chatResolverFor },
   });
 
   const respondToLinkChat = createLinkChatRoutes({
@@ -820,6 +832,9 @@ export function createSyncRelayHandler({
         route.route === "agent-introspect"
       ) {
         return await respondToAgentSignIn(request, route);
+      }
+      if (route.route === "agent-chat") {
+        return await respondToAgentChat(request, route);
       }
       if (route.route === "link-redeem") {
         if (request.method !== "POST") throw relayError("method_not_allowed");

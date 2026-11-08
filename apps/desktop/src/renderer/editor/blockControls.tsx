@@ -122,8 +122,6 @@ function gutterHang(node: ProseMirrorNode): string | null {
       return "bullet";
     case "orderedList":
       return "number";
-    case "taskList":
-      return "checkbox";
     case "blockquote":
       return "bar";
     case "callout":

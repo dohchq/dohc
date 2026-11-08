@@ -3,7 +3,8 @@ import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
-import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import type { NoticeTarget } from "./noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -54,6 +55,7 @@ export type ShellErrorKind =
   | "import-files"
   | "share-refresh"
   | "share-capture"
+  | "share-collision-record"
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
@@ -107,6 +109,9 @@ export interface ShellError {
   // closes its toast and keeps the row.
   // afterRetry puts the action after Try again, so F6 lands on Try again.
   action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; afterRetry?: true; additional?: {label: string; run: () => void}[] };
+  // Where a press on the row goes: what it is about. Opening never runs
+  // the row's action, so it never retries or ends the row.
+  target?: NoticeTarget;
   onDismiss?: () => void;
   // The row has no Dismiss: it stays until its action runs or the workspace
   // closes.
@@ -141,7 +146,7 @@ export type ReportShellFailure = (failure: {
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
-export function useShellError(workspaceId: string) {
+export function useShellError(workspaceId: string, retrySharedView?: () => void) {
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
@@ -164,12 +169,14 @@ export function useShellError(workspaceId: string) {
   // the row of its kind it replaces, so an open toast stays open, and files
   // it quietly when there is none.
   // "repeat" keeps an unchanged message's toast, and toasts a new message.
+  // "reader" works like "repeat" and also keeps an unchanged message's
+  // details, for a reader that can't see the refusal's cause.
   // "quiet" updates the row it replaces where it stands, with its id, time
   // and toast, so it never takes the toast from a newer row; with no row to
   // replace it files one without a toast.
   // A row that tests and other surfaces name passes a fixed `id`.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string }, seen: boolean | "keep" | "repeat" | "quiet" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string }, seen: boolean | "keep" | "repeat" | "reader" | "quiet" = false) => {
       if (currentWorkspace.current !== workspaceId) return;
       nextId.current += 1;
       const id = error.id ?? `shell-error-${nextId.current}`;
@@ -188,13 +195,15 @@ export function useShellError(workspaceId: string) {
           const updated: ShellError = { ...error, message, id: replaced.id, atMs: replaced.atMs, seen: replaced.seen };
           return current.flatMap((existing) => existing === replaced ? [updated] : matches(existing) ? [] : [existing]);
         }
-        const repeated = seen === "repeat" && replaced?.message === message ? replaced : undefined;
+        const repeat = seen === "repeat" || seen === "reader";
+        const repeated = repeat && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
+          ...(seen === "reader" && repeated ? { details: repeated.details } : {}),
           message,
           id: repeated?.id ?? id,
           atMs: repeated?.atMs ?? atMs,
-          seen: seen === "repeat" ? (repeated?.seen ?? false) : seen === "keep" || seen === "quiet" ? (replaced?.seen ?? true) : seen,
+          seen: repeat ? (repeated?.seen ?? false) : seen === "keep" || seen === "quiet" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -330,6 +339,19 @@ export function useShellError(workspaceId: string) {
     filedShareCapture.current = null;
   }, [workspaceId]);
 
+  const reportSharedViewRefusal = useCallback((error: unknown) => {
+    if (!retrySharedView || refusalCode(error) !== "share-collision-record") return false;
+    const { words } = readError(error);
+    push({
+      message: words ?? UNKNOWN_ERROR_WORDS,
+      retry: retrySharedView,
+      noDismiss: true,
+      kind: "share-collision-record",
+      identity: "share-collision-record",
+    }, "reader");
+    return true;
+  }, [push, retrySharedView]);
+
   const reportShellError = useCallback(
     (
       fallback: string,
@@ -340,7 +362,9 @@ export function useShellError(workspaceId: string) {
       // Changes the row of its identity where it stands, with no new toast.
       quiet = false,
     ) => {
+      if (reportSharedViewRefusal(error)) return;
       const { cause, title, words, canRetry, details: explanation } = readError(error);
+      const sharedFileRefusal = refusalCode(error) === "share-collision-record";
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
       const details: ReadonlyArray<ErrorDetailField> = partial ? [
         ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
@@ -348,11 +372,11 @@ export function useShellError(workspaceId: string) {
         ["Record ID", partial.retry.recordId],
         ["Reason", partial.reason, partial.reason.length],
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
-      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause ? [["Cause", cause] as const] : [])];
+      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause && !sharedFileRefusal ? [["Cause", cause] as const] : [])];
       // The request that ran a Collection's move reports its stop with the toast. One that only waited for it files a row.
       push({
         ...(title ? { title } : {}),
-        message: title && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        message: (sharedFileRefusal || title) && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
         ...(partial ? { identity: partial.retry.recordId
           ? `record:${partial.retry.recordId}`
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
@@ -364,7 +388,7 @@ export function useShellError(workspaceId: string) {
         ...(kind ? { kind } : {}),
       }, quiet || waitedForCollectionMove(error) ? "quiet" : false);
     },
-    [push, privacySettingsAction, keepCollectionsHere],
+    [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed. A part that keeps one row
@@ -398,12 +422,15 @@ export function useShellError(workspaceId: string) {
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
+      target?: NoticeTarget;
       noDismiss?: boolean;
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
-      const shown = readError(failure.message);
-      const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
+      if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message)) return;
+      const refusal = [failure.cause, failure.message].find(error => refusalCode(error) === "share-collision-record");
+      const shown = readError(refusal ?? failure.message);
+      const cause = refusal !== undefined ? null : failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
       const title = failure.title ?? (isLiveEditingRefusal(failure.cause) ? readError(failure.cause).title : undefined);
       const action = failure.action ??
         (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? privacySettingsAction : undefined);
@@ -421,12 +448,13 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),
+        ...(failure.target ? { target: failure.target } : {}),
         ...(failure.noDismiss ? { noDismiss: true } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);
     },
-    [push, privacySettingsAction],
+    [push, privacySettingsAction, reportSharedViewRefusal],
   );
   // Content search lives in the shell so its results survive panel switches.
   // Invocation failures use the shell's persistent error and retry contract;
@@ -467,6 +495,7 @@ export function useShellError(workspaceId: string) {
           message: notice.message,
           retry,
           action: { label: "Sync settings", run: openSyncSettings },
+          target: { to: "sync-settings" },
           kind: "collections-waiting",
         },
         notice.toast ? false : "keep",
@@ -500,7 +529,8 @@ export function useShellError(workspaceId: string) {
           ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
           // A held note's row stays until the change is saved.
           ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
-          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}) };
+          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}),
+          ...(attributionRefused ? { target: { to: "history" } as const } : path ? { target: { to: "file", path } as const } : {}) };
       }),
     ]);
   }, []);
@@ -589,6 +619,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         retry: notice.retry,
         action: { label: "Open History", run: notice.openHistory, reads: true },
+        target: { to: "history" },
       }, notice.toast ? false : "repeat");
     },
     [clearIdentity, push, workspaceId],
@@ -743,12 +774,13 @@ export function useShellError(workspaceId: string) {
   // A kind makes a newer message replace the row of an older one, such as
   // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
-    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"]) => {
+    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"], target?: NoticeTarget) => {
       push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
+        ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
     },
@@ -792,6 +824,7 @@ export function useShellError(workspaceId: string) {
       kind: "reports",
       reports,
       action: { label: "Privacy settings", run: openPrivacy },
+      target: { to: "privacy-settings" },
     });
   }, [push]);
   // One row per kept copy the engine lists. A copy listed for the first time
@@ -866,6 +899,7 @@ export function useShellError(workspaceId: string) {
         details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
         retry: null,
         action: { label: "Open History", run: recovery.open },
+        target: { to: "history-change", moment: recovery.momentId, path: recovery.path },
         onDismiss: recovery.dismiss,
         atMs,
         seen: false,
@@ -921,18 +955,19 @@ export function useShellError(workspaceId: string) {
       push({ identity, title: `Kept a copy of ${path}`,
         message: `It changed outside dohc. That change is now in ${copy}.`,
         retry: null, tone: "warning", onDismiss: dismiss,
-        action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true } }, seen);
+        action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true },
+        target: { to: "file", path: copy } }, seen);
     }
     if (JSON.stringify(saved) !== stored) persist();
   }, [push, workspaceId]);
   // A native copy that was saved opens from its new path.
   const showKeptCopySaved = useCallback(
-    (message: string, open: (() => void) | null) => {
+    (message: string, saved: { path: string; open: () => void } | null) => {
       push({
         message,
         retry: null,
         tone: "success",
-        ...(open ? { action: { label: "Open", run: open, ends: true } } : {}),
+        ...(saved ? { action: { label: "Open", run: saved.open, ends: true }, target: { to: "file", path: saved.path } as const } : {}),
       });
     },
     [push],
@@ -957,7 +992,7 @@ export function useShellError(workspaceId: string) {
     const fresh = arrived.map((file): ShellError => ({
       id: `shell-error-${++nextId.current}`, identity: `capture-held:${file.path}`, kind: "capture-held", tone: "warning",
       title: "Outside edit not recorded", message: file.message,
-      details: [["File", file.path, file.path.length]], retry: file.retry, atMs: Date.now(), seen: false,
+      details: [["File", file.path, file.path.length]], retry: file.retry, target: { to: "file", path: file.path }, atMs: Date.now(), seen: false,
     }));
     setShellErrors(current => {
       const stays = current.filter(row => row.kind !== "capture-held" || listed.has(row.identity!.slice("capture-held:".length)));
@@ -982,7 +1017,9 @@ export function useShellError(workspaceId: string) {
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
     // retried goes, so a failure the retry has already reported again stays.
-    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read"
+    // A share's collision-record row stays until a refresh completes.
+    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read" ||
+      target?.kind === "share-collision-record"
       ? current
       : current.filter(error => error !== target));
   }, []);

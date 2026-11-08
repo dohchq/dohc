@@ -32,18 +32,23 @@ export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 // notice and the band in Chats.
 export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
 
+// The oldest Claude Code dohc starts. dohc checks it in Settings and again
+// before each run.
+export const CLAUDE_MIN_VERSION = "2.1.316";
+
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
   if (tool !== "claude" || !version) return false;
   const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(version);
   if (!match) return false;
-  const [, major, minor, patch] = match.map(Number);
-  return major! > 2 || (major === 2 && (minor! > 1 || (minor === 1 && patch! >= 259)));
+  const [major, minor, patch] = match.slice(1).map(Number) as [number, number, number];
+  const [minMajor, minMinor, minPatch] = CLAUDE_MIN_VERSION.split(".").map(Number) as [number, number, number];
+  return major !== minMajor ? major > minMajor : minor !== minMinor ? minor > minMinor : patch >= minPatch;
 }
 
 export const AGENT_TOOLS = [
   { id: "claude", name: "Claude Code", command: "claude", authArgs: ["auth", "status"],
-    permissions: "Edits workspace files and replies without asking. Other actions use your Claude permissions; approval requests are denied." },
+    permissions: "Edits workspace files and uses dohc's tools without asking. Other actions use your Claude permissions; approval requests are denied." },
   { id: "codex", name: "Codex", command: "codex", authArgs: ["login", "status"],
     permissions: "Workspace-write sandbox. Runs without approval prompts." },
   { id: "opencode", name: "OpenCode", command: "opencode", authArgs: ["auth", "list", "--pure"],
@@ -54,12 +59,22 @@ export const AGENT_TOOLS = [
 
 // runArguments holds what one run adds: the dohc MCP server it replies
 // through and, for Codex, its sandbox and trust (codexRunConfig.ts).
-export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = []): string[] {
+// A read-only Claude Code run has only the built-in tools that read and only
+// the run's dohc server; a read-only Codex run gets that from codexRunConfig,
+// and loads none of the person's saved command rules. `codex mcp list`
+// takes no --ignore-rules, so it stays out of runArguments.
+export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
+  // mcp__dohc allows every tool the run's dohc server offers.
+  // --restricted drops the person's settings files too, and with them their
+  // hooks and plugins; --disable-slash-commands drops their skills.
+  const claudeTools = readOnly
+    ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+    : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
-    : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
+    : ["exec", "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {

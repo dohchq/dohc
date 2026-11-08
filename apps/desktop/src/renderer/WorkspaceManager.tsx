@@ -123,7 +123,7 @@ function WorkspaceRow(props: {
       data-testid="workspace-manager-row"
       data-workspace-id={props.workspace.workspaceId}
       className={`group relative flex items-center gap-2 rounded-lg px-3 py-2.5 transition-colors ${
-        props.current ? "bg-selected" : "hover:bg-hover"
+        props.current ? "bg-selected font-medium" : "hover:bg-hover"
       }`}
     >
       <button

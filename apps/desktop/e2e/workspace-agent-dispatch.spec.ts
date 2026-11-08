@@ -186,6 +186,132 @@ test("the agent dispatches a fresh successful run for each human message", async
   }
 });
 
+test("an agent's reply in Notices opens its conversation at the reply, washed and focused", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "agent-dispatch-notice-open-e2e";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedRunnerSettings(temp, "report");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
+    const page = desktop.page;
+    await openMyAgent(page);
+
+    // The first reply lands while its chat is on screen. Its run's notice
+    // comes later, once the run has ended. This reads the list on each change,
+    // as Notices does, so it sees the notice arrive before Notices dismisses it.
+    const runNotices = await page.evaluateHandle(() => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          listNotices(payload: Record<string, never>): Promise<{ notices: Array<{ kind: string }> }>;
+          onNoticesChanged(listener: () => void): () => void;
+        };
+      }).dohcDesktop;
+      const listed = async () => (await api.listNotices({})).notices.filter((notice) => notice.kind === "agent-run").length;
+      const state = { arrived: false, listed, stop: () => {} };
+      state.stop = api.onNoticesChanged(() => {
+        void listed().then((count) => { if (count > 0) state.arrived = true; });
+      });
+      return state;
+    });
+    const composer = page.getByTestId("chats-lane-composer");
+    await composer.fill("audit the projections");
+    await composer.press("Enter");
+    const agentReplies = page.getByTestId("chats-lane-message").filter({ hasText: REPORT });
+    await expect(agentReplies).toHaveCount(1);
+    // Its notice arrived and left the list while the chat was still open.
+    await expect.poll(() => runNotices.evaluate(async (state) => state.arrived && await state.listed() === 0), { timeout: 30_000 }).toBe(true);
+    await runNotices.evaluate((state) => state.stop());
+
+    // Ask again with the chat closed, so the reply arrives as a notice. The
+    // conversation is an editor tab: another sidebar view leaves it on screen.
+    await page.getByRole("button", { name: "Close Nova", exact: true }).click();
+    await expect(page.getByTestId("chats-lane-message")).toHaveCount(0);
+    // The agent's conversation is its channel's chat lane, not its posts.
+    await page.evaluate(async (workspaceId) => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          listChatChannels(payload: { workspaceId: string }): Promise<{ channels: Array<{ id: string; kind: string }> }>;
+          listChannelThreads(payload: { workspaceId: string; channelId: string; lane: "chat" }): Promise<{ threads: Array<{ id: string }> }>;
+          sendChatMessage(payload: { workspaceId: string; threadId: string; body: string }): Promise<unknown>;
+        };
+      }).dohcDesktop;
+      const { channels } = await api.listChatChannels({ workspaceId });
+      const agent = channels.find((channel) => channel.kind === "agent");
+      if (!agent) throw new Error(`no agent channel in ${workspaceId}`);
+      const { threads: [conversation] } = await api.listChannelThreads({ workspaceId, channelId: agent.id, lane: "chat" });
+      if (!conversation) throw new Error("the agent channel has no conversation");
+      await api.sendChatMessage({ workspaceId, threadId: conversation.id, body: "also audit the export totals" });
+    }, workspaceId);
+
+    // With UI_AUDIT_SHOT_DIR set, saves the window in both themes.
+    const shots = async (name: string) => {
+      const dir = process.env.UI_AUDIT_SHOT_DIR;
+      if (!dir) return;
+      await mkdir(dir, { recursive: true });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(dir, `${name}-${theme}.png`) });
+      }
+    };
+
+    // The reply arrives as a toast with its Open, before it fades.
+    const toastOpen = page.getByTestId("sent-notice-toast").filter({ hasText: "Nova" }).getByTestId("sent-notice-toast-open");
+    await expect(toastOpen).toBeVisible();
+    await toastOpen.hover();
+    await shots("notice-toast-open-hover");
+    // The toast fades on its own; still here means the frames caught it.
+    await expect(toastOpen).toBeVisible();
+
+    await page.getByTestId("notice-center-toggle").click();
+    const center = page.getByTestId("notice-center");
+    const row = center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" }).first();
+    await expect(row).toBeVisible();
+    await row.hover();
+    await shots("notice-row-hover");
+    // The whole row is the target, with the pointer.
+    expect(await row.evaluate((node) => getComputedStyle(node).cursor === "pointer"
+      || getComputedStyle(node.querySelector("[data-notice-open]")!, "::after").cursor === "pointer")).toBe(true);
+    // The row's own Open is the toast's button.
+    await row.getByRole("button", { name: "Open", exact: true }).hover();
+    await shots("notice-row-open-hover");
+    // The keyboard reaches the row through its one stop, and rings the row.
+    await page.mouse.move(0, 0);
+    await page.keyboard.press("ArrowDown");
+    await expect(row.locator("[data-notice-open]")).toBeFocused();
+    await shots("notice-row-focus");
+
+    // A press anywhere on the row, not only its Open, lands on the reply.
+    await row.click();
+    await expect(center).toHaveCount(0);
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
+    const landed = page.locator('[data-testid="chats-lane-message"].dohc-target-flash');
+    await expect(landed).toHaveCount(1);
+    await expect(landed).toContainText(REPORT);
+    await expect(landed).toBeFocused();
+    await expect(landed).toHaveAttribute("data-message-id", await agentReplies.nth(1).getAttribute("data-message-id") ?? "");
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `notice-landed-reply-${theme}.png`) });
+      }
+    }
+    // The wash clears on its own.
+    await expect(landed).toHaveCount(0);
+
+    // Both replies exist now. The only Nova row is the one just opened at the
+    // second reply.
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" })).toHaveCount(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("an agent's question with choices is a poll; picking one answers it and the answer reaches the next run", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -301,10 +427,13 @@ test("a runner that exits silently says why under the message and posts a notice
     // The failure's toast sits above the message box, so Send stays in reach.
     const toasts = page.getByTestId("notice-toasts");
     await expect(toasts).toContainText("Nova didn't reply");
-    // The same words sit under the message that asked. Nothing can run it
-    // again today, so the line offers no Try again.
+    // The same words sit under the message that asked. Running it again
+    // would repeat what it did, so the line offers no Try again and says to
+    // ask the agent again instead. In its own chat a message asks it.
+    const words = "Nova didn't reply. Its run ended with an error.";
+    const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
-    await expect(line).toHaveText("Nova didn't reply. Its run ended with an error.");
+    await expect(line.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
     await waitForVisibleAnimations(page);
     if (process.env.UI_AUDIT_SHOT_DIR) {
@@ -328,6 +457,7 @@ test("a runner that exits silently says why under the message and posts a notice
     const center = page.getByTestId("notice-center");
     await expect(center.getByText("Nova didn't reply", { exact: true })).toBeVisible();
     await expect(center.getByText("Its run ended with an error.", { exact: true })).toBeVisible();
+    await expect(center).not.toContainText(nextStep);
     const messages = page.getByTestId("chats-lane-message");
     await expect(messages).toHaveCount(1);
     await expect(messages.getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "human");
@@ -338,7 +468,8 @@ test("a runner that exits silently says why under the message and posts a notice
     await messages.hover();
     await page.getByTestId("chats-lane-reply-in-thread").click();
     const panel = page.getByTestId("chats-lane-thread-panel");
-    await expect(panel.getByTestId("chats-lane-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    const panelLine = panel.getByTestId("chats-lane-run-failed");
+    await expect(panelLine.getByRole("status")).toHaveText([words, nextStep]);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -347,11 +478,12 @@ test("a runner that exits silently says why under the message and posts a notice
       }
     }
 
-    // A post in a group says the same under its opening message.
+    // A post in a group says it under its opening message, by the @handle.
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    const postLine = page.getByTestId("chats-run-failed");
+    await expect(postLine.getByRole("status")).toHaveText([words, "Mention @Nova to ask again."]);
     await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {
@@ -408,6 +540,7 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
       await expect(settings).toBeVisible();
       if (process.env.UI_AUDIT_SHOT_DIR) {
         await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+        await waitForVisibleAnimations(page);
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `runner-test-error-${theme}.png`) });
       }
     }

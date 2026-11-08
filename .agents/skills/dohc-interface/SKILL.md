@@ -20,6 +20,7 @@ Use words only for the person's own content and for facts a picture cannot show,
 
 To test a surface, hide every word that is not the person's own content.
 If the purpose, state, or next click disappears, show it with an icon, position, shape, or color.
+Who can reach the work is a fact a picture can't show. A share row says it in words: `sam@ridge.co can edit`, `1 person can edit, 2 can view`, `Anyone with the link can view`.
 
 | Instead of | Show |
 | --- | --- |
@@ -95,6 +96,11 @@ Check that the action exists on that surface before you name it.
 | --- | --- |
 | `No results` | `No files match "budget". Try a shorter search.` |
 | `Nothing here yet` | `This folder is empty. Add a file to start.` |
+
+A Home section with nothing in it keeps its header and shows one muted line under it, not `EmptyState`: `No pages yet.`
+The header's + is that line's Next, so the line names a Next only when the header has none, as Apps does.
+The line is not a keyboard stop. The header's toggle reads it as its description.
+In a workspace of your own, Pages, Collections and Apps always show. A share view shows only the kinds it holds. While a section's list is still being read, it holds one row's height and shows no line, so it never says it is empty too soon.
 
 ### Agents
 
@@ -250,9 +256,14 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus reaches it, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A Notices row opens what it is about. A click, Enter or Space on the row goes where its Open or Review action goes, and reads the row. A row whose actions only change state, such as **Try again**, opens where the problem is, or nowhere. Opening a row never retries, sends, installs or deletes.
+- A row with nowhere to go has no pointer, hover fill, role or Tab stop. Arrow keys still reach it, so the keyboard can read and dismiss it.
+- A row's own actions and icon controls do only what they name, and never also open the row.
+- When what a row is about is gone, its text becomes `dohc could not find this chat.` or `dohc could not find this file.`, and the row stops opening, with no toast and no navigation.
+- On a row that opens, **Show more** expands clipped text, and a click on the text opens the row.
 - A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
 - F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast.
-- A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
+- A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Couldn't confirm this workspace's account**, has no × and stays until it ends.
 - **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Two kinds stay: a row that holds the only Undo for a change, and set-aside edits, whose Dismiss deletes the text for good.
 - Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Opening a dialog closes Notices too, which commits them. If dohc quits first, the cleared rows come back at the next start, because their Undo was still open. A dismissal that fails brings its row back.
 - A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
@@ -263,7 +274,8 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Write a refusal to fit two lines: what failed, then the one thing to do. The cause goes in its details.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself, except a dialog's own action, as above.
-- For a list or section whose read failed, show `RetryRow`.
+- If a list could not load, say so in its place in one line, with Try again. Pass the line as `RetryRow`'s children.
+- Keep the cause and Copy details in the toast and the Notices row, not in the list.
 
 ## Controls
 
@@ -299,6 +311,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
 
+A surface or list whose read failed, so it shows nothing, takes danger. When some of its sources didn't load beside others that did, what's missing takes warning. Work dohc is holding or has paused takes warning where it waits, such as History paused in History's pane. The notice that reports the failure behind it is an error, so it takes danger. What the person's own rules or a list's limit leave out, such as a file History no longer tracks, takes the plain mark. A list's limit goes in a `bg-panel-2` band above its rows, never in a row, and its whole sentence shows: how many the list includes, and how to see the rest. An item that is broken, such as an automation dohc can't read, takes danger wherever it sits.
+
 ### Type
 
 | Role | Classes |
@@ -318,6 +332,8 @@ Never uppercase a label.
 
 Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
 `PathLine` in `ui/PathLine.tsx` draws it.
+When a row is too narrow for a whole name, cut the name in the middle and keep its extension: `product-pl….md`. When two rows in one list have the same name, show the folder before it: `plans/notes.md`.
+When a line holds a name beside other words, such as who made a change, the other words give way first, each down to a 48px floor, and the name keeps its room longest.
 
 When the title bar is crowded, Go to… and the Restricted Mode pill give way first. Each narrows to its icon and keeps its words as its tooltip and accessible name.
 The Alpha pill stays. The workspace and version names keep at least three letters and an ellipsis, with the full name in the tooltip.
@@ -393,7 +409,7 @@ Position:
 | Dialog that scrolls | Only a body that scrolls gets bands: header and footer `px-6 py-4` with a rule, body `p-6`. |
 | Settings page | `px-12 pt-10`, as wide as the page column. The page title is 24 px over the first section. |
 | Settings section | `SettingsSection`: a heading in the panel title role, 8 px over a card. Sections sit 32 px apart. A page with one group has one card and no heading. |
-| Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size; in a narrow pane they wrap under the name and stay on the right edge. Reset appears left of them only when the value differs from its default. A row that can reset keeps Reset's place, so the controls never move or wrap when it appears. When the control is a list, its name and Reset sit beside the list's first row (`top`). |
+| Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size; in a narrow pane they wrap under the name and start at its left edge. Reset appears left of them only when the value differs from its default. A row that can reset keeps Reset's place, so the controls never move or wrap when it appears. When they wrap, Reset's place stays at the end of the name's line. When the control is a list, its name and Reset sit beside the list's first row (`top`). |
 | Empty state | `EmptyState`: `gap-4 px-6`. Do not build your own. |
 | Toast and Notices row | `px-3 py-2`, `gap-2` |
 
@@ -404,13 +420,16 @@ Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px
 List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
-- Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
+- Active or selected: `bg-selected text-ink`. The active row adds `font-medium`. A picked row takes the picked fill, `bg-(--dohc-selection)`, instead.
+- The picked fill marks the rows an action will act on, only in the list where they were picked. The open file has the selected fill and medium weight in every list. When it is also picked, it keeps the picked fill and gains a 2 px ink edge.
+- If a row's name is content, such as a share's file, draw the name in `text-ink`. If the share ended or was removed, keep its name `text-muted`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
 - So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape, Delete and Backspace leave the mark as it was, so closing or removing the focused thing from the keyboard still shows where focus went.
 - A confirm dialog's buttons show the ring whenever Chromium's `:focus-visible` matches, so a dialog opened from the keyboard shows where Enter acts at once. Opened with the pointer, it shows the ring after the first Tab or arrow, as everywhere else.
 - Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
+- A row that opens one thing puts a button on its title, stretched over the row with `dohc-row-open`. The whole row then takes the `dohc-focus-row` mark and hover fill as one target, and the row's own controls sit above the stretch.
 - Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
 - Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
 - To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`, except a confirm dialog's buttons, above.
@@ -426,8 +445,10 @@ Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-x
 Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
 While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
 A press outside a dialog does nothing, so a stray click cannot discard what a person typed.
-Only pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
-Pass `closeOnBackdrop` to `Overlay` for a picker only.
+Pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
+Settings closes on a press outside too, because each field saves when the person leaves it. A field that can't save yet sets `data-unsaved` and says why beside it. The press then keeps Settings open and focuses that field.
+A press closes one surface, as Escape does. A press that closes a menu leaves its dialog open, and a press that starts inside the panel never closes it.
+Pass `closeOnBackdrop` to `Overlay` only for these.
 
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 
@@ -455,6 +476,7 @@ A question's status is words and an icon, never a pill. An open question without
 - Real movement, such as expanding or sliding: 120 to 180ms ease-out. Panels take 220 to 280ms. No bounce.
 - Floating surfaces enter with `dohc-pop-in`. Nothing else animates on mount.
 - Reduced motion is handled globally. Never write an inline `animation` that bypasses it.
+- Landing on what a person asked to see, such as a heading from the outline or a message from Notices, washes it once with `dohc-target-flash` after the scroll settles, and moves focus to it. With reduced motion, the wash shows and clears without fading.
 
 ### Hard rules
 

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MentionComposer } from "./MentionComposer";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 const candidates: MentionCandidate[] = [
@@ -22,6 +22,7 @@ function Harness(props: {
   onEscape?: () => void;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   surface?: "post";
+  above?: ReactNode;
 }) {
   const [value, setValue] = useState("");
   return (
@@ -42,6 +43,7 @@ function Harness(props: {
       onChange={setValue}
       onSend={props.onSend ?? (() => {})}
       {...(props.onEscape ? { onEscape: props.onEscape } : {})}
+      above={props.above}
     />
   );
 }
@@ -189,22 +191,60 @@ describe("MentionComposer autocomplete", () => {
     expect(composer.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
   });
 
-  // jsdom's viewport is 1024 by 768. The menu is a fixed popover anchored to
-  // the composer: below it when there is room, otherwise above.
+  // jsdom's viewport is 1024 by 768. The menu is a fixed popover 4px off the
+  // composer's frame, or off a bar stacked on it, 30px tall: above them when
+  // the list fits there, otherwise on the side with more room.
   it.each([
-    { name: "below a composer near the top", top: 500, menuTop: 566 },
-    { name: "above a composer at the bottom", top: 700, menuTop: 692 },
-  ])("floats the roster $name", async ({ top, menuTop }) => {
-    render(<Harness />);
+    { name: "above a composer with room over it", frameTop: 500, bar: false, side: "bottom", at: "272px" },
+    { name: "above the bar stacked on a composer", frameTop: 500, bar: true, side: "bottom", at: "302px" },
+    { name: "below a composer with no room over it", frameTop: 70, bar: false, side: "top", at: "134px" },
+  ] as const)("floats the roster $name", async ({ frameTop, bar, side, at }) => {
+    const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
+    render(<Harness above={bar ? <div data-testid="bar" /> : undefined} />);
     const composer = screen.getByTestId("chats-composer");
-    vi.spyOn(composer, "getBoundingClientRect").mockReturnValue(new DOMRect(40, top, 300, 60));
+    const frame = composer.closest("form")!;
+    vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop, 300, 60));
+    // The stack's own box starts at its empty top margin; the menu ignores it.
+    vi.spyOn(frame.parentElement!, "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop - (bar ? 34 : 4), 300, 90));
+    if (bar) vi.spyOn(screen.getByTestId("bar"), "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop - 30, 300, 30));
     await userEvent.type(composer, "@");
     const menu = await screen.findByTestId("chats-mention-menu");
     expect(menu.getAttribute("popover")).toBe("manual");
     expect(menu.className).toContain("fixed");
     expect(menu.style.left).toBe("40px");
-    expect(menu.style.top).toBe(`${menuTop}px`);
+    expect(menu.style[side]).toBe(at);
     expect(menu.style.maxHeight).toBe("192px");
+    listHeight.mockRestore();
+  });
+
+  it("floats a post's roster off the card, not the author row inside it", async () => {
+    const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
+    render(<Harness surface="post" />);
+    const composer = screen.getByTestId("chats-composer");
+    const frame = composer.closest("form")!;
+    vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(new DOMRect(40, 500, 300, 120));
+    vi.spyOn(frame.firstElementChild!, "getBoundingClientRect").mockReturnValue(new DOMRect(53, 513, 274, 20));
+    await userEvent.type(composer, "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    expect(menu.style.bottom).toBe("272px");
+    listHeight.mockRestore();
+  });
+
+  it("moves the roster above once a query leaves it room there", async () => {
+    // Each row is 38px tall. Over the frame there are 104px to fill.
+    const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockImplementation(function (this: HTMLElement) { return this.querySelectorAll('[role="option"]').length * 38; });
+    render(<Harness />);
+    const composer = screen.getByTestId("chats-composer");
+    vi.spyOn(composer.closest("form")!, "getBoundingClientRect").mockReturnValue(new DOMRect(40, 120, 300, 60));
+    await userEvent.type(composer, "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    expect(within(menu).getAllByRole("option", { hidden: true })).toHaveLength(3);
+    expect(menu.style.top).toBe("184px");
+    await userEvent.type(composer, "pla");
+    expect(within(menu).getAllByRole("option", { hidden: true })).toHaveLength(1);
+    expect(menu.style.bottom).toBe("652px");
+    listHeight.mockRestore();
   });
 
   it("tracks the active file and heading option for assistive tech", async () => {

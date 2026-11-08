@@ -96,9 +96,11 @@ export interface WorkspaceActivityOptions {
   onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
-  // Live facts main owns: whether this workspace has cloud sync enabled
-  // (registry remote identity) and whether a cloud session exists right now.
-  cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
+  // Live facts main owns: why a synced workspace can't sync on this
+  // computer's session (absent when it can, or when the workspace doesn't
+  // sync), and the workspace's saved pause.
+  cloudStateFor?: (workspaceId: string) => {
+    syncBlocked?: "not-connected" | "account-unconfirmed";
     syncPause?: SyncStatusResult["syncPause"];
   };
   // Builds a sync engine for a workspace when it is enabled and connected;
@@ -267,10 +269,7 @@ export function createWorkspaceActivity(
   ): SyncStatusResult {
     const { workspaceId } = workspace;
     const liveSessionsGeneration = state.liveSessionsGeneration;
-    const cloud = options.cloudStateFor?.(workspaceId) ?? {
-      enabled: false,
-      connected: false,
-    };
+    const cloud = options.cloudStateFor?.(workspaceId) ?? {};
     const syncPause = cloud.syncPause;
     const preserved = state.preservedStatus;
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
@@ -287,12 +286,12 @@ export function createWorkspaceActivity(
       hasConflict: conflictCount > 0,
       // A retry someone asked for shows as syncing until it ends.
       syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
-      cloudEnabled: cloud.enabled,
-      // A confirmed-401 engine reads as disconnected (the existing
-      // "cloud-disconnected" surface) so the UI stops saying "connected" and
-      // prompts re-login, instead of spinning on a dead token. An engine
-      // stopped on the relay API version reads the same way.
-      cloudConnected: cloud.connected && !(snap?.authExpired ?? false) && !snap?.updateRequired,
+      // An engine stopped on the relay API version names the side to update.
+      // One whose sign-in the server refused stops too. Neither records a
+      // pause, so sync runs again once a new sign-in rebuilds the engine.
+      syncBlocked: snap?.updateRequired
+        ? "update-required"
+        : cloud.syncBlocked ?? (snap?.authExpired ? "sign-in-expired" : null),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -306,6 +305,7 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
+      ...(snap?.authExpired ? { signInExpired: true } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,

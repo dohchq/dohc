@@ -85,7 +85,7 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
       return state.status === "checking" ? available(event.version) : state;
     case "not-available":
       return state.status === "checking"
-        ? { status: "up-to-date", message: "You're on the latest version." }
+        ? { status: "up-to-date", message: "dohc is up to date." }
         : state;
     case "download":
       return state.status === "available"

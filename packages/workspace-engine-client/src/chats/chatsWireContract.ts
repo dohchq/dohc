@@ -514,6 +514,7 @@ const ChatActorSchema = Schema.Union([
     displayName: Schema.String,
     grantId: Schema.NonEmptyString,
     principalId: Schema.NonEmptyString,
+    agentConnectionId: Schema.optionalKey(Schema.NonEmptyString),
   }),
 ]);
 // A link message names no account, owner, actor key, origin or automation.

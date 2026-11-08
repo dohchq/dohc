@@ -2,7 +2,7 @@ import { useId, useMemo, useRef, useState, type DragEvent, type ReactNode } from
 import { Upload } from "lucide-react";
 import { FILE_KIND_RECORDS, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
-import { shortcutAccelerators, shortcutText } from "../../shortcuts/shortcutRegistry";
+import { shortcutAria, shortcutText } from "../../shortcuts/shortcutRegistry";
 import { EmptyState } from "../ui/controls";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { fileName } from "./EditorTabs";
@@ -46,13 +46,6 @@ function recentFiles(recent: readonly string[], files: readonly ListedFile[]): L
 
 function fileTone(kind: FileKindRecord): string | undefined {
   return kind.displayKind === "markdown" || kind.displayKind === "drawing" ? KIND_TONE[kind.displayKind] : undefined;
-}
-
-// The chord as aria-keyshortcuts spells it: Meta+N on macOS, Control+N elsewhere.
-function ariaShortcut(id: "new-file", platform: string | undefined): string | undefined {
-  return shortcutAccelerators(id, platform)[0]?.split("+")
-    .map((key) => key === "CommandOrControl" ? (platform === "darwin" ? "Meta" : "Control") : key === "Ctrl" ? "Control" : key)
-    .join("+");
 }
 
 // An editor group with no open tab shows what a person can make, and their
@@ -106,7 +99,7 @@ export function EmptyEditorGroup(props: {
               <button
                 key={tile.kind}
                 type="button"
-                aria-keyshortcuts={tile.shortcut ? ariaShortcut(tile.shortcut, props.platform) : undefined}
+                aria-keyshortcuts={tile.shortcut ? shortcutAria(tile.shortcut, props.platform) : undefined}
                 onClick={() => run(tile.create)}
                 className="group flex min-w-0 flex-col gap-2 rounded-lg text-left"
               >
@@ -182,7 +175,7 @@ function DropZone(props: { onDrop: (files: File[]) => void }) {
         const files = [...event.dataTransfer.files];
         if (files.length > 0) props.onDrop(files);
       }}
-      className={`flex h-11 items-center justify-center gap-2 rounded-lg border border-dashed text-[13px] transition-colors duration-100 ${over ? "border-accent bg-hover text-ink" : "border-line text-subtle"}`}
+      className={`flex h-11 items-center justify-center gap-2 rounded-lg border border-dashed text-[13px] transition-colors duration-100 ${over ? "border-accent bg-hover text-ink" : "border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] text-subtle"}`}
     >
       <Upload size={16} aria-hidden />
       Drop files here to add them

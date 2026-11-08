@@ -43,6 +43,7 @@ export const CAPABILITIES = {
   "settings.user.path.read": capability("Read the path of this computer's user settings file.", {ipc: ["getUserSettingsFilePath"]}),
   "settings.user.file.open": capability("Open this computer's user settings file in the system editor.", {ipc: ["openUserSettingsFile"]}),
   "settings.workspace.file.open": capability("Open the admitted workspace's settings file in the system editor.", {ipc: ["openWorkspaceSettingsFile"]}),
+  "history.rules.file.open": capability("Open one of the admitted workspace's History rules files in the system editor.", {ipc: ["openWorkspacePolicyFile"]}),
   "settings.workspace.read": capability("Read the admitted workspace's settings.", {ipc: ["getWorkspaceSettings"]}),
   "settings.workspace.write": capability("Save a patch to the admitted workspace's settings.", {ipc: ["setWorkspaceSettings"]}),
   "settings.workspace.reset": capability("Reset the admitted workspace's settings.", {ipc: ["resetWorkspaceSettings"]}),

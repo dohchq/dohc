@@ -108,6 +108,8 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
     return [name, target] as const;
   }).sort(([a], [b]) => compare(a, b)));
   const capabilities = row.capabilities.map(value => value?.kind === "dataset" ? parseAppDatasetCapability(value) : parseAppCollectionCapability(value));
+  // Display words are for Review app. A candidate is what the approval binds, so it carries none.
+  if (capabilities.some(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.display))) throw new Error("Invalid publication capability.");
   const outputs = new Set<string>();let total = 0;
   const files = row.files.map(value => {
     const file = object(value, ["path", "sha256", "byteLength", "contentType"]);

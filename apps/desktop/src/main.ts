@@ -62,7 +62,7 @@ import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collectio
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
-import { detectAgentTools } from "./agents/agentToolDetection";
+import { claudeCodeVersion, detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
@@ -265,6 +265,8 @@ import {
   titleBarOverlayOptions,
 } from "./window/createMainWindow";
 import {
+  assertNotStateFolder,
+  overlapsStateFolder,
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
   createWorkspaceFolderWithFreshness,
@@ -2160,7 +2162,7 @@ const forgetWorkspace = createWorkspaceForget({
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   canonicalizeRoot: canonicalWorkspaceRoot,
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
-  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), computer: thisComputer() }),
+  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), stateDir: stateDir(), computer: thisComputer() }),
   register: registerReservedPhysicalWorkspace,
   remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
   release: (reservation, cleanup) =>
@@ -2529,11 +2531,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     const workspace = findWorkspace(workspaceId);
     const remote = workspace?.remote;
     return {
-      enabled: !!remote,
       syncPause: workspace ? syncPauseFor(workspace, localInstallationId()) : undefined,
       // Legacy and different-account bindings stay local-only.
-      connected:
-        !!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
+      ...(remote && !workspaceRemoteMatchesCredentials(remote, cachedCredentials)
+        ? { syncBlocked: cachedCredentials ? "account-unconfirmed" as const : "not-connected" as const }
+        : {}),
     };
   },
   engineFor: engineForWorkspace,
@@ -2633,9 +2635,11 @@ function withWorkspaceActivityState<Result>(
 // physical attachment and then works only with that authority-owned state.
 const activity = {
   open: (workspace: RegistryEntry) =>
-    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
-      workspaceActivity.open(canonicalWorkspaceFor(lease), lease.state.activity),
-    ),
+    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
+      const canonical = canonicalWorkspaceFor(lease);
+      assertNotStateFolder(canonical.rootPath, { stateDir: stateDir(), workspace: "listed" });
+      return workspaceActivity.open(canonical, lease.state.activity);
+    }),
   close: (
     workspaceId: string,
     options?: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean; expectedRootPath?: string },
@@ -3136,6 +3140,7 @@ function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null
   }
   const lease = requireWorkspaceAuthority(workspaceId);
   try {
+    if (overlapsStateFolder(lease.binding.canonicalRootPath, stateDir())) return null;
     return {
       workspaceId: lease.binding.workspaceId,
       rootPath: lease.binding.canonicalRootPath,
@@ -3184,6 +3189,8 @@ function withEngineStoreRecoveredForAuthority<Result>(
   body: () => Promise<Result>,
 ): Promise<Result> {
   const workspace = canonicalWorkspaceFor(lease);
+  // Recovery writes in the workspace's .dohc, so a refused folder stops here.
+  assertNotStateFolder(workspace.rootPath, { stateDir: stateDir(), workspace: "listed" });
   return runInWorkspaceAuthorityLane(lease, "engine-store", () =>
     withEngineStoreRecoveredUnderEngineStoreLock(workspace, body, (rootPath) =>
       completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
@@ -3358,6 +3365,7 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 ): Promise<SyncStatusResult> {
   return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
     const canonicalWorkspace = canonicalWorkspaceFor(lease);
+    assertNotStateFolder(canonicalWorkspace.rootPath, { stateDir: stateDir(), workspace: "listed" });
     return withEngineStoreRecoveredUnderEngineStoreLock(
       canonicalWorkspace,
       () => ensureWorkspaceActivityOpenBody(lease, options),
@@ -3573,6 +3581,7 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,
   isPackaged: () => app.isPackaged,
@@ -5975,6 +5984,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       for (const workspace of listWorkspaces()) {
         if (workspace.remote === undefined && workspace.shareView === undefined) continue;
+        if (overlapsStateFolder(workspace.rootPath, stateDir())) continue;
         void recordSyncedIfNeeded(workspace).catch((error: unknown) =>
           console.warn(`[desktop] Could not record that workspace "${workspace.workspaceId}" synced:`, error));
       }
@@ -6136,7 +6146,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     }, folder);
   },
   register: async (rootPath) => {
-    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
+    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), stateDir: stateDir(), kind: "personal", computer: thisComputer() });
     WorkspaceSummary.parse(created);
     // As Open folder does: a share forgotten in this folder opens as that share.
     return workspaceSummaryFor(await forgottenShareViews.reopen(created, registerPhysicalWorkspace));
@@ -6472,6 +6482,7 @@ function registerIpcHandlers(): void {
     dialog,
     roots: workspaceRootApproval,
     effectiveHome,
+    stateDir,
     workspaceSummaries,
     prioritizePreferredWorkspace: (workspaces, event) =>
       prioritizePreferredWorkspace(workspaces, event.sender),

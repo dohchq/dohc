@@ -1392,7 +1392,13 @@ const SYNC_STATUS_BASE_FIELDS = {
     "local-changes",
     "conflict",
     "sync-failed",
-    "cloud-disconnected",
+    // A synced workspace while nobody is connected to a server.
+    "not-connected",
+    // Signed in, but not as the account that syncs this workspace.
+    "account-unconfirmed",
+    // The server stopped accepting this computer's sign-in.
+    "sign-in-expired",
+    "update-required",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
   lastSyncedAtMs: z.number().nullable(),
@@ -1403,6 +1409,10 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Sync stopped because the server does not serve this dohc's relay API
   // version: "app" means update dohc, "server" means the server is older.
   updateRequired: z.enum(["app", "server"]).optional(),
+  // True while the server refuses this computer's sign-in, even when a
+  // state ahead of it, such as a conflict, is the one shown. Omitted
+  // otherwise.
+  signInExpired: z.boolean().optional(),
   claimingIdentity: z.boolean().optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which
@@ -1828,6 +1838,14 @@ type ListEngineMomentsUpdatingResult = z.infer<
 // and the folder that holds them.
 export const WorkspacePolicyPath = z.enum(WORKSPACE_POLICY_PATHS);
 export type WorkspacePolicyPath = z.infer<typeof WorkspacePolicyPath>;
+// The two rules files, which a person can open to fix. Main maps each to its
+// file in the workspace's own .dohc folder; no other path opens.
+export const WorkspacePolicyFile = WorkspacePolicyPath.exclude([".dohc"]);
+export type WorkspacePolicyFile = z.infer<typeof WorkspacePolicyFile>;
+export const OpenWorkspacePolicyFilePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  file: WorkspacePolicyFile,
+}).strict();
 
 // History hides everything while those rules cannot be read. `unreadable`
 // names what to fix; `policyErrors` say why, for Copy details only.
@@ -2057,6 +2075,8 @@ export const ChatMessageRecord = z.object({
   threadId: OPAQUE_ID,
   presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+  // A link author that is an agent, signed in with the link.
+  linkAgent: z.literal(true).optional(),
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
@@ -2406,6 +2426,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       id: OPAQUE_ID,
       presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+      linkAgent: z.literal(true).optional(),
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),
@@ -5708,6 +5729,9 @@ const RefreshSharedViewSuccessResult = z.object({
     }),
   ),
   collisionRecordQuarantined: z.boolean().optional(),
+  // Set with collisionRecordQuarantined: whether this view's refreshes count
+  // the person's changed files as their edits, which the notice says.
+  takesLocalWrites: z.boolean().optional(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),
@@ -5719,11 +5743,18 @@ const RefreshSharedViewSuccessResult = z.object({
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
   probed: z.literal(true).optional(),
-  errorKind: z.enum(["unauthorized", "transient"]).optional(),
+  errorKind: z.enum(["unauthorized", "transient", "collision-record"]).optional(),
   // Capture runs before the pull. A failed pull can still leave repaired
   // projection files that the renderer must repaint.
   changedPaths: z.number().int().nonnegative(),
   errorMessage: z.string(),
+  // For a collision-record refusal: what kept dohc from reading or setting
+  // aside the record, for Details.
+  errorCause: z.string().optional(),
+  // This refresh set the record aside before it failed, so the person hears
+  // of it all the same.
+  collisionRecordQuarantined: z.boolean().optional(),
+  takesLocalWrites: z.boolean().optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
@@ -5912,6 +5943,28 @@ export const ChatDispatchFailedRun = z.object({
   triggerMessageId: OPAQUE_ID,
   // "Nova didn't reply. Its run ended with an error."
   words: z.string().min(1).max(1_000),
+  // For a run that ended without its reply, what the person can do instead,
+  // on its own line. Its notice leaves it out.
+  nextStep: z.discriminatedUnion("kind", [
+    // An agent that is set up and on, asked again in a message. The chat
+    // words it: "Message Nova to ask again." in the agent's own chat, where
+    // any message asks it; elsewhere "Mention @Nova to ask again.", with the
+    // handle the composer inserts, or "Message 🦊 in its own chat to ask
+    // again." for a name with no handle.
+    z.object({
+      kind: z.literal("message"),
+      agentId: AgentId,
+      name: z.string().min(1).max(1_000),
+      handle: z.string().min(1).max(200).optional(),
+    }).strict(),
+    // For an agent the @ menu can't offer, a step in Settings: "Add an agent
+    // in Settings to ask again." when it's gone, "Turn Nova on in Settings
+    // to ask again." when it's off, and "Set up Nova in Settings to ask
+    // again." when it isn't set up.
+    z.object({ kind: z.literal("add-agent") }).strict(),
+    z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
+    z.object({ kind: z.literal("set-up"), name: z.string().min(1).max(1_000) }).strict(),
+  ]).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
 }).strict();

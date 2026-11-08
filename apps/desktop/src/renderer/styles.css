@@ -38,7 +38,9 @@
   --dohc-line: #e4e1d8;
   --dohc-ink: #1c1b18;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
+  /* The fill of loading bars. */
+  --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.40);
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
@@ -47,8 +49,8 @@
   --dohc-agent: #666d2e;
   --dohc-match: #326fce;
   --dohc-success: #38684e;
-  --dohc-warning: #8a6420;
-  --dohc-danger: #a43e2a;
+  --dohc-warning: #855f1e;
+  --dohc-danger: #9d3c28;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
   /* Identity hues: olive belongs to the agent default.
@@ -71,17 +73,18 @@
   --dohc-line: #2a2925;
   --dohc-ink: #f6f4ee;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
+  --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.65);
-  --dohc-muted: #a9a599;
+  --dohc-muted: #aba79b;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
   --dohc-focus: color-mix(in srgb, var(--dohc-accent) 50%, transparent);
   --dohc-agent: #c0c585;
-  --dohc-match: #377afa;
+  --dohc-match: #4382fa;
   --dohc-success: #82c29b;
   --dohc-warning: #d9a94e;
-  --dohc-danger: #e08065;
+  --dohc-danger: #e1866c;
   --dohc-selection: rgba(102, 148, 245, 0.30);
   --dohc-hue-rust: #dc9378;
   --dohc-hue-amber: #d9b05a;
@@ -101,6 +104,7 @@
   --color-ink: var(--dohc-ink);
   --color-hover: var(--dohc-hover);
   --color-selected: var(--dohc-selected);
+  --color-skeleton: var(--dohc-skeleton);
   --color-scrim: var(--dohc-scrim);
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);
@@ -121,7 +125,15 @@
   --color-hue-rose: var(--dohc-hue-rose);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
-  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', serif;
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Noto Serif', 'Times New Roman', serif;
+}
+
+/* Subtle text misses AA on the selected fill, so inside it subtle shows in
+ * muted. Every variant and @apply of bg-selected carries this, and a hover or
+ * focus color on a control inside still wins. */
+@utility bg-selected {
+  background-color: var(--dohc-selected);
+  --dohc-subtle: var(--dohc-muted);
 }
 
 html,
@@ -160,7 +172,8 @@ body {
     outline: none;
   }
 
-  [data-keyboard-nav] :focus-visible {
+  /* A row-open control's focus marks its whole row instead, below. */
+  [data-keyboard-nav] :focus-visible:not(.dohc-row-open-target) {
     outline: 2px solid var(--dohc-focus);
     outline-offset: 0;
   }
@@ -175,11 +188,62 @@ body {
  * inside its edge, where a scroller cannot clip it. A selected row keeps its
  * fill, because utilities outrank this layer. */
 @layer components {
-  [data-keyboard-nav] .dohc-focus-row:focus-visible {
+  [data-keyboard-nav] .dohc-focus-row:focus-visible,
+  [data-keyboard-nav] .dohc-row-open:has(.dohc-row-open-target:focus-visible) {
     outline: 1px solid var(--dohc-accent);
     outline-offset: -1px;
     background-color: var(--dohc-hover);
   }
+
+  /* A row a press opens as a whole. Its one focus stop is the control that
+   * names where it goes; that control's ::after covers the row, and the
+   * row's own controls, and text opened to select, sit above it. Keyboard
+   * focus on the control rings the whole row, as a focus row's does. */
+  .dohc-row-open {
+    position: relative;
+  }
+  .dohc-row-open:hover {
+    background-color: var(--dohc-hover);
+  }
+  .dohc-row-open-target::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+  }
+  .dohc-row-open :is(button, a, code, [data-row-above]):not(.dohc-row-open-target) {
+    position: relative;
+    z-index: 1;
+  }
+}
+
+/* Landing on what a person asked to see — a heading from the outline, a
+ * message from Notices — washes it once. With reduced motion the wash holds
+ * without fading, and clears when its owner removes the class at 900ms. */
+@keyframes dohc-target-flash {
+  from {
+    background-color: var(--dohc-selection);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.dohc-target-flash {
+  border-radius: 4px;
+  animation: dohc-target-flash 900ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(:root:not([data-system-reduced-motion='false']) .dohc-target-flash) {
+    animation: none !important;
+    background-color: var(--dohc-selection);
+  }
+}
+
+:where(:root[data-system-reduced-motion='true'] .dohc-target-flash) {
+  animation: none !important;
+  background-color: var(--dohc-selection);
 }
 
 /* Text fields use their border and a thin underline, including borderless
@@ -199,7 +263,7 @@ body {
       animation-duration: 0.001ms !important;
       animation-iteration-count: 1 !important;
       scroll-behavior: auto !important;
-      transition-duration: 0.001ms !important;
+      transition-duration: 0s !important;
     }
   }
 }
@@ -209,7 +273,7 @@ body {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
-    transition-duration: 0.001ms !important;
+    transition-duration: 0s !important;
   }
 }
 
@@ -425,7 +489,7 @@ body {
   display: none;
 }
 
-/* An edge the strip can still scroll past fades its last 24px, so a name
+/* An edge the strip can still scroll past fades its last 40px, so a name
  * cut there reads as continuing. EditorTabs sets the attributes and draws
  * the fades (STRIP_FADE) after the strip. They are the chrome's fill drawn
  * over the tabs, not a mask on the strip: a masked strip changed how
@@ -539,26 +603,27 @@ body {
 
 /* One shared left content edge: the TEXT of every top-level block sits on the
  * column's left edge, so a straight vertical line down the page touches all
- * of it. Decorations — list markers, task checkboxes, the quote bar — hang
- * LEFT of that line into the gutter, and framed blocks below extend one
- * --dohc-editor-block-inset past the column on BOTH sides so their inner
- * padding lands their text back on the edge (degrades to a flush frame when
- * the pane is too narrow for the overhang). */
+ * of it. List markers and the quote bar hang LEFT of that line into the
+ * gutter. A task list's checkboxes and a table's frame start ON the line
+ * instead. Framed blocks below extend one --dohc-editor-block-inset past the
+ * column on BOTH sides so their inner padding lands their text back on the
+ * edge (degrades to a flush frame when the pane is too narrow for the
+ * overhang). */
 .dohc-notion-editor > pre,
-.dohc-notion-editor > table,
 .dohc-notion-editor > .dohc-callout,
 .dohc-notion-editor > .dohc-mermaid-preview {
   max-width: calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset));
 }
 
 /* The resizable TableView owns its chrome gutter and horizontal scrollbar.
- * Its outer width includes enough room for the left row grips and right add
- * strip while the table itself keeps the same framed reading-column measure. */
+ * At every pane width it reaches 22px past the column on each side, into the
+ * editor's 56px padding, for the left row grips and the right add strip, so
+ * the table itself fills the reading column. */
 .dohc-notion-editor > .tableWrapper {
-  width: 100%;
-  max-width: calc(
-    var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset) + 44px
-  );
+  width: calc(min(100%, var(--dohc-editor-measure)) + 44px);
+  max-width: none;
+  margin-left: calc(max(0px, (100% - var(--dohc-editor-measure)) / 2) - 22px);
+  margin-right: 0;
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -671,12 +736,13 @@ body {
   list-style: none;
 }
 
-/* Top-level task lists: text on the content edge, checkbox hanging in the
- * gutter. Repeated with the attribute selectors because the plain `> ul`
- * rule above loses specificity to the base task-list rule. */
+/* Top-level task lists: the checkbox starts on the content edge, and the
+ * text one checkbox and gap (23px) after it. Nested lists keep the 24px step.
+ * Repeated with the attribute selectors because the plain `> ul` rule above
+ * loses specificity to the base task-list rule. */
 .dohc-notion-editor > ul[data-type="taskList"],
 .dohc-notion-editor > ul:has(> li[data-checked]) {
-  padding-left: 0;
+  padding-left: 23px;
 }
 
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) {
@@ -857,19 +923,6 @@ body {
   border-left: 1px solid var(--dohc-line);
 }
 
-/* The table frame extends one block inset past the column, so the outer
- * columns pad back to it: 1px table border + 15px = the 16px inset, landing
- * first-column text on the shared content edge (last column mirrors it). */
-.dohc-notion-editor th:first-child,
-.dohc-notion-editor td:first-child {
-  padding-left: calc(var(--dohc-editor-block-inset) - 1px);
-}
-
-.dohc-notion-editor th:last-child,
-.dohc-notion-editor td:last-child {
-  padding-right: calc(var(--dohc-editor-block-inset) - 1px);
-}
-
 .dohc-notion-editor tr:first-child > th,
 .dohc-notion-editor tr:first-child > td {
   border-top: 0;
@@ -878,6 +931,12 @@ body {
 .dohc-notion-editor th {
   background: var(--dohc-panel);
   font-weight: 600;
+}
+
+/* A cell ends at its padding when a paragraph ends it. The editor draws the
+ * column-resize handle after the cell's last block, so it does not count. */
+.dohc-notion-editor :is(th, td) > p:nth-last-child(1 of :not(.column-resize-handle)) {
+  margin-bottom: 0;
 }
 
 /* Tiptap cell-selection tint. */
@@ -980,8 +1039,7 @@ body {
 /* Each hang, named by blockControls.tsx, is where the block's first-line mark
  * starts. A bullet reaches about 0.7em + 7.5px in every editor font. A
  * number reaches one ch per digit of the list's first number, plus its
- * period and space (theme.ts). The checkbox and the quote bar sit at fixed
- * offsets. */
+ * period and space (theme.ts). The quote bar sits at a fixed offset. */
 .dohc-block-affordance[data-hang="bullet"] {
   --dohc-block-hang: calc(0.7em + 7.5px);
 }
@@ -992,27 +1050,19 @@ body {
   );
 }
 
-.dohc-block-affordance[data-hang="checkbox"] {
-  --dohc-block-hang: 23px;
-}
-
 .dohc-block-affordance[data-hang="bar"] {
   --dohc-block-hang: 12px;
 }
 
 /* Framed blocks reach one block inset past the text edge once the gutter is
- * wider than the editor's 56px padding. A table's wrapper reaches 22px
- * further, for its row grips and ⋯ button. */
+ * wider than the editor's 56px padding. A table's frame starts on the text
+ * edge, and at every width its row grips and ⋯ button reach 22px past it. */
 .dohc-block-affordance[data-hang="frame"] {
   --dohc-block-hang: clamp(0px, var(--dohc-block-gutter) - 56px, var(--dohc-editor-block-inset));
 }
 
 .dohc-block-affordance[data-hang="table"] {
-  --dohc-block-hang: clamp(
-    0px,
-    var(--dohc-block-gutter) - 56px,
-    var(--dohc-editor-block-inset) + 22px
-  );
+  --dohc-block-hang: 22px;
 }
 
 /* The shown cluster sits above the others: a stacked one can run past its
@@ -1198,13 +1248,6 @@ body {
   gap: 6px;
 }
 
-.dohc-code-block-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--dohc-agent);
-}
-
 .dohc-code-language-select {
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1285,6 +1328,12 @@ body {
 .dohc-wikilink-pill--broken {
   border-style: dashed;
   color: var(--dohc-subtle);
+}
+
+/* Node-selected, the pill takes the text selection's tint over its fill,
+ * as a selected Ref chip does. */
+.dohc-wikilink-pill.ProseMirror-selectednode {
+  background-image: linear-gradient(var(--dohc-selection), var(--dohc-selection));
 }
 
 .dohc-wikilink-pill__label {
@@ -2448,22 +2497,6 @@ body {
   font-size: 11px;
 }
 
-/* A brief warm-ink wash on the heading the outline just scrolled to —
- * "briefly focuses it" without stealing keyboard focus in read-only mode. */
-@keyframes dohc-outline-target-flash {
-  from {
-    background: var(--dohc-selection);
-  }
-  to {
-    background: transparent;
-  }
-}
-
-.dohc-outline-target-flash {
-  border-radius: 4px;
-  animation: dohc-outline-target-flash 900ms ease-out;
-}
-
 [data-theme='dark'] .dohc-outline-panel {
   border-color: color-mix(in srgb, var(--dohc-line) 80%, transparent);
 }
@@ -2783,10 +2816,14 @@ body {
   @apply bg-selected;
 }
 
+/* Keyboard focus takes the hover fill, like other focus rows, so a focused
+ * option never looks chosen. The chosen option keeps its fill under focus. */
 [data-keyboard-nav] .dohc-callout-type-option:focus-visible {
-  @apply bg-selected;
   outline: 1px solid var(--dohc-accent);
   outline-offset: -1px;
+}
+[data-keyboard-nav] .dohc-callout-type-option:not([aria-selected='true']):focus-visible {
+  @apply bg-hover;
 }
 
 .dohc-callout-title-input {
@@ -2906,10 +2943,10 @@ mark.dohc-highlight,
  * field, and the empty/error states so math reads correctly in both themes.
  * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
 :root {
-  --dohc-math-error-color: #a43e2a;
+  --dohc-math-error-color: #9d3c28;
 }
 [data-theme='dark'] {
-  --dohc-math-error-color: #e08065;
+  --dohc-math-error-color: #e1866c;
 }
 
 .dohc-math-inline {

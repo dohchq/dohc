@@ -10,12 +10,14 @@ import { KindGlyph, ObjectGlyph, type ObjectKind } from "./KindGlyph";
 //
 // With `onOpen` the chip is a button named for what it opens. Without it the
 // chip is a plain span, so a row that is already a button can hold it and the
-// row stays the one control. Hover and selected lay the ink fills over the
-// inset surface instead of replacing it.
+// row stays the one control. Hover lays the ink fill, and selected the text
+// selection's tint, over the inset surface instead of replacing it. The
+// editor's wikilink pill takes the same tint when it is node-selected.
 const CHIP =
   "inline-flex h-[22px] max-w-full min-w-0 items-center gap-[5px] whitespace-nowrap rounded border bg-panel-2 px-[7px] align-[1px] text-[13px] leading-none text-ink";
 const HOVER = "transition-colors duration-75 hover:bg-[image:linear-gradient(var(--color-hover),var(--color-hover))]";
-const SELECTED = "bg-[image:linear-gradient(var(--color-selected),var(--color-selected))]";
+// Like the bg-selected utility, the selected fill shows subtle text in muted.
+const SELECTED = "bg-[image:linear-gradient(var(--dohc-selection),var(--dohc-selection))] [--dohc-subtle:var(--dohc-muted)]";
 
 export function Ref(props: {
   path: string;

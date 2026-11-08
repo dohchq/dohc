@@ -173,4 +173,18 @@ describe("the agent offer", () => {
     expect(screen.getByTestId("composer-agent-offer")).toBe(node);
     expect(vi.mocked(ChatAvatar).mock.calls.length).toBe(renders);
   });
+
+  it("hides while the @ menu is open and comes back when it closes", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    await pickAgent(user);
+    const node = screen.getByTestId("composer-agent-offer");
+    await user.type(screen.getByTestId("chats-composer"), "@y");
+    expect(screen.getByTestId("chats-mention-menu")).toBeTruthy();
+    expect(node.hidden).toBe(true);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("chats-mention-menu")).toBeNull();
+    expect(screen.getByTestId("composer-agent-offer")).toBe(node);
+    expect(node.hidden).toBe(false);
+  });
 });

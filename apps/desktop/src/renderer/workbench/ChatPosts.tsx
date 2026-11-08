@@ -22,7 +22,7 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SecondaryButton } from "../ui/controls";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
@@ -84,7 +84,7 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; repor
           endedAtMs === undefined ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
         }`}
       />
-      <span>{label}</span>
+      <span className="text-muted">{label}</span>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
       <RunChip run={props.run} reported={props.reported} />
     </div>
@@ -258,7 +258,7 @@ function RunAskedBy(props: { message: ChatMessageRecord }) {
       className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
     >
       <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-      <span className="truncate">Asked by {props.message.authorDisplayName}</span>
+      <span className="truncate text-muted">Asked by {props.message.authorDisplayName}</span>
       {person ? <span className="sr-only"> for {person}</span> : null}
     </span>
   );
@@ -311,7 +311,7 @@ function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink"
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-muted hover:text-ink"
       >
         run {props.run.runId.slice(0, 7)}
       </button>
@@ -475,6 +475,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   failedRun: ChatDispatchFailedRun | null;
   retryBusy: boolean;
   onRetryFailedRun?: () => void;
+  onOpenAgentSettings?: () => void;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -511,6 +512,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     failedRun,
     retryBusy,
     onRetryFailedRun,
+    onOpenAgentSettings,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -541,7 +543,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS;
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
-  const openingIsAgent = openingMessage.authorKind === "agent";
+  const openingIsAgent = isAgentAuthor(openingMessage);
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
   const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
@@ -557,6 +559,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         failed={failedRun}
         busy={retryBusy}
         onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
+        onOpenAgentSettings={onOpenAgentSettings}
+        chatAgentId={nav.channel.kind === "agent" ? nav.channel.agentId : undefined}
         className={className}
       >
         {askedBy ? <RunAskedBy message={askedBy} /> : null}
@@ -581,7 +585,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentTime = formatChatTime(comment.createdAtMs);
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? NO_ATTACHMENTS;
-    const isAgent = comment.authorKind === "agent";
+    const isAgent = isAgentAuthor(comment);
     const continues = previous !== undefined && previous.replies.length === 0 &&
       continuesRun(previous.message, comment);
     const replyCount = node.replies.length;
@@ -601,7 +605,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           continues ? "" : "mt-4 first:mt-0"
         } ${
           flashMessageId === comment.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "dohc-target-flash"
             : ""
         }`}
       >
@@ -648,7 +652,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               <AgentColorAvatar>
                 <ChatAvatar presentation={comment.presentation}
                   name={comment.authorDisplayName}
-                  kind={comment.authorKind}
+                  kind={comment.authorKind} linkAgent={comment.linkAgent === true}
                   size="comment"
                 />
               </AgentColorAvatar>
@@ -662,11 +666,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-author-kind={comment.authorKind}
               className="text-[13px] font-semibold text-ink"
             >
-              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+              <AgentName kind={comment.authorKind} presentation={comment.presentation} linkAgent={comment.linkAgent === true}>
                 <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
+            {/* A continued comment has no badge, so a link agent's hidden line still says agent before the link mark. */}
+            {isAgent && continues && comment.authorKind === "link" ? (
+              <span data-testid="chats-comment-link-agent" className="sr-only"> agent </span>
+            ) : null}
             {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
@@ -806,7 +814,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-author-kind={openingMessage.authorKind}
         className={`group relative flex gap-2.5 px-2 transition-shadow ${
           flashMessageId === openingMessage.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "dohc-target-flash"
             : ""
         }`}
       >
@@ -819,7 +827,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         <AgentColorAvatar>
           <ChatAvatar presentation={openingMessage.presentation}
             name={openingMessage.authorDisplayName}
-            kind={openingMessage.authorKind}
+            kind={openingMessage.authorKind} linkAgent={openingMessage.linkAgent === true}
             size="row"
           />
         </AgentColorAvatar>
@@ -830,7 +838,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-author-kind={openingMessage.authorKind}
               className="truncate text-[13px] font-semibold text-ink"
             >
-              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation} linkAgent={openingMessage.linkAgent === true}>
                 <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
               </AgentName>
             </span>

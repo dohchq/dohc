@@ -3,6 +3,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -27,7 +28,6 @@ import {
   pageRows,
   pageTree,
   pinnedRows,
-  recentRows,
   OTHER_FILES_SHOWN,
   type HomeLookup,
   type HomeRowModel,
@@ -55,6 +55,9 @@ export interface ExplorerHomeProps {
   folders: ReadonlySet<string>;
   activePath: string | null;
   scrollerRef: RefObject<HTMLElement | null>;
+  // Changes whenever the Open editors section above Home changes height, so
+  // the Pages window is measured again.
+  aboveLayout: string;
   // The file or folder the Explorer is renaming, and its name field.
   editingPath: string | null;
   renderEditRow: (depth: number) => ReactNode;
@@ -89,13 +92,15 @@ type Section = {
   // What the section shows before or after its rows.
   body?: ReactNode;
   after?: ReactNode;
+  // The muted line a section with nothing in it shows under its header. It
+  // is no stop in the keyboard list; the header's toggle reads it.
+  empty?: string;
 };
 
 type NavItem = { sectionId: HomeSectionId; row?: HomeRowModel; more?: true };
 
 const SECTION_TEST_IDS: Record<HomeSectionId, string> = {
   pinned: "explorer-pinned",
-  recent: "explorer-recent",
   pages: "explorer-pages",
   collections: "explorer-collections",
   apps: "explorer-apps",
@@ -137,6 +142,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const appByRoot = useMemo(() => new Map(appList.map((app) => [app.root, app])), [appList]);
   const expanded = useMemo(() => new Set(explorer.expandedFolders), [explorer.expandedFolders]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<HomeSectionId>>(new Set());
+  const idBase = useId();
 
   const noFolders = useMemo(() => new Set<string>(), []);
   const kinds = useMemo(
@@ -162,7 +168,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     () => pinnedRows(pinnedApps ?? [], explorer.pinned, lookup),
     [explorer.pinned, lookup, pinnedApps],
   );
-  const recent = useMemo(() => recentRows(explorer.recentFiles, lookup), [explorer.recentFiles, lookup]);
   const collections = useMemo(
     () => collectionRows(dataCollections ?? [], explorer.collectionFolders),
     [dataCollections, explorer.collectionFolders],
@@ -184,7 +189,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     !!explorer.onRestoreCollection ||
     !!refusal ||
     !!explorer.collectionsElsewhere;
-  const appsShown = apps?.state.status === "failed" || appList.length > 0;
+  // Pages, Collections and Apps always show in a workspace of your own, each
+  // saying when it has nothing. A share view shows only the kinds it holds.
+  const appsStatus = apps?.state.status;
+  const appsShown = appsStatus === "failed" || appList.length > 0 || (!!apps && !explorer.shareView);
   const collectionActions: MenuItem[] = [];
   if (!refusal && explorer.onIncludeArchivedCollections) {
     const archived = explorer.includeArchivedCollections ?? false;
@@ -200,17 +208,23 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     collectionActions.push({ id: "restore", label: "Restore from recovery file…", testId: "collections-restore", onSelect: explorer.onRestoreCollection });
   }
 
+  // A read on its way holds one row's height and says nothing, so the
+  // sections under it stay put and no section claims to be empty too soon.
+  const holdRow = <div aria-hidden className="h-7" />;
+  const collectionsUnknown = refusal ? undefined : explorer.collectionsUnknown;
   const sections: Section[] = [];
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
-  if (recent.length > 0) sections.push({ id: "recent", label: "Recent", rows: recent });
-  sections.push({
-    id: "pages",
-    label: "Pages",
-    count: kinds.pages.length,
-    countLabel: (count) => plural(count, "page", "pages"),
-    rows: pages,
-    add: { label: "New page", onClick: () => explorer.onNewPage("") },
-  });
+  if (pages.length > 0 || !explorer.shareView) {
+    sections.push({
+      id: "pages",
+      label: "Pages",
+      count: kinds.pages.length,
+      countLabel: (count) => plural(count, "page", "pages"),
+      rows: pages,
+      add: { label: "New page", onClick: () => explorer.onNewPage("") },
+      ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
+    });
+  }
   if (showCollections) {
     sections.push({
       id: "collections",
@@ -225,10 +239,15 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
       body: refusal ? (
         <CollectionsRefusalRow refusal={refusal} onKeep={explorer.onKeepCollections} onRetry={explorer.onRetryCollections} />
-      ) : undefined,
+      ) : collectionsUnknown === "failed" && explorer.onRetryCollections ? (
+        <RetryRow testId="collections-failed" onRetry={explorer.onRetryCollections} />
+      ) : collectionsUnknown ? holdRow : undefined,
       after: !refusal && explorer.collectionsElsewhere ? (
         <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} />
       ) : undefined,
+      ...(!refusal && !collectionsUnknown && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
+        ? { empty: "No Collections yet." }
+        : {}),
     });
   }
   if (appsShown) {
@@ -239,6 +258,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       countLabel: (count) => plural(count, "app", "apps"),
       rows: appRows,
       ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
+      ...(appsStatus === "loading" ? { body: holdRow } : {}),
+      ...(appsStatus === "ready" && appList.length === 0
+        ? { empty: "No apps yet. Any folder with a web app in it shows up here." }
+        : {}),
     });
   }
   if (others.length > 0) {
@@ -285,7 +308,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     }
     return { rows, items };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinned, recent, pages, collections, appRows, others, collapsed, sectionsKey]);
+  }, [pinned, pages, collections, appRows, others, collapsed, sectionsKey]);
 
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const tabbableKey = focusedKey && nav.items.has(focusedKey) ? focusedKey : (nav.rows[0]?.fullPath ?? null);
@@ -315,7 +338,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     };
     setRange((current) => (current.start === next.start && current.end === next.end ? current : next));
   }, [pages.length, scrollerRef, windowed]);
-  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed]);
+  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed, props.aboveLayout]);
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller || !windowed) return;
@@ -472,9 +495,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const appsSettled = apps ? apps.state.status !== "loading" : true;
   const firstAppKey = appRows[0]?.key ?? null;
   useEffect(() => {
-    if (!appsReveal) return;
+    if (!appsReveal || !appsSettled) return;
     if (!appsShown) {
-      if (appsSettled) onAppsRevealed?.();
+      onAppsRevealed?.();
       return;
     }
     if (collapsed.has("apps")) {
@@ -486,7 +509,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   }, [appsReveal, appsSettled, appsShown, collapsed, firstAppKey, onAppsRevealed, toggleSection]);
 
   if (!explorer.listed) {
-    return <SkeletonRows layout="list" className="px-3 py-2" label="Loading files..." />;
+    return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files..." />;
   }
 
   const renderRow = (row: HomeRowModel): ReactNode => {
@@ -544,11 +567,12 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   };
 
   return (
-    <div data-testid="explorer-home" onKeyDown={onKeyDown} className="flex flex-col">
+    <div data-testid="explorer-home" onKeyDown={onKeyDown} className="mt-4 flex flex-col">
       {sections.map((section) => {
         const open = !collapsed.has(section.id);
         const sectionKey = `section:${section.id}`;
         const testId = SECTION_TEST_IDS[section.id];
+        const emptyId = open && section.empty ? `${idBase}${section.id}-empty` : undefined;
         return (
           <section
             key={section.id}
@@ -563,6 +587,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                 data-home-key={sectionKey}
                 data-testid={`${testId}-toggle`}
                 aria-expanded={open}
+                aria-describedby={emptyId}
                 tabIndex={tabbableKey === sectionKey ? 0 : -1}
                 onFocus={() => setFocusedKey(sectionKey)}
                 onClick={() => {
@@ -602,6 +627,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
             {open ? (
               <>
                 {section.body ? <div className="px-1">{section.body}</div> : null}
+                {emptyId ? (
+                  <p id={emptyId} data-testid={`${testId}-empty`} className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                    {section.empty}
+                  </p>
+                ) : null}
                 {section.rows.length > 0 || section.more ? (
                   <ul
                     ref={section.id === "pages" ? pagesListRef : undefined}
@@ -637,8 +667,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   );
 }
 
-function HomeGlyph({ row, active }: { row: HomeRowModel; active: boolean }) {
-  const tone = active ? "text-ink" : "text-subtle";
+function HomeGlyph({ row, tone }: { row: HomeRowModel; tone: string }) {
   if (row.glyph.glyph === "folder") {
     const Glyph = row.glyph.open ? FolderOpen : Folder;
     return <Glyph size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
@@ -678,11 +707,18 @@ const HomeRow = memo(function HomeRow(props: {
     ? props.dropKind === "blocked"
       ? "bg-danger/10 text-danger"
       : props.dropRole === "target"
-        ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
+        ? "bg-success/16 text-ink"
         : "bg-line/35 text-ink"
     : active
       ? "bg-selected font-medium text-ink"
       : "text-muted hover:bg-hover hover:text-ink";
+  // An allowed drop target's glyph takes the success color.
+  const glyphTone =
+    props.dropKind && props.dropKind !== "blocked" && props.dropRole === "target"
+      ? "text-success"
+      : active
+        ? "text-ink"
+        : "text-subtle";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
   // How the menu of a Collection that can't open was opened, while it is open.
@@ -759,7 +795,7 @@ const HomeRow = memo(function HomeRow(props: {
               <span aria-hidden className="w-3 shrink-0" />
             )
           ) : null}
-          <HomeGlyph row={row} active={active} />
+          <HomeGlyph row={row} tone={glyphTone} />
           {/* The folder hint gives way before the name; the title holds the whole path.
               A row with a cause keeps its sentence as the row's title, so its name has its own. */}
           <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">{row.label}</span>

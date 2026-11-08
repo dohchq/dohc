@@ -11,7 +11,7 @@ import { AddAgentForm } from "./AddAgentForm";
 const detected: AgentToolsResult = {
   workingDirectory: "C:\\Work",
   tools: [
-    { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.278", auth: "signed-in", probe: "detected" },
+    { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-in", probe: "detected" },
     { tool: "codex", executable: "C:\\Tools\\codex.cmd", version: "0.155.1", auth: "unknown", probe: "detected" },
     { tool: "opencode", executable: "C:\\Tools\\opencode.cmd", version: "1.18.31", auth: "unknown", probe: "detected" },
     { tool: "cursor", executable: null, version: null, auth: "unknown", probe: "not-found" },
@@ -33,6 +33,11 @@ it("requires an agent name and saves it alongside the selected tool and owner", 
   const f = fixture();
   render(<AddAgentForm {...f.props} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  const codex = screen.getByRole("button", { name: "Codex" });
+  expect(codex.getAttribute("aria-pressed")).toBe("true");
+  expect(codex.querySelector("svg.lucide-check")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Claude Code" }).getAttribute("aria-pressed")).toBe("false");
+  expect(document.querySelectorAll("svg.lucide-check")).toHaveLength(1);
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
@@ -79,9 +84,9 @@ it("keeps the form open while saving and checking", async () => {
 });
 
 it("requires an update before selecting an older Claude profile", async () => {
-  const f = fixture(vi.fn(async () => ({ ...detected, tools: detected.tools.map((tool) => tool.tool === "claude" ? { ...tool, version: "2.1.258" } : tool) })));
+  const f = fixture(vi.fn(async () => ({ ...detected, tools: detected.tools.map((tool) => tool.tool === "claude" ? { ...tool, version: "2.1.315" } : tool) })));
   render(<AddAgentForm {...f.props} />);
-  await screen.findByText("Update Claude Code to 2.1.259 or later to use this profile.");
+  await screen.findByText("Update Claude Code to 2.1.316 or later to use this profile.");
   expect(screen.getByRole("button", { name: "Claude Code" }).hasAttribute("disabled")).toBe(true);
 });
 
@@ -130,7 +135,7 @@ it("reports detection failures to the shell and can refresh", async () => {
   render(<AddAgentForm {...f.props} />);
   await waitFor(() => expect(f.props.onError).toHaveBeenCalled());
   await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  await screen.findByText("Detected · 2.1.278");
+  await screen.findByText("Detected · 2.1.317");
 });
 
 it("keeps a cleared Advanced command open and preserves drafts across equivalent settings broadcasts", async () => {

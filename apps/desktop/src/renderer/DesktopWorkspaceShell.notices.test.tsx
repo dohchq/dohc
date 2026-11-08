@@ -13,7 +13,7 @@ import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { DohcDesktopBridge, OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
-import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
+import type { NoticeTarget } from "./shell/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
@@ -1881,7 +1881,7 @@ describe("notices sent to you", () => {
 
   function renderWithNotices(
     bridge: ReturnType<typeof makeBridge>,
-    extra: { sentNotices?: SentNotices; openOnReady?: OpenOnSwitch; onSwitchWorkspace?: (workspace: Workspace, open?: OpenOnSwitch) => void; workspace?: Workspace },
+    extra: { sentNotices?: SentNotices; openOnReady?: NoticeTarget; onSwitchWorkspace?: (workspace: Workspace, open?: NoticeTarget) => void; workspace?: Workspace },
     workspaces: Workspace[] = [extra.workspace ?? WORKSPACE],
   ) {
     vi.stubGlobal("dohcDesktop", bridge);
@@ -1987,6 +1987,30 @@ describe("notices sent to you", () => {
     expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
   });
 
+  it("opens a mention's file from its row, reads it and closes Notices", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([MENTION]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "mention:1" }]);
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+  });
+
+  it("says in place that a mention's file is gone, opening nothing", async () => {
+    const user = userEvent.setup();
+    const gone: NoticeRow = { ...MENTION, target: { path: "gone.md" } };
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: sentNotices([gone]) });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
+    const row = screen.getByTestId("sent-notice-mention:1");
+    expect(await within(row).findByText("dohc could not find this file.")).toBeTruthy();
+    expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("sent-notice-mention:1-open-row")).toBeNull();
+  });
+
   it("keeps a read held change read, with no toast, when dohc starts again", async () => {
     const user = userEvent.setup();
     renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: sentNotices([{ ...HELD, readAtMs: 6_000 }]) });
@@ -2048,7 +2072,7 @@ describe("notices sent to you", () => {
     const row = await screen.findByTestId("sent-notice-mention:1");
     expect(row.textContent).toContain("Japan");
     await user.click(within(row).getByRole("button", { name: "Open" }));
-    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, "Japan/day-1.md");
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, { to: "file", path: "Japan/day-1.md" });
   });
 
   const FAILED = (id: string, claimId: string): NoticeRow => ({
@@ -2105,7 +2129,7 @@ describe("notices sent to you", () => {
   });
 
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
-    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: "b.md" });
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: { to: "file", path: "b.md" } });
     await screen.findByTestId("tab-b.md");
   });
 
@@ -2124,7 +2148,7 @@ describe("notices sent to you", () => {
   it("opens Chats at a Group invitation, with its Join focused, once the workspace it switched to is ready", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
-    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
+    renderWithNotices(bridge, { openOnReady: { to: "chats-invitation", shareId: "share-1", inputs: inputCount() } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     const join = await screen.findByTestId("chats-join-shared");
     await waitFor(() => expect(document.activeElement).toBe(join));
@@ -2149,7 +2173,7 @@ describe("notices sent to you", () => {
     // person has moved on.
     const listed = deferred<typeof INVITATION_LISTING>();
     Object.assign(bridge, { listChatChannelShares: vi.fn(() => listed.promise) });
-    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
+    renderWithNotices(bridge, { openOnReady: { to: "chats-invitation", shareId: "share-1", inputs: inputCount() } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     await moveOn(user, bridge);
     listed.resolve(INVITATION_LISTING);
@@ -2166,7 +2190,7 @@ describe("notices sent to you", () => {
     Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
     const pressed = inputCount();
     await user.keyboard("a");
-    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: pressed } } });
+    renderWithNotices(bridge, { openOnReady: { to: "chats-invitation", shareId: "share-1", inputs: pressed } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     const join = await screen.findByTestId("chats-join-shared");
     expect(join.getAttribute("data-invitation")).toBe("share-1");
@@ -2220,7 +2244,7 @@ describe("notices sent to you", () => {
     const user = userEvent.setup();
     const bridge = withRuns(makeBridge(Promise.resolve(null)));
     bridge.findAutomationCollection.mockRejectedValueOnce(new Error("The workspace engine is not running."));
-    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    renderWithNotices(bridge, { openOnReady: { to: "automation-controls", automation: "collection:tasks#first" } as const });
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc could not open this automation.");
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
@@ -2238,7 +2262,7 @@ describe("notices sent to you", () => {
       valid: true, automationId: "collection:tasks#first", automation, definitionHash: "0123456789abcdef", cannotRun: null,
       reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
     }] });
-    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    renderWithNotices(bridge, { openOnReady: { to: "automation-controls", automation: "collection:tasks#first" } as const });
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
     const toggle = within(await screen.findByTestId("automation-first", undefined, { timeout: 15_000 })).getByRole("switch");
     await waitFor(() => expect(document.activeElement).toBe(toggle));
@@ -2249,7 +2273,7 @@ describe("notices sent to you", () => {
   it("opens a switched-off automation's switch next to the saved tabs once they apply", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = withRuns(makeBridge(stored.promise));
-    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    renderWithNotices(bridge, { openOnReady: { to: "automation-controls", automation: "collection:tasks#first" } as const });
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     await act(async () => undefined);
     expect(bridge.findAutomationCollection).not.toHaveBeenCalled();
@@ -2265,7 +2289,7 @@ describe("notices sent to you", () => {
 
   describe("through an Edit share view", () => {
     const EDIT_VIEW: Workspace = { ...WORKSPACE, shareView: { shareId: "share-1", granterEmail: "owner@dohc.test", access: "edit" } };
-    const SWITCHED_OFF = { automationControls: "collection:object-tasks#first", sharedFile: "tasks/automations.yaml" };
+    const SWITCHED_OFF = { to: "automation-controls", automation: "collection:object-tasks#first", sharedFile: "tasks/automations.yaml" } as const;
     const automation = {
       id: "first", name: "Stamp the date", enabled: false, when: { kind: "record-added" as const, table: null }, if: null,
       do: [{ kind: "set" as const, values: [{ field: "Done", value: { kind: "literal" as const, value: true } }], records: null, operation: null }],
@@ -2387,7 +2411,7 @@ describe("notices sent to you", () => {
       const start = await screen.findByTestId("open-share-start");
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
-      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, "Trips/Japan/report.md"));
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, { to: "file", path: "Trips/Japan/report.md" }));
     });
 
     it("opens it as its own workspace on a switched-off automation's switch", async () => {
@@ -2404,7 +2428,7 @@ describe("notices sent to you", () => {
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
       await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, {
-        automationControls: "collection:object-tasks#stamp", sharedFile: "Trips/tasks/automations.yaml",
+        to: "automation-controls", automation: "collection:object-tasks#stamp", sharedFile: "Trips/tasks/automations.yaml",
       }));
     });
   });
@@ -5044,4 +5068,341 @@ describe("a page delete refused while History is off", () => {
     const notice = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
     expect(within(notice).queryByRole("button", { name: /Try again|Open Live documents/u })).toBeNull();
   });
+});
+
+// An account dohc can't confirm is not the server's fault. Its row reads the
+// account again the way Settings' Try again does, opens Settings at the sync
+// row, and pauses nothing: once the account is confirmed, sync reads normal.
+it("reads the account again from Notices, opens Sync settings, and pauses nothing", async () => {
+  let status: SyncStatusResult = { ...SYNC_STATUS, state: "account-unconfirmed" };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudEnableSync: vi.fn(async () => {
+      status = { ...SYNC_STATUS };
+      return status;
+    }),
+    cloudStopSync: vi.fn(),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: status.state !== "account-unconfirmed",
+  }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  expect((await screen.findByTestId("sync-status")).textContent).toBe("Couldn't confirm account");
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-account-unconfirmed")).getByRole("button", { name: "Sync settings" }));
+  expect(await screen.findByTestId("settings-row-sync-workspace")).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-account-unconfirmed")).getByRole("button", { name: "Try again" }));
+  expect(bridge.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+  // Main pushes the confirmed status, and the title bar and Notices read
+  // normal with nothing else clicked.
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+  await waitFor(() => expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("synced"));
+  expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
+  expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+});
+
+// Nobody is connected, which is a choice, not a fault. Its row offers the same
+// connect flow as Settings' Connect server, never Try again, and pauses
+// nothing.
+it("offers Connect server from Notices while nobody is connected, and pauses nothing", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "not-connected" };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudEnableSync: vi.fn(),
+    cloudStopSync: vi.fn(),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({ connected: false, email: "", serverUrl: "", workspaceSynced: true }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  const title = await screen.findByTestId("sync-status");
+  expect(title.textContent).toBe("Connect server to sync");
+  expect(title.textContent).not.toBe("Couldn't confirm account");
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const row = await screen.findByTestId("notice-not-connected");
+  expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
+  await user.click(within(row).getByRole("button", { name: "Connect server" }));
+  expect(await screen.findByTestId("cloud-sync-panel")).toBeTruthy();
+  expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
+  expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+});
+
+// The server stopped accepting the sign-in. Sign in again in Notices starts
+// the same sign-in at that server, with no Disconnect first. Main rebuilds
+// the engine on the new session, so sync resumes with nothing else clicked:
+// no enable, no pause, and no Settings to finish in.
+it("signs in again from Notices, and sync resumes with no enable or pause", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(),
+      cloudStopSync: vi.fn(),
+      cloudLogout: vi.fn(),
+      cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+      cloudLoginPoll: vi.fn(async () => {
+        status = { ...SYNC_STATUS };
+        return { status: "complete" as const, email: "me@dohc.test" };
+      }),
+    });
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, workspaceSyncConnected: true,
+    }));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderShell(bridge);
+
+    const title = await screen.findByTestId("sync-status");
+    expect(title.textContent).toBe("Sign in again to sync");
+    expect(title.getAttribute("title")).toBe("Not syncing. Your sign-in expired.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("notice-sign-in-expired");
+    expect(row.textContent).toContain("Your sign-in expired");
+    await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+    await screen.findByTestId("cloud-user-code");
+    expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
+    expect(screen.queryByTestId("cloud-connected")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    // Main announces the rebuilt engine's status.
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("synced"));
+    expect(screen.queryByTestId("notice-sign-in-expired")).toBeNull();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
+    expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+    expect(bridge.cloudLogout).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// The dialog closed after a renewal failed. The notice's Try again still
+// signs in again at that server: the expired session is saved, and a plain
+// dialog would hand it to Settings and start nothing.
+it("signs in again at the same server from a failed renewal's notice after the dialog closes", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (_payload: { serverUrl: string }) => {
+      throw new Error("dohc couldn't reach this server.");
+    }),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: true,
+  }));
+  const user = userEvent.setup();
+  renderShell(bridge);
+
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const row = await screen.findByTestId("notice-sign-in-expired");
+  await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("workspace-shell-error");
+  expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(1);
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+  await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(2));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
+// The renewal's first step, the status check, failed. Its notice still signs
+// in again once the dialog has closed, instead of opening Settings.
+it("signs in again from a renewal's failed status check after the dialog closes", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  let failStatus = false;
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (_payload: { serverUrl: string }) => ({
+      userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device",
+    })),
+    cloudLoginPoll: vi.fn(async () => ({ status: "pending" as const })),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => {
+    if (failStatus) {
+      failStatus = false;
+      throw new Error("The engine stopped answering.");
+    }
+    return {
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, workspaceSyncConnected: true,
+    };
+  });
+  const user = userEvent.setup();
+  renderShell(bridge);
+
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const row = await screen.findByTestId("notice-sign-in-expired");
+  failStatus = true;
+  await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("workspace-shell-error");
+  expect(bridge.cloudLoginStart).not.toHaveBeenCalled();
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+  await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+  await screen.findByTestId("cloud-user-code");
+  expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
+// A connection that failed before the sign-in expired keeps its notice. Its
+// Try again during a renewal leaves the renewal a renewal, so the renewal's
+// own failure still signs in again from its notice after the dialog closes.
+it("keeps a renewal a renewal when an older connection notice is retried during it", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  let connected = false;
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (payload: { serverUrl: string }) => {
+      throw new Error(`dohc couldn't reach ${payload.serverUrl}.`);
+    }),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => (connected
+    ? {
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, workspaceSyncConnected: true,
+    }
+    : { connected: false, email: "", serverUrl: "", workspaceSynced: false }));
+  const user = userEvent.setup();
+  renderShell(bridge);
+  // The first row with these words.
+  const noticeRow = async (text: string) => {
+    if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    const [notice] = await within(await screen.findByTestId("notice-center")).findAllByText(text);
+    const row = notice?.closest("li");
+    if (!row) throw new Error(`"${text}" has no Notices row.`);
+    return row;
+  };
+
+  // Signed out, a connection to another server fails.
+  await user.keyboard("{Control>}k{/Control}");
+  await user.click(await screen.findByText("Connect server"));
+  await user.type(await screen.findByTestId("cloud-server-url"), "https://old.dohc.test");
+  await user.click(screen.getByTestId("cloud-connect-start"));
+  await screen.findByTestId("workspace-shell-error");
+  connected = true;
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+
+  // Signing in again after the sign-in expired fails too.
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-sign-in-expired")).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("cloud-renew");
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+
+  // The older notice's Try again restarts the renewal at its server.
+  await user.click(within(await noticeRow("dohc couldn't reach https://old.dohc.test.")).getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(3));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+  await user.click(within(await noticeRow("dohc couldn't reach https://cloud.dohc.test.")).getByRole("button", { name: "Try again" }));
+
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(4));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
+// Two renewal attempts failed in one open dialog. The older failure's Try
+// again signs in again there, rather than doing nothing and leaving.
+it("signs in again from an older renewal notice while the dialog is still open", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  const failures = ["The server didn't answer.", "The sign-in code expired."];
+  let attempt = 0;
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (_payload: { serverUrl: string }) => {
+      attempt += 1;
+      throw new Error(failures[attempt - 1] ?? "The server refused the sign-in.");
+    }),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: true,
+  }));
+  const user = userEvent.setup();
+  renderShell(bridge);
+
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-sign-in-expired")).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("cloud-renew");
+  await user.click(await screen.findByTestId("cloud-renew-start"));
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(2));
+
+  if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+  const notice = await within(await screen.findByTestId("notice-center")).findByText("The server didn't answer.");
+  const row = notice.closest("li");
+  if (!row) throw new Error("The first renewal's failure has no Notices row.");
+  await user.click(within(row).getByRole("button", { name: "Try again" }));
+
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(3));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
+// Settings shows the same expired row: no switch reading on while nothing
+// syncs, and Sign in again in Try again's place.
+it.each([
+  ["the title bar says so", { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true }, "Sign in again to sync"],
+  // A conflict shows first, and the switch still mustn't read on.
+  ["a conflict shows first", { ...SYNC_STATUS, state: "conflict", conflictCount: 1, signInExpired: true }, "Conflict (1)"],
+] as const)("shows Sign in again in Settings while the sign-in is expired, never the switch, when %s", async (_, shown, label) => {
+  const status: SyncStatusResult = shown;
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudEnableSync: vi.fn(),
+    cloudStopSync: vi.fn(),
+    cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: true,
+  }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  expect((await screen.findByTestId("sync-status")).textContent).toBe(label);
+  // Signed in, Connect server opens Settings' Sync and sharing page.
+  await user.keyboard("{Control>}k{/Control}");
+  await user.click(await screen.findByText("Connect server"));
+  const row = within(await screen.findByTestId("settings-row-sync-workspace"));
+  expect(row.queryByRole("switch")).toBeNull();
+  expect(row.getByTestId("cloud-workspace-sign-in-expired").textContent).toBe("This workspace isn't syncing until you sign in again.");
+  expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Sign in again", "Pause sync"]);
+  await user.click(row.getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("cloud-user-code");
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
+  expect(bridge.cloudStopSync).not.toHaveBeenCalled();
 });

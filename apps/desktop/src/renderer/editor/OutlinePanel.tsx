@@ -51,7 +51,7 @@ const headingFlashPluginKey = new PluginKey<HeadingFlashState>(
 /** The flashed range's class, which is also how a caller finds the element it
  *  drew: an inline flash renders spans ProseMirror owns, and nothing else in
  *  the editor DOM can be addressed by position. */
-export const FLASH_CLASS = "dohc-outline-target-flash";
+export const FLASH_CLASS = "dohc-target-flash";
 
 /** The whole block, or the range inside it the caller named. */
 function flashDecoration(

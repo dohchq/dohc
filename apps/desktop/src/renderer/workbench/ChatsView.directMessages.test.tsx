@@ -534,7 +534,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => {
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     });
-    expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+    expect(screen.getByTestId("chats-dm-message").className).toContain("dohc-target-flash");
   });
 
   it("opens a focused reply's thread and highlights the reply there", async () => {
@@ -550,7 +550,7 @@ describe("ChatsView direct messages", () => {
     const panel = await screen.findByTestId("chats-dm-thread-panel");
     await waitFor(() => {
       const row = within(panel).getByText("Prado at 8:30").closest("[data-message-id]");
-      expect(row?.className).toContain("ring-2");
+      expect(row?.className).toContain("dohc-target-flash");
     });
   });
 
@@ -577,12 +577,12 @@ describe("ChatsView direct messages", () => {
     });
 
     const initiallyFocused = await screen.findByTestId("chats-dm-message");
-    await waitFor(() => expect(initiallyFocused.className).toContain("ring-2"));
+    await waitFor(() => expect(initiallyFocused.className).toContain("dohc-target-flash"));
 
     await user.click(screen.getByTestId("chats-dm-back"));
     await user.click(await screen.findByTestId("chats-dm-item"));
     const normallyOpened = await screen.findByTestId("chats-dm-message");
-    expect(normallyOpened.className).not.toContain("ring-2");
+    expect(normallyOpened.className).not.toContain("dohc-target-flash");
   });
 
   // The main-side shared-channel pass is bounded, so a poll that does not

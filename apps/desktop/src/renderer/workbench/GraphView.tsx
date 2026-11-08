@@ -1045,7 +1045,7 @@ export function GraphView(props: {
                       }
                       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
                         active
-                          ? "bg-selected text-ink"
+                          ? "bg-selected text-ink font-medium"
                           : "text-muted hover:bg-hover hover:text-ink"
                       }`}
                     >

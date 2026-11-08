@@ -155,7 +155,7 @@ pub struct ThreadWithChannel {
 const MESSAGE_COLUMNS: &str = "workspace_id, thread_id, message_order, message_id, author_kind, \
      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
      author_owner_display_name, automation_id, chain_depth, author_actor_key, link_grant_id, \
-     link_principal_id, author_agent_id, author_reported";
+     link_principal_id, author_agent_id, author_reported, agent_connection_id";
 
 fn corrupt(reason: &'static str) -> DomainError {
     DomainError::StateCorrupt { reason }
@@ -503,12 +503,13 @@ fn post_repliers(
     let mut stmt = conn
         .prepare_cached(
             "SELECT m.thread_id, m.author_kind, m.author_display_name, m.author_user_id, \
-                    MAX(m.created_at_ms) AS at, m.link_grant_id, m.link_principal_id, m.author_agent_id \
+                    MAX(m.created_at_ms) AS at, m.link_grant_id, m.link_principal_id, m.author_agent_id, \
+                    m.agent_connection_id \
              FROM json_each(?2) ids \
              CROSS JOIN chat_messages m ON m.workspace_id = ?1 AND m.thread_id = ids.value \
              WHERE m.message_id NOT IN (SELECT value FROM json_each(?3)) \
              GROUP BY m.thread_id, m.author_kind, m.author_display_name, m.author_user_id, \
-                      m.link_grant_id, m.link_principal_id, m.author_agent_id",
+                      m.link_grant_id, m.link_principal_id, m.author_agent_id, m.agent_connection_id",
         )
         .map_err(DomainError::sql_corrupt)?;
     let rows = stmt
@@ -523,10 +524,12 @@ fn post_repliers(
                 let link_grant_id: Option<String> = row.get(5)?;
                 let link_principal_id: Option<String> = row.get(6)?;
                 let author_agent_id: Option<String> = row.get(7)?;
+                let agent_connection_id: Option<String> = row.get(8)?;
                 let link_author = match (link_grant_id, link_principal_id) {
                     (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
                         grant_id,
                         principal_id,
+                        agent_connection_id,
                     }),
                     _ => None,
                 };

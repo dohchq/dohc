@@ -21,6 +21,7 @@ import { ThreadedChat } from "./ThreadedChat";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
+import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
 import {
@@ -202,7 +203,9 @@ export type ChatsInvitation = { shareId: string; inputs: number };
 export type ChatsNav =
   | { level: "channels" }
   | { level: "feed" }
-  | { level: "channel"; channel: ChatChannelRecord }
+  // A channel, or with `lane` its chat lane, at a message when one is named.
+  // An agent DM is always its chat lane.
+  | { level: "channel"; channel: ChatChannelRecord; lane?: "chat"; focusMessageId?: string }
   | {
       level: "thread";
       channel: ChatChannelRecord;
@@ -444,7 +447,7 @@ function NavRow(props: {
       onClick={props.onClick}
       {...props.data}
       className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
-        props.active ? "bg-selected" : "hover:bg-hover"
+        props.active ? "bg-selected font-medium" : "hover:bg-hover"
       } ${props.className ?? ""}`}
     >
       {props.icon}
@@ -1658,10 +1661,16 @@ export function ChatsView(props: {
   }, []);
 
   const openChannel = useCallback(
-    async (channel: ChatChannelRecord) => {
+    async (channel: ChatChannelRecord, lane?: "chat", focusMessageId?: string) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
-      setNav({ level: "channel", channel: withListedAgent(channel, latestChannels.current) });
+      setNav({
+        level: "channel",
+        channel: withListedAgent(channel, latestChannels.current),
+        ...(lane ? { lane } : {}),
+        ...(focusMessageId ? { focusMessageId } : {}),
+      });
+      if (lane) setGroupLane(lane);
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -2496,7 +2505,7 @@ export function ChatsView(props: {
       // no nav state, so the passive report alone would cancel nothing.
       props.onNavCommand?.(target);
       if (target.level === "feed") openFeed();
-      else if (target.level === "channel") void openChannel(target.channel);
+      else if (target.level === "channel") void openChannel(target.channel, target.lane, target.focusMessageId);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
       } else void openDm(target.dm, target.focusMessageId);
@@ -2579,7 +2588,7 @@ export function ChatsView(props: {
     handoffReportBlocked.current = false;
     if (seed) {
       if (seed.level === "feed") openFeed();
-      else if (seed.level === "channel") void openChannel(seed.channel);
+      else if (seed.level === "channel") void openChannel(seed.channel, seed.lane, seed.focusMessageId);
       else if (seed.level === "thread") {
         void openThread(seed.channel, seed.thread, seed.focusMessageId);
       }
@@ -3662,11 +3671,14 @@ export function ChatsView(props: {
     }
     setFlashMessageId(messageId);
     const token = liveToken.current;
+    requestAnimationFrame(() => {
+      if (token === liveToken.current) focusMessage(document, messageId);
+    });
     window.setTimeout(() => {
       if (token === liveToken.current) {
         setFlashMessageId((current) => (current === messageId ? null : current));
       }
-    }, 1_200);
+    }, TARGET_FLASH_MS);
   }, []);
 
   useEffect(() => {
@@ -4036,13 +4048,16 @@ export function ChatsView(props: {
                     >
                       <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
-                        kind={item.message.authorKind}
+                        kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-1.5 leading-[18px]">
                           <span className="truncate text-[13px] font-semibold text-ink">
-                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation}>
+                            {/* The row is one button, so the agent's badge cannot sit in it; its name says agent. */}
+                            {item.message.authorKind === "link" && item.message.linkAgent === true
+                              ? <span data-testid="chats-feed-link-agent" className="sr-only">agent </span> : null}
+                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation} linkAgent={item.message.linkAgent === true}>
                               {chatAuthorLabel(item.message)}
                             </AgentName>
                           </span>
@@ -4399,7 +4414,7 @@ export function ChatsView(props: {
         {computerPausedStrip ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
           >
             <span>Agent replies paused on this computer</span>
             {!threadLocked ? (
@@ -4413,13 +4428,13 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span>read-only</span>
+              <span className="text-muted">read-only</span>
             )}
           </div>
         ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
           >
             <span>Agent replies paused</span>
             {!threadLocked ? (
@@ -4433,14 +4448,14 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span>read-only</span>
+              <span className="text-muted">read-only</span>
             )}
           </div>
         ) : dispatchState && (liveRunId !== null ||
           dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-muted"
           >
             {liveRunId !== null
               ? `agent working${
@@ -4476,6 +4491,7 @@ export function ChatsView(props: {
               failedRun={failedRun}
               retryBusy={dispatchActionBusy}
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
+              onOpenAgentSettings={props.onSetupAgent}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4758,7 +4774,7 @@ export function ChatsView(props: {
                       {grant.recipientEmail ?? "Invited"}
                     </span>
                     {grant.access === "read-only" ? (
-                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
+                      <span className="shrink-0 text-[10px] text-muted">read-only</span>
                     ) : null}
                     <button
                       type="button"
@@ -4844,10 +4860,12 @@ export function ChatsView(props: {
             onError={props.onError}
             onNotice={props.onNotice}
             onThreadRead={props.onThreadRead}
+            onOpenAgentSettings={props.onSetupAgent}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
+            {...(nav.focusMessageId === undefined ? {} : { focusMessageId: nav.focusMessageId })}
             header={top}
             notice={agentProblem ? (
               <AgentProblemLine words={agentProblem.words} action={agentProblem.action} off={"off" in agentProblem} onAction={props.onSetupAgent} />
@@ -5110,7 +5128,7 @@ export function ChatsView(props: {
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
+                    <span className="shrink-0 text-[10px] text-muted">{shareAccessLabel(row.access)}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"
@@ -5153,7 +5171,7 @@ export function ChatsView(props: {
                       trailing={
                         <>
                           {dm.connected ? null : (
-                            <span className="shrink-0 text-[10px] text-subtle">ended</span>
+                            <span className="shrink-0 text-[10px] text-muted">ended</span>
                           )}
                           <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
                         </>
@@ -5258,7 +5276,7 @@ export function ChatsView(props: {
                         {launch ? null : (
                           <span
                             data-testid="chats-my-agent-state"
-                            className="shrink-0 text-[10px] text-subtle"
+                            className="shrink-0 text-[10px] text-muted"
                           >
                             {agent?.launch ? "off" : "not set up"}
                           </span>
@@ -5288,7 +5306,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-muted">
                             via {agent.owner}
                           </span>
                         }

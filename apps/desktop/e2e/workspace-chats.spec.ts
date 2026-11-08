@@ -1,5 +1,6 @@
 import { desktopPins, activityPin, settingsNavPin, editorTabTestId, editorTabPrefixPattern } from "../src/testPins";
 import { expect, test } from "@playwright/test";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -246,6 +247,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       await page.emulateMedia({ reducedMotion: "reduce" });
       await back.focus();
       await expect(back).toBeFocused();
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`post-navigation-${theme}.png`) });
     }
     await expect(page.getByTestId("chats-composer")).toHaveCount(1);
@@ -286,10 +288,12 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       await panel.getByTestId("chats-feed-link").focus();
       await page.keyboard.press("Enter");
       await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: test.info().outputPath(`chat-home-${theme.toLowerCase()}.png`) });
       await panel.getByTestId("chats-channel").focus();
       await page.keyboard.press("Enter");
       await expect(pageChannelView).toBeVisible();
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: test.info().outputPath(`chat-channel-${theme.toLowerCase()}.png`) });
     }
     // The durable channel identity and Home tab survive a desktop restart.

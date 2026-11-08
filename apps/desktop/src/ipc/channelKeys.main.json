@@ -157,6 +157,7 @@
   "openUserSettingsFile",
   "openWorkspace",
   "openWorkspaceManager",
+  "openWorkspacePolicyFile",
   "openWorkspaceSettingsFile",
   "openWorkspaceWindow",
   "ownerAppResponses",

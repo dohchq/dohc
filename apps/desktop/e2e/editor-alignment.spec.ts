@@ -11,11 +11,12 @@ import {
 
 // Left-alignment audit for the WYSIWYG editor: the TEXT of every top-level
 // block type must share one left content edge — a straight vertical line down
-// the gutter touches all of it. Decorations (list markers, task checkboxes,
-// the quote bar) hang left of that edge, and framed blocks (code, tables,
-// callouts) extend --dohc-editor-block-inset past the column so their inner
-// padding lands their text back on the edge. This spec measures the first
-// text glyph of each block against a plain paragraph's.
+// the gutter touches all of it. Decorations (list markers, the quote bar)
+// hang left of that edge, and framed blocks (code, callouts) extend
+// --dohc-editor-block-inset past the column so their inner padding lands
+// their text back on the edge. A task list's checkboxes and a table's frame
+// start on the edge instead. This spec measures the first text glyph of each
+// block against a plain paragraph's.
 
 const ALIGNMENT_DOC = `# Heading one
 
@@ -186,6 +187,26 @@ function expectClustersClear(clusters: Awaited<ReturnType<typeof measureClusters
   }
 }
 
+// A task list's checkboxes and a table's frame start on the edge. Task text
+// follows one 15px checkbox and its 8px gap; a cell's text follows the
+// table's 1px border and the cell's 10px padding.
+function expectOnEdge({ edges, boxes }: BlockEdges, edge: number) {
+  for (const [key, left] of [
+    ["checkbox", boxes.checkbox?.left],
+    ["table", boxes.table?.left],
+  ] as const) {
+    expect(left, `${key} must render`).toBeDefined();
+    expect.soft(Math.abs(left! - edge), `${key} starts on the content edge`).toBeLessThanOrEqual(1.5);
+  }
+  for (const [key, offset] of [
+    ["task", 23],
+    ["tableCell", 11],
+  ] as const) {
+    expect(edges[key], `${key} must render text`).not.toBeNull();
+    expect.soft(Math.abs(edges[key]! - edge - offset), `${key} text sits ${offset}px in`).toBeLessThanOrEqual(1.5);
+  }
+}
+
 test("every block type's text sits on one shared left content edge", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
@@ -224,11 +245,9 @@ test("every block type's text sits on one shared left content edge", async () =>
       "h3",
       "bullet",
       "ordered",
-      "task",
       "blockquote",
       "callout",
       "code",
-      "tableCell",
     ] as const) {
       expect(edges[key], `${key} must render text`).not.toBeNull();
       expect
@@ -244,12 +263,10 @@ test("every block type's text sits on one shared left content edge", async () =>
     expect(boxes.hr).not.toBeNull();
     expect(Math.abs(boxes.hr!.left - edge!)).toBeLessThanOrEqual(1.5);
 
-    // Task checkboxes hang fully left of the edge (decoration, not content).
-    expect(boxes.checkbox).not.toBeNull();
-    expect(boxes.checkbox!.right).toBeLessThan(edge!);
+    expectOnEdge({ paneWidth, edges, boxes }, edge!);
 
-    // Framed blocks extend one block inset (16px) into both gutters.
-    for (const key of ["pre", "table", "callout"] as const) {
+    // Code and callout frames extend one block inset (16px) into both gutters.
+    for (const key of ["pre", "callout"] as const) {
       expect(boxes[key], `${key} frame must render`).not.toBeNull();
       expect
         .soft(Math.abs(edge! - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`)
@@ -263,8 +280,12 @@ test("every block type's text sits on one shared left content edge", async () =>
       BrowserWindow.getAllWindows()[0]?.setSize(1000, 950);
     });
     await expect.poll(async () => (await measure(page)).paneWidth).toBeLessThan(832);
-    const narrowEdge = (await measure(page)).edges.paragraph;
+    const narrow = await measure(page);
+    const narrowEdge = narrow.edges.paragraph;
     expect(narrowEdge).not.toBeNull();
+    // The table's wrapper still reaches 22px into the padding, so the frame,
+    // not the row grips, stays on the edge.
+    expectOnEdge(narrow, narrowEdge!);
     expectClustersClear(await measureClusters(page), narrowEdge!);
 
     // There the cluster stacks + above ⋮, and a one-item list's ⋮ runs below

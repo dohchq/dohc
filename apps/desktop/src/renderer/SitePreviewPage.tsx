@@ -232,6 +232,8 @@ export function SitePreviewPage(props: {
   visible?: boolean;
   // The tab is the focused group's active tab, so focus belongs in the app.
   focused?: boolean;
+  // Changes each time the person presses this page's tab, which puts focus in the app.
+  focusRequest?: number;
   // The app's title, for its tab.
   onTitle?: (title: string) => void;
   // The workspace's server connection, for Review app's Share links.
@@ -738,6 +740,7 @@ export function SitePreviewPage(props: {
     enabled: needsPublication,
     visible: props.visible ?? true,
     focused: props.focused ?? false,
+    focusRequest: props.focusRequest ?? 0,
     approvals: localApprovals,
     holdFocus: reviewOpen,
     notices: props.notices,

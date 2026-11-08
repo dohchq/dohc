@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { AppDatasetCapability } from "@dohc/security-contract/app-publication";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "./localDatasetHost";
 import { generateDatasetSources } from "./datasetGenerator";
@@ -39,20 +40,21 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
-async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: CollectionsHolderCheck = unguardedCollections) {
+async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: CollectionsHolderCheck = unguardedCollections, { customRead = true, schema = "" } = {}) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   if (holder.required()) await recordNewCollectionsHolder(workspaceRoot, "w", holder.here());
   const host = await createLocalDatasetHost({ holder, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
-  const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
-  files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
+  const files = new Map(Object.entries(generated.files));
+  if (customRead) files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
     if(input.echo)return {echo:input.fileId};
     if(input.extra)return {fileId:input.fileId,extra:true};
     if(input.guess)return {fileId:input.fileId};
     return {fileId:ctx.db.query('SELECT receipt FROM responses WHERE receipt=?',[input.fileId])[0]?.receipt||null};
   };`);
+  files.set(definition.schemaPath, files.get(definition.schemaPath) + schema);
   const adapter = sourceAdapter(files);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
@@ -104,6 +106,36 @@ describe("local approved dataset apps", () => {
       JSON.stringify({ version: 1, workspaceId: "w", installId: "install-laptop", label: "Laptop", storeId: null }));
     await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation("Blake", "submit-two"))).rejects.toThrow("These Collections are on Laptop.");
     await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).rejects.toThrow("These Collections are on Laptop.");
+  });
+
+  it("still matches an approval whose candidate has no display words, and shows what each operation does beside it", async () => {
+    const f = await fixture();
+    const stored = f.app.candidate.capabilities[0];
+    if (stored?.kind !== "dataset") throw new Error("Expected Dataset app.");
+    // The candidate, and so the approval's identity, holds only what an approval made before display words held.
+    expect(JSON.stringify(f.app.candidate)).not.toContain("display");
+    expect(f.published.publicationId).toBe(hash(JSON.stringify(["dohc-local-dataset-app-v1", "w", f.app.candidate])));
+    const [row] = f.host.apps.list("app");
+    if (!row || !("datasetCapability" in row)) throw new Error("Expected Dataset app.");
+    expect(row).toMatchObject({ active: true, approved: true });
+    const shown = row.datasetCapability as AppDatasetCapability;
+    // The fixture adds its own fileRead to the generated code, so dohc can't vouch for Submit's fields and shows it by its label.
+    expect(shown.operations.map(operation => operation.display)).toEqual([{ kind: "action", label: "Submit", fields: [] }]);
+    expect({ ...shown, operations: shown.operations.map(({ display: _, ...operation }) => operation) }).toEqual(stored);
+    expect(await f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).toMatchObject({ replayed: false });
+    expect(await f.host.apps.activate(f.app, new AbortController().signal)).toEqual(f.published);
+  });
+
+  it("says what each operation does only when dohc generated the Collection's schema and its operation code", async () => {
+    const shown = async (sources: Parameters<typeof fixture>[2]) => {
+      const [row] = (await fixture(undefined, undefined, sources)).host.apps.list("app");
+      if (!row || !("datasetCapability" in row)) throw new Error("Expected Dataset app.");
+      return (row.datasetCapability as AppDatasetCapability).operations.map(operation => operation.display);
+    };
+    expect(await shown({ customRead: false })).toEqual([{ kind: "create", label: "Submit", fields: ["Name", "Receipt"] }]);
+    // Beside generated operation code, a trigger that deletes every other record on each submit.
+    const wipe = "\nCREATE TRIGGER wipe AFTER INSERT ON responses BEGIN DELETE FROM responses WHERE id <> NEW.id; END;\n";
+    expect(await shown({ customRead: false, schema: wipe })).toEqual([{ kind: "action", label: "Submit", fields: [] }]);
   });
 
   it("persists approval provenance with the captured candidate without changing app authority", async () => {

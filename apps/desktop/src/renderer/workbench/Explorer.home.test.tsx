@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExplorerMenuEntry, SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { ExplorerApps } from "./AppsSection";
 import { Explorer, type ExplorerProps } from "./Explorer";
-import { OTHER_FILES_SHOWN, RECENT_SHOWN } from "./explorerHomeModel";
-import { collectionTabPath, siteTabPath, transactionalCollectionTabPath } from "./workbenchState";
+import { OTHER_FILES_SHOWN } from "./explorerHomeModel";
+import { collectionTabPath, siteTabPath } from "./workbenchState";
 
 const app = {
   root: "trip",
@@ -53,7 +53,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "home",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       file("notes.md"),
       file("Plans/Spring.md"),
@@ -83,7 +82,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),
@@ -117,6 +115,36 @@ function rowLabels(name: string): string[] {
     .map((element) => element.querySelector(".truncate")?.textContent ?? element.textContent ?? "");
 }
 
+const PAGE_PATHS = Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(4, "0")}.md`);
+
+// Home with 500 pages and 40 of them open in one group.
+function largeHome(): Partial<ExplorerProps> {
+  return {
+    files: PAGE_PATHS.map(file), folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(),
+    editorGroups: [{ id: "group-1", tabs: PAGE_PATHS.slice(0, 40).map((path) => ({ path })), activeTab: PAGE_PATHS[0]!, size: 1 }],
+  };
+}
+
+function mounted(path: string): boolean {
+  return document.querySelector(`[data-home-key="pages:${path}"]`) !== null;
+}
+
+function rect(top: number, height: number) {
+  return { x: 0, y: top, top, left: 0, right: 280, bottom: top + height, width: 280, height, toJSON: () => ({}) };
+}
+
+// Renders Home in a 280 px scroller, 100 rows into Pages less `offset`: how
+// far Open editors pushes Pages down.
+function scrolledHome(props: ExplorerProps, offset: () => number) {
+  const view = render(<Explorer {...props} />);
+  const scroller = screen.getByTestId("file-tree");
+  Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 280 });
+  vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(rect(0, 280));
+  vi.spyOn(section("Pages").querySelector("ul")!, "getBoundingClientRect").mockImplementation(() => rect(-2_800 + offset(), 14_000));
+  fireEvent.scroll(scroller);
+  return view;
+}
+
 const RENAME: ExplorerMenuEntry = { kind: "item", label: "Rename", id: "rename" };
 const DELETE: ExplorerMenuEntry = { kind: "item", label: "Delete", id: "delete" };
 
@@ -139,14 +167,81 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Explorer Home", () => {
-  it("orders its sections Pinned, Recent, Pages, Collections, Apps, Other files", () => {
-    render(<Explorer {...explorerProps({ pinned: ["notes.md"], recentFiles: ["budget.csv"] })} />);
+describe("Explorer Files", () => {
+  it("shows nothing below the Files header before the first listing", () => {
+    render(<Explorer {...explorerProps({ mode: "files", listed: false, files: [], folders: [] })} />);
 
-    const sections = [...screen.getByTestId("explorer-home").querySelectorAll(":scope > section")];
+    expect(screen.queryByText("No files yet.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
+    expect(screen.queryByRole("tree")).toBeNull();
+  });
+
+  it('shows "No files yet." after an empty listing', () => {
+    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [], editorGroups: [] })} />);
+
+    // An empty-state line says something, so it reads in muted, not subtle.
+    for (const line of [within(section("Files")).getByText("No files yet."), screen.getByText("No files open.")]) {
+      expect(line.className).toContain("text-muted");
+      expect(line.className).not.toContain("text-subtle");
+    }
+    expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
+    expect(screen.queryByRole("tree")).toBeNull();
+  });
+
+  it("shows the tree after a listing with a file", () => {
+    render(<Explorer {...explorerProps({ mode: "files", files: [file("notes.md")], folders: [] })} />);
+
+    expect(within(screen.getByRole("tree")).getByRole("treeitem", { name: "notes.md" })).toBeTruthy();
+    expect(screen.queryByText("No files yet.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
+  });
+
+  it('swaps "No files yet." for the new folder row in an empty workspace', async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [] })} />);
+
+    await user.click(within(section("Files")).getByRole("button", { name: "New folder" }));
+
+    expect((await screen.findByTestId("tree-edit-input")).getAttribute("aria-label")).toBe("New folder name");
+    expect(screen.queryByText("No files yet.")).toBeNull();
+  });
+});
+
+describe("Explorer Home", () => {
+  it("orders its sections Open editors, Pinned, Pages, Collections, Apps, Other files", () => {
+    render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
+
+    const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
     expect(sections.map((element) => element.getAttribute("aria-label")))
-      .toEqual(["Pinned", "Recent", "Pages", "Collections", "Apps", "Other files"]);
+      .toEqual(["Open editors", "Pinned", "Pages", "Collections", "Apps", "Other files"]);
     expect(screen.getByTestId("file-tree").getAttribute("aria-label")).toBe("Home");
+  });
+
+  it("shows Files' Open editors, and Tab moves on from it into Home's list", async () => {
+    const onActivateTab = vi.fn();
+    const onCloseTab = vi.fn();
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps({
+      onActivateTab,
+      onCloseTab,
+      editorGroups: [{ id: "group-1", tabs: [{ path: "notes.md" }, { path: "budget.csv" }], activeTab: "notes.md", size: 1 }],
+    })} />);
+
+    const openEditors = section("Open editors");
+    expect(within(openEditors).getAllByTestId("open-editor-row").map((row) => row.dataset.path)).toEqual(["notes.md", "budget.csv"]);
+    // A page shows its title, as Pages does, and another file its name.
+    expect(within(openEditors).getByRole("button", { name: "notes" }).title).toBe("notes.md");
+    expect(within(openEditors).getByRole("button", { name: "Close notes" })).toBeTruthy();
+    expect(within(openEditors).getByRole("separator", { name: "Resize open editors" })).toBeTruthy();
+    await user.click(within(openEditors).getByRole("button", { name: "budget.csv" }));
+    expect(onActivateTab).toHaveBeenCalledWith("group-1", "budget.csv");
+    const close = within(openEditors).getByRole("button", { name: "Close budget.csv" });
+    await user.click(close);
+    expect(onCloseTab).toHaveBeenCalledWith("group-1", "budget.csv");
+
+    close.focus();
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
   });
 
   it("leaves Files to Open editors and the folder tree", () => {
@@ -155,20 +250,117 @@ describe("Explorer Home", () => {
     const sections = [...screen.getByTestId("file-tree").querySelectorAll(":scope > section")];
     expect(sections.map((element) => element.getAttribute("aria-label"))).toEqual(["Open editors", "Files"]);
     expect(screen.queryByTestId("explorer-home")).toBeNull();
+    // Files names an open page by its file name, as its tree does.
+    expect(within(section("Open editors")).getByRole("button", { name: "notes.md" })).toBeTruthy();
   });
 
-  it("draws no Pinned or Recent section with nothing in it, and always draws Pages with its +", async () => {
+  it("draws no Pinned section with nothing in it, and always draws Open editors and Pages with its +", async () => {
     const onNewPage = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({ files: [], folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(), onNewPage })} />);
+    render(<Explorer {...explorerProps({
+      files: [], folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(), onNewPage,
+      editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
+    })} />);
 
+    // Its line is the toggle's description, as Pages' line is.
+    const empty = within(section("Open editors")).getByText("No files open.");
+    expect(screen.getByTestId("open-editors-toggle").getAttribute("aria-describedby")).toBe(empty.id);
     expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "Recent" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
     expect(rowLabels("Pages")).toEqual([]);
     await user.click(within(section("Pages")).getByRole("button", { name: "New page" }));
     expect(onNewPage).toHaveBeenCalledWith("");
+  });
+
+  it("says when Pages, Collections or Apps has nothing, in a line the arrows pass over", async () => {
+    const user = userEvent.setup();
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [],
+          folders: [],
+          dataCollections: [],
+          collectionFolders: new Set(),
+          appFolders: new Set(),
+          apps: apps({ state: { status: "ready", workspaceId: "workspace-1", apps: [] } }),
+          onIncludeArchivedCollections: vi.fn(),
+        })}
+      />,
+    );
+
+    const lines = {
+      pages: "No pages yet.",
+      collections: "No Collections yet.",
+      apps: "No apps yet. Any folder with a web app in it shows up here.",
+    };
+    for (const [id, words] of Object.entries(lines)) {
+      const line = screen.getByTestId(`explorer-${id}-empty`);
+      expect(line.textContent).toBe(words);
+      // The header's toggle reads the line, since focus never lands on it.
+      expect(screen.getByTestId(`explorer-${id}-toggle`).getAttribute("aria-describedby")).toBe(line.id);
+    }
+    expect(screen.queryByTestId("sites-count")).toBeNull();
+
+    screen.getByTestId("explorer-pages-toggle").focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-collections-toggle"));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
+
+    // A folded section shows no line, and its toggle no longer points at one.
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    expect(screen.getByTestId("explorer-apps-toggle").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("holds Apps' place while its first read runs, and says nothing yet", () => {
+    render(<Explorer {...explorerProps({ apps: apps({ state: { status: "loading" } }) })} />);
+
+    expect(section("Apps")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+  });
+
+  it("shows an empty Apps section in a workspace of your own, and none in a share view", () => {
+    const empty = apps({ state: { status: "ready", workspaceId: "workspace-1", apps: [] } });
+    const view = render(<Explorer {...explorerProps({ apps: empty })} />);
+    expect(screen.getByTestId("explorer-apps-empty")).toBeTruthy();
+
+    view.rerender(<Explorer {...explorerProps({ apps: empty, shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
+
+    view.rerender(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(rowLabels("Apps")).toEqual(["Trip"]);
+
+    // A share that holds only an app shows no Pages either.
+    view.rerender(<Explorer {...explorerProps({ files: [file("trip/index.html")], folders: ["trip"], dataCollections: [], collectionFolders: new Set(),
+      shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(rowLabels("Apps")).toEqual(["Trip"]);
+    expect(screen.queryByRole("region", { name: "Pages" })).toBeNull();
+    expect(screen.queryByTestId("explorer-pages-empty")).toBeNull();
+  });
+
+  // Show archived Collections clears the list and reads it again. Until that
+  // read lands, the list is not known to be empty.
+  it("holds Collections' place while its list is read again, and says nothing yet", () => {
+    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
+      includeArchivedCollections: true, collectionsUnknown: "reading" })} />);
+
+    expect(section("Collections")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    expect(screen.queryByTestId("collections-failed")).toBeNull();
+    expect(screen.getByTestId("explorer-collections-toggle").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("leaves Try again in Collections' place when that read fails, and still says nothing", () => {
+    const onRetryCollections = vi.fn();
+    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
+      includeArchivedCollections: true, collectionsUnknown: "failed", onRetryCollections })} />);
+
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("collections-failed")).getByRole("button", { name: "Try again" }));
+    expect(onRetryCollections).toHaveBeenCalledOnce();
   });
 
   it("waits for the first listing before drawing any section", () => {
@@ -206,11 +398,11 @@ describe("Explorer Home", () => {
   it("moves through every section as one list", async () => {
     const onOpenFile = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({ onOpenFile, recentFiles: ["budget.csv"] })} />);
+    render(<Explorer {...explorerProps({ onOpenFile, pinned: ["budget.csv"] })} />);
 
-    const recentToggle = screen.getByTestId("explorer-recent-toggle");
-    expect(recentToggle.tabIndex).toBe(0);
-    recentToggle.focus();
+    const pinnedToggle = screen.getByTestId("explorer-pinned-toggle");
+    expect(pinnedToggle.tabIndex).toBe(0);
+    pinnedToggle.focus();
     await user.keyboard("{ArrowDown}");
     await user.keyboard("{Enter}");
     expect(onOpenFile).toHaveBeenLastCalledWith("budget.csv");
@@ -276,23 +468,6 @@ describe("Explorer Home", () => {
     expect(rowLabels("Pinned")).toEqual(["Trip", "notes", "tasks"]);
   });
 
-  it("shows the five most recent things that still exist, across kinds", () => {
-    render(<Explorer {...explorerProps({
-      recentFiles: [
-        "gone.md",
-        siteTabPath("trip"),
-        transactionalCollectionTabPath("guests/dataset.json", TABLE),
-        "budget.csv",
-        "Plans/Spring.md",
-        collectionTabPath("tasks"),
-        "notes.md",
-      ],
-    })} />);
-
-    expect(rowLabels("Recent")).toEqual(["Trip", "Guests", "budget.csv", "Spring", "tasks"]);
-    expect(rowLabels("Recent")).toHaveLength(RECENT_SHOWN);
-  });
-
   it("shows the Files menu for a row, with an app folder's sidebar pin", async () => {
     render(<Explorer {...explorerProps({ apps: apps({ pinnedApps: ["trip"] }) })} />);
 
@@ -335,6 +510,44 @@ describe("Explorer Home", () => {
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" }));
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted notes.md", expect.any(Function)));
+  });
+
+  it("measures the Pages window again while Open editors above it is resized", () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1_000 });
+    try {
+      scrolledHome(
+        explorerProps({ ...largeHome(), openEditorsHeight: 56 }),
+        () => Number.parseFloat(screen.getByTestId("open-editors-list").style.maxHeight) - 56,
+      );
+      expect(mounted("file-0100.md")).toBe(true);
+      expect(mounted("file-0080.md")).toBe(false);
+
+      const handle = screen.getByTestId("open-editors-resize");
+      Object.defineProperty(handle, "setPointerCapture", { value: vi.fn() });
+      fireEvent.pointerDown(handle, { button: 0, buttons: 1, clientY: 0, pointerId: 1 });
+      fireEvent.pointerMove(handle, { buttons: 1, clientY: 1_000, pointerId: 1 });
+
+      expect(screen.getByTestId("open-editors-list").style.maxHeight).toBe("600px");
+      expect(mounted("file-0080.md")).toBe(true);
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    }
+  });
+
+  it("measures the Pages window again when a tab moves into a new group", () => {
+    const props = explorerProps(largeHome());
+    // Each group heading pushes Pages down, here by an exaggerated 150 px.
+    const view = scrolledHome(props, () => 150 * section("Open editors").querySelectorAll('[role="heading"]').length);
+    expect(mounted("file-0080.md")).toBe(false);
+
+    const tabs = props.editorGroups[0]!.tabs;
+    view.rerender(<Explorer {...props} editorGroups={[
+      { id: "group-1", tabs: tabs.slice(0, 20), activeTab: tabs[0]!.path, size: 1 },
+      { id: "group-2", tabs: tabs.slice(20), activeTab: tabs[20]!.path, size: 1 },
+    ]} />);
+
+    expect(mounted("file-0080.md")).toBe(true);
   });
 
   it("switches to Files to reveal a path", () => {

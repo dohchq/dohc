@@ -269,6 +269,7 @@
   "dataset.change.ask",
   "window.old.read",
   "window.old.go",
+  "history.rules.file.open",
   "file.reveal",
   "explorer.menu.read"
 ]

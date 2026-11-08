@@ -45,6 +45,16 @@ describe("chat Links authority",()=>{
   expect(result).toMatchObject({nextCursor:"sealed",entries:[{author:{displayName:"Ada",presentation:{group:"opaque"}}}]});
   expect(JSON.stringify(result)).not.toMatch(/secret-user|secret-key|authorUserId|authorActorKey/);
  });
+ it("marks an agent that signed in with a link, without its connection",async()=>{
+  const h=harness(); const link={authorKind:"link",authorDisplayName:"Helper",linkGrantId:"grant",linkPrincipalId:"principal"};
+  const page=(author:Record<string,string>)=>({...raw(),entries:[{...raw().entries[0]!,author}]});
+  h.store.linksPage.mockResolvedValueOnce(page({...link,agentConnectionId:"connection"}) as never);
+  const agent=await h.read("w",{channelWireId:"wire"});
+  expect(agent?.entries[0]?.author).toMatchObject({kind:"link",displayName:"Helper",linkAgent:true});
+  expect(JSON.stringify(agent)).not.toMatch(/connection|grant|principal/);
+  h.store.linksPage.mockResolvedValueOnce(page(link) as never);
+  expect((await h.read("w",{channelWireId:"wire"}))?.entries[0]?.author).not.toHaveProperty("linkAgent");
+ });
  it.each(["absent","invalid"] as const)("a chat grant never grants its %s file; omission has the empty page shape",async status=>{
   const h=harness(); h.resolveEngineFiles.mockResolvedValue([{status}] as never);
   const denied=await h.read("w",{channelWireId:"wire"});

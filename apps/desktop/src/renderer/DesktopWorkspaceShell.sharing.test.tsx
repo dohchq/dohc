@@ -371,7 +371,23 @@ describe("active file sharing", () => {
     expect((await within(dialog).findByTestId("share-setup")).dataset.reason).toBe("not-synced");
   });
 
-  // The palette hides Share… whenever the toolbar draws no Share file.
+  // A narrow group hides Share file and keeps it in the group's tab list.
+  it("opens the same dialog from the group's tab list", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByText("a.md"));
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByRole("button", { name: "All tabs in editor group 1" }));
+    await user.click(screen.getByRole("menuitem", { name: "Share file" }));
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+  });
+
+  // The palette and the tab list hide Share… whenever the toolbar draws no
+  // Share file.
   it.each<[string, Workspace | undefined, string[]]>([
     ["no editor shows a file", undefined, []],
     ["the workspace is a shared view", SHARE_VIEW, ["a.md"]],
@@ -382,6 +398,14 @@ describe("active file sharing", () => {
     renderShell(bridge, workspace);
     if (workspace) await settleShareView();
     if (tabs.length > 0) await screen.findByTestId("file-inspector");
+    // Only the shared view's tab opens: the received share's file isn't in
+    // makeBridge's listing, so its group stays empty and has no tab list.
+    if (workspace) {
+      await user.click(screen.getByRole("button", { name: "All tabs in editor group 1" }));
+      expect(screen.getByRole("menuitem", { name: "New editor group right" })).toBeTruthy();
+      expect(screen.queryByRole("menuitem", { name: "Share file" })).toBeNull();
+      await user.keyboard("{Escape}");
+    }
     expect(screen.queryByTestId("file-share")).toBeNull();
 
     await user.keyboard("{Control>}k{/Control}");
@@ -644,7 +668,7 @@ describe("shared view editing", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
-    return toggle.hasAttribute("disabled");
+    return toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true";
   }
 
   for (const shareView of [
@@ -712,6 +736,7 @@ describe("shared view editing", () => {
     const toggle = await screen.findByTestId("markdown-edit-toggle");
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
       "Chats are read-only in this shared view.",
     );

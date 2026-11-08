@@ -173,7 +173,6 @@ export function DemoSidebar(props: {
           mode={explorerMode}
           onModeChange={setExplorerMode}
           listed
-          recentFiles={props.openTabs}
           shareView={null}
           files={files}
           folders={folders}
@@ -202,7 +201,6 @@ export function DemoSidebar(props: {
           onActivateTab={(_groupId, path) => props.onOpenDocument(path)}
           onCloseTab={(_groupId, path) => props.onCloseTab(path)}
           onCloseAllTabs={props.onCloseAllTabs}
-          onNewUntitledTextFile={props.onCreateDocument}
           onCollapseFolders={() => setExpandedFolders([])}
           onSetFolderExpanded={(path, expanded) =>
             setExpandedFolders((current) =>

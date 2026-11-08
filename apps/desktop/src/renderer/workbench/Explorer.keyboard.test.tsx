@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
+import { newPageTabPath } from "./workbenchState";
 
 afterEach(() => {
   cleanup();
@@ -16,7 +17,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       { path: "apps/reading-list/index.html", kind: "file" },
       { path: "notes.md", kind: "file" },
@@ -37,7 +37,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),
@@ -184,32 +183,179 @@ describe("Explorer tree tab stop", () => {
   });
 });
 
-describe("the active row inside a multi-selection", () => {
-  // Every selected row shares one fill. The ring marks the focused row, not
-  // the open file, so the open file alone is medium weight and still reads
-  // after focus leaves the tree.
-  it("keeps its weight cue when the tree is not focused", async () => {
+describe("active and picked rows", () => {
+  const TINT = "bg-(--dohc-selection)";
+  const untitled = newPageTabPath("page-1", "");
+  const opened = (activeTab: string | null) => ({
+    editorGroups: [
+      { id: "group-1", tabs: activeTab ? [{ path: activeTab }] : [], activeTab, size: 1 },
+    ],
+  });
+  const expanded = { expandedFolders: ["apps", "apps/reading-list"] };
+  const marked = () =>
+    screen
+      .getAllByRole("treeitem")
+      .filter((item) => item.className.includes(TINT) || item.className.includes("bg-selected"))
+      .map((item) => item.dataset.path);
+  const edged = () =>
+    screen
+      .getAllByRole("treeitem")
+      .filter((item) => item.querySelector('[data-testid="tree-row-open-edge"]'))
+      .map((item) => item.dataset.path);
+  async function openNotes() {
     const user = userEvent.setup();
-    render(
-      <Fixture
-        {...explorerProps({
-          editorGroups: [{ id: "group-1", tabs: [{ path: "notes.md" }], activeTab: "notes.md", size: 1 }],
-          expandedFolders: ["apps", "apps/reading-list"],
-        })}
-      />,
-    );
-
+    const props = explorerProps(expanded);
+    const view = render(<Fixture {...props} />);
     await user.click(row("notes.md"));
-    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
-    expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
-    expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
+    view.rerender(<Fixture {...props} {...opened("notes.md")} />);
+    return user;
+  }
 
+  it("marks no row active when the active tab is not a tree path", () => {
+    render(<Fixture {...explorerProps({ ...expanded, ...opened(untitled) })} />);
+    expect(marked()).toEqual([]);
+    expect(screen.getAllByRole("treeitem").some((item) => item.className.includes("font-medium"))).toBe(false);
+  });
+
+  it("shows one click as one active row with no tint", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps(expanded);
+    const view = render(<Fixture {...props} />);
+    await user.click(row("notes.md"));
+    view.rerender(<Fixture {...props} {...opened("notes.md")} />);
+
+    expect(marked()).toEqual(["notes.md"]);
+    expect(row("notes.md").className).toContain("bg-selected");
+    expect(row("notes.md").className).toContain("font-medium");
+    expect(row("notes.md").className).not.toContain(TINT);
+    expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("tints two picked rows, and the open one keeps its weight after focus leaves", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps(expanded);
+    const view = render(<Fixture {...props} />);
+    await user.click(row("notes.md"));
+    view.rerender(<Fixture {...props} {...opened("notes.md")} />);
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
     await user.click(screen.getByRole("button", { name: "After tree" }));
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "After tree" }));
+
+    for (const path of ["notes.md", "apps/reading-list/index.html"]) {
+      expect(row(path).className).toContain(TINT);
+      expect(row(path).className).not.toContain("bg-selected");
+      expect(row(path).getAttribute("aria-selected")).toBe("true");
+    }
     expect(row("notes.md").className).toContain("font-medium");
     expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
-    expect(row("apps/reading-list/index.html").className).toContain("bg-selected");
+
+    // Clearing the pick returns the open file to the active fill.
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(marked()).toEqual(["notes.md"]);
     expect(row("notes.md").className).toContain("bg-selected");
+  });
+
+  it("tints a folder clicked while a file is open, and keeps the file active", async () => {
+    const user = userEvent.setup();
+    render(<Fixture {...explorerProps({ ...expanded, ...opened("notes.md") })} />);
+    await user.click(row("apps"));
+
+    expect(row("apps").className).toContain(TINT);
+    expect(row("apps").getAttribute("aria-selected")).toBe("true");
+    expect(row("notes.md").className).toContain("bg-selected");
+    expect(row("notes.md").className).toContain("font-medium");
+    expect(row("notes.md").className).not.toContain(TINT);
+  });
+
+  it("keeps a folder picked on purpose when another editor becomes active", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps({ ...expanded, ...opened("notes.md") });
+    const view = render(<Fixture {...props} />);
+    await user.click(row("apps"));
+    view.rerender(<Fixture {...props} {...opened(untitled)} />);
+
+    expect(marked()).toEqual(["apps"]);
+    expect(row("apps").className).toContain(TINT);
+  });
+
+  it("edges the open file among picked rows, and keeps the edge after focus leaves", async () => {
+    const user = await openNotes();
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual(["notes.md"]);
+
+    await user.click(screen.getByRole("button", { name: "After tree" }));
+    expect(edged()).toEqual(["notes.md"]);
+    expect(row("notes.md").className).toContain(TINT);
+  });
+
+  it("edges neither the open file alone nor a picked row that is not open", async () => {
+    await openNotes();
+    expect(edged()).toEqual([]);
+
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual(["notes.md"]);
+    expect(row("apps/reading-list/index.html").className).toContain(TINT);
+  });
+
+  it("removes the edge when the pick clears", async () => {
+    await openNotes();
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual(["notes.md"]);
+
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual([]);
+    expect(marked()).toEqual(["notes.md"]);
+  });
+});
+
+// A click that opened a file selects only that file. When a new page takes
+// the editor, nothing in the tree is selected, so Delete acts on the focused
+// row.
+describe("the open file's selection after a new page opens", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function openThenNewPage() {
+    const deleteWorkspacePath = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("dohcDesktop", { platform: "win32", deleteWorkspacePath });
+    const user = userEvent.setup();
+    const props = explorerProps({ shareView: { granterEmail: "owner@example.test" } });
+    const view = render(<Fixture {...props} />);
+    await user.click(row("notes.md"));
+    const groups = (activeTab: string) => [{ id: "group-1", tabs: [{ path: activeTab }], activeTab, size: 1 }];
+    view.rerender(<Fixture {...props} editorGroups={groups("notes.md")} />);
+    view.rerender(<Fixture {...props} editorGroups={groups(newPageTabPath("page-1", ""))} />);
+    return { user, deleteWorkspacePath };
+  }
+
+  it("fills no row", async () => {
+    await openThenNewPage();
+    for (const item of screen.getAllByRole("treeitem")) {
+      expect(item.getAttribute("aria-selected")).toBe("false");
+      expect(item.className).not.toContain("bg-selected");
+      expect(item.className).not.toContain("bg-(--dohc-selection)");
+    }
+  });
+
+  it("enters the tree at the file that was open, which Delete would act on", async () => {
+    const { user } = await openThenNewPage();
+    await tabIntoTree(user, "notes.md");
+  });
+
+  it("deletes the focused row, not the file that was open", async () => {
+    const { user, deleteWorkspacePath } = await openThenNewPage();
+    row("apps").focus();
+    await user.keyboard("{Delete}");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(1));
+    expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "apps" });
+  });
+
+  it("deletes the file that was open when its row has focus", async () => {
+    const { user, deleteWorkspacePath } = await openThenNewPage();
+    row("notes.md").focus();
+    await user.keyboard("{Delete}");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(1));
+    expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" });
   });
 });
 

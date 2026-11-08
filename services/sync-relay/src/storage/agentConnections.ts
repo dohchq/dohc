@@ -114,6 +114,19 @@ export function initializeAgentConnectionSchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_agent_tokens_connection
       ON sync_relay_agent_tokens(connection_id, kind, issued_at_ms);
   `);
+  // start_seq is the log position when the agent signed in. A wait without
+  // a cursor reads from there, and nothing moves it. A connection from
+  // before the column starts at the log's end when the relay adds it.
+  const marker = "agent-connection-start-seq-v1";
+  if (!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker)) {
+    const columns = new Set(db.prepare("PRAGMA table_info(sync_relay_agent_connections)").all().map(row => String(row.name)));
+    if (!columns.has("start_seq")) {
+      db.exec(`ALTER TABLE sync_relay_agent_connections ADD COLUMN start_seq INTEGER NOT NULL DEFAULT 0 CHECK (start_seq >= 0);
+        UPDATE sync_relay_agent_connections SET start_seq = (SELECT COALESCE(MAX(log.relay_seq), 0) FROM sync_relay_log AS log
+          WHERE log.workspace_id = sync_relay_agent_connections.workspace_id);`);
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(marker, Date.now());
+  }
 }
 
 export type AgentClientRegistration = "metadata-document" | "registered";
@@ -152,6 +165,8 @@ export interface AgentConnectionRow {
   reportedName: string | null;
   connectedAtMs: number;
   lastActionAtMs: number | null;
+  /** The log position when it signed in, where a wait without a cursor starts. */
+  startSeq: number;
   status: AgentConnectionStatus;
   endedAtMs: number | null;
 }
@@ -171,7 +186,7 @@ type Guard = () => boolean;
 
 const CONNECTION_COLUMNS = `c.connection_id, c.workspace_id, c.share_id, c.grant_id, c.credential_id,
   c.generation, c.principal_id, c.client_id, c.reported_name, c.connected_at_ms,
-  c.last_action_at_ms, c.status, c.ended_at_ms`;
+  c.last_action_at_ms, c.start_seq, c.status, c.ended_at_ms`;
 
 function rowToConnection(row: Record<string, unknown>): AgentConnectionRow {
   return {
@@ -186,6 +201,7 @@ function rowToConnection(row: Record<string, unknown>): AgentConnectionRow {
     reportedName: nullableText(row.reported_name),
     connectedAtMs: Number(row.connected_at_ms),
     lastActionAtMs: row.last_action_at_ms === null ? null : Number(row.last_action_at_ms),
+    startSeq: Number(row.start_seq),
     status: String(row.status) as AgentConnectionStatus,
     endedAtMs: row.ended_at_ms === null ? null : Number(row.ended_at_ms),
   };
@@ -473,11 +489,12 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
         principalBytes);
     storage.db.prepare(`INSERT INTO sync_relay_agent_connections (
         connection_id, workspace_id, share_id, grant_id, credential_id, generation, principal_id, client_id,
-        reported_name, resource_hash, connected_at_ms, last_action_at_ms, status, ended_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', NULL)`)
+        reported_name, resource_hash, connected_at_ms, last_action_at_ms, start_seq, status, ended_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+        (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = ?), 'active', NULL)`)
       .run(input.connectionId, authorization.workspaceId, authorization.shareId, authorization.grantId,
         authorization.credentialId, authorization.generation, input.principalId, authorization.clientId,
-        authorization.reportedName, input.resourceHash, nowMs);
+        authorization.reportedName, input.resourceHash, nowMs, authorization.workspaceId);
     insertTokens(storage, input.connectionId, input, nowMs);
     storage.db.prepare(`UPDATE sync_relay_agent_authorizations SET status = 'redeemed', connection_id = ?
       WHERE authorization_id = ?`).run(input.connectionId, authorization.authorizationId);
@@ -530,30 +547,35 @@ export function refreshAgentTokens(storage: StorageContext, input: {
   });
 }
 
+/** Call inside the caller's transaction: the token's active connection, while its link is current. */
+export function activeAgentConnectionInTransaction(storage: StorageContext, accessTokenHash: string, nowMs: number): AgentConnectionRow | null {
+  const row = storage.db.prepare(`SELECT ${CONNECTION_COLUMNS}
+    FROM sync_relay_agent_tokens AS token
+    JOIN sync_relay_agent_connections AS c ON c.connection_id = token.connection_id
+    WHERE token.token_hash = ? AND token.kind = 'access' AND token.expires_at_ms > ? AND c.status = 'active'`)
+    .get(accessTokenHash, Math.trunc(nowMs));
+  if (!row) return null;
+  const connection = rowToConnection(row);
+  return linkBindingIsCurrent(storage, connection) ? connection : null;
+}
+
 /** The active connection an unexpired access token belongs to, while its link is current. */
 export function authenticateAgentAccessToken(storage: StorageContext, accessTokenHash: string, nowMs: number): AgentConnectionRow | null {
-  return storage.readTx(() => {
-    const row = storage.db.prepare(`SELECT ${CONNECTION_COLUMNS}
-      FROM sync_relay_agent_tokens AS token
-      JOIN sync_relay_agent_connections AS c ON c.connection_id = token.connection_id
-      WHERE token.token_hash = ? AND token.kind = 'access' AND token.expires_at_ms > ? AND c.status = 'active'`)
-      .get(accessTokenHash, Math.trunc(nowMs));
-    if (!row) return null;
-    const connection = rowToConnection(row);
-    return linkBindingIsCurrent(storage, connection) ? connection : null;
-  });
+  return storage.readTx(() => activeAgentConnectionInTransaction(storage, accessTokenHash, nowMs));
+}
+
+export function recordAgentConnectionActionInTransaction(storage: StorageContext, connectionId: string, atMs: number): void {
+  const updated = storage.db.prepare(`UPDATE sync_relay_agent_connections
+    SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
+    WHERE connection_id = ? AND status = 'active'`).run(Math.trunc(atMs), connectionId);
+  if (Number(updated.changes ?? 0) === 1) {
+    const grantId = storage.db.prepare("SELECT grant_id FROM sync_relay_agent_connections WHERE connection_id = ?").get(connectionId);
+    upsertLinkUsage(storage, String(grantId!.grant_id), atMs);
+  }
 }
 
 export function recordAgentConnectionAction(storage: StorageContext, connectionId: string, atMs: number): void {
-  storage.tx(() => {
-    const updated = storage.db.prepare(`UPDATE sync_relay_agent_connections
-      SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
-      WHERE connection_id = ? AND status = 'active'`).run(Math.trunc(atMs), connectionId);
-    if (Number(updated.changes ?? 0) === 1) {
-      const grantId = storage.db.prepare("SELECT grant_id FROM sync_relay_agent_connections WHERE connection_id = ?").get(connectionId);
-      upsertLinkUsage(storage, String(grantId!.grant_id), atMs);
-    }
-  });
+  storage.tx(() => recordAgentConnectionActionInTransaction(storage, connectionId, atMs));
 }
 
 /** The link's active connections, newest first. The caller checks the owner. */

@@ -60,17 +60,21 @@ function longCheckpoint(paragraphs: number, mixed: boolean) {
   try {return encodeStateAsUpdate(doc);} finally {doc.destroy();}
 }
 
-it("accepts 5000 mixed paragraphs for settlement, journal, activation and restore validation in capped children", async () => {
-  const {pool, input} = fixture(), checkpoint = longCheckpoint(5000, true);
-  const call = {...input, checkpoint};
-  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint})).toMatchObject({kind: "accepted"});
-  const profile = selfHostLiveProfile();
-  const validation = pool.validator(profile.namedLive.validation);
-  expect(await validation(call)).toMatchObject({kind: "accepted"});
-  expect(await pool.ordinaryActivation(profile.service.activation.validation)({
-    document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint})).toMatchObject({kind: "accepted"});
-  expect(await pool.restore(profile.service.restore.validation).point(restorePoint(input, checkpoint)))
-    .toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)});
+// Each validation of 5000 mixed paragraphs takes about 5 s, so each gets its own budget.
+const longValidations = {
+  settlement: async ({pool, input}, checkpoint) =>
+    expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint})).toMatchObject({kind: "accepted"}),
+  journal: async ({pool, input}, checkpoint) =>
+    expect(await pool.validator(selfHostLiveProfile().namedLive.validation)({...input, checkpoint})).toMatchObject({kind: "accepted"}),
+  activation: async ({pool, input}, checkpoint) =>
+    expect(await pool.ordinaryActivation(selfHostLiveProfile().service.activation.validation)({
+      document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint})).toMatchObject({kind: "accepted"}),
+  restore: async ({pool, input}, checkpoint) =>
+    expect(await pool.restore(selfHostLiveProfile().service.restore.validation).point(restorePoint(input, checkpoint)))
+      .toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)}),
+} satisfies Record<string, (f: ReturnType<typeof fixture>, checkpoint: Uint8Array) => Promise<void>>;
+it.each(Object.entries(longValidations))("accepts 5000 mixed paragraphs for %s validation in a capped child", async (_, validate) => {
+  await validate(fixture(), longCheckpoint(5000, true));
 }, 60_000);
 
 it("refuses 25000 bold paragraphs by the struct budget before exhausting the worker heap", async () => {

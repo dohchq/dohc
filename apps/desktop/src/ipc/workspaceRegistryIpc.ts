@@ -84,6 +84,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   };
   roots: ReturnType<typeof createWorkspaceRootApproval>;
   effectiveHome(): string;
+  // dohc's own state folder, which no workspace may be or contain.
+  stateDir(): string;
   workspaceSummaries(): WorkspaceSummary[];
   prioritizePreferredWorkspace(workspaces: WorkspaceSummary[], event: Event): WorkspaceSummary[];
   createWorkspaceFolder: typeof createWorkspaceFolderWithFreshness;
@@ -117,6 +119,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     dialog,
     roots: { approveRoot, usableRoot },
     effectiveHome,
+    stateDir,
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
@@ -186,6 +189,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const { workspace: created, fresh } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      stateDir: stateDir(),
       computer: thisComputer(),
       kind: input.kind,
     });
@@ -214,6 +218,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const { workspace: attached } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      stateDir: stateDir(),
       computer: thisComputer(),
       kind: "personal",
     });
