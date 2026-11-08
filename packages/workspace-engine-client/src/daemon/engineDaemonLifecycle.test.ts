@@ -1950,10 +1950,9 @@ describe("Rust engine daemon lifecycle", () => {
     const client = new FakeClient((request) =>
       request.method === "engine.ping"
         ? healthyPing(request)
-        : new Promise<Response>((_resolve, reject) => {
-            // Match the real client deadline, which races the lifecycle drain.
-            setTimeout(() => reject(new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs!)), request.deadlineMs!);
-          }),
+        // The client's own deadline ends the request before the lifecycle
+        // cap. At an equal deadline, timer order would decide which ends it.
+        : Promise.reject(new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs!)),
     );
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
