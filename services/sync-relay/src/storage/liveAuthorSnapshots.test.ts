@@ -10,6 +10,8 @@ import {readAcceptedHistoryDelivery, readAcceptedHistoryInterval, RestoreHistory
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors.js";
 import type {NativeRestoreProposalReceipt} from "../liveRestoreProposal.js";
 import {limitLiveDeclaredAgents} from "./liveAuthorWindow.js";
+import {seedLinkAgent} from "../liveTickets.test-helper.js";
+import {AGENT_ACCESS_TOKEN_TTL_MS} from "./agentConnections.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
@@ -39,6 +41,26 @@ it("binds server automation provenance to owner admission and exact retries", ()
     }
     const named = f.capture(f.update("more", "named"), "named", {kind: "named", userId: "reader", grantId: "grant"});
     expect(f.storage.commitLiveUpdateJournal({...named, trustedAutomation}).result).toEqual({kind: "refused", reason: "authority-refused"});
+  } finally {f.close();}
+});
+
+it("records a connected agent's last action when its live edit commits, never when its access is checked", () => {
+  const f = registered({deployment: true});
+  try {
+    let agent!: ReturnType<typeof seedLinkAgent>;
+    f.write(db => {
+      db.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL WHERE grant_id='grant'");
+      agent = seedLinkAgent(db, {connectionId: "agent-connection", workspaceId: "workspace", shareId: "share", grantId: "grant",
+        generation: 4, expiresAtMs: Date.now() + AGENT_ACCESS_TOKEN_TTL_MS});
+    });
+    const lastAction = () => f.raw.prepare("SELECT last_action_at_ms FROM sync_relay_agent_connections WHERE connection_id=?").get(agent.connectionId);
+    // Capturing the edit checks the agent's access, as each wake does.
+    const edit = f.capture(f.update(), "agent-edit", agent.actor);
+    expect(lastAction()).toEqual({last_action_at_ms: null});
+    const accepted = f.storage.commitLiveUpdateJournal(edit);
+    expect(accepted.result).toMatchObject({kind: "accepted", replayed: false});
+    expect(accepted.admitted!.metadata.accepted.authority).toMatchObject({principalKind: "link", principalId: agent.principalId});
+    expect(lastAction()).toEqual({last_action_at_ms: edit.receivedAtMs});
   } finally {f.close();}
 });
 

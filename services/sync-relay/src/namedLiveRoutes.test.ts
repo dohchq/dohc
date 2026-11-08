@@ -25,7 +25,6 @@ import { createLiveTickets } from "./liveTickets.js";
 import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { fixture as ticketFixture, audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
-import { AGENT_ACCESS_TOKEN_TTL_MS } from "./storage/agentConnections.js";
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
@@ -373,10 +372,12 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
   http.listen(0, "127.0.0.1"); await once(http, "listening");
   const port = (http.address() as { port: number }).port;
-  async function post(path: string, body: unknown, cookie = "account=reader", extra: Record<string, string> = {}) {
+  // A link request sends a cookie only when a test names one: an agent's is refused, a holder's ignored.
+  const defaultCookie = link ? "" : "account=reader";
+  async function post(path: string, body: unknown, cookie = defaultCookie, extra: Record<string, string> = {}) {
     return new Promise<Response>((resolve, reject) => {
       const request = httpRequest(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: {
-        host: relayHost, "content-type": "application/json", ...(desktop ? {authorization: "Bearer reader-token"} : {origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders}), ...extra } }, response => {
+        host: relayHost, "content-type": "application/json", ...(desktop ? {authorization: "Bearer reader-token"} : {origin: audience, "x-dohc-relay-exchange-key": exchangeKey, ...(cookie ? {cookie} : {}), ...linkHeaders}), ...extra } }, response => {
         const bytes: Buffer[] = []; response.on("data", chunk => bytes.push(Buffer.from(chunk)));
         response.once("end", () => resolve(new Response(Buffer.concat(bytes), { status: response.statusCode })));
         response.once("error", reject);
@@ -402,10 +403,10 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number; publicPrincipalId?: string };
   }
-  function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
+  function connect(token: string, cookie = defaultCookie, extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
     const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
     const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`], {
-      headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders, ...extra }, perMessageDeflate: false });
+      headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, ...(cookie ? {cookie} : {}), ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
     const received: LiveFrame[] = [], watchers = new Set<() => void>();
     ws.on("message", bytes => { received.push(decodeLiveFrame(Buffer.from(bytes as Buffer), frames.receive.maxFrameBytes)); for (const notify of watchers) notify(); });
@@ -671,7 +672,8 @@ it.each<Record<string, string>>([
 // and socket routes, with its access token and the MCP address it signed in at.
 type LinkFixture = Awaited<ReturnType<typeof fixture>>;
 type SeededAgent = ReturnType<typeof seedLinkAgent>;
-const agentExpiresAtMs = 1000 + AGENT_ACCESS_TOKEN_TTL_MS;
+// The agent signed in nearly an hour ago: its token expires before a link holder's session (61 s).
+const agentExpiresAtMs = 2000;
 function linkAgent(f: LinkFixture, connectionId = "agent-connection") {
   const {workspaceId, shareId, grantId} = f.currentScope;
   return seedLinkAgent(f.raw, {connectionId, workspaceId, shareId, grantId, generation: 4, expiresAtMs: agentExpiresAtMs});
@@ -680,21 +682,22 @@ const liveDocument = {workspaceId: binding.workspaceId, mainVersionId: "main", o
 
 // What ends an agent's access. Each commits straight in storage, as a racing
 // owner request would, after the request's own authentication passed: only
-// the live checks that present the agent's token again can stop it.
-const agentEnds: Array<[string, (f: LinkFixture, agent: SeededAgent) => void]> = [
+// the live checks that present the agent's token again can stop it. The
+// last value says whether a link holder under the same grant keeps access.
+const agentEnds: Array<[string, (f: LinkFixture, agent: SeededAgent) => void, boolean]> = [
   ["the owner disconnects it", (f, agent) => {
     expect(f.storage.disconnectAgentConnection({workspaceId: agent.workspaceId, shareId: agent.shareId, grantId: agent.grantId,
       connectionId: agent.connectionId, nowMs: 1001, guard: () => undefined})).not.toBeNull();
-  }],
+  }, true],
   ["the owner resets the link", (f, agent) => {
     expect(f.storage.rotateLinkGrant({shareId: agent.shareId, grantId: agent.grantId, rotatedAtMs: 1001, expectedDependentGrantIds: [], guard: () => {},
       mintCredential: () => ({credentialId: "raced-credential", secretHash: "raced-secret-hash"})}).ok).toBe(true);
-  }],
+  }, false],
   ["the owner ends the link", (f, agent) => {
     expect(f.storage.revokeShareGrant({shareId: agent.shareId, grantId: agent.grantId, revokedAtMs: 1001}).ok).toBe(true);
-  }],
+  }, false],
   // The relay's own clock stays at 1000, so its sign-in check still passes.
-  ["its access token expires", (_f, agent) => { vi.spyOn(Date, "now").mockReturnValue(agent.expiresAtMs); }],
+  ["its access token expires", (_f, agent) => { vi.spyOn(Date, "now").mockReturnValue(agent.expiresAtMs); }, true],
 ];
 
 it("opens an agent's live session as its own link principal while a holder under the same grant still opens", async () => {
@@ -768,8 +771,19 @@ it("refuses an agent that also sends a link holder's profile", async () => {
   expect(await f.connect((await f.mint()).token).status).toBe(101);
 });
 
-it.each(agentEnds)("refuses an agent's ticket at redemption once %s", async (_name, end) => {
+it("refuses an agent request that also sends a cookie, on the ticket and socket routes, without consuming its ticket", async () => {
   const f = await fixture(limits, true), agent = linkAgent(f);
+  f.useCredentials(agent.headers);
+  expect((await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: binding.objectId}, "account=reader")).status).toBe(404);
+  const minted = await f.mint();
+  expect(await f.connect(minted.token, "account=reader").status).toBe(404);
+  expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({redeemed_at_ms: null});
+  expect(await f.connect(minted.token).status).toBe(101);
+});
+
+it.each(agentEnds)("refuses an agent's ticket at redemption once %s", async (_name, end, holderKeeps) => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  const held = await f.mint();
   f.useCredentials(agent.headers);
   const first = await f.mint(), second = await f.mint();
   const redeem = f.tickets.redeem.bind(f.tickets);
@@ -783,6 +797,11 @@ it.each(agentEnds)("refuses an agent's ticket at redemption once %s", async (_na
   ending = true;
   expect(await f.connect(second.token).status).toBe(404);
   expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets WHERE redeemed_at_ms IS NOT NULL").get()).toEqual({count: 1});
+  if (!holderKeeps) return;
+  // Under the same clock and rows, the holder's ticket still redeems: only the agent's access ended.
+  ending = false;
+  f.useCredentials();
+  expect(await f.connect(held.token).status).toBe(101);
 });
 
 it.each(agentEnds)("closes an agent's open live session at its next check once %s", async (_name, end) => {

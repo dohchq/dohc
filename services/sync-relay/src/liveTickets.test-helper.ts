@@ -45,9 +45,10 @@ export const key = new Uint8Array(32).fill(13);
 /**
  * An active agent connection on a link grant, committed straight in storage
  * as its sign-in commits it. The sign-in itself is tested in
- * `linkAgentAuthority.test.ts`.
+ * `linkAgentAuthority.test.ts`. Pass a raw connection, or a storage
+ * transaction's own database when the raw one is read-only.
  */
-export function seedLinkAgent(raw: InstanceType<typeof DatabaseSync>, input: {connectionId: string; workspaceId: string; shareId: string;
+export function seedLinkAgent(raw: {prepare(sql: string): {run(...params: unknown[]): unknown}}, input: {connectionId: string; workspaceId: string; shareId: string;
   grantId: string; generation: number; expiresAtMs: number}) {
   const accessToken = createHash("sha256").update(input.connectionId).digest("base64url");
   const resource = `${audience}/mcp/s/${input.connectionId}`;

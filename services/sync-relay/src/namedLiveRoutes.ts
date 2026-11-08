@@ -121,9 +121,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const trusted = (headers: Headers) => hosts.has(headers.get("host") ?? "") && (desktop
     ? (!headers.has("origin") || headers.get("origin") === origin) && /^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") && !headers.has("cookie")
     : headers.get("origin") === origin && verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash));
-  // A link route forwards only the headers present, so the agent resolver sees exactly what was sent.
+  // A link route forwards only the headers present, so the agent resolver sees exactly what was sent, and refuses a cookie.
   const credentials = (headers: Headers): Record<string, string> => (kind === "owner" || desktop) ? { authorization: headers.get("authorization") ?? "" } : kind === "named" ? { cookie: headers.get("cookie") ?? "" } :
-    Object.fromEntries(["authorization", "x-dohc-link-profile-secret", "x-dohc-agent-resource", "x-dohc-relay-exchange-key"]
+    Object.fromEntries(["authorization", "cookie", "x-dohc-link-profile-secret", "x-dohc-agent-resource", "x-dohc-relay-exchange-key"]
       .flatMap((name): [string, string][] => { const value = headers.get(name); return value === null ? [] : [[name, value]]; }));
   const sessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{12}$/.test(value);
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.drainTimeoutMs));

@@ -52,7 +52,7 @@ it("finds a document for a connected agent, and never opens a browser gateway se
   expect(await (await handle(agentRequest(agent))).json()).toEqual({objectId: binding.objectId});
   expect(await (await handle(request())).json()).toEqual({objectId: binding.objectId});
   expect((await f.handle(agentRequest(agent))).status).toBe(404);
-  for (const headers of [{"x-dohc-agent-resource": `${audience}/mcp/s/elsewhere`}, {"x-dohc-link-profile-secret": profile}])
+  for (const headers of [{"x-dohc-agent-resource": `${audience}/mcp/s/elsewhere`}, {"x-dohc-link-profile-secret": profile}, {cookie: "account=reader"}])
     expect((await handle(agentRequest(agent, undefined, undefined, headers))).status).toBe(404);
   expect((await handle(agentRequest(agent, {discriminator}, "/sync/live/link-session"))).status).toBe(404);
   vi.mocked(Date.now).mockReturnValue(agent.expiresAtMs);

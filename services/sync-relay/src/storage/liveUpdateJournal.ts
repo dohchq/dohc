@@ -29,6 +29,7 @@ import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
 import { registerLiveDeliveryEvent } from "./liveDeliveryReservations";
+import { recordAgentConnectionActionInTransaction } from "./agentConnections";
 import { baselineRecord, baselineByteBuffer, baselineByteOffset, baselineByteLength, baselineBufferLength, baselineBufferResizable, authorityInteger, authorityIntegrity, currentLiveDocumentMoment, assertCurrentAuthorityHost, snapshotCurrentBindingRequest, decodeLiveDocumentAuthorityStructure, authorizeLiveDocument } from "./liveDocumentAuthority";
 
 function journalAuthorityHistory(storage: StorageContext, document: LiveDocumentKey): StoredLiveDocumentAuthority[] {
@@ -1004,6 +1005,8 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           assertWorkspaceQuota(storage,document.workspaceId,storageBytes);
           storage.db.prepare(`INSERT INTO ${LIVE_AUTHOR_CLIENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,author_snapshot_json,storage_bytes) VALUES (?,?,?,?,?,?,?)`).run(...documentParams(document),binding.clientId,binding.snapshot,storageBytes);
         }
+        // An agent's accepted edit is its connection's action; a check, wake, or replay is not.
+        if ("agentConnectionId" in request.actor) recordAgentConnectionActionInTransaction(storage, request.actor.agentConnectionId, receivedAtMs);
         return {reply: {result: {kind: "accepted" as const, receipt: {...admitted.metadata.accepted.receipt}, replayed: false}, admitted}};
       });
     } catch (error) {
