@@ -18,6 +18,14 @@ it("offers Discard as a separate toast action without dismissing the Notice",()=
   expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
 });
 
+it("puts a toast's worded actions under its text, so the text keeps the toast's width", () => {
+  render(<WorkspaceErrorToast error={{ id: "live", title: "dohc can't restore \"notes/plan.md\" while it has live editing on",
+    message: "In Live documents, stop live editing for this page, then restore it again.", details: "", atMs: 0,
+    canRetry: true, seen: false, actionLabel: "Open Live documents" }} onAction={vi.fn()} onRetry={vi.fn()} />);
+  const text = screen.getByText("In Live documents, stop live editing for this page, then restore it again.").parentElement!;
+  expect(within(text).getAllByRole("button").map(button => button.textContent)).toEqual(["Open Live documents", "Try again"]);
+});
+
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {});
 });
