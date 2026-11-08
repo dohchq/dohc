@@ -4,7 +4,7 @@ import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFil
 import { join } from "node:path";
 import { z } from "zod";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
-import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
+import { cutText, NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
   isAutomationWake,
@@ -197,11 +197,11 @@ function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinat
 // the name. A name a title can't hold is left out.
 function unattributedTitle(path: string | null | undefined): string {
   const lead = "Some author names did not sync";
-  const name = [...(path?.slice(path.lastIndexOf("/") + 1) ?? "")];
-  if (!name.length) return lead;
+  const name = path?.slice(path.lastIndexOf("/") + 1) ?? "";
+  if (!name) return lead;
   // Room for the name between its two quotes.
   const room = NOTICE_TITLE_MAX_CHARS - lead.length - " for ".length - 2;
-  const title = `${lead} for “${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}”`;
+  const title = `${lead} for “${cutText(name, room)}”`;
   return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }
 
@@ -209,10 +209,9 @@ function unattributedTitle(path: string | null | undefined): string {
 // "Couldn't save packing.md".
 function heldTitle(path: string | null | undefined): string {
   const lead = "Held a change to ";
-  const name = [...(path?.slice(path.lastIndexOf("/") + 1) ?? "")];
-  const room = NOTICE_TITLE_MAX_CHARS - lead.length;
-  const title = `${lead}${name.length > room ? `${name.slice(0, room - 1).join("")}…` : name.join("")}`;
-  return name.length && isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a note`;
+  const name = path?.slice(path.lastIndexOf("/") + 1) ?? "";
+  const title = `${lead}${cutText(name, NOTICE_TITLE_MAX_CHARS - lead.length)}`;
+  return name && isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : `${lead}a note`;
 }
 
 const RelayRow = z.object({

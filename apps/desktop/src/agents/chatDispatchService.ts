@@ -125,14 +125,13 @@ function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvail
     case "quit":
       return "dohc quit during its run.";
     case "not-started": {
-      const detail = [...(run.failureReason ?? "")
+      const detail = (run.failureReason ?? "")
         .slice(`${RUNNER_START_FAILURE}: `.length)
         .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
-        .trim()];
+        .trim();
       const lead = "It couldn't start: ";
-      if (detail.length === 0) return "It couldn't start.";
-      const room = NOTICE_BODY_MAX_CHARS - lead.length;
-      return lead + (detail.length <= room ? detail.join("") : `${detail.slice(0, room - 1).join("")}…`);
+      if (!detail) return "It couldn't start.";
+      return lead + cutText(detail, NOTICE_BODY_MAX_CHARS - lead.length);
     }
   }
 }
@@ -164,8 +163,7 @@ const SELF_TEST_MARKER_PREFIX = "dohc-runner-self-test:";
 const SELF_TEST_OPENING = "Reply here to check the agent connection.";
 
 function clip(name: string): string {
-  const chars = [...name];
-  return chars.length <= NOTICE_NAME_MAX_CHARS ? name : `${chars.slice(0, NOTICE_NAME_MAX_CHARS - 1).join("")}…`;
+  return cutText(name, NOTICE_NAME_MAX_CHARS);
 }
 
 export interface ChatDispatchWorkspace {
