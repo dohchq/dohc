@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { contrastRatio, mixHex } from "../accentColor";
 import { identityHues, palette } from "../tokens";
-import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, labelOpacity } from "./GraphCanvas";
+import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, fitCamera, labelOpacity } from "./GraphCanvas";
 
 // The Graph page draws on bg, the side panel on panel.
 const SURFACES = ["bg", "panel"] as const;
@@ -40,5 +40,20 @@ describe.each(["light", "dark"] as const)("dimmed Graph nodes in %s", (theme) =>
     // With nothing emphasised, the zoom fade is unchanged; the emphasised node's own label shows whole.
     expect(labelOpacity(0.5, 0, LABEL_DIM[theme], false)).toBe(0.5);
     expect(labelOpacity(0.5, 1, LABEL_DIM[theme], true)).toBe(1);
+  });
+});
+
+describe("fitting the Graph to its view", () => {
+  it("leaves a 16 px margin on the side that limits it, centred", () => {
+    // A 300 by 288 panel and a graph 1,000 wide and 500 tall: the width limits it.
+    const camera = fitCamera(-500, -250, 500, 250, 300, 288);
+    expect(camera.k).toBeCloseTo(0.268);
+    expect(-500 * camera.k + camera.tx).toBeCloseTo(16);
+    expect(500 * camera.k + camera.tx).toBeCloseTo(284);
+    expect(camera.ty).toBe(144);
+  });
+
+  it("never draws a node larger than at 100% zoom", () => {
+    expect(fitCamera(0, 0, 40, 20, 300, 288)).toEqual({ k: 1, tx: 130, ty: 134 });
   });
 });

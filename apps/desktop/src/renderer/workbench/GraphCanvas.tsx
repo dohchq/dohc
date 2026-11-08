@@ -86,6 +86,15 @@ function readPalette(surface: "bg" | "panel"): Palette {
   };
 }
 
+// Frames a graph's bounds in a view with a 16 px margin. A node never draws
+// larger than at 100% zoom, so a small graph doesn't blow up to fill the view.
+export function fitCamera(x0: number, y0: number, x1: number, y1: number, width: number, height: number): { k: number; tx: number; ty: number } {
+  const margin = 16;
+  const scale = Math.min((width - margin * 2) / Math.max(1, x1 - x0), (height - margin * 2) / Math.max(1, y1 - y0));
+  const k = Math.max(0.02, Math.min(1, scale));
+  return { k, tx: width / 2 - ((x0 + x1) / 2) * k, ty: height / 2 - ((y0 + y1) / 2) * k };
+}
+
 function nodeRadius(degree: number, display: GraphDisplay): number {
   return (2.5 + Math.sqrt(degree) * 1.6) * (0.5 + display.nodeSize);
 }
@@ -377,10 +386,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       y0 = Math.min(y0, py(i) - r);
       y1 = Math.max(y1, py(i) + r);
     }
-    const pad = options.local ? 32 : 48;
-    const scale = Math.min((width - pad * 2) / Math.max(1, x1 - x0), (height - pad * 2) / Math.max(1, y1 - y0));
-    const nextK = Math.max(0.02, Math.min(options.local ? 2 : 1.6, scale));
-    return { k: nextK, tx: width / 2 - ((x0 + x1) / 2) * nextK, ty: height / 2 - ((y0 + y1) / 2) * nextK };
+    return fitCamera(x0, y0, x1, y1, width, height);
   }
 
   function wake(): void {
