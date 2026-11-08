@@ -4649,7 +4649,7 @@ describe("CLI socket server", () => {
       authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: { kind: "human", displayName: "Sam" }, body: "Draft the agenda",
     });
     // The run dohc dispatched for Sam's message, so the store knows it.
-    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (claim?.run.triggerMessageId !== chat.message.id) throw new Error("Expected a run for the message");
     const { runId } = claim.run;
     const getRunRecord = vi.spyOn(dispatchStore, "getRunRecord").mockRejectedValueOnce(new Error("store closed"));
@@ -4803,7 +4803,7 @@ describe("CLI socket server", () => {
       threadId: "thread-dispatch",
       agentId: "default",
     });
-    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected a dispatch run.");
     const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
     holdRun(claim.run.runId);
