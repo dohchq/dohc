@@ -174,6 +174,7 @@ function AgentNameField(props: {
       aria-describedby={error ? `agent-name-error-${props.agent.id}` : undefined}
       data-testid="agent-name-input"
       data-unsaved={draft.trim() !== props.agent.name ? true : undefined}
+      data-edit-in-place
       value={draft}
       maxLength={MAX_PREFERRED_NAME_LENGTH}
       disabled={saving}

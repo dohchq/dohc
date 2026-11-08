@@ -50,6 +50,7 @@ function InlineField(props: {
       aria-label={props.label}
       aria-invalid={error ? true : undefined}
       data-unsaved={error ? true : undefined}
+      data-edit-in-place
       aria-describedby={error ? errorId : undefined}
       value={draft}
       spellCheck={false}
