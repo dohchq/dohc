@@ -1194,6 +1194,36 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByText("dohc could not load this link's agents.")).toBeNull();
   });
 
+  it("reads a link's agents once each time the link tab is shown, and again when the links change", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1")] });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await screen.findByTestId("share-link-row-grant-link-1");
+    await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(1));
+
+    // The same links on return: the list's own read is the only one.
+    await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+    await showLinkPane(user);
+    await waitFor(() => expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(2);
+
+    // Changed links, as after Reset or a new link elsewhere: the list reads again.
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1", { lastUsedAtMs: CREATED_MS + 5 })] });
+    await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+    await showLinkPane(user);
+    await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(4));
+    await act(async () => {});
+    expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(4);
+  });
+
   it("shows every dependent identity and cancel never mutates a link", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [
@@ -1310,7 +1340,7 @@ describe("RelayShareDialog", () => {
       supportedLinkAccess: ["view", "comment"],
       independentGrants: [independentGrant("named-1", { recipientEmail: "friend@example.test" })],
     });
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), resolved: vi.fn() };
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -1388,7 +1418,7 @@ describe("RelayShareDialog", () => {
         undo: UNDO,
       });
     bridgeMock.revokeRelayShareLink.mockRejectedValueOnce(new Error("relay down"));
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), resolved: vi.fn() };
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
     const user = userEvent.setup();
     const view = render(
       <RelayShareDialog

@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { expect, type Browser } from "@playwright/test";
 
 // An agent that signs in to a share link with the standard MCP sign-in, as
@@ -10,10 +11,59 @@ import { expect, type Browser } from "@playwright/test";
 
 export type ShareWebHandle = (request: Request) => Promise<Response>;
 
-// The agent's loopback redirect URI. The browser's route answers it, so no
-// listener is needed.
-const CALLBACK = "http://127.0.0.1:9/callback";
 const CONSENT_HEADING = "Allow this agent to use the share link?";
+const CALLBACK_HEADING = "Back at the agent";
+
+type AgentCallbackAnswer = { headers: IncomingHttpHeaders; query: URLSearchParams };
+
+export type AgentCallback = {
+  origin: string;
+  redirectUri: string;
+  // Every request to /callback, in order: the code or error, and the state.
+  received: AgentCallbackAnswer[];
+  server: Server;
+};
+
+/**
+ * The agent's loopback redirect URI, as a desktop MCP client opens one, on a
+ * port the OS picks. The consent page's Allow answers 303 to it, and the
+ * browser follows that to this listener. Close it with stopAgentCallback.
+ */
+export async function startAgentCallback(): Promise<AgentCallback> {
+  const received: AgentCallbackAnswer[] = [];
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/callback") received.push({ headers: request.headers, query: url.searchParams });
+    request.resume();
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    response.end(`<!doctype html><title>Agent callback</title><h1>${CALLBACK_HEADING}</h1>`);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("agent callback did not bind a loopback TCP port");
+  }
+  const origin = `http://127.0.0.1:${String(address.port)}`;
+  return { origin, received, redirectUri: `${origin}/callback`, server };
+}
+
+export async function stopAgentCallback(callback: AgentCallback | null): Promise<void> {
+  if (!callback?.server.listening) return;
+  callback.server.closeAllConnections();
+  await new Promise<void>((resolve, reject) => {
+    callback.server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
 
 export type LinkAgent = {
   clientId: string;
@@ -90,8 +140,11 @@ export async function signInLinkAgent(input: {
   address: string;
   // What the agent's client reports as its name; none when undefined.
   clientName?: string;
+  // The test's loopback listener, which the consent page's Allow returns to.
+  callback: AgentCallback;
 }): Promise<LinkAgent> {
-  const { handle, address: resource } = input;
+  const { handle, address: resource, callback } = input;
+  const { redirectUri } = callback;
   const unsigned = await rpc(handle, resource, "tools/list", undefined, undefined);
   expect(unsigned.status).toBe(401);
   const metadataUrl = text(/resource_metadata="([^"]+)"/u.exec(unsigned.headers.get("www-authenticate") ?? "")?.[1], "resource_metadata");
@@ -103,7 +156,7 @@ export async function signInLinkAgent(input: {
   const registered = await json(await shareWebRequest(handle, text(server.registration_endpoint, "registration_endpoint"), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ redirect_uris: [CALLBACK], ...(input.clientName === undefined ? {} : { client_name: input.clientName }) }),
+    body: JSON.stringify({ redirect_uris: [redirectUri],...(input.clientName === undefined ? {} : { client_name: input.clientName }) }),
   }), 201);
   const clientId = text(registered.client_id, "client_id");
 
@@ -113,7 +166,7 @@ export async function signInLinkAgent(input: {
   for (const [name, value] of Object.entries({
     response_type: "code",
     client_id: clientId,
-    redirect_uri: CALLBACK,
+    redirect_uri: redirectUri,
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
     code_challenge_method: "S256",
     state,
@@ -125,16 +178,18 @@ export async function signInLinkAgent(input: {
   let code: string;
   try {
     const page = await context.newPage();
-    await page.route((url) => url.href.startsWith(CALLBACK), (route) =>
-      route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Agent callback</title>" }));
     await page.goto(authorize.href);
     await expect(page.getByRole("heading", { name: CONSENT_HEADING })).toBeVisible();
     await expect(page.getByText(input.clientName === undefined ? "The agent reported no name" : "Name reported by the agent")).toBeVisible();
+    // Allow posts the form, and the browser follows the 303 to the listener.
     await page.getByRole("button", { name: "Allow", exact: true }).click();
-    await page.waitForURL((url) => url.href.startsWith(CALLBACK));
-    const answer = new URL(page.url());
-    expect(answer.searchParams.get("state")).toBe(state);
-    code = text(answer.searchParams.get("code"), "code");
+    await page.waitForURL((url) =>
+      url.origin === callback.origin && url.pathname === "/callback" && url.searchParams.get("state") === state);
+    await expect(page.getByRole("heading", { name: CALLBACK_HEADING })).toBeVisible();
+    const answers = callback.received.filter((answer) => answer.query.get("state") === state);
+    expect(answers).toHaveLength(1);
+    expect(answers[0]!.query.get("error")).toBeNull();
+    code = text(answers[0]!.query.get("code"), "code");
   } finally {
     await context.close();
   }
@@ -148,7 +203,7 @@ export async function signInLinkAgent(input: {
       client_id: clientId,
       code,
       code_verifier: verifier,
-      redirect_uri: CALLBACK,
+      redirect_uri: redirectUri,
       resource,
     }).toString(),
   }), 200);

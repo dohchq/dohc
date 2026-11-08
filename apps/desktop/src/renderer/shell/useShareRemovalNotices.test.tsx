@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useShellError } from "./useShellError";
 import {
   SHARE_UNDO_EXPIRED,
+  agentDisconnectIdentity,
+  disconnectedAgentKey,
+  useDisconnectedLinkAgents,
   useShareRemovalNotices,
   type ShareRemoval,
 } from "./useShareRemovalNotices";
@@ -26,14 +29,16 @@ function renderNotices(workspaceId = "ws-a") {
   return renderHook(
     ({ id }) => {
       const shell = useShellError(id);
+      const [disconnected, agentDisconnected] = useDisconnectedLinkAgents();
       const notices = useShareRemovalNotices({
         workspaceId: id,
         showSuccessNotice: shell.showSuccessNotice,
         reportShellFailure: shell.reportShellFailure,
         clearIdentity: shell.clearIdentity,
         onSharesChanged: sharesChanged,
+        onAgentDisconnected: agentDisconnected,
       });
-      return { shell, notices };
+      return { shell, notices, disconnected };
     },
     { initialProps: { id: workspaceId } },
   );
@@ -160,21 +165,37 @@ describe("useShareRemovalNotices", () => {
     expect(result.current.shell.shellErrors).toEqual([]);
   });
 
-  // One thing's failure is one row: a repeat replaces it, and its later
-  // success takes it back. Another thing's row stays.
-  it("keeps one row per named failure and takes it back on success", () => {
+  // One agent's Disconnect failure is one row: a repeat replaces it, and its
+  // later success takes it back and records the agent as disconnected.
+  // Another agent's row stays.
+  it("keeps one row per agent's failed Disconnect, and its success takes the row back", () => {
     const cause = new Error("busy");
+    const c1 = agentDisconnectIdentity("grant-1", "c1");
+    const c2 = agentDisconnectIdentity("grant-1", "c2");
     const { result } = renderNotices();
     act(() => {
-      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: "agent:c1" });
-      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: "agent:c1" });
-      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Agent.", cause, identity: "agent:c2" });
+      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: c1 });
+      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: c1 });
+      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Agent.", cause, identity: c2 });
     });
-    expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual(["agent:c1", "agent:c2"]);
+    expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual([c1, c2]);
+    const set = result.current.disconnected;
 
-    act(() => result.current.notices.resolved({ workspaceId: "ws-other", identity: "agent:c1" }));
+    // Another workspace's success leaves this one's rows alone, though that agent is gone too.
+    const other = { workspaceId: "ws-other", grantId: "grant-1", connectionId: "c1" };
+    act(() => result.current.notices.agentDisconnected(other));
     expect(result.current.shell.shellErrors).toHaveLength(2);
-    act(() => result.current.notices.resolved({ workspaceId: "ws-a", identity: "agent:c1" }));
-    expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual(["agent:c2"]);
+    expect(result.current.disconnected.has(disconnectedAgentKey(other))).toBe(true);
+
+    const mine = { workspaceId: "ws-a", grantId: "grant-1", connectionId: "c1" };
+    act(() => result.current.notices.agentDisconnected(mine));
+    expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual([c2]);
+    expect(result.current.disconnected.has(disconnectedAgentKey(mine))).toBe(true);
+    expect(result.current.disconnected.has(disconnectedAgentKey({ ...mine, connectionId: "c2" }))).toBe(false);
+    expect(set.size).toBe(0);
+    // The notices keep one identity, so a Disconnect re-renders no other surface.
+    const notices = result.current.notices;
+    act(() => result.current.notices.agentDisconnected(mine));
+    expect(result.current.notices).toBe(notices);
   });
 });

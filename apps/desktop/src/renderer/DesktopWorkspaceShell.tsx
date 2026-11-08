@@ -115,7 +115,7 @@ import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
-import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
+import { useDisconnectedLinkAgents, useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useUsageRecordStops } from "./shell/usageRecordStops";
@@ -972,12 +972,14 @@ export function DesktopWorkspaceShell(props: {
   // notice with Undo, held here so it outlives the surface that removed the
   // access. Each removal and Undo counts, so an open Sharing view reads again.
   const [sharesRevision, sharesChanged] = useReducer((revision: number) => revision + 1, 0);
+  const [disconnectedLinkAgents, linkAgentDisconnected] = useDisconnectedLinkAgents();
   const shareRemovals = useShareRemovalNotices({
     workspaceId,
     showSuccessNotice,
     reportShellFailure,
     clearIdentity,
     onSharesChanged: sharesChanged,
+    onAgentDisconnected: linkAgentDisconnected,
   });
   // For surfaces that report a failure as one sentence, with the error that
   // caused it when they have one. One stable identity: ChatsView keys its
@@ -7760,6 +7762,7 @@ export function DesktopWorkspaceShell(props: {
               target={shareTarget}
               onClose={() => setShareTarget(null)}
               shareRemovals={shareRemovals}
+              disconnectedAgents={disconnectedLinkAgents}
               accessContext={accessContext}
               server={cloudStatus?.workspaceServerUrl ?? null}
             />

@@ -636,7 +636,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
     const undo = alreadyEnded ? undefined : { undoId: "undo-1", expiresAtMs: 600_000 };
     bridgeMock.revokeRelayShare.mockResolvedValue({ undo });
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), resolved: vi.fn() };
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
     renderView(vi.fn(), vi.fn(), { shareRemovals });
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
       "Shared with 1",

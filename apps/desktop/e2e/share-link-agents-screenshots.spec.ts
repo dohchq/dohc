@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { signInLinkAgent } from "./helpers/linkAgent";
+import { signInLinkAgent, startAgentCallback, stopAgentCallback, type AgentCallback } from "./helpers/linkAgent";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
@@ -27,7 +27,8 @@ import {
 // it is covered by the component test, not a frame.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture share link agent screenshots");
-// The frames hold a test link; no trace or failure screenshot keeps another copy.
+// The link and its address belong to this test's own relay, which the test
+// stops and deletes, so a frame that shows one leaves nothing usable.
 test.use({ screenshot: "off", trace: "off" });
 
 const OWNER = "e2e-link-owner";
@@ -71,7 +72,9 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
   let relay: SyncRelayHandle | null = null;
   let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let callback: AgentCallback | null = null;
   try {
+    callback = await startAgentCallback();
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
     await writeWorkspaceFiles(temp, [{ path: PATH, contents: "# Trip plan\n\nPack light.\n" }]);
     relay = await spawnSyncRelay({
@@ -120,8 +123,8 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     });
 
     // Two agents sign in with the copied address, and each makes a call.
-    const named = await signInLinkAgent({ handle: shared.handle, browser: shared.browser, address, clientName: "Claude Code" });
-    const unnamed = await signInLinkAgent({ handle: shared.handle, browser: shared.browser, address });
+    const named = await signInLinkAgent({ handle: shared.handle, browser: shared.browser, callback, address, clientName: "Claude Code" });
+    const unnamed = await signInLinkAgent({ handle: shared.handle, browser: shared.browser, callback, address });
     for (const agent of [named, unnamed]) {
       expect((await agent.rpc("tools/call", { name: "dohc_share_status", arguments: {} })).status).toBe(200);
     }
@@ -149,7 +152,9 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     expect(shared.failures).toEqual([]);
   } finally {
     try { await shared?.close(); } finally {
-      try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, temp); }
+      try { await stopAgentCallback(callback); } finally {
+        try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, temp); }
+      }
     }
   }
 });

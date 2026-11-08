@@ -4376,8 +4376,10 @@ export type DisconnectRelayShareLinkAgentResult = z.infer<
   typeof DisconnectRelayShareLinkAgentResult
 >;
 
-// Disconnect is idempotent: a connection that Reset link or End link already
-// ended answers with its row, retired.
+// Disconnect is idempotent while the link is active: a connection already
+// disconnected, or retired by Reset link or by widening the link, answers with
+// its row. Once End link has ended the link, the relay answers 404, as for
+// any link this owner does not hold, and End has already retired its agents.
 export const RelayShareLinkAgentDisconnectResponse = z.object({
   ok: z.literal(true),
   agent: RelayShareLinkAgent.extend({ status: z.enum(["disconnected", "retired"]) }),

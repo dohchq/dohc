@@ -22,7 +22,7 @@ import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { CopyButton, CopyField, type CopySecret } from "./ui/CopyButton";
-import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor } from "./shareLinkAgents";
+import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor, useLinkAgentDisconnects } from "./shareLinkAgents";
 
 // Share links are shown once, so a link whose copy is gone is reset, not
 // copied again.
@@ -411,11 +411,16 @@ export function useRelayShareLinkPane(props: {
   // shows that notice and holds the Undo, so it outlives this dialog; a
   // refused removal goes to the same shell with Try again.
   shareRemovals?: ShareRemovalNotices;
+  // The shell's useDisconnectedLinkAgents set.
+  disconnectedAgents?: ReadonlySet<string>;
 }): {
   content: ReactNode;
   scope: string;
   close: () => void;
 } {
+  // The dialog's Disconnects outlive the link tab, so leaving it does not
+  // count as closing the dialog.
+  const agentDisconnects = useLinkAgentDisconnects(props.shareRemovals, props.disconnectedAgents);
   const [linkBusy, setLinkBusy] = useState(false);
   const [linkRequestBusy, setLinkRequestBusy] = useState<LinkRequestBusy | null>(
     null,
@@ -431,8 +436,10 @@ export function useRelayShareLinkPane(props: {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
-  // Each read of the links reads each link's agents again.
+  // A read of the links that changes them reads each link's agents again. A
+  // list reads once when it mounts, so returning to the tab reads it once.
   const [linksRevision, setLinksRevision] = useState(0);
+  const linksKey = useRef<string | null>(null);
   const [linksLoading, setLinksLoading] = useState(false);
   const [linksError, setLinksError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<LinkConfirmation | null>(null);
@@ -575,6 +582,7 @@ export function useRelayShareLinkPane(props: {
     setLinkError(null);
     setMinted(null);
     setLinks([]);
+    linksKey.current = null;
     setLinksLoading(false);
     setLinksError(null);
     setConfirmation(null);
@@ -1392,7 +1400,11 @@ export function useRelayShareLinkPane(props: {
       setLinkAccess(current => advertisedAccess!.includes(current) ? current : "view");
       setAddAccessByShareId(current => Object.fromEntries(Object.entries(current).map(([id, access]) => [id, advertisedAccess!.includes(access) ? access : "view"])));
       setLinks(inventory);
-      setLinksRevision((revision) => revision + 1);
+      const key = JSON.stringify(inventory);
+      if (linksKey.current !== key) {
+        linksKey.current = key;
+        setLinksRevision((revision) => revision + 1);
+      }
       setIndependentGrants([...independentInventory.values()]);
       if (!options.preserveOwnerMutationError) {
         setOwnerMutationError((current) =>
@@ -1908,7 +1920,7 @@ export function useRelayShareLinkPane(props: {
                           shareId={group.shareId}
                           grantId={row.grantId}
                           revision={linksRevision}
-                          notices={props.shareRemovals}
+                          disconnects={agentDisconnects}
                         />
                       ) : null}
                     </article>

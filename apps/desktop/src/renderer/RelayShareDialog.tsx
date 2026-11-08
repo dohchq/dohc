@@ -24,6 +24,8 @@ export function RelayShareDialog(props: {
   onClose: () => void;
   // Ending a link or a person's access: the shell shows the notice and its Undo.
   shareRemovals?: ShareRemovalNotices;
+  // The shell's useDisconnectedLinkAgents set, so a link's Agents list leaves them out.
+  disconnectedAgents?: ReadonlySet<string>;
   // What About's Access reads, so Share names the same cause.
   accessContext: AccessContext;
   // The server this workspace syncs with, when it syncs.
@@ -36,6 +38,7 @@ export function RelayShareDialog(props: {
     visible: shareWith === "link",
     onClose: props.onClose,
     ...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {}),
+    ...(props.disconnectedAgents ? { disconnectedAgents: props.disconnectedAgents } : {}),
   });
   // The forms show but take no input while a cause dohc can name stops a
   // share, or while it is still read. Main still refuses a share it cannot

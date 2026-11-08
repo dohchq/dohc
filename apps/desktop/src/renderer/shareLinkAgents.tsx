@@ -4,7 +4,11 @@ import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { RelayShareLinkAgent } from "../ipc/bridgeContract";
 import { withErrorWords } from "../ipc/errorWords";
 import { bridge } from "./bridge";
-import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
+import {
+  agentDisconnectIdentity,
+  disconnectedAgentKey,
+  type ShareRemovalNotices,
+} from "./shell/useShareRemovalNotices";
 import { GhostButton, RetryRow, SecondaryButton, SectionLabel } from "./ui/controls";
 import type { CopySecret } from "./ui/CopyButton";
 import { ChatAvatar } from "./workbench/ChatAvatar";
@@ -36,69 +40,119 @@ export function agentAddressFor(linkUrl: string): string | null {
 
 export const LINK_AGENTS_FAILED = "dohc could not load this link's agents.";
 
-// One agent's Disconnect, as the shell names its failure, so a later success
-// from any Share dialog takes back the toast and row.
-export function disconnectIdentity(grantId: string, connectionId: string): string {
-  return `share-link-agent-disconnect:${grantId}:${connectionId}`;
+type AgentLink = { workspaceId: string; shareId: string; grantId: string };
+type AgentDisconnect = { kind: "pending" } | { kind: "refused"; words: string } | { kind: "gone" };
+const GONE: AgentDisconnect = { kind: "gone" };
+
+export type LinkAgentDisconnects = {
+  // What this dialog's Disconnect, or any since dohc started, did to the agent.
+  stateOf(link: AgentLink, connectionId: string): AgentDisconnect | undefined;
+  disconnect(link: AgentLink, agent: RelayShareLinkAgent): void;
+};
+
+/**
+ * The Share dialog's Disconnects. They belong to the dialog, not to one
+ * link's list, so leaving the link tab and coming back keeps a Disconnect
+ * running and shows its failure in place. Only a Disconnect that fails after
+ * the dialog closed goes to the shell, with Try again. A success, here or
+ * from that Try again, reaches the shell's set of disconnected agents, so
+ * every list leaves the agent out.
+ */
+export function useLinkAgentDisconnects(
+  notices: ShareRemovalNotices | undefined,
+  disconnected: ReadonlySet<string> | undefined,
+): LinkAgentDisconnects {
+  const [rows, setRows] = useState<ReadonlyMap<string, AgentDisconnect>>(() => new Map());
+  const open = useRef(false);
+  const shell = useRef(notices);
+  shell.current = notices;
+  useEffect(() => {
+    open.current = true;
+    return () => {
+      open.current = false;
+    };
+  }, []);
+
+  function settle(key: string, row: AgentDisconnect) {
+    if (open.current) setRows((current) => new Map(current).set(key, row));
+  }
+
+  async function run(link: AgentLink, agent: RelayShareLinkAgent) {
+    const named = { workspaceId: link.workspaceId, grantId: link.grantId, connectionId: agent.connectionId };
+    const key = disconnectedAgentKey(named);
+    settle(key, { kind: "pending" });
+    try {
+      await bridge().disconnectRelayShareLinkAgent({ ...link, connectionId: agent.connectionId });
+      settle(key, GONE);
+      shell.current?.agentDisconnected(named);
+    } catch (cause) {
+      const message = `dohc could not disconnect ${agentName(agent)}.`;
+      if (open.current) {
+        settle(key, { kind: "refused", words: withErrorWords(message, cause) });
+        return;
+      }
+      shell.current?.failed({
+        workspaceId: link.workspaceId,
+        message,
+        cause,
+        retry: () => void run(link, agent),
+        identity: agentDisconnectIdentity(link.grantId, agent.connectionId),
+      });
+    }
+  }
+
+  return {
+    stateOf(link, connectionId) {
+      const key = disconnectedAgentKey({ workspaceId: link.workspaceId, grantId: link.grantId, connectionId });
+      return disconnected?.has(key) ? GONE : rows.get(key);
+    },
+    disconnect: (link, agent) => void run(link, agent),
+  };
 }
 
 const shortTimestamp = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 
 /**
  * The agents connected through one link, with Disconnect. Nothing shows
- * until the relay names at least one. Each answer lands only on the link and
- * read that asked for it; the parent keys this list by workspace and link.
- *
- * The list sits in the Share dialog, so its failures show here while it is
- * open: a read that failed is one line with Try again, and a Disconnect that
- * failed says so in its agent's row, whose Disconnect tries again. Only a
- * Disconnect that fails after the dialog closed goes to the shell.
+ * until the relay names an agent or another page. Each answer lands only on
+ * the link and read that asked for it; the parent keys this list by
+ * workspace and link. A read that failed is one line with Try again.
  */
 export function LinkAgentsList(props: {
   workspaceId: string;
   shareId: string;
   grantId: string;
-  // Bumped when the link list is read again, so Reset and End show here too.
+  // Bumped when the links change, so Reset and End show here too.
   revision: number;
-  notices?: ShareRemovalNotices | undefined;
+  disconnects: LinkAgentDisconnects;
 }) {
   const [agents, setAgents] = useState<readonly RelayShareLinkAgent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [failedCursor, setFailedCursor] = useState<string | null | undefined>(undefined);
-  const [paging, setPaging] = useState(false);
-  const [disconnecting, setDisconnecting] = useState<ReadonlySet<string>>(new Set());
-  // Each refused Disconnect's words, by connection.
-  const [refused, setRefused] = useState<ReadonlyMap<string, string>>(new Map());
+  // The read in flight. Show more and Try again wait for it, so a page
+  // cannot land on a list read again from the start.
+  const [reading, setReading] = useState<"start" | "more" | null>(null);
   const read = useRef(0);
-  const mounted = useRef(true);
-  // Disconnected here: a read that started before the relay ended them
-  // must not bring them back.
-  const gone = useRef(new Set<string>());
-  const notices = useRef(props.notices);
-  notices.current = props.notices;
   const link = { workspaceId: props.workspaceId, shareId: props.shareId, grantId: props.grantId };
 
   async function readPage(token: number, cursor?: string) {
-    // A read from the start drops any page still in flight.
-    setPaging(cursor !== undefined);
+    setReading(cursor === undefined ? "start" : "more");
     try {
       const page = await bridge().listRelayShareLinkAgents({ ...link, ...(cursor === undefined ? {} : { cursor }) });
       if (read.current !== token) return;
-      const fresh = page.agents.filter((agent) => !gone.current.has(agent.connectionId));
-      setAgents((current) => cursor === undefined ? fresh
-        : [...current, ...fresh.filter((agent) => !current.some((shown) => shown.connectionId === agent.connectionId))]);
+      setAgents((current) => cursor === undefined ? page.agents
+        : [...current, ...page.agents.filter((agent) => !current.some((shown) => shown.connectionId === agent.connectionId))]);
       setNextCursor(page.nextCursor);
       setFailedCursor(undefined);
     } catch {
       if (read.current !== token) return;
       setFailedCursor(cursor ?? null);
     } finally {
-      if (read.current === token) setPaging(false);
+      if (read.current === token) setReading(null);
     }
   }
 
   useEffect(() => {
-    mounted.current = true;
     const token = ++read.current;
     void readPage(token);
     return () => {
@@ -106,53 +160,9 @@ export function LinkAgentsList(props: {
     };
   }, [props.revision]);
 
-  useEffect(() => () => {
-    mounted.current = false;
-  }, []);
-
-  function settleRow(id: string, words: string | null) {
-    if (!mounted.current) return;
-    setDisconnecting((current) => {
-      const next = new Set(current);
-      next.delete(id);
-      return next;
-    });
-    setRefused((current) => {
-      if (words === null && !current.has(id)) return current;
-      const next = new Map(current);
-      if (words === null) next.delete(id);
-      else next.set(id, words);
-      return next;
-    });
-  }
-
-  async function disconnect(agent: RelayShareLinkAgent) {
-    const id = agent.connectionId;
-    const identity = disconnectIdentity(props.grantId, id);
-    if (mounted.current) setDisconnecting((current) => new Set(current).add(id));
-    try {
-      await bridge().disconnectRelayShareLinkAgent({ ...link, connectionId: id });
-      gone.current.add(id);
-      notices.current?.resolved({ workspaceId: link.workspaceId, identity });
-      settleRow(id, null);
-      if (mounted.current) setAgents((current) => current.filter((shown) => shown.connectionId !== id));
-    } catch (cause) {
-      const message = `dohc could not disconnect ${agentName(agent)}.`;
-      if (mounted.current) {
-        settleRow(id, withErrorWords(message, cause));
-        return;
-      }
-      notices.current?.failed({
-        workspaceId: link.workspaceId,
-        message,
-        cause,
-        retry: () => void disconnect(agent),
-        identity,
-      });
-    }
-  }
-
-  if (agents.length === 0 && failedCursor === undefined) return null;
+  // A read that started before a Disconnect finished must not bring its agent back.
+  const shown = agents.filter((agent) => props.disconnects.stateOf(link, agent.connectionId)?.kind !== "gone");
+  if (shown.length === 0 && failedCursor === undefined && nextCursor === null) return null;
   return (
     <section
       data-testid={`share-link-agents-${props.grantId}`}
@@ -161,15 +171,16 @@ export function LinkAgentsList(props: {
     >
       <div className="flex h-6 items-center gap-2">
         <SectionLabel as="h4" id={`share-link-agents-heading-${props.grantId}`} className="m-0">Agents</SectionLabel>
-        {agents.length > 0 ? (
-          <span className="text-[12px] text-subtle">{agents.length}{nextCursor !== null ? "+" : ""}</span>
+        {shown.length > 0 ? (
+          <span className="text-[12px] text-subtle">{shown.length}{nextCursor !== null ? "+" : ""}</span>
         ) : null}
       </div>
-      {agents.length > 0 ? (
+      {shown.length > 0 ? (
         <ul className="m-0 flex list-none flex-col p-0">
-          {agents.map((agent) => {
-            const busy = disconnecting.has(agent.connectionId);
-            const failure = busy ? undefined : refused.get(agent.connectionId);
+          {shown.map((agent) => {
+            const state = props.disconnects.stateOf(link, agent.connectionId);
+            const busy = state?.kind === "pending";
+            const failure = state?.kind === "refused" ? state.words : undefined;
             const name = agentName(agent);
             return (
               <li
@@ -207,7 +218,7 @@ export function LinkAgentsList(props: {
                   aria-busy={busy || undefined}
                   aria-label={`${busy ? "Disconnecting" : "Disconnect"} ${name}`}
                   data-testid={`share-link-agent-disconnect-${agent.connectionId}`}
-                  onClick={() => void disconnect(agent)}
+                  onClick={() => props.disconnects.disconnect(link, agent)}
                 >
                   {busy ? "Disconnecting…" : "Disconnect"}
                 </SecondaryButton>
@@ -219,6 +230,7 @@ export function LinkAgentsList(props: {
       {failedCursor !== undefined ? (
         <RetryRow
           testId={`share-link-agents-retry-${props.grantId}`}
+          disabled={reading !== null}
           onRetry={() => void (failedCursor === null ? readPage(++read.current) : readPage(read.current, failedCursor))}
         >
           {LINK_AGENTS_FAILED}
@@ -226,10 +238,10 @@ export function LinkAgentsList(props: {
       ) : nextCursor !== null ? (
         <GhostButton
           className="self-start"
-          disabled={paging}
+          disabled={reading !== null}
           onClick={() => void readPage(read.current, nextCursor)}
         >
-          {paging ? "Loading agents…" : "Show more agents"}
+          {reading === "more" ? "Loading agents…" : "Show more agents"}
         </GhostButton>
       ) : null}
     </section>

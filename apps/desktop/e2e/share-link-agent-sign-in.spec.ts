@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { shareWebRequest, signInLinkAgent } from "./helpers/linkAgent";
+import { shareWebRequest, signInLinkAgent, startAgentCallback, stopAgentCallback, type AgentCallback } from "./helpers/linkAgent";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
@@ -23,7 +23,9 @@ import {
 // registers, a person allows it, and it calls tools with its token. The token
 // survives a share-web restart, refreshes, works only at its own link, writes
 // as the agent, and stops at Disconnect or a reused refresh token.
-// The run holds a live link and tokens; no trace or failure screenshot keeps them.
+// The link, its address and the tokens belong to this test's own relay, which
+// the test stops and deletes, so a screenshot or failure message that shows
+// one leaves nothing usable.
 test.use({ screenshot: "off", trace: "off" });
 
 const OWNER = "e2e-link-owner";
@@ -74,9 +76,11 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
   let relay: SyncRelayHandle | null = null;
   let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let callback: AgentCallback | null = null;
   try {
+    callback = await startAgentCallback();
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
-    await writeWorkspaceFiles(temp, [{ path: PATH, contents: PLAN }, { path: OTHER_PATH, contents: "# Budget\n\nCabin, 400.\n" }]);
+    await writeWorkspaceFiles(temp, [{ path: PATH, contents: PLAN },{ path: OTHER_PATH, contents: "# Budget\n\nCabin, 400.\n" }]);
     relay = await spawnSyncRelay({
       dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin },
@@ -131,8 +135,8 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
 
     // 1. Register, consent, token, and a tool call: the agent reads the
     // linked file, and only it.
-    const claude = await signInLinkAgent({ handle, browser: shared.browser, address, clientName: "Claude Code" });
-    const codex = await signInLinkAgent({ handle, browser: shared.browser, address, clientName: "Codex" });
+    const claude = await signInLinkAgent({ handle, browser: shared.browser, callback, address, clientName: "Claude Code" });
+    const codex = await signInLinkAgent({ handle, browser: shared.browser, callback, address, clientName: "Codex" });
     const listed = await claude.tool("dohc_list_files");
     expect(listed.status).toBe(200);
     const files = (listed.result?.files ?? []) as Array<{ path: string; blobSha256: string }>;
@@ -198,7 +202,9 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     expect(shared.failures).toEqual([]);
   } finally {
     try { await shared?.close(); } finally {
-      try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, temp); }
+      try { await stopAgentCallback(callback); } finally {
+        try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, temp); }
+      }
     }
   }
 });
