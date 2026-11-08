@@ -715,6 +715,7 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
     refreshFiles,
     hasCommittedListing,
+    newestFilesRequest,
     prepareRestoredTabPruning,
   } = useWorkspaceListing(props.workspace.workspaceId);
   // Main's single answer to "does anything record here": when the
@@ -1122,7 +1123,8 @@ export function DesktopWorkspaceShell(props: {
     else if (failedMovesChanged(failedMoves.current.values(), files, folders)) void confirmFailedMoves();
   }, [fileListingCommit, files, folders, confirmFailedMoves]);
   // Explorer's failures. A move refused for live editing opens Live
-  // documents, at the page's row for a page, whose words name the action that ran.
+  // documents, at the page's row for a page, whose words name the action that
+  // ran. A refused Undo keeps the Explorer's words.
   const reportExplorerError = useCallback(
     (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange | PendingTreeChange[], livePage?: LivePageRefused) => {
       const batch = Array.isArray(change) ? change : undefined;
@@ -1147,7 +1149,7 @@ export function DesktopWorkspaceShell(props: {
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage && "path" in livePage ? livePage.path : null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
-        ...(!livePage ? { message }
+        ...(!livePage || livePage.action === "undo" ? { message }
           : "path" in livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) }
           : { title: livePagesTitle(livePage.paths, livePage.action), message: livePagesBody(livePage.action),
             details: livePage.paths.map((path) => ["File", path, path.length] as const) }),
@@ -3300,6 +3302,22 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  // The Explorer's notices and failures, held to their workspace rather than
+  // to the Explorer, which the side panel unmounts while the workspace stays
+  // open. Undo and Try again run only while that workspace is open here.
+  const explorerReports = useMemo(() => {
+    const owner = workspaceId;
+    const current = () => workspaceIdRef.current === owner;
+    const whileCurrent = (run?: () => void) => run && (() => { if (current()) run(); });
+    return {
+      onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange | PendingTreeChange[], livePage?: LivePageRefused) => {
+        if (current()) reportExplorerError(message, cause, whileCurrent(retry), change, livePage);
+      },
+      onNotice: (message: string, undo?: () => void) => {
+        if (current()) showSuccessNotice(message, whileCurrent(undo));
+      },
+    };
+  }, [workspaceId, reportExplorerError, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
@@ -4391,7 +4409,8 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
-  }, [refreshFiles, reportShellError]);
+    return newestFilesRequest();
+  }, [refreshFiles, newestFilesRequest, reportShellError]);
 
   const moveTabIntoNewGroup = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup, path?: string) => {
@@ -5733,6 +5752,7 @@ export function DesktopWorkspaceShell(props: {
         listed={fileListingCommit !== null}
         files={files}
         folders={folders}
+        listingRequest={fileListingCommit?.request ?? 0}
         editorGroups={wb.editorGroups}
         activeEditorGroup={wb.activeEditorGroup}
         dirtyPaths={dirtyPaths}
@@ -5778,7 +5798,8 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={reportExplorerError}
+        onError={explorerReports.onError}
+        onNotice={explorerReports.onNotice}
         onNewCollection={setNewCollectionFolder}
       />
     </>

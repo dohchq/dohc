@@ -42,9 +42,8 @@ export function isEditorMenuCommand(command: unknown): command is EditorMenuComm
   return (EDITOR_MENU_COMMANDS as readonly unknown[]).includes(command);
 }
 
-// Explorer context menu: the renderer names what was right-clicked, main pops
-// a native menu built from main-owned labels over this closed set, and the
-// chosen id comes back over the same invoke.
+// Explorer context menu: the renderer names what was right-clicked, and main
+// answers with the entries it offers there, each over this closed set.
 export const EXPLORER_MENU_COMMANDS = [
   "new-file",
   "new-folder",
@@ -195,7 +194,6 @@ export const CHANNELS = {
   closeThisWindow: "desktop:close-this-window",
   revealWorkspaceFolder: "desktop:reveal-workspace-folder",
   createCollectionRecord: "desktop:create-collection-record",
-  showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
   listCollections: "desktop:list-collections",

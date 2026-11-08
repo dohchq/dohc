@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExplorerMenuEntry } from "../../ipc/bridgeContract";
 import { Explorer, type ExplorerProps } from "./Explorer";
 import { newPageTabPath } from "./workbenchState";
 
@@ -48,8 +49,10 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
@@ -360,18 +363,23 @@ describe("the open file's selection after a new page opens", () => {
 describe("macOS file tree keys", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  // A delete goes to the trash with Undo on its notice, so the key deletes
+  // without asking.
   it.each([
-    ["darwin", "⌘⌫ asks", { key: "Backspace", metaKey: true }, true],
-    ["darwin", "⌫ alone does not ask", { key: "Backspace" }, false],
-    ["darwin", "Delete asks", { key: "Delete" }, true],
-    ["win32", "Meta+Backspace does not ask", { key: "Backspace", metaKey: true }, false],
-    ["win32", "Delete asks", { key: "Delete" }, true],
-  ] as const)("on %s, %s to delete the selection", (platform, _name, init, asks) => {
-    vi.stubGlobal("dohcDesktop", { platform });
+    ["darwin", "⌘⌫ deletes", { key: "Backspace", metaKey: true }, true],
+    ["darwin", "⌫ alone does not delete", { key: "Backspace" }, false],
+    ["darwin", "Delete deletes", { key: "Delete" }, true],
+    ["win32", "Meta+Backspace does not delete", { key: "Backspace", metaKey: true }, false],
+    ["win32", "Delete deletes", { key: "Delete" }, true],
+  ] as const)("on %s, %s the selection", async (platform, _name, init, deletes) => {
+    const deleteWorkspacePath = vi.fn(async () => ({ trashed: true }));
+    vi.stubGlobal("dohcDesktop", { platform, deleteWorkspacePath });
     render(<Fixture {...explorerProps()} />);
     fireEvent.click(row("notes.md"));
     fireEvent.keyDown(row("notes.md"), init);
-    expect(screen.queryByTestId("delete-confirm") !== null).toBe(asks);
+    await act(async () => {});
+    expect(deleteWorkspacePath.mock.calls.length > 0).toBe(deletes);
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
   });
 
   it("adds a row to the selection with ⌘-click on macOS", () => {
@@ -454,7 +462,9 @@ describe("selecting several rows in Files", () => {
     expect(selected()).toEqual([]);
   });
 
-  it("drops a selected row someone else removes from the count and the delete", () => {
+  it("drops a selected row someone else removes from the count and the delete", async () => {
+    const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
     const props = many();
     const view = render(<Fixture {...props} />);
     fireEvent.click(row("b.md"));
@@ -464,7 +474,8 @@ describe("selecting several rows in Files", () => {
     view.rerender(<Fixture {...props} files={props.files.filter((file) => file.path !== "c.md")} />);
     expect(bar()?.textContent).toBe("2 selected");
     fireEvent.keyDown(row("d.md"), { key: "Delete" });
-    expect([...screen.getByTestId("delete-confirm").querySelectorAll("li")].map((item) => item.textContent)).toEqual(["b.md", "d.md"]);
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+    await waitFor(() => expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "d.md"]));
   });
 
   it("extends the selection with Shift and the arrows from the row it started on", async () => {
@@ -496,29 +507,33 @@ describe("selecting several rows in Files", () => {
     ["pins the rows that are not pinned", ["c.md"], "pin", ["b.md", "d.md"]],
     ["unpins every row when all are pinned", ["b.md", "c.md", "d.md"], "unpin", ["b.md", "c.md", "d.md"]],
   ] as const)("%s from a selected row's menu", async (_name, pinned, choice, toggled) => {
-    const showExplorerMenu = vi.fn(async (_input: unknown) => choice);
-    vi.stubGlobal("dohcDesktop", { showExplorerMenu });
+    const entry: ExplorerMenuEntry = { kind: "item", label: choice === "pin" ? "Pin 3 items" : "Unpin 3 items", id: choice };
+    const readExplorerMenu = vi.fn(async (_input: unknown) => [entry]);
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    const user = userEvent.setup();
     const onTogglePin = vi.fn();
     render(<Fixture {...many({ pinned: [...pinned], onTogglePin })} />);
     fireEvent.click(row("b.md"));
     fireEvent.click(row("c.md"), { ctrlKey: true });
     fireEvent.click(row("d.md"), { ctrlKey: true });
     fireEvent.contextMenu(row("c.md"));
-    expect(showExplorerMenu).toHaveBeenCalledWith({
+    expect(readExplorerMenu).toHaveBeenCalledWith({
       workspaceId: "workspace-1", path: "c.md", kind: "file", pinned: choice === "unpin", count: 3,
     });
+    await user.click(await screen.findByRole("menuitem", { name: entry.label }));
     await waitFor(() => expect(onTogglePin.mock.calls.map(([path]) => path)).toEqual(toggled));
   });
 
-  it("gives a row outside the selection its own menu", () => {
-    const showExplorerMenu = vi.fn(async (_input: unknown) => null);
-    vi.stubGlobal("dohcDesktop", { showExplorerMenu });
+  it("gives a row outside the selection its own menu", async () => {
+    const readExplorerMenu = vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => []);
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
     render(<Fixture {...many()} />);
     fireEvent.click(row("b.md"));
     fireEvent.click(row("c.md"), { ctrlKey: true });
     fireEvent.contextMenu(row("d.md"));
-    expect(showExplorerMenu).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "d.md", kind: "file", pinned: false });
+    expect(readExplorerMenu).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "d.md", kind: "file", pinned: false });
     expect(selected()).toEqual(["d.md"]);
+    await act(async () => {});
   });
 
   it("deletes the rest when some are refused, and reports the refusals once", async () => {
@@ -536,7 +551,6 @@ describe("selecting several rows in Files", () => {
     render(<Fixture {...many({ onError, onPathsChanged })} />);
     await user.click(row("b.md"));
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
-    await user.click(screen.getByTestId("confirm-delete"));
 
     await waitFor(() => expect(onPathsChanged).toHaveBeenCalledTimes(1));
     expect(deleteWorkspacePath).toHaveBeenCalledTimes(3);
@@ -573,7 +587,6 @@ describe("selecting several rows in Files", () => {
     render(<Fixture {...many({ onError, onPathsChanged })} />);
     await user.click(row("b.md"));
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
-    await user.click(screen.getByTestId("confirm-delete"));
 
     await waitFor(() => expect(onPathsChanged).toHaveBeenCalledTimes(1));
     expect(onError).toHaveBeenCalledTimes(2);
@@ -596,7 +609,6 @@ describe("selecting several rows in Files", () => {
     render(<Fixture {...many({ folders: ["archive", "box"], onError, onPathsChanged })} />);
     await user.click(row("b.md"));
     await user.keyboard("{Control>}a{/Control}{Delete}");
-    await user.click(screen.getByTestId("confirm-delete"));
 
     await waitFor(() => expect(onPathsChanged).toHaveBeenCalledTimes(1));
     const order = deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
@@ -612,18 +624,40 @@ describe("selecting several rows in Files", () => {
     expect(other?.[4]).toBeUndefined();
   });
 
-  it("deletes the focused row alone when it is outside the selection, as its menu would", () => {
+  it("deletes the focused row alone when it is outside the selection, as its menu would", async () => {
+    const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
+    const deleted = () => deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
     render(<Fixture {...many()} />);
-    const dialog = () => screen.getByTestId("delete-confirm");
     fireEvent.click(row("b.md"));
     fireEvent.click(row("c.md"), { ctrlKey: true });
     act(() => row("d.md").focus());
     fireEvent.keyDown(row("d.md"), { key: "Delete" });
-    expect(within(dialog()).getByRole("heading").textContent).toBe("Delete d.md?");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(deleted()).toEqual(["d.md"]));
+
+    // A delete clears the selection, so select the two rows again.
+    fireEvent.click(row("b.md"));
+    fireEvent.click(row("c.md"), { ctrlKey: true });
     act(() => row("c.md").focus());
     fireEvent.keyDown(row("c.md"), { key: "Delete" });
-    expect(within(dialog()).getByRole("heading").textContent).toBe("Delete 2 items?");
-    expect([...dialog().querySelectorAll("li")].map((item) => item.textContent)).toEqual(["b.md", "c.md"]);
+    await waitFor(() => expect(deleted()).toEqual(["d.md", "b.md", "c.md"]));
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+  });
+
+  // A share view's delete has no trash, so it still asks, once, for the
+  // whole selection.
+  it("asks once to delete the selection in a share view", async () => {
+    const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
+    const user = userEvent.setup();
+    render(<Fixture {...many({ shareView: { granterEmail: "owner@example.test" } })} />);
+    await user.click(row("b.md"));
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
+    const dialog = screen.getByTestId("delete-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Delete 3 items?");
+    expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["b.md", "c.md", "d.md"]);
+    expect(deleteWorkspacePath).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("confirm-delete"));
+    await waitFor(() => expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "c.md", "d.md"]));
   });
 });

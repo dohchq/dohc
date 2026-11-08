@@ -82,7 +82,7 @@ import type {
   SyncDmsPayload,
   SyncDmsResult,
   SyncStatusResult,
-  ShowExplorerMenuResult,
+  ExplorerMenuEntry,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
   MenuCommand,
@@ -575,7 +575,8 @@ function makeBaseBridge(
       }),
     ),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
-    showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
+    readExplorerMenu: vi.fn(async (): Promise<ExplorerMenuEntry[]> => []),
+    revealExplorerPath: vi.fn(async () => undefined),
     showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),
     getUpdateState: vi.fn(async () => IDLE_UPDATE_STATE),
     checkForUpdates: vi.fn(async () => ({

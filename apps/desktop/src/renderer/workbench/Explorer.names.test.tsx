@@ -13,6 +13,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
+    listingRequest: 0,
     files: [],
     folders: [],
     editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
@@ -43,6 +44,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onShare: vi.fn(),
     onRefresh: vi.fn(),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };

@@ -11,7 +11,7 @@ import * as shellError from "./shell/useShellError";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
-import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
+import type { DohcDesktopBridge, OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
 import type { NoticeTarget } from "./shell/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -2666,10 +2666,12 @@ describe("file transfers", () => {
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
   });
 
+  const IMPORT_FILES_ENTRY = { kind: "item" as const, label: "Import files…", id: "import-files" as const };
+
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.refreshSharedView = vi.fn(async () =>
       refreshOk.shift() === false
         ? {
@@ -2700,6 +2702,7 @@ describe("file transfers", () => {
     const folder = (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === "notes");
     if (!folder) throw new Error("notes folder row missing");
     fireEvent.contextMenu(folder);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-import-files"));
     await waitFor(() =>
       expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
     );
@@ -2713,7 +2716,7 @@ describe("file transfers", () => {
       folders: ["notes"],
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockImplementationOnce(async () => {
       bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md", "notes/c.md"]));
       return { imported: ["notes/b.md", "notes/c.md"], skipped: 0 };
@@ -2738,7 +2741,7 @@ describe("file transfers", () => {
       folders,
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockImplementationOnce(async () => {
       bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes", "notes/Empty"]));
       return { imported: [], skipped: 0, folders: ["notes/Empty"] };
@@ -2758,7 +2761,7 @@ describe("file transfers", () => {
       folders: ["notes"],
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     let finishOlder!: (result: { imported: string[]; skipped: number }) => void;
     bridge.importWorkspaceFiles
       .mockImplementationOnce(() => new Promise((resolve) => { finishOlder = resolve; }))
@@ -2792,7 +2795,7 @@ describe("file transfers", () => {
       folders: ["notes"],
     });
     bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     let finishExplorer!: (result: { imported: string[]; skipped: number }) => void;
     bridge.importWorkspaceFiles
       .mockImplementationOnce(() => new Promise((resolve) => { finishExplorer = resolve; }))
@@ -2840,7 +2843,7 @@ describe("file transfers", () => {
   it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
-    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.readExplorerMenu.mockResolvedValue([IMPORT_FILES_ENTRY]);
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: ["notes/one.md"],
       skipped: 0,
@@ -4746,6 +4749,130 @@ describe("documents too large for live editing", () => {
   });
 });
 
+// The notice is the shell's, so its Undo outlives the Explorer, which the
+// side panel unmounts when it hides or shows another view.
+describe("Undo on an Explorer notice", () => {
+  const DELETED = "dohc-operation:22222222-2222-4222-8222-222222222222";
+  type UndoAnswer = Awaited<ReturnType<DohcDesktopBridge["undoHistoryOperation"]>>;
+
+  function undoBridge() {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async () => ({ trashed: true, operationId: DELETED, undo: { available: true as const } })),
+      undoHistoryOperation: vi.fn(async (): Promise<UndoAnswer> => ({
+        ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [],
+      })),
+    });
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Delete", id: "delete" }]);
+    return bridge;
+  }
+
+  async function deleteFromMenu(path: string) {
+    fireEvent.contextMenu((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-delete"));
+  }
+
+  async function undoFromNotices(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }));
+  }
+
+  const shell = (bridge: ReturnType<typeof undoBridge>, workspace: Workspace) => (
+    <DesktopWorkspaceShell workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+  );
+
+  it("undoes a delete after the side panel hid the Explorer", async () => {
+    const bridge = undoBridge();
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await deleteFromMenu("a.md");
+    await screen.findAllByText("Deleted a.md. It's in the system trash.");
+    await user.click(screen.getByTestId("titlebar-primary-sidebar"));
+    expect(screen.queryByTestId("file-tree")).toBeNull();
+
+    await undoFromNotices(user);
+    await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, operationId: DELETED }));
+    expect(await screen.findAllByText("Restored a.md")).not.toHaveLength(0);
+  });
+
+  // DesktopRoot remounts the shell on a switch; these rerender the same
+  // instance, the stricter case.
+  it("never shows workspace A's late delete in workspace B", async () => {
+    const bridge = undoBridge();
+    const deleted = deferred<{ trashed: boolean; operationId: string; undo: { available: true } }>();
+    bridge.deleteWorkspacePath.mockReturnValueOnce(deleted.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, WORKSPACE));
+    await deleteFromMenu("a.md");
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, OTHER_WORKSPACE));
+    await act(async () => deleted.resolve({ trashed: true, operationId: DELETED, undo: { available: true } }));
+    expect(screen.queryByText("Deleted a.md. It's in the system trash.")).toBeNull();
+  });
+
+  it("never reports the answer to workspace A's Undo in workspace B", async () => {
+    const bridge = undoBridge();
+    const undone = deferred<UndoAnswer>();
+    bridge.undoHistoryOperation.mockReturnValueOnce(undone.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(bridge, WORKSPACE));
+    await deleteFromMenu("a.md");
+    await screen.findAllByText("Deleted a.md. It's in the system trash.");
+    await undoFromNotices(user);
+    await waitFor(() => expect(bridge.undoHistoryOperation).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, OTHER_WORKSPACE));
+    await act(async () => undone.resolve({ ok: false, reason: "Cannot undo the delete.", refusal: { code: "unexplained" } }));
+    expect(screen.queryByText("Cannot restore a.md.")).toBeNull();
+  });
+
+  const RENAMED = "dohc-operation:33333333-3333-4333-8333-333333333333";
+  async function renameTo(user: ReturnType<typeof userEvent.setup>, path: string, name: string) {
+    await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, `${name}{Enter}`);
+  }
+
+  it("says to stop live editing when that refused the Undo, and opens Live documents at the page", async () => {
+    const reason = "dohc can't undo renaming \"b.md\" while it has live editing on\nIn Live documents, stop live editing for this page, then try again.";
+    const bridge = Object.assign(undoBridge(), {
+      moveWorkspacePath: vi.fn(async () => ({ path: "b.md", operationId: RENAMED, undo: { available: true as const } })),
+    });
+    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal: { code: "live-page-owned", path: "b.md" } });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "b.md", objectId: "object-b", status: "ready" as const, canResume: false }] }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await renameTo(user, "a.md", "b");
+    await screen.findAllByText("Renamed a.md to b.md");
+    await undoFromNotices(user);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("Cannot undo the rename. Stop live editing for b.md first.")).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-b.md").getAttribute("aria-current")).toBe("true"));
+  });
+
+  it("never shows workspace A's live-page refusal in workspace B", async () => {
+    const title = `dohc can't rename "a.md" while it has live editing on`;
+    const refused = deferred<never>();
+    const bridge = Object.assign(undoBridge(), { moveWorkspacePath: vi.fn().mockReturnValueOnce(refused.promise) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(bridge, WORKSPACE));
+    await renameTo(user, "a.md", "b");
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, OTHER_WORKSPACE));
+    await act(async () => refused.reject(new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't move "a.md" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`)));
+    expect(screen.queryByText(title)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Live documents" })).toBeNull();
+  });
+});
+
 describe("a refused folder move", () => {
   const TITLE = `dohc can't move "box" while a page in it has live editing on`;
   const BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
@@ -4805,7 +4932,6 @@ describe("a folder refused in a delete of several rows", () => {
     await user.keyboard("{Shift>}");
     await user.click(await row("box"));
     await user.keyboard("{/Shift}{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     // Only the newest failure is a toast, so the folder's notice waits in Notices.
     await screen.findByTestId("workspace-shell-error");
     expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["archive", "box"]);
@@ -4921,7 +5047,6 @@ describe("a refused delete of a page this computer owns live", () => {
     const user = userEvent.setup();
     await user.click((await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!);
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
     // While the delete runs, the page stays.
     expect(await treePaths()).toContain("a.md");
@@ -4970,7 +5095,6 @@ describe("a refused delete of a page this computer owns live", () => {
     await user.keyboard("{Shift>}");
     await user.click(await row("c.md"));
     await user.keyboard("{/Shift}{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["a.md", "b.md", "c.md"]);
     expect(toast.querySelector("[id$='-title']")?.textContent).toBe(SEVERAL);
@@ -5003,7 +5127,6 @@ describe("a refused delete of a page this computer owns live", () => {
     await user.keyboard("{Shift>}");
     await user.click(await row("c.md"));
     await user.keyboard("{/Shift}{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     await screen.findByText(SEVERAL);
     // Hiding the sidebar unmounts Explorer, and its notice stays in Notices.
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
@@ -5013,7 +5136,6 @@ describe("a refused delete of a page this computer owns live", () => {
     deleteWorkspacePath.mockResolvedValue(undefined);
     await user.click(await row("a.md"));
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     await waitFor(() => expect(deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ relativePath: "a.md" })));
     await waitFor(() => expect(screen.queryByText(SEVERAL)).toBeNull());
     await user.click(screen.getByTestId("notice-center-toggle"));
@@ -5081,7 +5203,6 @@ describe("a page delete refused while History is off", () => {
     const user = userEvent.setup();
     await user.click((await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!);
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.querySelector("[id$='-title']")?.textContent).toBe(TITLE);
     expect(toast.querySelector("[id$='-body']")?.textContent).toBe(BODY);

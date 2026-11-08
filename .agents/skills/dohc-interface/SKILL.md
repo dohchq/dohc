@@ -291,6 +291,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
+- Write a refusal to fit two lines: what failed, then the one thing to do. The cause goes in its details.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself, except a dialog's own action, as above.
 - If a list could not load, say so in its place in one line, with Try again. Pass the line as `RetryRow`'s children.
@@ -456,6 +457,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
 - Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
 - To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`, except a confirm dialog's buttons, above.
+- A menu opened with the pointer marks no row, and the hover fill follows the pointer. The first arrow key marks a row with the fill. Until a row is marked, Enter and Space mark the row the menu opened on, its checked row or else its first, and run nothing. A menu opened from the keyboard marks that row at once.
 - In a panel, give the parent `px-1`.
 - A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its fill.
 

@@ -4,11 +4,12 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { basenameOf, dirnameOf } from "../path";
 import { FileGlyph, listedFileKind } from "../ui/KindGlyph";
 
-// What the delete dialog says for these paths. Explorer opens it, and the
-// states page draws the same dialog.
+// What the delete dialog says for these paths. Only a share view asks before
+// a delete, because its delete has no trash behind it. Explorer opens it, and
+// the states page draws the same dialog.
 export function deleteConfirmText(
   paths: readonly string[],
-  shareView: { granterEmail: string | null } | null,
+  shareView: { granterEmail: string | null },
   fileByPath?: ReadonlyMap<string, WorkspaceFileEntry>,
   isFolderPath?: (path: string) => boolean,
 ): { title: string; confirmLabel: string; intent: "danger"; details: ReactNode; children: ReactNode } {
@@ -39,25 +40,13 @@ export function deleteConfirmText(
         </ul>
       ) : null,
     children: (
-      shareView ? (
-        <p>
-          {`${paths.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-              paths.length === 1 ? "it" : "them"
-            } from. ${
-              shareView.granterEmail ?? "The person who shared it"
-            } still ${paths.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
-        </p>
-      ) : paths.length === 1 ? (
-        <>
-          <p>It moves to the system trash, where you can restore it.</p>
-          <p className="text-[12px]">If the system trash refuses it, it goes to .dohc/local/trash in this workspace.</p>
-        </>
-      ) : (
-        <>
-          <p>They move to the system trash, where you can restore them.</p>
-          <p className="text-[12px]">If the system trash refuses one, it goes to .dohc/local/trash in this workspace.</p>
-        </>
-      )
+      <p>
+        {`${paths.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+          paths.length === 1 ? "it" : "them"
+        } from. ${
+          shareView.granterEmail ?? "The person who shared it"
+        } still ${paths.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
+      </p>
     ),
   };
 }

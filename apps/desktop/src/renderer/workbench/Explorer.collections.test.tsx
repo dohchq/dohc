@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExplorerMenuEntry } from "../../ipc/bridgeContract";
 import { editorTitle, Explorer, type ExplorerProps } from "./Explorer";
 import { collectionTabPath, transactionalCollectionTabPath } from "./workbenchState";
 
@@ -45,11 +46,19 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
+}
+
+// The Explorer's own menu, which a Collection that can't open must never open
+// beside its Show in Files.
+function explorerMenu() {
+  return vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [{ kind: "item", label: "Rename", id: "rename" }]);
 }
 
 function treeRow(path: string): HTMLElement {
@@ -74,10 +83,10 @@ describe("Explorer collection folders", () => {
     view.rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
     expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
   });
-  it("names why a Collection can't open, and shows the files to fix in Files", () => {
+  it("names why a Collection can't open, and shows the files to fix in Files", async () => {
     const onOpenDataCollection = vi.fn();
-    const showExplorerMenu = vi.fn(async (_input: unknown) => null);
-    vi.stubGlobal("dohcDesktop", { showExplorerMenu });
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
     const tableId = "00000000-0000-4000-8000-000000000002";
     const props = explorerProps({ mode: "home", onOpenDataCollection, dataCollections: [
       { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
@@ -100,14 +109,17 @@ describe("Explorer collection folders", () => {
       vi.mocked(props.onModeChange).mockClear();
       fireEvent.click(share);
       fireEvent.contextMenu(share);
+      await act(async () => {});
       expect(props.onModeChange).not.toHaveBeenCalled();
       expect(screen.queryByRole("menu")).toBeNull();
 
       const ambiguous = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
       expect(ambiguous.textContent).toContain("2 dataset.json files");
       fireEvent.contextMenu(ambiguous);
+      await act(async () => {});
+      expect(screen.getAllByRole("menu")).toHaveLength(1);
       fireEvent.click(screen.getByRole("menuitem", { name: "Show in Files" }));
-      expect(showExplorerMenu).not.toHaveBeenCalled();
+      expect(readExplorerMenu).not.toHaveBeenCalled();
       expect(props.onModeChange).toHaveBeenLastCalledWith("files");
       view.rerender(<Explorer {...props} mode="files" expandedFolders={["copy", "rooms"]} folders={[...props.folders, "copy", "rooms"]}
         files={[...props.files, { path: "copy/dataset.json", kind: "file" }, { path: "rooms/dataset.json", kind: "file" }]} />);
@@ -116,7 +128,7 @@ describe("Explorer collection folders", () => {
     } finally { vi.unstubAllGlobals(); }
   });
   it("gives focus back to the row when its menu closes, so the arrows and Enter still work", () => {
-    vi.stubGlobal("dohcDesktop", { showExplorerMenu: vi.fn(async (_input: unknown) => null) });
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu: explorerMenu() });
     const tableId = "00000000-0000-4000-8000-000000000002";
     const props = explorerProps({ mode: "home", dataCollections: [
       { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
@@ -139,6 +151,50 @@ describe("Explorer collection folders", () => {
       fireEvent.keyDown(rooms, { key: "Enter" });
       expect(props.onModeChange).toHaveBeenLastCalledWith("files");
       expect(props.onSetFolderExpanded).toHaveBeenCalledWith("rooms", true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("opens only a broken Collection's own menu from the Menu key and Shift+F10, with its row marked", async () => {
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId: "00000000-0000-4000-8000-000000000002", name: "Rooms" },
+    ] })} />);
+    try {
+      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
+        rooms.focus();
+        fireEvent.keyDown(rooms, key);
+        const show = screen.getByRole("menuitem", { name: "Show in Files" });
+        expect(document.activeElement).toBe(show);
+        expect(show.className.split(" ")).toContain("focus:bg-selected");
+        // The browser's own contextmenu event for the key opens no second menu.
+        fireEvent.contextMenu(show);
+        await act(async () => {});
+        expect(screen.getAllByRole("menu")).toHaveLength(1);
+        fireEvent.keyDown(show, { key: "Escape" });
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(document.activeElement).toBe(rooms);
+      }
+      expect(readExplorerMenu).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("opens no menu from the Menu key or Shift+F10 on a Collection a share leaves out", async () => {
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId: "00000000-0000-4000-8000-000000000002", name: "Volunteers" },
+    ] })} />);
+    try {
+      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
+        share.focus();
+        fireEvent.keyDown(share, key);
+        fireEvent.contextMenu(share);
+        await act(async () => {});
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(document.activeElement).toBe(share);
+      }
+      expect(readExplorerMenu).not.toHaveBeenCalled();
     } finally { vi.unstubAllGlobals(); }
   });
   it("opens the collection on a row click instead of toggling the folder", () => {

@@ -260,7 +260,6 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
     await showExplorerFiles(page);
     await explorerRow(page, folder).click();
     await explorerRow(page, folder).press("Delete");
-    await page.getByTestId("confirm-delete").click();
     await expect(explorerRow(page, folder)).toHaveCount(0);
     await openExplorerHome(page);
     await expect(home.getByText("Registration", { exact: true })).toHaveCount(0);

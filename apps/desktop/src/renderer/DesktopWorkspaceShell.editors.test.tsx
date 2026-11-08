@@ -1904,15 +1904,16 @@ describe("ui-state merge-on-load", () => {
     expect((await screen.findByTestId("notice-center")).querySelectorAll("[data-notice-row]")).toHaveLength(1);
   });
 
-  it("retries a native menu refusal from a mounted share in an ordinary workspace", async () => {
+  it("retries a refused reveal from a mounted share in an ordinary workspace", async () => {
     // userEvent's setup gives the test a clipboard to read.
     userEvent.setup();
     const path = "shared-with-me/sam/shared.md";
     const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs([]), expandedFolders: ["shared-with-me", "shared-with-me/sam"] }));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
       files: [{ path, kind: "file" }], folders: ["shared-with-me", "shared-with-me/sam"] });
-    const received = new Error(`Error invoking remote method 'desktop:show-explorer-menu': ${String(ipcWireError(await sharedViewRefusal()))}`);
-    bridge.showExplorerMenu.mockRejectedValueOnce(received);
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Show in Finder", id: "open-externally" }]);
+    const received = new Error(`Error invoking remote method 'desktop:reveal-explorer-path': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    bridge.revealExplorerPath.mockRejectedValueOnce(received);
     renderShell(bridge, { ...WORKSPACE, shareMounts: [
       { shareId: "share-1", label: "sam", granterEmail: "sam@dohc.test", access: "view" },
     ] });
@@ -1922,6 +1923,7 @@ describe("ui-state merge-on-load", () => {
       return row!;
     });
     fireEvent.contextMenu(file);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-open-externally"));
     const toast = await screen.findByTestId("workspace-shell-error");
     await navigator.clipboard.writeText("");
     await copyDetails(toast);
@@ -1933,10 +1935,9 @@ describe("ui-state merge-on-load", () => {
     await navigator.clipboard.writeText("");
     await copyDetails(row);
     checkRefusalCopy(await navigator.clipboard.readText());
-    bridge.showExplorerMenu.mockResolvedValueOnce("open-externally");
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(bridge.showExplorerMenu, "Try again repeats the native reveal").toHaveBeenCalledTimes(2));
-    expect(bridge.showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, path, kind: "file", pinned: false, reveal: true });
+    await waitFor(() => expect(bridge.revealExplorerPath, "Try again repeats the reveal").toHaveBeenCalledTimes(2));
+    expect(bridge.revealExplorerPath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, path });
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(within(await screen.findByTestId("notice-center")).queryByText(sharedViewRefusalWords, { exact: false })).toBeNull();
   });
