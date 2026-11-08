@@ -399,10 +399,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const runReservations = new Set<string>();
   const selfTests = new Map<string, SelfTestState>();
   const selfTestReservations = new Set<string>();
-  // Each run this dohc started, by the id it gave the run, with its
-  // workspace. It outlives the run, so a write that comes after the runner
-  // exits still belongs to that run and its workspace.
-  const startedRuns = new Map<string, string>();
   const budgetBypassThreads = new Set<string>();
   // What this run of dohc told each restricted workspace's person: the
   // notice that Restricted Mode holds a request, and main's dialog on their
@@ -1082,7 +1078,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         dispatch: "run",
         secret,
       });
-      startedRuns.set(claim.run.runId, workspace.workspaceId);
       // Only people's own messages, which only the owner's send records,
       // start a run at depth 0. A run an automation started gets the reply
       // tool and can't write.
@@ -1958,7 +1953,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           dispatch: "self-test",
           secret,
         });
-        startedRuns.set(runId, workspace.workspaceId);
         const child = await spawnConfiguredRunner({
           rootPath: workspace.rootPath,
           threadId,
@@ -2255,7 +2249,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,
-    runWorkspace: (runId: string) => startedRuns.get(runId),
     hasLiveRun: (workspaceId: string) => {
       const workspace = options.workspaceFor(workspaceId);
       return workspace ? workspaceProcessReserved(workspace) : false;

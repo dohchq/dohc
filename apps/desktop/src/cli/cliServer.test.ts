@@ -3195,31 +3195,39 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(opened);
   });
 
-  it("posts a finished run's late write as an agent's, not your agent's, only in its own workspace", async () => {
+  it("drops a finished run's id from its late write, which is an agent's only when it says so", async () => {
     if (!store) throw new Error("Store is not available");
-    // The run has let go of the slot; main still knows the workspace of the
-    // id it gave the run.
+    await seedDispatchThread("thread-dispatch");
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger", agentId: "default" });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
+    if (!claim) throw new Error("Expected a dispatch run.");
+    const runId = claim.run.runId;
+    await dispatchStore.completeRun({ runId, exitCode: 0 });
+    // The run has let go of the slot, so the secret its process still sends
+    // no longer proves its id.
     dispatchedRun = null;
-    serverOptions.agentRunWorkspace = (runId) => runId === "run_finished" ? WORKSPACE_ID : undefined;
-    const late = await post({ actor: "human", title: "Late", body: "Published the trip app.", runId: "run_finished" });
-    const [message] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${late.threadId.slice("th_".length)}` });
-    // Chat reads show run ids, so a finished run's id doesn't make a write your agent's.
-    expect([message?.author.kind, message?.authorAgentId, message?.author.displayName]).toEqual(["agent", undefined, "Agent"]);
+    dispatchedRunId = null;
+    callerRunSecret = RUN_SECRET;
+    const written = async (threadId: string, messageId: string) => {
+      const [message] = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+      return [message?.author.kind, message?.authorAgentId, message?.author.displayName, await dispatchStore.runIdForMessage(WORKSPACE_ID, messageId)];
+    };
+    const engineIds = (posted: { threadId: string; messageId: string }) =>
+      [`thread-${posted.threadId.slice("th_".length)}`, `message-${posted.messageId.slice("msg_".length)}`] as const;
 
-    // A run id dohc never gave out leaves the caller's actor as it is.
-    const unknown = await post({ actor: "human", title: "Mine", body: "My own post.", runId: "run_never_issued" });
-    const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${unknown.threadId.slice("th_".length)}` });
-    expect(mine?.author.kind).toBe("human");
+    // With --as-agent it's an agent's, but not your agent's, and not the run's.
+    const asAgent = await post({ actor: "agent", title: "Late", body: "Published the trip app.", runId });
+    expect(await written(...engineIds(asAgent))).toEqual(["agent", undefined, "Agent", null]);
 
-    const nestedRoot = join(workspaceRoot, "notes");
-    await mkdir(nestedRoot);
-    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
-    const opened = calls.openWorkspace;
-    await expect(invoke("post", {
-      cwd: nestedRoot, actor: "human", runId: "run_finished", group: "general",
-      attachments: [], needsDecision: false, body: "Published the trip app.",
-    })).rejects.toThrow("Agent runs cannot write in another workspace.");
-    expect(calls.openWorkspace).toBe(opened);
+    // The MCP server names the run it works for, and its writes are an agent's.
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, runId, request: (value) => invoke(value.verb, value.args) };
+    const fromMcp = await startGroupChat(ctx, { group: "general", title: "Late too", body: "Published it again." });
+    if (!fromMcp.ok) throw new Error(fromMcp.reason);
+    expect(await written(fromMcp.threadId, fromMcp.messageId)).toEqual(["agent", undefined, "Agent", null]);
+
+    // Without --as-agent it's yours.
+    const mine = await post({ actor: "human", title: "Mine", body: "My own post.", runId });
+    expect(await written(...engineIds(mine))).toEqual(["human", undefined, "Sam", null]);
   });
 
   it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
