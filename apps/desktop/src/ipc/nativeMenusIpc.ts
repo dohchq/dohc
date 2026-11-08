@@ -125,6 +125,7 @@ export function registerNativeMenusIpcHandlers<
           return explorerMenuEntries({
             kind: input.kind,
             pinned: input.pinned === true,
+            ...(input.count !== undefined && input.kind !== "root" ? { count: input.count } : {}),
             isMountPath: menuContext.isMountPath,
             hasMountRecord: menuContext.hasMountRecord,
             // Sharing onward is offered nowhere in a share view or a mount:

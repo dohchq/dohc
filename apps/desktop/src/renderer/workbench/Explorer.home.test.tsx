@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
@@ -509,5 +509,179 @@ describe("Explorer Home", () => {
     render(<Explorer {...explorerProps({ onModeChange, revealPaths: ["budget.csv"] })} />);
 
     expect(onModeChange).toHaveBeenCalledWith("files");
+  });
+});
+
+describe("selecting several rows in Home", () => {
+  const homeRow = (key: string) => {
+    const element = document.querySelector<HTMLElement>(`[data-home-key="${key}"]`);
+    if (!element) throw new Error(`Missing Home row: ${key}`);
+    return element;
+  };
+  // The fill sits on the row's frame, around its button.
+  const picked = () =>
+    [...document.querySelectorAll<HTMLElement>("[data-home-key]")]
+      .filter((button) => button.parentElement?.className.includes("bg-(--dohc-selection)"))
+      .map((button) => button.dataset.homeKey);
+  const edged = () =>
+    [...document.querySelectorAll<HTMLElement>("[data-testid='home-row-open-edge']")].map(
+      (edge) => edge.parentElement?.querySelector<HTMLElement>("[data-home-key]")?.dataset.homeKey,
+    );
+  const bar = () => screen.queryByTestId("explorer-selection-bar");
+
+  it("adds rows with Ctrl-click, and a plain click selects one row and opens it", () => {
+    const onOpenFile = vi.fn();
+    render(<Explorer {...explorerProps({ onOpenFile })} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
+    expect(onOpenFile).not.toHaveBeenCalled();
+    expect(picked()).toEqual(["pages:notes.md", "apps:trip"]);
+    // The open page keeps its weight inside the selection and gains the edge.
+    expect(homeRow("pages:notes.md").parentElement?.className).toContain("font-medium");
+    expect(edged()).toEqual(["pages:notes.md"]);
+    expect(bar()?.textContent).toBe("2 selected");
+    const note = homeRow("apps:trip").getAttribute("aria-describedby");
+    expect(note && document.getElementById(note)?.textContent).toBe("Selected");
+
+    fireEvent.click(homeRow("pages:notes.md"));
+    expect(onOpenFile).toHaveBeenCalledWith("notes.md");
+    expect(picked()).toEqual([]);
+    expect(edged()).toEqual([]);
+    expect(homeRow("pages:notes.md").parentElement?.className).toContain("bg-selected font-medium");
+    expect(bar()).toBeNull();
+    expect(homeRow("apps:trip").getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("selects a range over Home's rows in order, across sections, and counts a pinned page once", () => {
+    render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
+    fireEvent.click(homeRow("pinned:notes.md"));
+    fireEvent.click(homeRow("collections:tasks/"), { shiftKey: true });
+    expect(picked()).toEqual([
+      "pinned:notes.md",
+      "pages:Plans/",
+      "pages:notes.md",
+      `collections:d:${TABLE}`,
+      "collections:tasks/",
+    ]);
+    expect(bar()?.textContent).toBe("4 selected");
+  });
+
+  it("extends the selection with Shift and the arrows, past a heading", async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps()} />);
+    await user.click(homeRow("pages:Plans/"));
+    // A folder clicked alone is not the open row, so it is picked.
+    expect(picked()).toEqual(["pages:Plans/"]);
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{ArrowDown}{/Shift}");
+    expect(document.activeElement).toBe(homeRow(`collections:d:${TABLE}`));
+    expect(picked()).toEqual(["pages:Plans/", "pages:notes.md", `collections:d:${TABLE}`]);
+  });
+
+  it("selects every row with a path with Ctrl+A, and Escape clears it", async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps()} />);
+    homeRow("pages:notes.md").focus();
+    await user.keyboard("{Control>}a{/Control}");
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-home-key]")].filter((button) => button.dataset.path);
+    expect(picked()).toEqual(rows.map((button) => button.dataset.homeKey));
+    expect(bar()?.textContent).toBe(`${new Set(rows.map((button) => button.dataset.path)).size} selected`);
+    await user.keyboard("{Escape}");
+    expect(picked()).toEqual([]);
+    expect(bar()).toBeNull();
+  });
+
+  it("shows an app opened from its row as the open row, and clears it when another editor becomes active", () => {
+    const props = explorerProps();
+    const view = render(<Explorer {...props} />);
+    fireEvent.click(homeRow("apps:trip"));
+    const tab = siteTabPath("trip");
+    view.rerender(<Explorer {...props} editorGroups={[{ id: "group-1", tabs: [{ path: tab }], activeTab: tab, size: 1 }]} />);
+    expect(picked()).toEqual([]);
+    expect(homeRow("apps:trip").parentElement?.className).toContain("bg-selected font-medium");
+
+    view.rerender(<Explorer {...props} />);
+    // The selection held only the app, so it goes with the app's tab.
+    expect(picked()).toEqual([]);
+    expect(homeRow("apps:trip").parentElement?.className).not.toContain("font-medium");
+  });
+
+  it("asks once to delete the whole selection, with the folders of apps and Collections", () => {
+    render(<Explorer {...explorerProps()} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("collections:tasks/"), { ctrlKey: true });
+    fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
+    fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
+    const dialog = screen.getByTestId("delete-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Delete 3 items?");
+    expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["notes.md", "tasks", "trip"]);
+  });
+
+  it("deletes the selection from a heading, and the focused row alone when it is outside the selection", async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps()} />);
+    const listed = () => [...screen.getByTestId("delete-confirm").querySelectorAll("li")].map((item) => item.textContent);
+    await user.click(homeRow("pages:Plans/"));
+    await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    act(() => document.querySelector<HTMLElement>('[data-home-key^="section:"]')!.focus());
+    await user.keyboard("{Delete}");
+    expect(listed()).toEqual(["Plans", "notes.md"]);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
+    act(() => homeRow("other:budget.csv").focus());
+    fireEvent.keyDown(homeRow("other:budget.csv"), { key: "Delete" });
+    expect(within(screen.getByTestId("delete-confirm")).getByRole("heading").textContent).toBe("Delete budget.csv?");
+  });
+
+  it("drags every selected row from one selected page", () => {
+    render(<Explorer {...explorerProps()} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("pages:Plans/"), { ctrlKey: true });
+    const setData = vi.fn();
+    fireEvent.dragStart(homeRow("pages:notes.md"), { dataTransfer: { effectAllowed: "none", setData } });
+    expect(setData).toHaveBeenCalledWith("text/plain", "notes.md\nPlans");
+  });
+
+  it("leaves a selected folder's contents out of the delete, since the folder carries them", async () => {
+    const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
+    vi.stubGlobal("dohcDesktop", { showExplorerMenu, deleteWorkspacePath });
+    const onPathsChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps({ expandedFolders: ["Plans"], onPathsChanged })} />);
+    homeRow("pages:notes.md").focus();
+    await user.keyboard("{Control>}a{/Control}");
+    expect(picked()).toEqual(expect.arrayContaining(["pages:Plans/", "pages:Plans/Old/", "pages:Plans/Spring.md"]));
+    await user.keyboard("{Delete}");
+
+    const dialog = screen.getByTestId("delete-confirm");
+    const listed = [...dialog.querySelectorAll("li")].map((item) => item.textContent ?? "");
+    expect(listed).toContain("Plans");
+    expect(listed.filter((path) => path.startsWith("Plans/"))).toEqual([]);
+    expect(within(dialog).getByRole("heading").textContent).toBe(`Delete ${listed.length} items?`);
+    await user.click(screen.getByTestId("confirm-delete"));
+    await waitFor(() => expect(onPathsChanged).toHaveBeenCalled());
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath).sort()).toEqual([...listed].sort());
+  });
+
+  it("drags a selected folder without its selected contents", () => {
+    render(<Explorer {...explorerProps({ expandedFolders: ["Plans"] })} />);
+    fireEvent.click(homeRow("pages:Plans/"), { ctrlKey: true });
+    fireEvent.click(homeRow("pages:Plans/Spring.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    const setData = vi.fn();
+    fireEvent.dragStart(homeRow("pages:Plans/Spring.md"), { dataTransfer: { effectAllowed: "none", setData } });
+    expect(setData).toHaveBeenCalledWith("text/plain", "Plans\nnotes.md");
+  });
+
+  it("sends a selected row's menu the selection's count, and a row outside it its own menu", () => {
+    render(<Explorer {...explorerProps()} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("other:budget.csv"), { ctrlKey: true });
+    fireEvent.contextMenu(homeRow("other:budget.csv"));
+    expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "budget.csv", kind: "file", pinned: false, count: 2 });
+    fireEvent.contextMenu(homeRow("pages:Plans/"));
+    expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "Plans", kind: "folder", pinned: false });
+    expect(bar()).toBeNull();
   });
 });
