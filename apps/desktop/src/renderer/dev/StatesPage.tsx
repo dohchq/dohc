@@ -1626,7 +1626,7 @@ const DELETED_BUDGET = doneNotice([{
   operationId: "dohc-operation:33333333-3333-4333-8333-333333333333", undoable: true, trashed: true,
 }]).message;
 const UNDO_TOAST = {
-  id: "undo", tone: "success" as const, message: DELETED_BUDGET, copy: { report: DELETED_BUDGET },
+  id: "undo", tone: "success" as const, message: DELETED_BUDGET,
   atMs: 0, canRetry: false, actionLabel: "Undo", seen: false,
 };
 const REFUSED_UNDO_TOAST = {

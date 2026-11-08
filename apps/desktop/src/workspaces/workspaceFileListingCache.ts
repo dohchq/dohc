@@ -50,7 +50,7 @@ export class WorkspaceFileListingCache {
     return this.walk(options, true);
   }
 
-  private walk(options: { workspaceId: string; attachmentId: symbol; load: () => ListingPromise }, again: boolean): ListingPromise {
+  private walk(options: { workspaceId: string; attachmentId: symbol; load: () => ListingPromise }, again: boolean, publish = true): ListingPromise {
     const entry: ListingEntry = {
       attachmentId: options.attachmentId,
       listing: Promise.resolve({ files: [], folders: [] }),
@@ -69,9 +69,10 @@ export class WorkspaceFileListingCache {
         // and the walk lacks it, even if a newer walk replaced it. Its callers,
         // who may have asked after that change, get one walk that started after
         // it. That walk answers with what it finds: a path no walk lists, such
-        // as a re-pointed symlink, would otherwise keep it walking.
+        // as a re-pointed symlink, would otherwise keep it walking. It replaces
+        // the cached listing only if no newer walk has.
         if (again && [...entry.changed].some(path => !entry.files.has(path))) {
-          return this.walk(options, false);
+          return this.walk(options, false, this.#listings.get(options.workspaceId) === entry);
         }
         for (const path of entry.changed) {
           const file = entry.files.get(path);
@@ -87,7 +88,7 @@ export class WorkspaceFileListingCache {
         throw error;
       });
     entry.listing = listing;
-    this.#listings.set(options.workspaceId, entry);
+    if (publish) this.#listings.set(options.workspaceId, entry);
     return listing;
   }
 

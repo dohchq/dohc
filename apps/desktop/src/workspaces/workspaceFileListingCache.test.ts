@@ -98,6 +98,25 @@ describe("WorkspaceFileListingCache", () => {
     settle(newer, both);
     if (outcome === "answers") await expect(replacing).resolves.toEqual(both);
     else await expect(replacing).rejects.toThrow("walk failed");
+    // The retry answers only the replaced walk's callers. After a failed newer walk, nothing is cached.
+    await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual(outcome === "answers" ? { ...both, cached: true } : both);
+    expect(load).toHaveBeenCalledTimes(outcome === "answers" ? 3 : 4);
+  });
+
+  it("keeps a newer walk cached when a replaced walk's retry still lacks a changed file", async () => {
+    const cache = new WorkspaceFileListingCache("win32");
+    const replaced = deferred<WorkspacePathListing>();
+    const both = { files: [{ path: "plan.md", kind: "file" as const }, { path: "packing.md", kind: "file" as const }], folders: [] };
+    const putBack = () => cache.observe("ws-a", ATTACHMENT_A, [{ path: "packing.md", kind: "changed" }]);
+    // packing.md is put back behind the replaced walk, and again behind its retry.
+    const load = vi.fn().mockReturnValueOnce(replaced.promise).mockResolvedValueOnce(both)
+      .mockImplementationOnce(async () => { putBack(); return listing("plan.md"); });
+    const options = { workspaceId: "ws-a", attachmentId: ATTACHMENT_A, load };
+    const walking = cache.list({ ...options, allowCached: true });
+    putBack();
+    await expect(cache.list({ ...options, allowCached: false })).resolves.toEqual(both);
+    replaced.resolve(listing("plan.md"));
+    await expect(walking).resolves.toEqual(listing("plan.md"));
     await expect(cache.list({ ...options, allowCached: true })).resolves.toEqual({ ...both, cached: true });
     expect(load).toHaveBeenCalledTimes(3);
   });
