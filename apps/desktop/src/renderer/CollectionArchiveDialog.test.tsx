@@ -49,3 +49,11 @@ it("reads Archiving… while the archive runs", async () => {
   expect((await screen.findByRole("button", { name: "Archiving…" }) as HTMLButtonElement).disabled).toBe(true);
   await act(async () => pending.resolve({ kind: "lifecycle-updated", archived: true, generation: 1 }));
 });
+it("closes on Cancel or Escape while the apps load", async () => {
+  const pending = deferred<unknown>(); backend.dataset.mockReturnValue(pending.promise);
+  const p = props(); render(<CollectionArchiveDialog {...p} />);
+  const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+  expect(cancel.disabled).toBe(false); expect((screen.getByRole("button", { name: "Archive" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" }); expect(p.onClose).toHaveBeenCalledOnce();
+  fireEvent.click(cancel); expect(p.onClose).toHaveBeenCalledTimes(2);
+});

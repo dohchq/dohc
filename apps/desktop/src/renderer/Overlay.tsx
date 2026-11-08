@@ -32,8 +32,8 @@ type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children" | "onClick" | 
 // top spacer gives up to 5rem of its 6rem so a short window still shows the
 // actions above the toasts, and a dialog taller than the window scrolls, with
 // a focused control scrolled clear of the toasts. The panel never shrinks.
-// A warning dialog centers in the space above the toasts, and scrolls the
-// same way when it is taller than that space.
+// Every dialog keeps this top anchor, so its title sits where the last one's
+// did. A warning dialog only sits above the other dialogs.
 export function OverlayFrame(props: {
   appearance?: "standard" | "warning";
   panelRef: RefObject<HTMLDivElement | null>;
@@ -48,9 +48,7 @@ export function OverlayFrame(props: {
   return (
     <div
       data-dohc-modal="true"
-      className={props.appearance === "warning"
-        ? "fixed inset-0 z-50 grid place-items-center-safe overflow-auto bg-scrim pb-[var(--dohc-toast-room,0px)] scroll-pb-[var(--dohc-toast-room,0px)]"
-        : "fixed inset-0 z-30 flex flex-col items-center overflow-auto bg-scrim px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]"}
+      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto bg-scrim px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
       {...(props.onBackdropClick ? {
         onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
           const target = event.target instanceof Node ? event.target : null;
@@ -63,7 +61,7 @@ export function OverlayFrame(props: {
         },
       } : {})}
     >
-      {props.appearance === "warning" ? null : <div aria-hidden className="min-h-4 shrink grow-0 basis-24" />}
+      <div aria-hidden className="min-h-4 shrink grow-0 basis-24" />
       <div
         {...props.panelProps}
         ref={props.panelRef}

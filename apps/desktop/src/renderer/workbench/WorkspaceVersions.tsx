@@ -537,7 +537,8 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         // The panel holds focus, so a screen reader reads the title and body
         // before Tab reaches Cancel.
         <ConfirmDialog
-          title={`Switch to ${versionName(snapshot, pendingSwitch)}`}
+          icon={Layers}
+          title={`Switch to ${versionName(snapshot, pendingSwitch)}?`}
           confirmLabel="Save and switch"
           testId="version-switch-save-confirm"
           cancelTestId="version-switch-save-cancel"
@@ -549,7 +550,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
             if (target) void performSwitch(target);
           }}
         >
-          <p className="m-0 mt-1 text-[13px] leading-5 text-muted">
+          <p>
             dohc saves your changes in <span className="font-medium text-ink">{activeName}</span> first.
           </p>
         </ConfirmDialog>

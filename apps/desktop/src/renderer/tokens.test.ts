@@ -130,6 +130,8 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "subtle", bg: "bg", min: 3.0 },
     { fg: "subtle", bg: "panel", min: 3.0 },
     { fg: "subtle", bg: "panel2", min: 3.0 },
+    // A disabled primary or danger confirm: a subtle label on the line fill.
+    { fg: "subtle", bg: "line", min: 3.0 },
     // The find-match mark is an OPAQUE chip that must pop on every surface a
     // result row renders on: paper, the side panel and inset surfaces.
     // 3:1 is the graphical-object bar.
@@ -140,10 +142,9 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "match", bg: "bg", min: 4.5 },
     // Paper-colored text sits ON the mark, at AA like any other text.
     { fg: "bg", bg: "match", min: 4.5 },
-    // Labels on filled buttons use the paper color: primary on accent, and
-    // destructive confirms on danger. White on dark-theme danger was 2.7:1.
+    // A primary button's label uses the paper color. The danger confirm has
+    // its own pair, below.
     { fg: "bg", bg: "accent", min: 4.5 },
-    { fg: "bg", bg: "danger", min: 4.5 },
   ];
 
   for (const mode of ["light", "dark"] as const) {
@@ -225,6 +226,34 @@ describe("WCAG AA contrast, both modes", () => {
           }
         }
       }
+    });
+  }
+});
+
+// A danger confirm sits on a dialog's panel. Its label is text, and hover
+// fades the whole button to 90% over the panel. The fill is the control's
+// shape, a graphical object, and so is the keyboard halo around it.
+describe("the danger confirm", () => {
+  const HOVER = 0.9;
+  for (const mode of ["light", "dark"] as const) {
+    it(`${mode} label, fill and halo clear their thresholds`, () => {
+      const t = palette[mode];
+      const label = contrast(t.onDanger, t.dangerFill);
+      expect(label, `on-danger on danger-fill (${mode}) = ${label.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      const hover = contrast(mix(t.onDanger, t.panel, HOVER), mix(t.dangerFill, t.panel, HOVER));
+      expect(hover, `hovered label (${mode}) = ${hover.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      const fill = contrast(t.dangerFill, t.panel);
+      expect(fill, `danger-fill on panel (${mode}) = ${fill.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(t.focus);
+      expect(alpha, "focus").not.toBeNull();
+      const halo = contrast(mix(t.accent, t.panel, Number(alpha![1]) / 100), t.panel);
+      expect(halo, `halo on panel (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+    });
+    // A danger confirmation's glyph sits on its tinted tile.
+    it(`${mode} glyph clears 3:1 on its tile`, () => {
+      const t = palette[mode];
+      const glyph = contrast(t.danger, t.dangerTint);
+      expect(glyph, `danger on danger-tint (${mode}) = ${glyph.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
     });
   }
 });

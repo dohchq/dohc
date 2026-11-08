@@ -102,6 +102,22 @@ describe("ServerAccountDeleteDialog", () => {
     expect(confirm.disabled).toBe(false);
   });
 
+  // The panel takes focus as the warning opens, so it is the dialog a screen
+  // reader names. Its buttons take the arrows, as in every confirmation.
+  it("opens on a panel named by its title, and moves between its buttons with the arrows", async () => {
+    renderDialog();
+    await screen.findByTestId("server-account-delete-scope");
+    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Delete ice@dohc.dev on this server?" }));
+    typePassword("correct horse");
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    const confirm = screen.getByTestId("server-account-delete-confirm");
+    cancel.focus();
+    fireEvent.keyDown(cancel, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(confirm);
+    // A held Enter never deletes the account.
+    expect(fireEvent.keyDown(confirm, { key: "Enter", repeat: true })).toBe(false);
+  });
+
   it("deletes with the reviewed token and the typed password, and passes on a failed disconnect", async () => {
     bridgeMock.deleteServerAccount.mockResolvedValue({ ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: "store failed" });
     const { props } = renderDialog();
