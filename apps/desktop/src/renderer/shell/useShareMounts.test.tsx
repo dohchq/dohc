@@ -254,7 +254,7 @@ it("tells the person when dohc set aside a share's collision record", async () =
       results: [{ shareId: "share-1", label: "alex", status: "updated", changedPaths: 2, collisionRecordQuarantined: true }],
     }),
   });
-  const { result, showSuccessNotice, reportShellFailure, clearIdentity } = mountRows();
+  const { result, showSuccessNotice, reportShellFailure, clearIdentity, clearKind } = mountRows();
   const setAside = {
     message:
       "dohc could not read its record of your files with the same path as a file in alex. " +
@@ -275,6 +275,8 @@ it("tells the person when dohc set aside a share's collision record", async () =
     setAside,
     { message: "Shares refreshed — 2 files updated.", tone: "success", kind: "share-refresh", quiet: true },
   ]);
+  // The last summary ends first, so its open toast can't come back.
+  expect(clearKind).toHaveBeenCalledWith("share-refresh");
   expect(showSuccessNotice).not.toHaveBeenCalled();
   vi.unstubAllGlobals();
 });

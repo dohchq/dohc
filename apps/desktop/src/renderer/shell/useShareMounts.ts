@@ -222,7 +222,10 @@ export function useShareMounts(
       } else if (results.some((row) => row.status === "damaged")) {
         reportShellError(summary, null, null, "share-refresh");
       } else if (warned) {
-        // A warning row is this refresh's toast, so the summary goes into Notices without one.
+        // A warning row is this refresh's toast, so the summary goes into
+        // Notices without one. Ending the last summary first keeps its open
+        // toast from coming back after the warning's.
+        clearKind("share-refresh");
         reportShellFailure({ message: summary, tone: "success", kind: "share-refresh", quiet: true });
       } else {
         showSuccessNotice(summary, undefined, "share-refresh");
