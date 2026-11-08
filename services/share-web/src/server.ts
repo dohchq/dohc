@@ -1408,8 +1408,9 @@ export function createShareWebApplication({
         return response(result.body, {status: result.status, headers: result.headers});
       };
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
-      if (!mcpFailedSignIns.has(clientIp, nowMs())) return jsonResponse(REFUSAL_VALUE, {status: 429});
       const authorization = request.headers.get("authorization");
+      // A request with no token never reaches the relay, so a sign-in can always start.
+      if (authorization !== null && !mcpFailedSignIns.has(clientIp, nowMs())) return jsonResponse(REFUSAL_VALUE, {status: 429});
       const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/iu.exec(authorization ?? "")?.[1];
       if (!bearer) {
         if (authorization !== null) mcpFailedSignIns.allow(clientIp, nowMs());

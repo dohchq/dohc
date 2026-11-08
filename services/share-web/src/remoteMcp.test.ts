@@ -282,6 +282,10 @@ it("limits refused bearers by client address, and never spends for a valid one",
   expect((await send("192.0.2.2", `Bearer ${"D".repeat(43)}`)).status).toBe(429);
   expect((await send("192.0.2.2", `Bearer ${bearer}`)).status).toBe(429);
   expect(f.calls.length).toBe(relayCalls);
+  // A sign-in can still start from that address.
+  const unsigned = await f.send(mcpPath, {method: "POST", body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"}),
+    headers: {"content-type": "application/json", "x-dohc-share-web-client-ip": "192.0.2.2"}});
+  expect([unsigned.status, unsigned.headers.get("www-authenticate")]).toEqual([401, challenge]);
   // Another address is not affected, and the scheme's case does not matter.
   expect((await send("192.0.2.3", `bearer ${bearer}`)).status).toBe(200);
 });

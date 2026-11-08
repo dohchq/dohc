@@ -71,7 +71,7 @@ Settled file reads can lag live documents. File reads are limited to 256 KiB; ot
 
 share-web keeps no agent token. Browser cookies cannot authenticate MCP requests, and share-web refuses a token in the query string.
 A token never contains the relay workload key or a browser account credential.
-Each refused bearer spends one from its client address's allowance of 30, which refills one every two seconds. When the allowance is spent, every MCP request from that address gets 429 until it refills. A valid bearer never spends from it.
+Each refused bearer spends one from its client address's allowance of 30, which refills one every two seconds. When the allowance is spent, every MCP request from that address that carries a bearer gets 429 until it refills, valid or not. A valid bearer never spends from it, and a request without one, the first step of sign-in, is never refused for it.
 Do not log `Authorization` headers, `/oauth/token` request or response bodies, consent form fields, or consent cookies. Do not log MCP paths or the `/oauth/authorize` query, which hold the link secret. [Public origin and proxy](#public-origin-and-proxy) lists each one.
 
 Each edit opens a fresh live connection and adds a Yjs client clock to the document.
