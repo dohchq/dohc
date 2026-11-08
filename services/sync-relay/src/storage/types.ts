@@ -55,7 +55,10 @@ export interface CurrentLiveBindingRequest {
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
     | { readonly kind: "link"; readonly sessionId: string;
-        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string };
+        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string }
+    // An agent connected through its link edits as the link principal its connection holds.
+    | { readonly kind: "link"; readonly agentConnectionId: string; readonly accessTokenHash: string;
+        readonly resourceHash: string; readonly grantId: string; readonly workspaceId: string };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {

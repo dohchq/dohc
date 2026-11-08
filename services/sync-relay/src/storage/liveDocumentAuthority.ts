@@ -69,7 +69,8 @@ import { assertWorkspaceQuota } from "./workspaces";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./liveDeliveryReservations";
 import { nextShareDiscussionRevision } from "./discussion";
 import { liveBrowserActor } from "../liveBrowserContext";
-import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment } from "./linkEnrollment";
+import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment, type LinkEnrollment } from "./linkEnrollment";
+import { agentWriteAuthorityInTransaction } from "./agentConnections";
 import { authorizeLinkShareAction } from "../shareAuthorization";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
@@ -84,6 +85,12 @@ export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest):
     ? Object.getOwnPropertyDescriptor(outer.actor, "kind") : undefined;
   if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named" && kind.value !== "link")) {
     throw new TypeError("live authority requires an authenticated actor");
+  }
+  if (kind.value === "link" && Object.getOwnPropertyDescriptor(outer.actor, "agentConnectionId") !== undefined) {
+    const actor = ticketRecord(outer.actor, ["kind", "agentConnectionId", "accessTokenHash", "resourceHash", "grantId", "workspaceId"]);
+    return { document, actor: { kind: "link", agentConnectionId: parseLiveUpdateIdentifier(actor.agentConnectionId, "agent connection ID"),
+      accessTokenHash: parseTicketHash(actor.accessTokenHash), resourceHash: parseTicketHash(actor.resourceHash),
+      grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"), workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID") } };
   }
   if (kind.value === "link") {
     const actor = ticketRecord(outer.actor, ["kind", "sessionId", "profileTokenHash", "grantId", "workspaceId"]);
@@ -371,10 +378,17 @@ export function resolveLiveObjectHostBinding(storage: StorageContext, value: Liv
 function currentLinkEdit(storage: StorageContext, actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "link" }>) {
   const now = Date.now();
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid link authority clock.");
-  const session = storage.db.prepare("SELECT capability_hash FROM sync_relay_link_sessions WHERE session_id=?").get(actor.sessionId);
-  if (!session) return null;
-  const enrollment = readLinkEnrollment(storage, {capabilityHash: String(session.capability_hash), profileTokenHash: actor.profileTokenHash}, now);
-  if (!enrollment || enrollment.authority.session_id !== actor.sessionId || enrollment.authority.grant_id !== actor.grantId ||
+  let enrollment: LinkEnrollment | null;
+  if ("agentConnectionId" in actor) {
+    const agent = agentWriteAuthorityInTransaction(storage, {accessTokenHash: actor.accessTokenHash, resourceHash: actor.resourceHash}, now);
+    enrollment = agent?.connection.connectionId === actor.agentConnectionId ? agent.enrollment : null;
+  } else {
+    const session = storage.db.prepare("SELECT capability_hash FROM sync_relay_link_sessions WHERE session_id=?").get(actor.sessionId);
+    if (!session) return null;
+    enrollment = readLinkEnrollment(storage, {capabilityHash: String(session.capability_hash), profileTokenHash: actor.profileTokenHash}, now);
+    if (enrollment?.authority.session_id !== actor.sessionId) return null;
+  }
+  if (!enrollment || enrollment.authority.grant_id !== actor.grantId ||
     enrollment.authority.workspace_id !== actor.workspaceId || linkWriteRefusal(enrollment)) return null;
   const authorized = authorizeLinkShareAction({ storage, grantId: actor.grantId, action: "live-edit" });
   if (!authorized.ok || !isLiveEditShareSelector(authorized.effectiveSelector)) return null;
@@ -385,15 +399,17 @@ function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTick
   try {
     for (const column of LIVE_TICKET_COLUMNS) {
       const value = row[column];
-      if ((column === "redeemed_at_ms" || column === "link_session_id") && value === null) continue;
+      if ((column === "redeemed_at_ms" || column === "link_session_id" || column === "agent_connection_id") && value === null) continue;
       if (LIVE_TICKET_INTEGER_COLUMNS.has(column)) {
         if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error();
       } else if (typeof value !== "string") throw new Error();
     }
     parseTicketHash(row.token_hash);
     if ((row.principal_kind !== "named" && row.principal_kind !== "link") || row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
-    if (row.principal_kind === "named" ? row.link_session_id !== null :
-      parseLiveUpdateIdentifier(row.link_session_id, "link session ID") !== row.link_session_id) throw new Error();
+    if (row.principal_kind === "named" ? row.link_session_id !== null || row.agent_connection_id !== null :
+      row.agent_connection_id === null ? parseLiveUpdateIdentifier(row.link_session_id, "link session ID") !== row.link_session_id :
+        row.link_session_id !== null ||
+        parseLiveUpdateIdentifier(row.agent_connection_id, "agent connection ID") !== row.agent_connection_id) throw new Error();
     parseLiveUpdateDigest(row.lineage_claim_id);
     const claims = parseLiveTicketClaims({
       ticketId: row.ticket_id, audience: row.audience,
@@ -425,8 +441,8 @@ export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveBrowser
     const share = grant && storage.getShare(grant.shareId);
     return !!grant && grant.shareId === scope.shareId && !!share && share.workspaceId === scope.workspaceId &&
       (scope.kind === "named" ? authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: scope.userId, grantId: scope.grantId }).ok :
-        !!storage.db.prepare("SELECT 1 FROM sync_relay_link_sessions WHERE session_id=? AND capability_hash=?")
-          .get(scope.sessionId, scope.capabilityHash) && currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
+        ("agentConnectionId" in scope || !!storage.db.prepare("SELECT 1 FROM sync_relay_link_sessions WHERE session_id=? AND capability_hash=?")
+          .get(scope.sessionId, scope.capabilityHash)) && currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
   }
 
 export function currentTicketAuthority(storage: StorageContext, scope: LiveBrowserContext, objectId: string, report: TicketHostReport):
@@ -450,7 +466,7 @@ export function matchingTicket(storage: StorageContext, input: LiveTicketLookup,
     if (redeemedAtMs !== null || now < claims.mintedAtMs || now >= claims.expiresAtMs || claims.audience !== input.audience ||
       claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== input.scope.kind ||
       (input.scope.kind === "named" ? claims.authority.principalId !== input.scope.userId :
-        row.link_session_id !== input.scope.sessionId ||
+        ("agentConnectionId" in input.scope ? row.agent_connection_id !== input.scope.agentConnectionId : row.link_session_id !== input.scope.sessionId) ||
         currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal?.principalId !== claims.authority.principalId) ||
       claims.authority.grantId !== input.scope.grantId ||
       !ticketScopeIsCurrent(storage, input.scope)) throw LIVE_TICKET_REFUSED;
@@ -477,11 +493,14 @@ export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): 
         const actor = liveBrowserActor(owned.scope);
         const link = currentLinkEdit(storage, actor);
         if (!link || !ticketScopeIsCurrent(storage, owned.scope) || linkPrincipalLimitReached(storage, link.enrollment)) throw LIVE_TICKET_REFUSED;
-        const principalId = link.enrollment.principal?.principalId ?? parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
-        if (!link.enrollment.principal) assertWorkspaceQuota(storage, owned.scope.workspaceId,
-          linkPrincipalStorageBytes(principalId, owned.scope.grantId, owned.scope.profileTokenHash));
-        commitLinkEnrollment(storage, { ...owned.scope, enrollment: link.enrollment, principalId,
-          displayName: null, createdAtMs: now, discussionRevision: link.enrollment.principal ? Number(link.enrollment.authority.discussion_revision) : nextShareDiscussionRevision(storage, owned.scope.shareId) });
+        // An agent's connection already holds its principal; only a holder enrolls here.
+        if (!("agentConnectionId" in owned.scope)) {
+          const principalId = link.enrollment.principal?.principalId ?? parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
+          if (!link.enrollment.principal) assertWorkspaceQuota(storage, owned.scope.workspaceId,
+            linkPrincipalStorageBytes(principalId, owned.scope.grantId, owned.scope.profileTokenHash));
+          commitLinkEnrollment(storage, { ...owned.scope, enrollment: link.enrollment, principalId,
+            displayName: null, createdAtMs: now, discussionRevision: link.enrollment.principal ? Number(link.enrollment.authority.discussion_revision) : nextShareDiscussionRevision(storage, owned.scope.shareId) });
+        }
       }
       const current = currentTicketAuthority(storage, owned.scope, objectId, report);
       const claims = parseLiveTicketClaims({ ticketId, audience: owned.audience, authority: current.authority,
@@ -499,12 +518,13 @@ export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): 
       )`).get(owned.scope.workspaceId, claims.authority.principalKind, claims.authority.principalId, owned.scope.grantId, now, policy.retainedTicketsPerPrincipalGrant);
       if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant) throw LIVE_TICKET_REFUSED;
       storage.db.prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`).run(
         claims.ticketId, owned.tokenHash, claims.audience, claims.binding.workspaceId, claims.binding.mainVersionId,
         claims.binding.objectId, claims.binding.lineageClaimId, claims.binding.currentPath, JSON.stringify(claims.binding.selectorPaths),
         claims.binding.restoreFenceGeneration, claims.authority.principalKind, claims.authority.principalId,
         claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
-        owned.scope.kind === "link" ? owned.scope.sessionId : null,
+        "sessionId" in owned.scope ? owned.scope.sessionId : null,
+        "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
       );
       return { expiresAtMs: claims.expiresAtMs,
         ...(current.authority.principalKind === "link" ? {publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority)} : {}) };

@@ -31,8 +31,18 @@ Each read and write checks the access token's expiry, the connection's status,
 the MCP address, the link's current credential and generation, and the current
 access. With this header, an agent reads the share, its files, its discussion,
 and a Group link's messages. It posts to the discussion and writes a Collection
-through an Edit link. Agent chat takes the access token and the MCP address in
-its request body and makes the same checks. Other link routes refuse an agent.
+through an Edit link. Through an Edit link, it also finds a Markdown file and
+opens it as a live document. Agent chat takes the access token and the MCP
+address in its request body and makes the same checks. Other link routes refuse
+an agent.
+
+A live ticket issued to an agent names its connection. Redeeming the ticket
+checks the access token again, with the clock read in that transaction. So does
+every later check of the live session: each wake, read, and edit. Disconnect,
+Reset link, and End link each commit a relay write, which wakes every live
+session, so the agent's session closes. Nothing writes when an access token
+expires, so its session closes at the next check. Each live edit records the
+connection's own link principal, never a link holder's.
 
 On the link routes, a response, blob or JSON, checks again before each chunk.
 Agent chat checks once, before it answers. A write checks again in its
@@ -43,7 +53,8 @@ write it makes records its agent connection.
 The relay keeps a used refresh token for 30 days after its use. Reuse in that
 time ends the connection. After that the token is unknown, and the next refresh
 deletes it.
-See the [agent link tests](../../services/sync-relay/src/linkAgentAuthority.test.ts).
+See the [agent link tests](../../services/sync-relay/src/linkAgentAuthority.test.ts)
+and the [live route tests](../../services/sync-relay/src/namedLiveRoutes.test.ts).
 
 ## Live documents have one canonical host
 

@@ -121,8 +121,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const trusted = (headers: Headers) => hosts.has(headers.get("host") ?? "") && (desktop
     ? (!headers.has("origin") || headers.get("origin") === origin) && /^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") && !headers.has("cookie")
     : headers.get("origin") === origin && verifyRelayExchangeKey(headers.get("x-dohc-relay-exchange-key"), keyHash));
+  // A link route forwards only the headers present, so the agent resolver sees exactly what was sent.
   const credentials = (headers: Headers): Record<string, string> => (kind === "owner" || desktop) ? { authorization: headers.get("authorization") ?? "" } : kind === "named" ? { cookie: headers.get("cookie") ?? "" } :
-    { authorization: headers.get("authorization") ?? "", "x-dohc-link-profile-secret": headers.get("x-dohc-link-profile-secret") ?? "" };
+    Object.fromEntries(["authorization", "x-dohc-link-profile-secret", "x-dohc-agent-resource", "x-dohc-relay-exchange-key"]
+      .flatMap((name): [string, string][] => { const value = headers.get(name); return value === null ? [] : [[name, value]]; }));
   const sessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{12}$/.test(value);
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.drainTimeoutMs));
 
@@ -178,7 +180,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     let ownerTarget: {document: LiveDocumentKey; shareId: string} | undefined;
     try {
       headers = new Headers();
-      const selected = new Set(["host", "origin", "cookie", "authorization", "x-dohc-link-profile-secret", "sec-websocket-protocol", "x-dohc-relay-exchange-key"]);
+      const selected = new Set(["host", "origin", "cookie", "authorization", "x-dohc-link-profile-secret", "x-dohc-agent-resource", "sec-websocket-protocol", "x-dohc-relay-exchange-key"]);
       for (let index = 0; index < request.rawHeaders.length; index += 2) {
         const name = request.rawHeaders[index]!.toLowerCase();
         if (!selected.has(name)) continue;
@@ -305,7 +307,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }
         connectionScopes.set(stop, {workspaceId: context.workspaceId, ...(context.kind === "named" ? {userId: context.userId} : {})});
-        const principalKey = context.kind === "named" ? context.userId : context.profileTokenHash;
+        const principalKey = context.kind === "named" ? context.userId :
+          "agentConnectionId" in context ? `agent:${context.agentConnectionId}` : context.profileTokenHash;
         const reservations: [string, number, LiveConnectionLimitCode][] = [
           [JSON.stringify(["session", context.kind, principalKey, context.workspaceId, context.grantId, discriminator]), limits.maxConnectionsPerSession, "live_session_limit"],
           [JSON.stringify(context.kind === "named" ? ["principal", "named", context.userId] :

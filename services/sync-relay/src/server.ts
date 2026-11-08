@@ -66,7 +66,7 @@ import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/sha
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkChatRoutes } from "./linkChatRoutes";
 import { createLinkReadRoutes } from "./linkReadRoutes";
-import { createLinkAuthorityResolver, type LinkAuthority, type LinkJsonResponse } from "./linkAuthority";
+import { createLinkAuthorityResolver, type LinkAuthority, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
 import { createShareInventoryRoutes } from "./shareInventoryRoutes";
@@ -274,6 +274,8 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
+  linkAuthority: LinkAuthorityResolver;
   dispose(): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
@@ -1139,6 +1141,7 @@ export function createSyncRelayHandler({
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
+    linkAuthority,
     dispose(){replicaLinkReads?.close();},
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
       presence.deleteAccount(userId, workspaceIds);

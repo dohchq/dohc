@@ -3,7 +3,9 @@ import {createLinkLiveHttp} from "./linkLiveHttp";
 import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {createLiveTickets} from "./liveTickets";
 import {hashLinkBearer, hashLinkProfileSecret} from "./linkSecurity";
-import {audience, binding, fixture as ticketFixture, key, report, scope} from "./liveTickets.test-helper";
+import {audience, binding, fixture as ticketFixture, key, report, scope, seedLinkAgent} from "./liveTickets.test-helper";
+import {createLinkAuthorityResolver} from "./linkAuthority";
+import {AGENT_ACCESS_TOKEN_TTL_MS} from "./storage/agentConnections";
 
 const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
 const exchangeKey = "private-link-metadata-exchange-at-least-32", discriminator = "abcdefghijkl";
@@ -29,6 +31,33 @@ function request(body: unknown = {discriminator, path: binding.currentPath}, pat
     "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey, authorization: `Bearer ${bearer}`,
     "x-dohc-link-profile-secret": profile, ...headers}});
 }
+// The live document route with the link resolver the MCP tool loop's other routes use.
+function agentHandle(f: Awaited<ReturnType<typeof fixture>>) {
+  const holderOnly = () => { throw new Error("A link holder never reaches the agent resolver."); };
+  const linkAuthority = createLinkAuthorityResolver({storage: f.storage, linkKey: key, publicEditRelease: {version: 1}, relayExchangeKeyConfigured: true,
+    hasValidRelayExchangeKey: request => request.headers.get("x-dohc-relay-exchange-key") === exchangeKey, nowMs: () => Date.now(),
+    requireLinkCapability: holderOnly, requireFreshLinkRead: holderOnly});
+  return createLinkLiveHttp({publicEditRelease: {version: 1}, storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience,
+    exchangeKey, limits, linkAuthority});
+}
+function agentRequest(agent: ReturnType<typeof seedLinkAgent>, body: unknown = {discriminator, path: binding.currentPath}, path = "/sync/live/link-document",
+  headers: Record<string, string> = {}) {
+  return new Request(`https://relay.test${path}`, {method: "POST", body: JSON.stringify(body), headers: {host: "relay.test", origin: audience,
+    "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey, ...agent.headers, ...headers}});
+}
+it("finds a document for a connected agent, and never opens a browser gateway session for one", async () => {
+  const f = await fixture(), handle = agentHandle(f);
+  const agent = seedLinkAgent(f.raw, {connectionId: "agent-connection", workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
+    generation: 4, expiresAtMs: 1000 + AGENT_ACCESS_TOKEN_TTL_MS});
+  expect(await (await handle(agentRequest(agent))).json()).toEqual({objectId: binding.objectId});
+  expect(await (await handle(request())).json()).toEqual({objectId: binding.objectId});
+  expect((await f.handle(agentRequest(agent))).status).toBe(404);
+  for (const headers of [{"x-dohc-agent-resource": `${audience}/mcp/s/elsewhere`}, {"x-dohc-link-profile-secret": profile}])
+    expect((await handle(agentRequest(agent, undefined, undefined, headers))).status).toBe(404);
+  expect((await handle(agentRequest(agent, {discriminator}, "/sync/live/link-session"))).status).toBe(404);
+  vi.mocked(Date.now).mockReturnValue(agent.expiresAtMs);
+  expect((await handle(agentRequest(agent))).status).toBe(404);
+});
 it("resolves only the existing current Markdown object within the link selector", async () => {
   const f = await fixture(); expect(await (await f.handle(request())).json()).toEqual({objectId: binding.objectId});
   for (const path of ["private/a.md", "docs/missing.md", "docs/a.excalidraw"]) expect((await f.handle(request({discriminator, path}))).status).toBe(404);
