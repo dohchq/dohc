@@ -983,9 +983,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }
         }
         // Pages live editing refused report together, with the way to Live
-        // documents, and any other failures report together apart from them.
+        // documents. Each folder it refused reports alone, so its notice keeps
+        // that way too. Any other failures report together apart from them.
         const live = failed.filter(({ livePage }) => livePage?.action === "delete" || livePage?.action === "move");
-        for (const group of [live, failed.filter((entry) => !live.includes(entry))]) {
+        const folders = failed.filter((entry) => !live.includes(entry) && isLiveFolderRefusal(entry.cause));
+        const rest = failed.filter((entry) => !live.includes(entry) && !folders.includes(entry));
+        for (const group of [live, ...folders.map((entry) => [entry]), rest]) {
           const [first] = group;
           if (!first) continue;
           if (group.length === 1) {

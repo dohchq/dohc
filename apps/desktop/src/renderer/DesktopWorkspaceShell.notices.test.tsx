@@ -4738,6 +4738,38 @@ describe("a refused folder move", () => {
   });
 });
 
+describe("a folder refused in a delete of several rows", () => {
+  const TITLE = `dohc can't delete "box" while a page in it has live editing on`;
+  const BODY = "In Live documents, stop live editing for every page in this folder, then delete the folder again.";
+  it("keeps its own notice and Open Live documents after another row failed first", async () => {
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "archive") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+      if (relativePath === "box") throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LiveFolderError: ${TITLE}\n${BODY}`);
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), { deleteWorkspacePath });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "box/page.md", kind: "file" as const }], folders: ["archive", "box"] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await row("archive"));
+    await user.keyboard("{Shift>}");
+    await user.click(await row("box"));
+    await user.keyboard("{/Shift}{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    // Only the newest failure is a toast, so the folder's notice waits in Notices.
+    await screen.findByTestId("workspace-shell-error");
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["archive", "box"]);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const notice = (await within(notices).findByText(TITLE)).closest("li")!;
+    expect(notice.textContent).toContain(BODY);
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
+    expect(notices.textContent).toContain("The disk is full.");
+  });
+});
+
 describe("a refused rename of a page this computer owns live", () => {
   const TITLE = `dohc can't rename "a.md" while it has live editing on`;
   const BODY = "In Live documents, stop live editing for this page, then rename it again.";

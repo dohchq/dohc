@@ -581,6 +581,37 @@ describe("selecting several rows in Files", () => {
     expect(onError.mock.calls[1]![4]).toBeUndefined();
   });
 
+  it("reports a folder live editing refused on its own, after another failure in the same delete", async () => {
+    const folderRefusal = new Error(
+      `Error invoking remote method 'desktop:delete-workspace-path': LiveFolderError: dohc can't delete "box" while a page in it has live editing on\nIn Live documents, stop live editing for every page in this folder, then delete the folder again.`,
+    );
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "archive") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+      if (relativePath === "box") throw folderRefusal;
+    });
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
+    const onError = vi.fn();
+    const onPathsChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<Fixture {...many({ folders: ["archive", "box"], onError, onPathsChanged })} />);
+    await user.click(row("b.md"));
+    await user.keyboard("{Control>}a{/Control}{Delete}");
+    await user.click(screen.getByTestId("confirm-delete"));
+
+    await waitFor(() => expect(onPathsChanged).toHaveBeenCalledTimes(1));
+    const order = deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
+    expect(order.indexOf("archive")).toBeLessThan(order.indexOf("box"));
+    expect(onError).toHaveBeenCalledTimes(2);
+    // The folder's report keeps its own refusal, which the shell turns into
+    // the way to Live documents, and its Try again.
+    const folder = onError.mock.calls.find(([, , , change]) => change?.path === "box");
+    expect(folder?.[1]).toBe(folderRefusal);
+    expect(folder?.[2]).toEqual(expect.any(Function));
+    const other = onError.mock.calls.find(([, , , change]) => change?.path === "archive");
+    expect(other?.[1]).not.toBe(folderRefusal);
+    expect(other?.[4]).toBeUndefined();
+  });
+
   it("deletes the focused row alone when it is outside the selection, as its menu would", () => {
     render(<Fixture {...many()} />);
     const dialog = () => screen.getByTestId("delete-confirm");
