@@ -141,6 +141,7 @@ import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAcce
 import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
+import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
 import {
@@ -4982,6 +4983,12 @@ const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
 });
+// The Share dialog's Agents list and Disconnect, for the CLI and MCP.
+const shareLinkAgentsForCli = createShareLinkAgentActions<RegistryEntry>({
+  remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
+  relayJson: relayShareJsonWithCredentials,
+  relayShareErrorCopy,
+});
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even
 // one another window signed in with while deletion ran, and keeps another
@@ -5021,6 +5028,7 @@ const moveAcceptedEdits = createMoveAcceptedEditsGuard({
 
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
+  shareLinkAgents: shareLinkAgentsForCli,
   beforeMove: moveAcceptedEdits.beforeMove,
   ownerLiveRecovery: {
     keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),

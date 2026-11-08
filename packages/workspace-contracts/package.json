@@ -12,6 +12,7 @@
     "./access": "./src/access.ts",
     "./links": "./src/links.ts",
     "./share-copy": "./src/share-copy.ts",
+    "./share-link-agents": "./src/shareLinkAgents.ts",
     "./automation-schedule": "./src/automationSchedule.ts",
     "./automations": "./src/automations.ts",
     "./automation-controls": "./src/automationControls.ts",

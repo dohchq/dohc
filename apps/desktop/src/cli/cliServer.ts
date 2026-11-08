@@ -338,6 +338,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   signal?: AbortSignal;
   stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  shareLinkAgents?: {
+    list(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentsInput): Promise<import("@dohc/workspace-contracts/share-link-agents").ListRelayShareLinkAgentsResult>;
+    disconnect(input: import("@dohc/workspace-contracts/share-link-agents").ShareLinkAgentDisconnectInput): Promise<import("@dohc/workspace-contracts/share-link-agents").DisconnectRelayShareLinkAgentResult>;
+  };
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
@@ -2583,6 +2587,13 @@ async function dispatchWorkspace(
     case "shareCopy":
       if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
       return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
+    case "shareAgents":
+      if (context.readOnly || !context.shareLinkAgents) throw new CliCommandError("Open the owning workspace to list a link's agents.");
+      return context.shareLinkAgents.list({ shareId: request.args.shareId, grantId: request.args.grantId,
+        ...(request.args.cursor === undefined ? {} : { cursor: request.args.cursor }) });
+    case "shareDisconnect":
+      if (context.readOnly || !context.shareLinkAgents) throw new CliCommandError("Open the owning workspace to disconnect a link's agent.");
+      return context.shareLinkAgents.disconnect({ shareId: request.args.shareId, grantId: request.args.grantId, connectionId: request.args.connectionId });
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.refresh();

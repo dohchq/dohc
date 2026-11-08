@@ -38,6 +38,10 @@ import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
+import type {
+  DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult,
+  ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
+} from "@dohc/workspace-contracts/share-link-agents";
 import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
@@ -76,6 +80,11 @@ interface DesktopCliServerDependencies<State> {
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  /** The Share dialog's Agents list and Disconnect for one link (shareLinkAgentActions.ts). */
+  shareLinkAgents?: {
+    list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: ShareLinkAgentsInput): Promise<ListRelayShareLinkAgentsResult>;
+    disconnect(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: ShareLinkAgentDisconnectInput): Promise<DisconnectRelayShareLinkAgentResult>;
+  };
   /** Catches a live page, or a folder holding one, up with the server before an agent moves it. */
   beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
@@ -309,6 +318,16 @@ export function createDesktopCliServer<State>(
           if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.shareCopy!(operation, input);
         }) } : {}),
+      ...(dependencies.shareLinkAgents ? { shareLinkAgents: {
+        list: (input: ShareLinkAgentsInput) => withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+          return dependencies.shareLinkAgents!.list(operation, input);
+        }),
+        disconnect: (input: ShareLinkAgentDisconnectInput) => withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+          return dependencies.shareLinkAgents!.disconnect(operation, input);
+        }),
+      } } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {

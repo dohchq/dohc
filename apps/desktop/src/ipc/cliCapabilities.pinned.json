@@ -196,6 +196,12 @@
     "shareCopy": [
       "share.copy.read"
     ],
+    "shareAgents": [
+      "share.link.agents.list"
+    ],
+    "shareDisconnect": [
+      "share.link.agent.disconnect"
+    ],
     "accountDeletePreview": [
       "account.delete.preview"
     ],
@@ -338,6 +344,8 @@
     "automation press": "automation.button.press",
     "sync stop": "workspace.sync.stop",
     "share copy": "share.copy.read",
+    "share agents": "share.link.agents.list",
+    "share disconnect": "share.link.agent.disconnect",
     "account deletePreview": "account.delete.preview",
     "account delete": "account.delete",
     "history operation": "history.operation.read",

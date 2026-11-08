@@ -38,10 +38,6 @@ import {
   RelayShareGrantRevokeResponse,
   RelayShareLinkCreateResponse,
   RelayShareLinkDependentConflict,
-  RelayShareLinkAgentDisconnectResponse,
-  RelayShareLinkAgentsResponse,
-  ListRelayShareLinkAgentsResult,
-  DisconnectRelayShareLinkAgentResult,
   RelayShareLinkEndResponse,
   RelayShareLinkListResponse,
   RelayShareLinkRotateResponse,
@@ -57,6 +53,7 @@ import {
 import { z } from "zod";
 import {OwnerRestoreActionResponse} from "./ownerRestoreContract";
 import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import { createShareLinkAgentActions } from "./shareLinkAgentActions";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -906,49 +903,18 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  // The relay answers only the owner of the share and its workspace, for an
-  // active link on that share. Main names the workspace this window holds.
-  const linkAgentsPath = (workspaceId: string, input: { shareId: string; grantId: string }) =>
-    `/sync/${encodeURIComponent(workspaceId)}/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/agents`;
-
-  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(
-      operation,
-      async (operation, credentials, session) => {
-        const query = input.cursor === undefined ? "" : `?cursor=${encodeURIComponent(input.cursor)}`;
-        const relayResult = await session.run(() =>
-          relayShareJsonWithCredentials<unknown>(credentials, `${linkAgentsPath(operation.workspace.workspaceId, input)}${query}`),
-        );
-        const parsed = RelayShareLinkAgentsResponse.safeParse(relayResult);
-        if (!parsed.success || parsed.data.nextCursor === input.cursor) {
-          throw new Error(relayShareErrorCopy(500, null));
-        }
-        return ListRelayShareLinkAgentsResult.parse({ agents: parsed.data.agents, nextCursor: parsed.data.nextCursor });
-      },
-      assertOriginalWorkspace,
-    );
-  };
-
-  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(
-      operation,
-      async (operation, credentials, session) => {
-        const relayResult = await session.run(() =>
-          relayShareJsonWithCredentials<unknown>(
-            credentials,
-            `${linkAgentsPath(operation.workspace.workspaceId, input)}/${encodeURIComponent(input.connectionId)}/disconnect`,
-            { method: "POST" },
-          ),
-        );
-        const parsed = RelayShareLinkAgentDisconnectResponse.safeParse(relayResult);
-        if (!parsed.success || parsed.data.agent.connectionId !== input.connectionId) {
-          throw new Error(relayShareErrorCopy(500, null));
-        }
-        return DisconnectRelayShareLinkAgentResult.parse({ connectionId: input.connectionId });
-      },
-      assertOriginalWorkspace,
-    );
-  };
+  // The active-workspace guard has matched the payload's workspace to this
+  // window. The actions name the workspace the operation holds.
+  const linkAgents = createShareLinkAgentActions<Workspace>({
+    remoteForWorkspace,
+    currentCredentialGeneration,
+    relayJson: relayShareJsonWithCredentials,
+    relayShareErrorCopy,
+  });
+  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+    linkAgents.list(operation, input);
+  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+    linkAgents.disconnect(operation, input);
 
   const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (input, { operation }) => {
     return ownerRelayShareOperation(

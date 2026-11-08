@@ -118,7 +118,7 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
-const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
+const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy", agents: "shareAgents", disconnect: "shareDisconnect" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
   refresh: "accessRefresh",
@@ -188,6 +188,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_links_in: { cli: "linksIn" },
   dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
+  dohc_list_link_agents: { cli: "shareAgents" },
+  dohc_disconnect_link_agent: { cli: "shareDisconnect" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
@@ -410,6 +412,7 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_wait_for_messages: "The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.",
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_link_agents: "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",

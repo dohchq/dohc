@@ -319,6 +319,26 @@ function renderAutomationPress(result: Extract<CliResultByVerb["automationPress"
   ].join("\n");
 }
 
+// An agent reports its own name. Print it quoted, as reported, with each
+// character that could move, recolor, or reorder the terminal as its code point.
+function reportedText(name: string): string {
+  return `"${name.replace(/[\\"\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, (char) =>
+    char === "\\" || char === "\"" ? `\\${char}` : `\\u{${char.codePointAt(0)!.toString(16)}}`)}"`;
+}
+
+function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
+  if (page.agents.length === 0 && page.nextCursor === null) return "No agent is connected through this link.";
+  return [
+    ...page.agents.map((agent) => [
+      agent.connectionId,
+      agent.reportedName === null ? "no reported name" : `reported name ${reportedText(agent.reportedName)}`,
+      `signed in ${dateTime(agent.connectedAtMs)}`,
+      agent.lastActionAtMs === null ? "no action yet" : `last action ${dateTime(agent.lastActionAtMs)}`,
+    ].join(" · ")),
+    ...(page.nextCursor === null ? [] : [`More agents; use --cursor ${page.nextCursor}`]),
+  ].join("\n");
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
@@ -352,6 +372,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "accessObject":
     case "accessSharing":
       return JSON.stringify(result, null, 2);
+    case "shareAgents":
+      return renderLinkAgents(result as CliResultByVerb["shareAgents"]);
+    case "shareDisconnect":
+      return `Disconnected ${(result as CliResultByVerb["shareDisconnect"]).connectionId}`;
     case "automationList":
     case "automationSwitch":
       return JSON.stringify(result, null, 2);
