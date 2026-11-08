@@ -54,7 +54,7 @@ export function RelayShareDialog(props: {
   return (
     <div
       data-testid="share-dialog"
-      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+      className="dohc-elevated flex max-h-[calc(100dvh-2rem)] w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
         <Share2 size={14} aria-hidden className="text-subtle" />
@@ -74,24 +74,28 @@ export function RelayShareDialog(props: {
         )}
       </p>
 
-      <ShareSetup reason={reason} context={props.accessContext} server={props.server} onLeave={linkPane.close} />
+      {/* The title stays while the rest scrolls inside the window. The
+          padding gives focus rings room inside the scroll edge. */}
+      <div className="-m-2 flex min-h-0 flex-col gap-3 overflow-y-auto p-2">
+        <ShareSetup reason={reason} context={props.accessContext} server={props.server} onLeave={linkPane.close} />
 
-      <div inert={held || undefined} className={held ? "flex flex-col gap-3 opacity-50" : "flex flex-col gap-3"}>
-        <SegmentedControl
-          label="Share with"
-          value={shareWith}
-          options={SHARE_WITH_OPTIONS}
-          onChange={setShareWith}
-        />
+        <div inert={held || undefined} className={held ? "flex flex-col gap-3 opacity-50" : "flex flex-col gap-3"}>
+          <SegmentedControl
+            label="Share with"
+            value={shareWith}
+            options={SHARE_WITH_OPTIONS}
+            onChange={setShareWith}
+          />
 
-        <EmailShareForm
-          key={linkPane.scope}
-          workspaceId={props.workspaceId}
-          target={props.target}
-          visible={shareWith === "email"}
-          onDone={linkPane.close}
-        />
-        {linkPane.content}
+          <EmailShareForm
+            key={linkPane.scope}
+            workspaceId={props.workspaceId}
+            target={props.target}
+            visible={shareWith === "email"}
+            onDone={linkPane.close}
+          />
+          {linkPane.content}
+        </div>
       </div>
     </div>
   );

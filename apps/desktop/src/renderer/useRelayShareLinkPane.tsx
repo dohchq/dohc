@@ -1,5 +1,5 @@
 import { ipcErrorMessage } from "./ipcError";
-import { Bot } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import {
   useLayoutEffect,
   useMemo,
@@ -1709,7 +1709,7 @@ export function useRelayShareLinkPane(props: {
                 <CopyButton
                   key={minted.url}
                   size="header"
-                  icon={Bot}
+                  icon={Sparkles}
                   label="Copy for an agent"
                   getText={() => agentAddressFor(minted.url)}
                   sensitive={AGENT_ADDRESS_SECRET}

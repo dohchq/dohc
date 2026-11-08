@@ -48,6 +48,12 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
 
 async function shoot(page: Page, dialog: Locator, name: string): Promise<void> {
   await page.mouse.move(0, 0);
+  // The dialog fits the window; a long one scrolls inside it.
+  const box = await dialog.boundingBox();
+  const windowHeight = await page.evaluate(() => window.innerHeight);
+  expect(box).not.toBeNull();
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(windowHeight);
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
     await dialog.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`) });
@@ -136,6 +142,7 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await expect(agents).toContainText("Claude Code");
     await expect(agents).toContainText("Name reported by the agent");
     await expect(agents).toContainText("The agent reported no name");
+    await agents.scrollIntoViewIfNeeded();
     await shoot(page, dialog, "share-link-b-agents-two");
 
     // Disconnect ends the agent's connection: its next call is refused.
