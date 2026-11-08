@@ -6484,9 +6484,6 @@ export function DesktopWorkspaceShell(props: {
           onPinnedAppMenu={(appRoot) => void showPinnedAppMenu(appRoot)}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
-          searchResultCount={
-            search.model.totalMatches > 0 ? search.model.totalMatches : undefined
-          }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenSettings={() => openSettings()}
           viewsDisabled={!workbenchRestored || workspaceStopped}
