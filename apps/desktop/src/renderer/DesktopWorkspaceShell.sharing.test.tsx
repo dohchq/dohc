@@ -322,6 +322,37 @@ describe("refreshing shares added to this workspace", () => {
     expect(notices.textContent).not.toContain("could not refresh");
   });
 
+  // The warning is the press's toast, and its summary waits in Notices.
+  it("answers a refresh the person starts with the set-aside row, not the summary", async () => {
+    const setAside =
+      "dohc could not read its record of your files with the same path as a file in alex. " +
+      "dohc keeps these files apart.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const refresh = vi.fn<() => Promise<RefreshShareMountsResult>>()
+      .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }] })
+      .mockResolvedValue({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0, collisionRecordQuarantined: true }] });
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    await screen.findByTestId("workspace-shell-error");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(await screen.findByTestId("notice-center")).getByText("dohc did not update alex", { exact: false })
+      .closest<HTMLElement>("[data-notice-row]")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(setAside));
+    expect(screen.getByTestId("workspace-shell-notice").textContent).not.toContain("Shares refreshed");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getByText(setAside)).toBeTruthy();
+    expect(within(notices).getByText("Shares refreshed — 0 files updated.")).toBeTruthy();
+    expect(within(notices).queryByText("dohc did not update alex", { exact: false })).toBeNull();
+  });
+
   it("says a share's record was set aside when its refresh stops because the session expired", async () => {
     const setAside =
       "dohc could not read its record of your files with the same path as a file in alex. " +

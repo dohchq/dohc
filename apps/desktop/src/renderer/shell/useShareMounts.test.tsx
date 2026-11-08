@@ -254,24 +254,28 @@ it("tells the person when dohc set aside a share's collision record", async () =
       results: [{ shareId: "share-1", label: "alex", status: "updated", changedPaths: 2, collisionRecordQuarantined: true }],
     }),
   });
-  const { result, reportShellFailure, clearIdentity } = mountRows();
-
-  await act(async () => { await result.current.refreshShareMounts(); });
-  expect(reportShellFailure).toHaveBeenCalledWith({
+  const { result, showSuccessNotice, reportShellFailure, clearIdentity } = mountRows();
+  const setAside = {
     message:
       "dohc could not read its record of your files with the same path as a file in alex. " +
       "dohc keeps these files apart.",
     identity: "share-mount-collision-record-set-aside:share-1",
     tone: "warning",
-  });
+  };
+
+  await act(async () => { await result.current.refreshShareMounts(); });
+  expect(reportShellFailure).toHaveBeenCalledWith(setAside);
   expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1");
 
-  // From a refresh the person starts, the summary is the toast.
+  // From a refresh the person starts, the warning is the toast, and the
+  // summary goes into Notices without one.
+  reportShellFailure.mockClear();
   await act(async () => { await result.current.refreshShareMounts(true); });
-  expect(reportShellFailure).toHaveBeenLastCalledWith(expect.objectContaining({
-    identity: "share-mount-collision-record-set-aside:share-1",
-    quiet: true,
-  }));
+  expect(reportShellFailure.mock.calls.map(([row]) => row)).toEqual([
+    setAside,
+    { message: "Shares refreshed — 2 files updated.", tone: "success", kind: "share-refresh", quiet: true },
+  ]);
+  expect(showSuccessNotice).not.toHaveBeenCalled();
   vi.unstubAllGlobals();
 });
 
@@ -351,16 +355,25 @@ it.each([false, true])("reports kept mount paths and clears them after refresh (
         "shared-with-me/alex/docs/blocked/b.md",
       ],
       noDismiss: true,
-      ...(announce ? { quiet: true } : { repeat: true }),
+      ...(announce ? {} : { repeat: true }),
     });
     expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-kept-paths:share-1");
-    showSuccessNotice.mockClear();
+    // From a refresh the person starts, the warning is the toast, and the
+    // summary goes into Notices without one.
+    if (announce) {
+      expect(reportShellFailure).toHaveBeenLastCalledWith(
+        { message: "Shares refreshed — 0 files updated.", tone: "success", kind: "share-refresh", quiet: true },
+      );
+      expect(showSuccessNotice).not.toHaveBeenCalled();
+    }
+    const filed = reportShellFailure.mock.calls.length;
     const retry = reportShellFailure.mock.calls[0]![0].retry as () => void;
     await act(async () => { retry(); });
     await vi.waitFor(() => expect(clearIdentity).toHaveBeenCalledWith("share-mount-kept-paths:share-1"));
     expect(refresh).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1" });
+    // With no warning left, the summary is the toast.
     expect(showSuccessNotice).toHaveBeenCalledWith(expect.stringContaining("Shares refreshed"), undefined, "share-refresh");
-    expect(reportShellFailure).toHaveBeenCalledOnce();
+    expect(reportShellFailure).toHaveBeenCalledTimes(filed);
     expect(shareUnjournalableNotice([
       { path: "notes.md", reason: "local-collision" },
       { path: "docs/blocked/a.md", reason: "local-collision", owner: "docs/blocked" },
