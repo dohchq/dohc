@@ -1221,7 +1221,7 @@ function ChatRunSpecimen() {
     <div data-force-state="hover" data-force-target='[data-message-id="run-2"] > .group'>
       <AboutPanelSpecimen>
         <div className="flex h-[180px] flex-col">
-          <ChatMessageList testIdPrefix="states-chat" messages={CHAT_RUN} loading={false} emptyLabel="No messages yet." />
+          <ChatMessageList testIdPrefix="states-chat" messages={CHAT_RUN} loading={false} emptyLabel="No messages yet." surface="panel" />
         </div>
       </AboutPanelSpecimen>
     </div>
@@ -3942,7 +3942,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <AgentColorContext.Provider value={noop}>
               <AboutPanelSpecimen>
                 <div className="flex h-[220px] flex-col">
-                  <ChatMessageList testIdPrefix={`states-agent-color-${theme}`} messages={AGENT_COLOR_CHAT} loading={false} emptyLabel="No messages yet." />
+                  <ChatMessageList testIdPrefix={`states-agent-color-${theme}`} messages={AGENT_COLOR_CHAT} loading={false} emptyLabel="No messages yet." surface="panel" />
                 </div>
               </AboutPanelSpecimen>
             </AgentColorContext.Provider>
