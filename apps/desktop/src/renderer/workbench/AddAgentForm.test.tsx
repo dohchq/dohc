@@ -173,7 +173,10 @@ describe("AddAgentForm", () => {
     contentHeight = 520;
     report();
     expect(banded()).toBe(true);
-    expect(body.classList.contains("p-6")).toBe(true);
+    // The bands keep the dialog's 20px inset.
+    expect(body.classList.contains("px-5")).toBe(true);
+    expect(header.classList.contains("px-5") && header.classList.contains("pt-5")).toBe(true);
+    expect(footer.classList.contains("px-5") && footer.classList.contains("pb-5")).toBe(true);
     expect(form.classList.contains("p-5")).toBe(false);
 
     contentHeight = 400;

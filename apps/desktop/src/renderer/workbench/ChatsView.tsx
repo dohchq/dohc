@@ -110,11 +110,11 @@ import {
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
-import { MentionComposer } from "./MentionComposer";
+import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { agentMentionId, listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -781,6 +781,12 @@ export function ChatsView(props: {
   // when the activated pill was the viewer's only row and unmounts.
   const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
   const threadComposerRef = useRef<HTMLDivElement | null>(null);
+  // A failed run's ask-again readies the comment box; it never sends.
+  const commentComposer = useRef<MentionComposerHandle>(null);
+  const askAgainInComment = useCallback((agentId: string, mention: boolean) => {
+    if (mention) commentComposer.current?.mention(agentMentionId(agentId));
+    else commentComposer.current?.focus();
+  }, []);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
   // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
@@ -4492,6 +4498,7 @@ export function ChatsView(props: {
               retryBusy={dispatchActionBusy}
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
+              onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4553,6 +4560,7 @@ export function ChatsView(props: {
                 </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
+                handle={commentComposer}
                 value={composer}
                 sending={sending}
                 allowEmptySend={resolveTargetMessageId !== null}

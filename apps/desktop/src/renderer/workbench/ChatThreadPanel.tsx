@@ -1,4 +1,4 @@
-import { ChevronLeft, LoaderCircle, RotateCw, Square, TriangleAlert, X } from "lucide-react";
+import { AtSign, ChevronLeft, LoaderCircle, MessageSquare, RotateCw, Square, TriangleAlert, X } from "lucide-react";
 import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { ActorPresentation, ChatDispatchFailedRun, ChatMessageRecord, ChatRunRecord } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -179,8 +179,10 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
 }
 
 // Under the message an agent didn't answer: why, in its notice's words, and
-// Try again while its request can run once more. A next step takes its own
-// line, behind a hidden copy of the icon so it starts under the words.
+// Try again while its request can run once more. Where a message would ask
+// again and a composer is at hand, a button readies that message; nothing
+// sends. Any other next step takes its own line, behind a hidden copy of the
+// icon so it starts under the words.
 export function FailedRunLine(props: {
   testIdPrefix: string;
   failed: ChatDispatchFailedRun;
@@ -189,9 +191,15 @@ export function FailedRunLine(props: {
   onOpenAgentSettings?: () => void;
   // The agent whose own chat this is, where any message asks it.
   chatAgentId?: string;
+  // Readies the composer to ask again: @handle added and focused, or, in the
+  // agent's own chat, focused only.
+  onAskAgain?: (agentId: string, mention: boolean) => void;
   className?: string;
   children?: ReactNode;
 }) {
+  const step = props.failed.nextStep;
+  const ownChat = step?.kind === "message" && step.agentId === props.chatAgentId;
+  const askAgain = step?.kind === "message" && props.onAskAgain && (ownChat || step.handle) ? step : null;
   return (
     <div
       data-testid={`${props.testIdPrefix}-run-failed`}
@@ -213,8 +221,18 @@ export function FailedRunLine(props: {
           Try again
         </SecondaryButton>
       ) : null}
+      {askAgain ? (
+        <SecondaryButton
+          size="row"
+          data-testid={`${props.testIdPrefix}-run-ask-again`}
+          onClick={() => props.onAskAgain?.(askAgain.agentId, !ownChat)}
+        >
+          {ownChat ? <MessageSquare size={12} aria-hidden /> : <AtSign size={12} aria-hidden />}
+          {ownChat ? `Message ${askAgain.name}` : `Mention @${askAgain.handle}`}
+        </SecondaryButton>
+      ) : null}
       {props.children}
-      {props.failed.nextStep ? (
+      {props.failed.nextStep && !askAgain ? (
         <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
           <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
           <span role="status" className="min-w-0 wrap-anywhere">

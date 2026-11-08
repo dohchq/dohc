@@ -19,33 +19,35 @@ function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?
 
 afterEach(cleanup);
 describe("agent badge", () => {
-  it("shows the chosen tool's command for your agent", () => {
+  it("names your agent's tool on this computer, with the full command as its tooltip", () => {
     const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, mine,
       settingsWithAgent({ name: "Nova", launch: { tool: "codex", executable: "/tools/codex" } }, ada));
-    expect(text).toContain("/tools/codex");
+    expect(text).toBe("NovaOwned by AdaCodex on this computer");
+    expect(screen.getByTestId("chats-post-agent-runs-with").getAttribute("title")).toContain("/tools/codex");
   });
 
-  it("shows the owner, and your command only on your agent's message", () => {
-    expect(tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, mine)).toContain("Current local command: local-tool --private-path");
+  it("shows the owner, and how your agent runs only on your agent's message", () => {
+    expect(tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, mine)).toContain("Your runner command");
+    expect(screen.getByTestId("chats-post-agent-runs-with").getAttribute("title")).toBe("local-tool --private-path");
     cleanup();
     // In a shared workspace, another person's agent can carry your agent's name and id. It is still theirs.
     const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, theirs);
-    expect(text).toContain("Owned by Ada");
-    expect(text).not.toContain("local-tool");
+    expect(text).toBe("NovaOwned by Ada");
+    expect(screen.queryByTestId("chats-post-agent-runs-with")).toBeNull();
   });
 
   it("finds your agent only by the id its run's message carries", () => {
-    expect(tooltipFor({ authorDisplayName: "Atlas", authorAgentId: "default" }, mine)).toContain("Current local command: local-tool --private-path");
+    expect(tooltipFor({ authorDisplayName: "Atlas", authorAgentId: "default" }, mine)).toContain("Your runner command");
     cleanup();
     // An outside agent with no name posts as "Agent", and an older message can
     // carry your agent's name. Neither is your agent's run.
     for (const name of ["Agent", "Nova"]) {
       expect(tooltipFor({ authorDisplayName: name }, mine, settingsWithAgent({ name, launch: { command: "local-tool" } }, ada)))
-        .not.toContain("Current local command");
+        .not.toContain("Your runner command");
       cleanup();
     }
     // An agent no longer in Settings shows no command.
-    expect(tooltipFor({ authorDisplayName: "Nova", authorAgentId: "codex" }, mine)).not.toContain("Current local command");
+    expect(tooltipFor({ authorDisplayName: "Nova", authorAgentId: "codex" }, mine)).not.toContain("Your runner command");
   });
 
   it("adds what the agent reported as one line, and no line when it reported nothing", () => {

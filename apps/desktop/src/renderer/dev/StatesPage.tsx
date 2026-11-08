@@ -844,11 +844,11 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   freshness: "unknown",
 };
 
-// About for the drawing's #general: Sam and Nova here, and the Group's grants.
-const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
-  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
+// About for the drawing's #general: Sam and the agent Nova here, and the Group's grants.
+const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number, agent = false): PresencePeer => ({
+  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: agent ? { agent: true } : null, updatedAtMs: 0,
 });
-const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4, true)];
 const ABOUT_GROUP: AboutConversation = {
   kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
 };
@@ -1007,6 +1007,7 @@ function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFa
         retryBusy={props.busy ?? false}
         onRetryFailedRun={noop}
         onOpenAgentSettings={noop}
+        onAskAgain={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
