@@ -52,6 +52,8 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
   expect(shared.status, await shared.clone().text()).toBe(200);
   const shareId = String(((await shared.json()) as { shareId: string }).shareId);
   const relayPaths: string[] = [];
+  // "METHOD /path" of each relay call.
+  const relayCalls: string[] = [];
   // "METHOD /path" of relay calls whose next answer is lost after the relay made it:
   // before its response arrives, with its body broken, or replaced by a JSON 429 whose body breaks.
   const lost = new Map<string, "connection" | "body" | "refusal">();
@@ -61,6 +63,7 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
     fetchRelay: async (incoming) => {
       const path = new URL(incoming.url).pathname, call = `${incoming.method} ${path}`, loss = lost.get(call);
       relayPaths.push(path);
+      relayCalls.push(call);
       lost.delete(call);
       const answered = await relay(incoming);
       if (!loss) return answered;
@@ -90,7 +93,7 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
     const page = (await (await relay(request(OWNER, `/sync/${WORKSPACE}/log?since=0`))).json()) as { ops: LoggedOp[] };
     return page.ops.filter((op) => op.opKind === "chat.message.append" && op.originId.startsWith("relay:share-link:"));
   };
-  return { send, link, revoke, linkPosts, relayPaths, handle: app.handle, lost, storage, shareId };
+  return { send, link, revoke, linkPosts, relayPaths, relayCalls, handle: app.handle, lost, storage, shareId };
 }
 
 type Stack = Awaited<ReturnType<typeof stack>>;
@@ -223,9 +226,10 @@ it("lets an agent with only a read-write link read the channel and post, with th
   expect(stored?.payload).toMatchObject({ threadId: "thread-team", authorKind: "link", linkGrantId: link.grantId, body: "On it",
     agentConnectionId: expect.any(String) });
   expect(stored?.payload).not.toHaveProperty("authorUserId");
-  // It posted through its own agent chat, never the viewer's post route.
-  expect(s.relayPaths).toContain("/sync/link/agent-chat/post");
-  expect(s.relayPaths).not.toContain("/sync/link/chat/messages");
+  // It posted through its own agent chat, never the viewer's post route. It reads through the viewer's read route.
+  expect(s.relayCalls).toContain("POST /sync/link/agent-chat/post");
+  expect(s.relayCalls).not.toContain("POST /sync/link/chat/messages");
+  expect(s.relayCalls).toContain("GET /sync/link/chat/messages");
 
   const followed = (await mcp.callTool({ name: "dohc_read_channel", arguments: { since: read.nextCursor } })).structuredContent as { messages: unknown[] };
   expect(followed.messages).toEqual([expect.objectContaining({ authorKind: "link", body: "On it" })]);

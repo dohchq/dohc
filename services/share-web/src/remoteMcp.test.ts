@@ -320,7 +320,6 @@ it("validates discussion inputs before forwarding invalid writes", async () => {
     {body: "\0"},
     {idempotencyKey: "k".repeat(65)},
     {idempotencyKey: "bad\nkey"},
-    {body: "\u0001".repeat(2000)},
   ]) {
     expect(await client.callTool({name: "dohc_post_discussion", arguments: {body: "hello", idempotencyKey: "key", ...args}})).toMatchObject({isError: true});
   }
@@ -329,6 +328,10 @@ it("validates discussion inputs before forwarding invalid writes", async () => {
   const body = "😀".repeat(2000), idempotencyKey = "k".repeat(64);
   const posted = await client.callTool({name: "dohc_post_discussion", arguments: {body, idempotencyKey}});
   expect(asRecord(posted.structuredContent)?.body).toEqual({body, idempotencyKey});
+  // The widest JSON a body can make still fits the envelope: 2,000 control characters escape to 12 KiB.
+  const escaped = "\u0001".repeat(2000);
+  const escapedPost = await client.callTool({name: "dohc_post_discussion", arguments: {body: escaped, idempotencyKey: "escaped"}});
+  expect(asRecord(escapedPost.structuredContent)?.body).toEqual({body: escaped, idempotencyKey: "escaped"});
 });
 
 it.each(["text", "binary"] as const)("uses authoritative %s metadata for UTF-8-compatible file bytes", async contentKind => {

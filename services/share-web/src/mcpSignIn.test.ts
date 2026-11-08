@@ -62,7 +62,7 @@ async function stack(options: { exchangeKey?: boolean } = {}) {
   };
   await claimWorkspace(relay, OWNER, WORKSPACE);
   const blob = await putBlob(relay, OWNER, WORKSPACE, CONTENT);
-  await appendLog(relay, OWNER, WORKSPACE, [moment("docs/list.md", CONTENT)]);
+  await appendLog(relay, OWNER, WORKSPACE, [moment("docs/list.md", CONTENT, { originSeq: 0 })]);
   const link = async (paths: string[]) => {
     const shareId = await createShare(relay, OWNER, WORKSPACE, { recipientUserId: "seed-recipient", paths });
     const created = await relay(request(OWNER, `/sync/${WORKSPACE}/shares/${shareId}/links`, jsonBody({ access: "view" })));
