@@ -56,7 +56,7 @@ export function ComposerPoll(props: {
       aria-label="Poll"
       disabled={props.disabled}
       className={`flex min-w-0 flex-col gap-1 ${
-        props.surface === "post" ? "mt-2" : "border-x border-t border-line bg-panel-2 px-2.5 py-2"
+        props.surface === "post" ? "mt-2" : "mt-1 px-3"
       }`}
     >
       {props.choices.map((choice, index) => {
@@ -65,7 +65,7 @@ export function ComposerPoll(props: {
         return (
           <Fragment key={index}>
             <div className="flex items-center gap-2">
-              <span aria-hidden className="size-3.5 shrink-0 rounded-full border border-line" />
+              <span aria-hidden className="w-3.5 shrink-0 text-right text-[12px] tabular-nums text-subtle">{index + 1}</span>
               <input
                 ref={(node) => { inputs.current[index] = node; }}
                 data-testid={`${props.testIdPrefix}-poll-choice`}
@@ -121,7 +121,7 @@ export function ComposerPoll(props: {
         );
       })}
       <div className="flex items-center gap-1">
-        {/* The plus sits in the circles' column and its words under the choices. */}
+        {/* The plus sits in the numbers' column and its words under the choices. */}
         {canAdd ? (
           <button
             type="button"

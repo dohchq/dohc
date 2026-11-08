@@ -71,7 +71,7 @@ describe("the agent offer", () => {
     // Alone, the folder says what it is.
     ["unknown", null, "Reaches trip-planner", null],
   ] as const)("%s says %j", (state, words, reach, mark) => {
-    render(<AgentOffer offer={offer(state)} surface="post" />);
+    render(<AgentOffer offer={offer(state)} />);
     const node = screen.getByTestId("composer-agent-offer");
     expect(node.dataset.state).toBe(state);
     expect(screen.queryByTestId("composer-agent-offer-words")?.textContent ?? null).toBe(words);
@@ -81,24 +81,24 @@ describe("the agent offer", () => {
   });
 
   it("shows only the agent when nothing is known, not even its folder", () => {
-    render(<AgentOffer offer={{ ...offer("unknown"), reach: null }} surface="stream" />);
+    render(<AgentOffer offer={{ ...offer("unknown"), reach: null }} />);
     expect(screen.getByTestId("composer-agent-offer").textContent).toBe("Nova");
   });
 
-  it("floats over a stream composer's bars, not inside its box", () => {
+  it("sits in a stream composer's bar just before Send, clear of its reply bar", () => {
     render(
       <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="@Nova " sending={false}
         placeholder="Write a comment…" sendLabel="Send message" candidates={candidates} onChange={() => {}}
         onSend={() => {}} agentOffer={offer("runs")}
         above={<div data-testid="chats-replying-mode">Replying to Sam</div>} />,
     );
-    const stack = screen.getByTestId("composer-agent-offer").parentElement!;
-    expect(stack.firstElementChild).toBe(screen.getByTestId("chats-replying-mode"));
-    expect(screen.getByTestId("chats-composer").closest("form")!.contains(screen.getByTestId("composer-agent-offer"))).toBe(false);
+    const offerNode = screen.getByTestId("composer-agent-offer");
+    expect(offerNode.nextElementSibling).toBe(screen.getByTestId("chats-send"));
+    expect(screen.getByTestId("chats-replying-mode").contains(offerNode)).toBe(false);
   });
 
   it("marks a known run when the rest is unknown", () => {
-    render(<AgentOffer offer={offer("unknown", true)} surface="stream" />);
+    render(<AgentOffer offer={offer("unknown", true)} />);
     expect(screen.getByTestId("composer-agent-offer-run").className).toContain("bg-agent");
     expect(screen.getByTestId("composer-agent-offer").textContent).toContain("agent working");
   });
@@ -174,17 +174,16 @@ describe("the agent offer", () => {
     expect(vi.mocked(ChatAvatar).mock.calls.length).toBe(renders);
   });
 
-  it("hides while the @ menu is open and comes back when it closes", async () => {
+  it("stays in the bar while the @ menu opens off the composer", async () => {
     const user = userEvent.setup();
     render(<Composer />);
     await pickAgent(user);
     const node = screen.getByTestId("composer-agent-offer");
     await user.type(screen.getByTestId("chats-composer"), "@y");
     expect(screen.getByTestId("chats-mention-menu")).toBeTruthy();
-    expect(node.hidden).toBe(true);
+    expect(node.hidden).toBe(false);
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("chats-mention-menu")).toBeNull();
     expect(screen.getByTestId("composer-agent-offer")).toBe(node);
-    expect(node.hidden).toBe(false);
   });
 });

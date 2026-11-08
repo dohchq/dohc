@@ -96,7 +96,11 @@ it.each(["Claude Code", "Codex"])("saves %s as a profile and checks through the 
   render(<AddAgentForm {...f.props} />);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   await userEvent.click(await screen.findByRole("button", { name }));
-  expect(screen.getByText("Conversation through stdin")).toBeTruthy();
+  // The card names the tool and its sign-in; its path waits under Advanced
+  // with how the tool starts, and its permissions stay in view.
+  expect(screen.getByRole("button", { name }).textContent).not.toMatch(/Tools/u);
+  expect(screen.getByTestId("agent-tool-permissions").closest("details")).toBeNull();
+  expect(screen.getByText("Conversation through stdin").closest("details")?.querySelector("summary")?.textContent).toBe("Advanced");
   expect(screen.getByText("dohc adds its own server for replies.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "OpenCode" }).hasAttribute("disabled")).toBe(true);
   expect(screen.queryByTestId("chats-add-agent-check-result")).toBeNull();

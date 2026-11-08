@@ -967,16 +967,18 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
       </article>
       </AgentColorScope>
 
-      <div
-        data-testid="chats-comments-divider"
-        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
-      >
-        <span className="inline-flex items-center gap-1">
-          <MessageSquare size={12} strokeWidth={1.9} aria-hidden />
-          <span aria-hidden>{commentCount}</span>
-          <span className="sr-only">{`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}</span>
-        </span>
-      </div>
+      {commentCount > 0 ? (
+        <div
+          data-testid="chats-comments-divider"
+          className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+        >
+          <span className="inline-flex items-center gap-1">
+            <MessageSquare size={12} strokeWidth={1.9} aria-hidden />
+            <span aria-hidden>{commentCount}</span>
+            <span className="sr-only">{`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}</span>
+          </span>
+        </div>
+      ) : null}
 
       <ol data-testid="chats-comments" className="m-0 list-none px-2 py-0">
         {commentTree.map((node, index) => renderThreadComment(node, 0, null, commentTree[index - 1]))}

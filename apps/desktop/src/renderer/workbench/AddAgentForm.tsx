@@ -198,9 +198,8 @@ export function AddAgentForm(props: {
         </div>
 
         <AgentToolPicker workspaceId={props.workspaceId} profile={launch ? launchProfile(launch) : undefined} usingCommand={command.trim().length > 0} disabled={busy}
-          onError={props.onError} onChange={(value) => { setProfile(value); setStartProfile(value); setCheck({ status: "idle" }); }} />
-        <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
-          <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
+          advancedOpen={advanced} onAdvancedToggle={setAdvanced}
+          onError={props.onError} onChange={(value) => { setProfile(value); setStartProfile(value); setCheck({ status: "idle" }); }}>
           {profile && command.trim() ? <SecondaryButton size="compact" disabled={busy} onClick={() => { setProfile(undefined); setCheck({ status: "idle" }); }}>Use saved command</SecondaryButton> : null}
         <div className="mt-2 flex flex-col gap-1">
           <label htmlFor="chats-add-agent-command" className={LABEL_CLASS}>
@@ -223,8 +222,7 @@ export function AddAgentForm(props: {
             {launchCommandHint(launch)}
           </p>
         </div>
-
-        </details>
+        </AgentToolPicker>
         </div>
         </div>
 

@@ -82,6 +82,16 @@ it("shows each agent with its controls, and an agent you run with no Check and n
   expect(terminal.getByRole("button", { name: "Claude in Terminal actions" })).toBeTruthy();
 });
 
+it("says under each name what starts the agent and where it stands", () => {
+  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
+  renderList({ settings: codexOff });
+  const state = (agent: string) => within(row(agent)).getByTestId("agent-state").textContent;
+  expect(state("Claude Code")).toBe("Your command·Not checked");
+  // Off says only its tool; the switch shows it off.
+  expect(state("Codex")).toBe("Codex");
+  expect(state("Claude in Terminal")).toBe("Through MCP");
+});
+
 it("names an agent's switch by the agent, says what a click does, and dims a row that's off", () => {
   const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
   const { rerender } = renderList({ settings: codexOff });
@@ -95,7 +105,7 @@ it("names an agent's switch by the agent, says what a click does, and dims a row
   expect(off.title).toBe("Turn on Codex");
   expect(off.getAttribute("aria-description")).toBe("Turn on");
   // The off row's name and mark go muted; the on row keeps its ink.
-  const name = (agent: string) => within(row(agent)).getByText(agent).closest("button")!;
+  const name = (agent: string) => within(row(agent)).getByRole("button", { name: `Rename ${agent}` });
   const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;
   expect(name("Codex").className).toContain("text-muted");
   expect(name("Codex").className).not.toContain("text-ink");
@@ -135,7 +145,7 @@ it("keeps an entry dohc could not use in its place, with its problem and a way t
 it("checks one agent, then says how long its reply took", async () => {
   const answer = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
-  renderList();
+  const { rerender } = renderList();
   await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex" });
   expect(within(row("Codex")).getByText("Checking")).toBeTruthy();
@@ -143,6 +153,13 @@ it("checks one agent, then says how long its reply took", async () => {
   expect((within(row("Claude Code")).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
   await act(async () => answer.resolve({ ok: true, detail: "Runner self-test passed." }));
   expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+  // While agents are paused, an agent that is off keeps the check it ran,
+  // and one that is on says Paused.
+  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
+  rerender({ settings: codexOff });
+  act(() => pausedListener?.({ paused: true }));
+  expect(within(row("Codex")).getByTestId("agent-state").textContent).toMatch(/^Codex·Replied in \d+ s$/);
+  expect(within(row("Claude Code")).getByTestId("agent-state").textContent).toBe("Your command·Paused");
 });
 
 it("says an agent didn't reply, names it in Notices with why and its log, and offers Try again", async () => {

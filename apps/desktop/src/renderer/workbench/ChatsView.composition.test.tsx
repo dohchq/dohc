@@ -644,6 +644,19 @@ describe("ChatsView document thread", () => {
     expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
   });
 
+  it("draws no comments divider under a post with no comments", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    // The comment list draws with the post, where the divider would.
+    expect((await screen.findByTestId("chats-comments")).children).toHaveLength(0);
+    expect(screen.queryByTestId("chats-comments-divider")).toBeNull();
+  });
+
   it("keeps agent, then link holder, for screen readers on a link agent's continued comment", async () => {
     const user = userEvent.setup();
     const opening = message({ body: "The full opening post body." });
@@ -920,7 +933,7 @@ describe("ChatsView agent offer", () => {
     expect(screen.getByTestId("composer-agent-offer-reach").textContent).toBe("Reaches work");
   });
 
-  it("keeps the comment's reply bar clear: the offer floats above the bar", async () => {
+  it("keeps the comment's reply bar clear: the offer sits before Send", async () => {
     const user = userEvent.setup();
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ id: "comment-1", body: "Friday works." })] });
@@ -930,7 +943,8 @@ describe("ChatsView agent offer", () => {
     await user.click((await screen.findAllByTestId("chats-comment-reply"))[0]!);
     const bar = await screen.findByTestId("chats-replying-mode");
     const offer = await pickAgent(user, "chats");
-    expect(offer.parentElement!.firstElementChild).toBe(bar);
+    expect(bar.contains(offer)).toBe(false);
+    expect(offer.nextElementSibling).toBe(screen.getByTestId("chats-send"));
     await user.click(screen.getByTestId("chats-replying-cancel"));
     expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("runs");
