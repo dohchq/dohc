@@ -2532,8 +2532,9 @@ describe("chatDispatchService", () => {
 
     const [notice] = fixture.notices;
     expect(fixture.notices).toHaveLength(1);
-    expect(notice!.title).toMatch(/^Nova didn't reply in "Audit every file in the workspace .*…"$/u);
-    expect([...notice!.title]).toHaveLength(120);
+    // The cut lands after a space, so the title ends one short of the limit.
+    expect(notice!.title).toBe(`Nova didn't reply in "Audit ${"every file in the workspace ".repeat(3)}every…"`);
+    expect([...notice!.title].length).toBeLessThanOrEqual(120);
   });
 
   it("keeps the agent's own reply when the run fails without adding dohc text", async () => {
