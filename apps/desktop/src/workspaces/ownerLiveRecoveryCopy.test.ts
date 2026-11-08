@@ -149,8 +149,11 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
     4: native("agent", "trip-agent"),
     5: native("automation", "automation-1"),
     6: {nativeSource: {binding, adoptionId: "adoption", nativeSequence: 0, updateDigest: "", origin: {kind: "adoptionSeed"}}},
+    7: {nativeSource: {...native("agent", "trip-agent").nativeSource,
+      origin: {...native("agent", "trip-agent").nativeSource.origin, agentRunId: "run-1"}}},
+    8: {agentDeclaration: {agentId: "trip-agent", onBehalfOf: "local-person", depth: 1}, agentRunId: "run-2"},
   };
-  const {recovery} = queue(6, 0, sequence => kinds[sequence]!);
+  const {recovery} = queue(8, 0, sequence => kinds[sequence]!);
   const written = parseLiveRecoveryPackage(JSON.stringify(liveRecoveryPackage(recovery, source)));
   expect(written.updates.map(update => update.author)).toEqual([
     {kind: "agent", declaration: {agentId: "trip-agent", onBehalfOf: "local-person", depth: 1}},
@@ -159,8 +162,11 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
     {kind: "agent", actorOriginId: "trip-agent", onBehalfOf: "local-person", chainDepth: 1},
     {kind: "automation", actorOriginId: "automation-1", onBehalfOf: "local-person", chainDepth: 1},
     null,
+    // An agent's edit made in a run keeps the run, native or declared.
+    {kind: "agent", actorOriginId: "trip-agent", onBehalfOf: "local-person", chainDepth: 1, agentRunId: "run-1"},
+    {kind: "agent", declaration: {agentId: "trip-agent", onBehalfOf: "local-person", depth: 1}, agentRunId: "run-2"},
   ]);
   // The recorded source itself travels with each native edit, unchanged.
   expect(written.updates.map(update => update.nativeSource?.origin)).toEqual([undefined, undefined,
-    ...[3, 4, 5, 6].map(sequence => kinds[sequence]!.nativeSource!.origin)]);
+    ...[3, 4, 5, 6, 7].map(sequence => kinds[sequence]!.nativeSource!.origin), undefined]);
 });

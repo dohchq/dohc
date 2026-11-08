@@ -1195,8 +1195,9 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
 
 /// A declared agent is the largest live entry: an id, a name and a principal,
 /// each up to 512 bytes that escape to twice their size, and its depth. The
-/// host admits it, so the interval admits it too. One more byte is outside the
-/// contract on both sides.
+/// host admits it at 3,143 bytes, and the interval admits it too. The
+/// interval's bound is one byte larger, for an agent in a run on the owner's
+/// devices. One more byte of id escapes to two, outside both bounds.
 #[test]
 fn the_largest_declared_agent_fits_one_entry_and_a_larger_one_does_not() {
     use dohc_engine_collab::live_update_application::LiveAuthorEntry;

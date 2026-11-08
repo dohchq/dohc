@@ -61,13 +61,18 @@ function nativeSource(value: unknown) {
 function adoptedSource(row: Record<string, unknown>, binding: ReturnType<typeof parseLiveObjectBinding>) {
   const source = configRecord(row.source, ["binding", "adoptionId", "nativeSequence", "updateDigest", "origin"]);
   const sourceBinding = parseLiveObjectBinding(source.binding);
-  const origin = configRecord(source.origin, ["kind"], ["actorOriginId", "actorKind", "onBehalfOf", "chainDepth", "recordedAtMs"]);
+  const origin = configRecord(source.origin, ["kind"], ["actorOriginId", "actorKind", "onBehalfOf", "chainDepth", "recordedAtMs", "agentRunId"]);
   if (origin.kind === "adoptionSeed") configRecord(origin, ["kind"]);
   else {
     require(origin.kind === "nativeUpdate");
-    configRecord(origin, ["kind", "actorOriginId", "actorKind", "onBehalfOf", "chainDepth", "recordedAtMs"]);
+    // An agent's write names the run it was made in; one made outside a run, or before runs were recorded, names none.
+    configRecord(origin, ["kind", "actorOriginId", "actorKind", "onBehalfOf", "chainDepth", "recordedAtMs"], ["agentRunId"]);
     for (const field of ["actorOriginId", "onBehalfOf"] as const) {
       if (origin[field] !== null) parseLiveUpdateIdentifier(origin[field]);
+    }
+    if (Object.hasOwn(origin, "agentRunId")) {
+      require(origin.actorKind === "agent");
+      parseLiveUpdateIdentifier(origin.agentRunId);
     }
     if (origin.actorKind !== null) require(origin.actorKind === "human" || origin.actorKind === "agent" || origin.actorKind === "automation");
     if (origin.chainDepth !== null) require(integer(origin.chainDepth) <= 64);

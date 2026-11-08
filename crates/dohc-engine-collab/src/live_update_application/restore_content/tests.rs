@@ -1958,6 +1958,7 @@ fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
             update: update.clone(),
             now_ms: 10,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         },
         &NoFaults,

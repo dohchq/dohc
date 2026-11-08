@@ -1427,6 +1427,7 @@ fn owner_draft(
             update: update.clone(),
             now_ms: 20,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         },
         &NoFaults,

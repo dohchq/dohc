@@ -5645,7 +5645,7 @@ mod tests {
             ),
             (
                 "v2-ydoc-update-agent-run",
-                "72189aa7652bc1bc1f37b0da476e3ceb6f778623d57b9e7c69ba95c1f0b71ec9",
+                "7847cf674a01b4a938882ffa6a50d79f2542f8dd1e7f37af8dcb6c09a7f7f26d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

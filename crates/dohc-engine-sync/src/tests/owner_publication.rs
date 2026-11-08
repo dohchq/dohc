@@ -170,6 +170,7 @@ fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix(
             update: doc.richdoc_append_paragraph("waiting for an offline owner"),
             now_ms: 3,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: Some(dohc_engine_domain::AutomationDeclaration {
                 automation_id: "collection:Tasks#mark".into(),
                 attribution: dohc_engine_domain::ChangeAttribution {

@@ -1899,10 +1899,27 @@ pub fn apply_committed_with_settlement_limit(
             // A declared agent stays beside it.
             let shared = event.metadata.accepted.authority.shared_author();
             let snapshot = event.metadata.author_snapshot.as_deref().unwrap_or_default();
+            // This computer's own agent update names, in its History only, the
+            // run its journal or draft recorded, so two runs stay two authors.
+            // The canonical snapshot keeps no run.
+            let draft_run = if own.is_some() {
+                None
+            } else {
+                own_draft_run(tx, &key, &event.metadata.accepted.receipt)?
+            };
+            let own_run = own_agent_run(own.as_ref())
+                .or_else(|| draft_run.as_ref().map(|(agent, run)| (agent.as_str(), run.as_str())));
             let mut authors = snapshot.iter()
                 .filter(|author| shared.is_none() || !matches!(author, LiveAuthorEntry::Human { .. } | LiveAuthorEntry::Link { .. }))
                 .map(|author| match author {
                     LiveAuthorEntry::Automation { automation_id, attribution } => Ok(dohc_engine_domain::moment_author_json(Some(automation_id), Some(attribution)).expect("validated automation author")),
+                    LiveAuthorEntry::Agent { agent_id, agent_name: None, .. } => match own_run {
+                        Some((agent, run)) if agent == agent_id.as_str() => serde_json::to_value(author).map(|mut entry| {
+                            entry["agentRunId"] = run.into();
+                            serde_json::Value::Array(vec![entry]).to_string()
+                        }),
+                        _ => serde_json::to_string(&[author]),
+                    },
                     _ => serde_json::to_string(&[author]),
                 })
                 .collect::<Result<Vec<_>, _>>().map_err(|_| ApplicationError::Corrupt)?;
@@ -2240,6 +2257,50 @@ fn own_draft(
         declaration: crate::owner_outbox::stored_declaration(declaration)
             .map_err(|_| ApplicationError::Corrupt)?,
     }))
+}
+
+/// The declared agent and run of this computer's own owner draft, when the
+/// accepted frame is its delivery and the agent made it in a run.
+fn own_draft_run(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    receipt: &LiveUpdateReceipt,
+) -> Result<Option<(String, String)>, ApplicationError> {
+    let entry: Option<(Option<String>, String)> = tx
+        .query_row(
+            "SELECT e.agent_declaration_json,e.agent_run_id FROM owner_ydoc_outbox_entries e \
+             JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
+             WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
+               AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
+               AND e.native_source_json IS NULL AND e.agent_run_id IS NOT NULL",
+            params![
+                receipt.delivery_id,
+                receipt.update_digest,
+                key.workspace_id,
+                key.version_id,
+                key.object_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some((declaration, run)) = entry else {
+        return Ok(None);
+    };
+    let declaration = crate::owner_outbox::stored_declaration(declaration)
+        .map_err(|_| ApplicationError::Corrupt)?
+        .ok_or(ApplicationError::Corrupt)?;
+    Ok(Some((declaration.agent_id, run)))
+}
+
+/// The agent and run this computer's own native update recorded, when an agent
+/// made it in a run.
+fn own_agent_run(own: Option<&OwnDraft>) -> Option<(&str, &str)> {
+    let (actor, attribution) = own?.author.as_ref()?;
+    let attribution = attribution
+        .as_ref()
+        .filter(|a| a.actor_kind == dohc_engine_domain::ChangeActorKind::Agent)?;
+    Some((actor.as_deref()?, attribution.agent_run_id.as_deref()?))
 }
 
 struct ApplicationRecord {
@@ -5407,6 +5468,104 @@ mod tests {
                 Some("local-person".into())
             )
         );
+    }
+
+    #[test]
+    fn own_agent_updates_and_drafts_in_separate_runs_stay_separate_history_authors() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        for (cursor, run, journal) in [(1, "run-a", true), (2, "run-b", true), (3, "run-c", false)] {
+            let bytes = source.frontmatter_set("status", run).unwrap();
+            let draft = crate::owner_outbox::append(
+                &mut store,
+                "workspace-1",
+                crate::owner_outbox::OwnerOutboxAppendInput {
+                    binding: binding(),
+                    base_update: Ydoc::wire().encode_full_state(),
+                    append_key: run.into(),
+                    update: bytes.clone(),
+                    limits: crate::owner_outbox::OwnerOutboxLimits {
+                        max_pending_bytes: 100_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+            let native = crate::owner_outbox::OwnerOutboxNativeSource {
+                binding: binding(),
+                adoption_id: "adoption-1".into(),
+                native_sequence: cursor,
+                update_digest: draft.update_digest.clone(),
+                origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                    actor_origin_id: Some("trip-agent".into()),
+                    actor_kind: Some("agent".into()),
+                    on_behalf_of: Some("local-person".into()),
+                    chain_depth: Some(1),
+                    recorded_at_ms: 1,
+                    agent_run_id: Some(run.into()),
+                },
+            };
+            // A native update keeps its run in its source; an owner draft
+            // keeps it beside its declaration.
+            let (sql, recorded) = if journal {
+                (
+                    "UPDATE owner_ydoc_outbox_entries SET native_source_json=?1, agent_declaration_json=?3 WHERE delivery_id=?2",
+                    serde_json::to_string(&native).unwrap(),
+                )
+            } else {
+                (
+                    "UPDATE owner_ydoc_outbox_entries SET agent_run_id=?1, agent_declaration_json=?3 WHERE delivery_id=?2",
+                    run.to_owned(),
+                )
+            };
+            store.write_with(&NoFaults, |tx| {
+                tx.execute(
+                    sql,
+                    params![
+                        recorded,
+                        draft.delivery_id,
+                        serde_json::to_string(&declared("trip-agent").unwrap()).unwrap()
+                    ],
+                ).map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            }).unwrap();
+            let mut update = event(&draft.delivery_id, cursor, bytes);
+            snapshot(&mut update.metadata, declared("trip-agent"));
+            ack(apply(&mut store, &mut cache, &handle, update));
+        }
+        // History names the run each delivery's journal or draft recorded.
+        let interval: serde_json::Value = serde_json::from_str(
+            &store
+                .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+                .unwrap()
+                .json(),
+        )
+        .unwrap();
+        let runs: Vec<&serde_json::Value> = interval
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|author| author["kind"] == "agent")
+            .map(|author| &author["agentRunId"])
+            .collect();
+        assert_eq!(
+            runs,
+            [&serde_json::json!("run-a"), &serde_json::json!("run-b"), &serde_json::json!("run-c")]
+        );
+        // The canonical snapshot each delivery was accepted with names no run.
+        let stored: Vec<String> = store
+            .read_with(|conn| {
+                let mut statement =
+                    conn.prepare("SELECT admitted_metadata_json FROM live_device_update_applications")?;
+                let rows = statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 3);
+        assert!(stored.iter().all(|json| !json.contains("agentRunId")));
     }
 
     #[test]

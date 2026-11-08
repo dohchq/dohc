@@ -456,6 +456,26 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     await expect(read(result)).rejects.toThrow(TypeError);
   });
 
+  it("reads the run a declared agent's draft was made in beside its declaration", async () => {
+    const result = pendingResult();
+    const agentDeclaration = { agentId: "trip-agent", onBehalfOf: "local-person", depth: 1 };
+    Object.assign(result.entries[0]!, { agentDeclaration, agentRunId: "run-1" });
+    Object.assign(result.entries[1]!, { agentDeclaration });
+    const pending = await read(result);
+    expect(pending.entries[0]).toMatchObject({ agentDeclaration, agentRunId: "run-1" });
+    expect(pending.entries[1]).not.toHaveProperty("agentRunId");
+  });
+
+  it.each([
+    { agentRunId: "run-1" },
+    ...["", null, "run\u0085", "a".repeat(513)].map(agentRunId =>
+      ({ agentDeclaration: { agentId: "trip-agent", onBehalfOf: null, depth: 0 }, agentRunId })),
+  ])("refuses a draft run %j without a declaration or outside the identifier bound", async (fields) => {
+    const result = pendingResult();
+    Object.assign(result.entries[0]!, fields);
+    await expect(read(result)).rejects.toThrow(TypeError);
+  });
+
   function nativeSourceOf(result: ReturnType<typeof pendingResult>, origin: Record<string, unknown>) {
     return {binding: result.binding, adoptionId: "adoption-1", nativeSequence: 4, updateDigest: result.entries[0]!.updateDigest, origin};
   }
@@ -468,6 +488,19 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
       Object.assign(result.entries[0]!, {nativeSource});
       expect((await read(result)).entries[0]?.nativeSource).toEqual(nativeSource);
     });
+
+  it("reads the run an agent's native entry was made in and adds none to one made outside a run", async () => {
+    const result = pendingResult();
+    result.entries.push({...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3"});
+    result.pendingBytes = 6;
+    const origin = {kind: "nativeUpdate", actorOriginId: "trip-agent", actorKind: "agent", onBehalfOf: "local-person", chainDepth: 1, recordedAtMs: 7};
+    const inRun = nativeSourceOf(result, {...origin, agentRunId: "run-1"});
+    Object.assign(result.entries[0]!, {nativeSource: inRun});
+    Object.assign(result.entries[1]!, {nativeSource: nativeSourceOf(result, origin)});
+    const pending = await read(result);
+    expect(pending.entries[0]?.nativeSource).toEqual(inRun);
+    expect(pending.entries[1]?.nativeSource?.origin).not.toHaveProperty("agentRunId");
+  });
 
   it("reads an adoption seed's source and leaves an entry without one absent", async () => {
     const result = pendingResult();
@@ -485,6 +518,9 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     {kind: "foreign"},
     {kind: "adoptionSeed", note: 1},
     {kind: "nativeUpdate", actorOriginId: "", actorKind: null, onBehalfOf: null, chainDepth: null, recordedAtMs: 1},
+    ...[{agentRunId: ""}, {agentRunId: null}, {agentRunId: "run\u0085"}, {agentRunId: "a".repeat(513)},
+      {agentRunId: "run-1", actorKind: "human", onBehalfOf: null, chainDepth: 0}].map(patch =>
+      ({kind: "nativeUpdate", actorOriginId: "trip-agent", actorKind: "agent", onBehalfOf: "local-person", chainDepth: 1, recordedAtMs: 1, ...patch})),
   ])("refuses a malformed native origin %j", async origin => {
     const result = pendingResult();
     Object.assign(result.entries[0]!, {nativeSource: nativeSourceOf(result, origin)});
