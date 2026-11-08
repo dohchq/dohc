@@ -244,22 +244,23 @@ function AgentRow(props: {
   const launched = agent.launch !== undefined;
   // Only a switch turns an agent off, so only a row with one dims.
   const off = launched && !agent.enabled;
-  // Under the name: what starts the agent, then where it stands. An agent
-  // that is off says only its tool, and its switch shows it off.
+  // Under the name: what starts the agent, then where it stands. A check
+  // reports even when the agent is off; otherwise an agent that is off says
+  // only its tool, and its switch shows it off.
   const launch = agent.launch;
   const toolId = launch && "tool" in launch ? launch.tool : null;
   const tool = !launch ? null : toolId ? AGENT_TOOLS.find((entry) => entry.id === toolId)!.name : "Your command";
   const status = !launched ? (
     <span className="inline-flex items-center gap-1 text-muted"><Plug size={12} aria-hidden />Through MCP</span>
-  ) : off ? null : props.checking ? (
+  ) : props.checking ? (
     <span className="inline-flex items-center gap-1 text-muted"><LoaderCircle size={12} aria-hidden className="animate-spin" />Checking</span>
-  ) : props.paused ? (
+  ) : props.paused && !off ? (
     <span className="inline-flex items-center gap-1 text-muted"><Pause size={12} aria-hidden />Paused</span>
   ) : props.check?.status === "replied" ? (
     <span className="inline-flex items-center gap-1 text-success"><Check size={12} aria-hidden />{`Replied in ${props.check.seconds} s`}</span>
   ) : props.check?.status === "failed" ? (
     <span className="inline-flex items-center gap-1 text-danger"><CircleAlert size={12} aria-hidden />Didn't reply.</span>
-  ) : (
+  ) : off ? null : (
     <span className="text-muted">Not checked</span>
   );
   const state = (

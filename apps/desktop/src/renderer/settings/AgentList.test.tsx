@@ -153,11 +153,13 @@ it("checks one agent, then says how long its reply took", async () => {
   expect((within(row("Claude Code")).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
   await act(async () => answer.resolve({ ok: true, detail: "Runner self-test passed." }));
   expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
-  // Turned off, the row says only its tool; turned back on, the reply shows again.
-  rerender({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } } });
-  expect(within(row("Codex")).getByTestId("agent-state").textContent).toBe("Codex");
-  rerender({ settings: SETTINGS });
-  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+  // While agents are paused, an agent that is off keeps the check it ran,
+  // and one that is on says Paused.
+  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
+  rerender({ settings: codexOff });
+  act(() => pausedListener?.({ paused: true }));
+  expect(within(row("Codex")).getByTestId("agent-state").textContent).toMatch(/^Codex·Replied in \d+ s$/);
+  expect(within(row("Claude Code")).getByTestId("agent-state").textContent).toBe("Your command·Paused");
 });
 
 it("says an agent didn't reply, names it in Notices with why and its log, and offers Try again", async () => {
