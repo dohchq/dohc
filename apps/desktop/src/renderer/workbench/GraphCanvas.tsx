@@ -434,7 +434,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     const labelsFading = draw(now);
     if (fading || easing || labelsFading) {
       frame = requestAnimationFrame(step);
-    } else if (layoutSettled && canvas.dataset.settled !== "true") {
+    } else if (layoutSettled && !incoming && canvas.dataset.settled !== "true") {
       canvas.dataset.settled = "true";
       callbacks.settled();
     }
