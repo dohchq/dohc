@@ -57,3 +57,31 @@ export function createWorkLinks<Entry extends { readonly workspaceId: string; re
     },
   };
 }
+
+/**
+ * Opens the work links the OS hands dohc. Each link takes the next activation
+ * when it arrives. A link whose lookup or window switch finishes after a newer
+ * link arrived opens nothing, so the newest link always wins.
+ */
+export function createWorkLinkActivations<Shown>(deps: {
+  resolve(link: WorkLink): Promise<WorkLinkPlace | null>;
+  /** Shows the place's workspace in a window. Null when this computer no longer lists it. */
+  activate(place: WorkLinkPlace): Promise<Shown | null>;
+  /** Opens the message in the window that now shows its workspace. */
+  deliver(shown: Shown, place: WorkLinkPlace): void;
+  /** Shows dohc when no workspace here holds the message. */
+  showDohc(): Promise<void>;
+}) {
+  let latest = 0;
+  return {
+    async open(link: WorkLink): Promise<void> {
+      const activation = ++latest;
+      const place = await deps.resolve(link);
+      if (activation !== latest) return;
+      const shown = place === null ? null : await deps.activate(place);
+      if (activation !== latest) return;
+      if (place === null || shown === null) return await deps.showDohc();
+      deps.deliver(shown, place);
+    },
+  };
+}

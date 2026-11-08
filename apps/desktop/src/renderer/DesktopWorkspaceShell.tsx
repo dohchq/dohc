@@ -151,6 +151,7 @@ import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { installWorkLinkOpener } from "./workLinkOpener";
+import { useRequestSequence } from "./useRequestSequence";
 import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
@@ -3205,17 +3206,20 @@ export function DesktopWorkspaceShell(props: {
   }, [openedFromLink, workbenchRestored]);
   const makeMessageLink = useMessageLinkMaker(props.workspace);
   // A work link clicked in a chat or a document opens its message here, or
-  // in the workspace on this computer that holds it. A link none holds goes
-  // to the browser. An answer after this window left the workspace opens
-  // nothing.
+  // in the workspace on this computer that holds it. A link none holds, or
+  // one main could not look up, goes to the browser. Only the newest link
+  // opens, and an answer after this shell has gone opens nothing.
   const workLinkPlaces = useRef({ workspaces: props.workspaces, onSwitchWorkspace: props.onSwitchWorkspace });
   workLinkPlaces.current = { workspaces: props.workspaces, onSwitchWorkspace: props.onSwitchWorkspace };
+  const workLinkLookups = useRequestSequence([workspaceId]);
   useEffect(() => {
     const owner = workspaceId;
     return installWorkLinkOpener(async (url) => {
-      const place = await bridge().resolveWorkLink({ url });
-      if (workspaceIdRef.current !== owner) return true;
-      if (place === null) return false;
+      const lookup = workLinkLookups.next();
+      // Undefined when main could not look the link up.
+      const place = await bridge().resolveWorkLink({ workspaceId: owner, url }).catch(() => undefined);
+      if (!workLinkLookups.isCurrent(lookup)) return true;
+      if (!place) return false;
       const target = workLinkTarget(place);
       if (place.workspaceId === owner) {
         setPendingOpen(target);
@@ -3227,7 +3231,7 @@ export function DesktopWorkspaceShell(props: {
       onSwitchWorkspace(next, target);
       return true;
     });
-  }, [workspaceId]);
+  }, [workLinkLookups, workspaceId]);
   useEffect(() => {
     if (!workspaceIsReady || openedFromOs.length === 0) return;
     setOpenedFromOs([]);

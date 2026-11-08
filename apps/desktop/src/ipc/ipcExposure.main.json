@@ -399,6 +399,6 @@
     "desktop:links-resolve": "active-workspace",
     "desktop:links-edges": "active-workspace",
     "desktop:make-message-link": "active-workspace",
-    "desktop:resolve-work-link": "trusted-sender"
+    "desktop:resolve-work-link": "active-workspace"
   }
 }

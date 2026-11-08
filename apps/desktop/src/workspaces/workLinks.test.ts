@@ -1,5 +1,8 @@
+import type { WorkLink } from "@dohc/workspace-contracts/work-links";
 import { describe, expect, it, vi } from "vitest";
-import { createWorkLinks } from "./workLinks";
+import type { WorkLinkPlace } from "../ipc/bridgeContract";
+import { deferred } from "../testing/deferred";
+import { createWorkLinkActivations, createWorkLinks } from "./workLinks";
 
 const reference = "aB_9-".repeat(8) + "aB_";
 
@@ -93,5 +96,60 @@ describe("opening a work link", () => {
     const resolve = vi.fn();
     await expect(links([local, elsewhere], resolve).resolve(link, "local")).resolves.toBeNull();
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe("links the OS hands dohc", () => {
+  const handed = (name: string): WorkLink => ({ server: "https://dohc.example", reference: name });
+  const placeIn = (workspaceId: string): WorkLinkPlace =>
+    ({ workspaceId, channelId: "group-1", threadId: "thread-1", messageId: `message-${workspaceId}` });
+
+  // The window shows the workspace it was switched to.
+  function activations(deps: {
+    resolve: (link: WorkLink) => Promise<WorkLinkPlace | null>;
+    activate?: (place: WorkLinkPlace) => Promise<string | null>;
+  }) {
+    const activate = vi.fn<(place: WorkLinkPlace) => Promise<string | null>>(deps.activate ?? (async (place) => place.workspaceId));
+    const deliver = vi.fn((_shown: string, _place: WorkLinkPlace) => {});
+    const showDohc = vi.fn(async () => {});
+    const { open } = createWorkLinkActivations<string>({ resolve: deps.resolve, activate, deliver, showDohc });
+    return { open, activate, deliver, showDohc };
+  }
+
+  it("opens the newer link when an older link's lookup finishes after it", async () => {
+    const slow = deferred<WorkLinkPlace | null>();
+    const { open, activate, deliver, showDohc } = activations({
+      resolve: async (link) => link.reference === "older" ? await slow.promise : placeIn("b"),
+    });
+    const older = open(handed("older"));
+    await open(handed("newer"));
+    expect(deliver).toHaveBeenCalledExactlyOnceWith("b", placeIn("b"));
+
+    slow.resolve(placeIn("a"));
+    await older;
+    expect(activate).toHaveBeenCalledExactlyOnceWith(placeIn("b"));
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(showDohc).not.toHaveBeenCalled();
+  });
+
+  it("delivers nothing for an older link a newer one overtook while its window switched", async () => {
+    const switching = deferred<string | null>();
+    const { open, activate, deliver } = activations({
+      resolve: async (link) => placeIn(link.reference === "older" ? "a" : "b"),
+      activate: async (place) => place.workspaceId === "a" ? await switching.promise : place.workspaceId,
+    });
+    const older = open(handed("older"));
+    await vi.waitFor(() => expect(activate).toHaveBeenCalledWith(placeIn("a")));
+    await open(handed("newer"));
+    switching.resolve("a");
+    await older;
+    expect(deliver).toHaveBeenCalledExactlyOnceWith("b", placeIn("b"));
+  });
+
+  it("shows dohc for the newest link when no workspace here holds its message", async () => {
+    const { open, activate, showDohc } = activations({ resolve: async () => null });
+    await open(handed("nowhere"));
+    expect(activate).not.toHaveBeenCalled();
+    expect(showDohc).toHaveBeenCalledOnce();
   });
 });

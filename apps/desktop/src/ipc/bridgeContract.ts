@@ -6651,7 +6651,13 @@ export const MakeMessageLinkPayload = z.object({
 export type MakeMessageLinkPayload = z.infer<typeof MakeMessageLinkPayload>;
 export const MakeMessageLinkResult = z.object({ url: z.string().min(1).max(2_048) }).strict().nullable();
 export type MakeMessageLinkResult = z.infer<typeof MakeMessageLinkResult>;
-export const ResolveWorkLinkPayload = z.object({ url: z.string().min(1).max(2_048) }).strict();
+// Only the window's open workspace may ask. Main tries it first, then the
+// other workspaces on the link's server, because main owns which workspace a
+// window switches to.
+export const ResolveWorkLinkPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  url: z.string().min(1).max(2_048),
+}).strict();
 export type ResolveWorkLinkPayload = z.infer<typeof ResolveWorkLinkPayload>;
 // The message a work link names, in a workspace on this computer. Null when no
 // workspace on this computer that syncs with the link's server holds it.
@@ -6667,10 +6673,10 @@ export const workLinkOperations = {
   },
   resolveWorkLink: {
     capabilityId: "work.link.resolve",
-    scope: "device",
+    scope: "workspace",
     channel: "desktop:resolve-work-link",
     payload: ResolveWorkLinkPayload, result: WorkLinkPlace.nullable(),
-    guard: "trusted-sender",
+    guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
   },
 } as const satisfies OperationTable;
 

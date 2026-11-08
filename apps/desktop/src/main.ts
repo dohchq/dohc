@@ -16,8 +16,8 @@ import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
 import { appViewOperations, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
-import { createWorkLinks } from "./workspaces/workLinks";
-import { parseWorkLinkUrl, type WorkLink } from "@dohc/workspace-contracts/work-links";
+import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLinks";
+import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
@@ -5915,7 +5915,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     pendingCodeChanged: () => shareHandoffRedemption.pendingCodeChanged(),
   },
   workLinks: {
-    open: (link) => openWorkLink(link).catch((error: unknown) => {
+    open: (link) => workLinkActivations.open(link).catch((error: unknown) => {
       console.error("[desktop] could not open a work link:", error);
     }),
   },
@@ -6140,22 +6140,27 @@ const workLinks = createWorkLinks<RegistryEntry>({
 });
 
 // A work link the OS handed dohc opens its message in the workspace on this
-// computer that holds it. dohc still opens for a link none holds, and shows
-// nothing about it.
-async function openWorkLink(link: WorkLink): Promise<void> {
-  const shown = liveWorkspaceWindow();
-  const currentWorkspaceId = shown ? rendererWorkspaceSessions.current(shown.webContents)?.workspaceId : undefined;
-  const place = await workLinks.resolve(link, currentWorkspaceId);
-  const entry = place && findWorkspace(place.workspaceId);
-  if (!place || !entry) {
+// computer that holds it, the shown window's workspace first. dohc still
+// opens for a link none holds, and shows nothing about it.
+const workLinkActivations = createWorkLinkActivations<{ window: BrowserWindow; workspace: WorkspaceSummary }>({
+  resolve: (link) => {
+    const shown = liveWorkspaceWindow();
+    return workLinks.resolve(link, shown ? rendererWorkspaceSessions.current(shown.webContents)?.workspaceId : undefined);
+  },
+  activate: async (place) => {
+    const entry = findWorkspace(place.workspaceId);
+    if (!entry) return null;
+    const workspace = workspaceSummaryFor(entry);
+    return { window: await sendWorkspaceActivated(liveWorkspaceWindow(), workspace), workspace };
+  },
+  deliver: ({ window, workspace }, place) => {
+    workLinkOpens.request(window.webContents, workspace, { channelId: place.channelId, threadId: place.threadId, messageId: place.messageId });
+    refreshNativeWorkspaceSurfaces();
+  },
+  showDohc: async () => {
     await showOrCreateMainWindow();
-    return;
-  }
-  const workspace = workspaceSummaryFor(entry);
-  const window = await sendWorkspaceActivated(shown, workspace);
-  workLinkOpens.request(window.webContents, workspace, { channelId: place.channelId, threadId: place.threadId, messageId: place.messageId });
-  refreshNativeWorkspaceSurfaces();
-}
+  },
+});
 
 const oldWindows = createOldWindows<WebContents, BrowserWindow>({
   windows: () => desktopWindows.workspaceWindows.allLive(),
@@ -7497,9 +7502,9 @@ function registerIpcHandlers(): void {
         (await adapter.makeWorkReference({ workspaceId, target: { kind: "message", messageId }, signal: operation.signal })).reference));
       return url === null ? null : { url };
     },
-    resolveWorkLink: async ({ url }, { event }) => {
+    resolveWorkLink: async ({ workspaceId, url }) => {
       const link = parseWorkLinkUrl(url);
-      return link ? await workLinks.resolve(link, rendererWorkspaceSessions.current(event.sender)?.workspaceId) : null;
+      return link ? await workLinks.resolve(link, workspaceId) : null;
     },
   });
 

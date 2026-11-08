@@ -57,6 +57,11 @@ function ReadOnlyNotice() {
   );
 }
 
+// One function for every render, so typing in the composer keeps the list's memo.
+function copyLinkAction(message: ChatMessageRecord) {
+  return <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />;
+}
+
 const NEW_COMMENT_COMPOSER = "linked-chat-new-composer-input";
 
 // A comment's chat takes its title from the comment's first line.
@@ -485,7 +490,7 @@ export function LinkedChatsPanel(props: {
           listRef={listRef}
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
-          rowActions={(message) => <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />}
+          rowActions={copyLinkAction}
         />
         {readOnly ? (
           <ReadOnlyNotice />
