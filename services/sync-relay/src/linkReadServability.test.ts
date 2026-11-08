@@ -56,6 +56,8 @@ it.each(["view","comment","edit","read-only","read-write"] as const)("rechecks %
 });
 
 it("refuses a holder's live request that also names an agent's address",async()=>{
+  // The test relay's clock reads 2000, so the link session is current only then.
+  vi.spyOn(Date,"now").mockReturnValue(2000);
   const f=await fixture("edit");
   try {
     const resolver=createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY,publicEditRelease:{version:1}});
