@@ -745,27 +745,17 @@ function decodedCollectionCursor(
   };
 }
 
-// Who a write through this socket is. While a run an automation started holds
-// the run slot, every write is that run's agent, whatever actor the caller
-// named, as disk edits during the run are: an agent that names itself a
-// person would otherwise write at depth 0 and start the chain over.
+// Who a write through this socket is. A request from the run dohc started that
+// holds the run slot is that run's agent, whatever actor the caller named. So
+// is every write while a run an automation started holds the slot, as disk
+// edits during the run are: an agent that names itself a person would
+// otherwise write at depth 0 and start the chain over.
 function writeActor(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): CliActor {
-  return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
-}
-
-// Who a chat message or reaction through this socket is. A request from the
-// run dohc started that holds the run slot is that run's agent, whatever
-// actor the caller named.
-function chatWriteActor(
-  actor: CliActor,
-  context: CliWorkspaceContext,
-  options: CliServerOptions,
-): CliActor {
-  return context.run === undefined ? writeActor(actor, context, options) : "agent";
+  return context.run !== undefined || options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
 // The agent an edit through this socket is recorded as. A run dohc dispatched
@@ -827,15 +817,14 @@ function collectionWriteAuthor(
 }
 
 // The agent a dataset invocation through this socket is, as writeActor
-// decides: an agent that names itself, at 0 outside a chain, or any caller
-// during a run an automation started, at its depth. Null for the person.
+// decides, at the depth of the run in progress, or 0 outside a chain. Null
+// for the person.
 function datasetAgent(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): LocalDatasetAgent | null {
-  const depth = options.agentRunDepth(context.workspaceId);
-  return depth > 0 || actor === "agent" ? { depth } : null;
+  return writeActor(actor, context, options) === "agent" ? { depth: options.agentRunDepth(context.workspaceId) } : null;
 }
 
 // A person edits documents and records in the app. Through this socket, an
@@ -3715,7 +3704,7 @@ async function dispatchWorkspace(
       if (channel.engine.kind === "agent" && request.args.title) {
         throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
       }
-      const actor = chatWriteActor(request.args.actor, context, options);
+      const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
         writer: cliChatWriter(actor, context, request.args.agent, request.args.reported),
         channelId: channel.engine.id,
@@ -3745,7 +3734,7 @@ async function dispatchWorkspace(
 
     case "reply": {
       const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
-      const actor = chatWriteActor(request.args.actor, context, options);
+      const actor = writeActor(request.args.actor, context, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : actor === "agent"
@@ -3852,7 +3841,7 @@ async function dispatchWorkspace(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: cliChatWriter(chatWriteActor(request.args.actor, context, options), context),
+        writer: cliChatWriter(writeActor(request.args.actor, context, options), context),
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,

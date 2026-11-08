@@ -1485,6 +1485,25 @@ describe("CLI socket server", () => {
     expect(stop).toHaveBeenCalledTimes(4);
   });
 
+  it("records a run's own sync stop and Collection action as its agent's without --as-agent, and the person's as theirs", async () => {
+    const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
+    context.stopSync = stop;
+    context.dataset = vi.fn(async () => ({kind:"invoked" as const,result:{accepted:true},revision:1,replayed:false}));
+    const request = {action:"invoke" as const,workspaceId:WORKSPACE_ID,datasetPath:"data/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Equipment"},idempotencyKey:"create-1"};
+    // A person's message started this run, at depth 0, and the `dohc` command
+    // its agent runs sends the run's secret.
+    dispatchedRun = "codex";
+    await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 0 });
+    await invoke("dataset", { cwd: workspaceRoot, actor: "human", request });
+    // The person's own terminal has no secret.
+    callerRunSecret = undefined;
+    await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
+    expect(stop).toHaveBeenLastCalledWith(undefined);
+    await invoke("dataset", { cwd: workspaceRoot, actor: "human", request });
+    expect(vi.mocked(context.dataset).mock.calls.map(call => call[1])).toEqual([{depth:0},null]);
+  });
+
   it("rejects older and newer CLIs before opening a workspace", async () => {
     for (const protocolVersion of [
       CLI_PROTOCOL_VERSION - 1,
