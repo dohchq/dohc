@@ -376,6 +376,42 @@ describe("Undo after a rename, a move or a delete", () => {
       "dohc could not put plan.md back. It stays at drafts/plan.md.", undefined, undefined));
   });
 
+  // The renamed file went back, so its tabs follow it. Only another page's
+  // links stayed behind, and they report on their own.
+  it("finishes a rename's Undo that left only another page's links, and names that page", async () => {
+    const reason = "dohc could not restore links in source.md. Update those links yourself.";
+    bridge.undoHistoryOperation.mockResolvedValueOnce({
+      ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [],
+      remaining: [{ path: "source.md", reason, retry: false }],
+    });
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    await renameTo("notes.md", "ideas");
+    const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    vi.mocked(props.onPathsChanged).mockClear();
+    act(() => undo());
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Renamed ideas.md back to notes.md"));
+    expect(props.onPathsChanged).toHaveBeenCalledWith([expect.objectContaining({ kind: "file", fromPath: "ideas.md", toPath: "notes.md" })]);
+    expect(props.onError).toHaveBeenCalledWith(reason);
+  });
+
+  it("files a rename's Undo that left the file itself where it was", async () => {
+    const reason = "dohc could not restore this file. Restore it from History.";
+    bridge.undoHistoryOperation.mockResolvedValueOnce({
+      ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [],
+      remaining: [{ path: "ideas.md", reason, retry: false }],
+    });
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    await renameTo("notes.md", "ideas");
+    const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    vi.mocked(props.onPathsChanged).mockClear();
+    act(() => undo());
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(reason, undefined, undefined));
+    expect(props.onNotice).not.toHaveBeenCalledWith("Renamed ideas.md back to notes.md");
+    expect(props.onPathsChanged).not.toHaveBeenCalled();
+  });
+
   // Main's text stays in the cause, for Copy.
   it.each([
     [{ code: "old-path-occupied", path: "notes.md" } as const, "Cannot undo the rename. Move the new notes.md first."],

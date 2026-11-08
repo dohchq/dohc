@@ -1212,12 +1212,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal),
               result.refusal.code === "live-page-owned" ? result.refusal.path : undefined);
           }
-          if (result.remaining.length > 0) {
-            throw new UndoRefusedError(
-              result.remaining.map((left) => left.reason).join(" "),
-              result.remaining.some((left) => left.retry),
-            );
+          const reasons = result.remaining.map((left) => left.reason).join(" ");
+          // A move whose row went back is undone even when other pages keep
+          // their links, so tabs follow the row and the links report alone.
+          const moved = "fromPath" in entry.change ? [entry.change.fromPath, entry.change.toPath] : [];
+          if (result.remaining.some((left) => moved.length === 0 || moved.some((path) => left.path === path || left.path.startsWith(`${path}/`)))) {
+            throw new UndoRefusedError(reasons, result.remaining.some((left) => left.retry));
           }
+          if (reasons) onError(reasons);
           // The change is undone, so it no longer waits for a listing.
           setPending((current) => current.filter((pending) => pending.id !== entry.change.id));
           return entry;
