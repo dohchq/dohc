@@ -655,7 +655,7 @@ describe("selecting several rows in Home", () => {
     await user.keyboard("{Delete}");
 
     const dialog = screen.getByTestId("delete-confirm");
-    const listed = [...dialog.querySelectorAll("li")].map((item) => item.textContent ?? "");
+    const listed = [...dialog.querySelectorAll("li")].map((item) => item.getAttribute("title") ?? "");
     expect(listed).toContain("Plans");
     expect(listed.filter((path) => path.startsWith("Plans/"))).toEqual([]);
     expect(within(dialog).getByRole("heading").textContent).toBe(`Delete ${listed.length} items?`);
