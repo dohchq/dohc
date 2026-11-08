@@ -1,6 +1,6 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, MessagesSquare, Reply, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -20,6 +20,7 @@ import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { EmptyState, SecondaryButton } from "../ui/controls";
+import { EMPTY_ART } from "./EmptyArt";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
@@ -543,8 +544,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingMessage = messages[0] ?? null;
   if (openingMessage === null) {
     return (
-      <div className="pt-4">
-        <EmptyState icon={MessagesSquare} title="No messages yet." />
+      <div className="flex py-12">
+        <EmptyState picture={EMPTY_ART.posts} title="No messages yet." />
       </div>
     );
   }

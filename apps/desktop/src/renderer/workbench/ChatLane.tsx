@@ -600,7 +600,7 @@ export function ChatLane(props: {
       messages={messages}
       runs={runs}
       loading={loading}
-      emptyLabel={`${agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}${props.locked ? "" : " Start one below."}`}
+      emptyLabel={agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
       place={place}
       header={(
         <>

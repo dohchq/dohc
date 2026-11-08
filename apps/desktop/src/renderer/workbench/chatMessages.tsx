@@ -11,7 +11,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
-import { MessagesSquare, SmilePlus } from "lucide-react";
+import { SmilePlus } from "lucide-react";
 import { EmptyState } from "../ui/controls";
 import {
   memo,
@@ -530,6 +530,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   messages: ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
+  // A chat that fills its own panel shows this picture over the label; without
+  // it the label is one muted line, for a chat inside a surface with more in it.
+  emptyPicture?: ReactNode;
   listRef?: RefObject<ChatMessageListHandle | null>;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
@@ -799,14 +802,17 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       </li>
     );
   }, [props, candidates, reactionsByMessage, density, anchor]);
+  if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
+    return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
+      <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
+    </div>;
+  }
   if (props.loading || props.messages.length === 0) {
     return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 ${anchor === "end" ? "justify-end" : ""}`}>
       {props.loading ? (
         <SkeletonRows label="Loading..." className="pt-1" />
       ) : (
-        <div className="py-4">
-          <EmptyState icon={MessagesSquare} title={props.emptyLabel} />
-        </div>
+        <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
       )}
     </div>;
   }
