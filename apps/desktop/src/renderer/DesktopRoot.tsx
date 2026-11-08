@@ -277,10 +277,15 @@ export function DesktopRoot() {
   }, [shownWorkspace]);
 
   // Signal first paint when real content is about to mount (not while the
-  // registry IPC is still pending and the root renders null).
+  // registry IPC is still pending and the root renders null). The two marks
+  // tell a window that never shows apart: no answer, or no frame.
   useEffect(() => {
     if (loaded) {
-      requestAnimationFrame(() => window.dohcDesktopInternal?.firstPaint());
+      performance.mark("dohc:workspace-registry-loaded");
+      requestAnimationFrame(() => {
+        performance.mark("dohc:first-frame");
+        window.dohcDesktopInternal?.firstPaint();
+      });
     }
   }, [loaded]);
 

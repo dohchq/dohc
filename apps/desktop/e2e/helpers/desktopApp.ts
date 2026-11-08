@@ -64,6 +64,16 @@ function stateWithin(read: Promise<object>): Promise<string> {
   );
 }
 
+/** The renderer's startup marks, in ms since its page started, for a failure message. */
+function describeRenderer(page: Page): Promise<string> {
+  return stateWithin(page.evaluate(() => ({
+    now: Math.round(performance.now()),
+    visibilityState: document.visibilityState,
+    marks: performance.getEntriesByType("mark").filter(mark => mark.name.startsWith("dohc:"))
+      .map(mark => `${mark.name} ${Math.round(mark.startTime)}`),
+  })));
+}
+
 /** What Electron says about the page's window, for a failure message. */
 function describeWindow(page: Page): Promise<string> {
   const app = launchedApps.get(page);
@@ -267,7 +277,10 @@ export async function launchDesktopApp(input: {
     try {
       const shown = await within(window.evaluate(window => window.isVisible()
         || new Promise<boolean>(resolve => window.once("show", () => resolve(true)))), 20_000);
-      if (!shown) throw new Error(`The desktop window didn't show within 20 s. Window: ${await describeWindow(page)}.`);
+      if (!shown) {
+        throw new Error(`The desktop window didn't show within 20 s. Window: ${
+          await describeWindow(page)}. Renderer: ${await describeRenderer(page)}.`);
+      }
     } finally {
       await window.dispose();
     }
