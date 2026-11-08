@@ -393,7 +393,7 @@ describe("LiveDocumentsDialog", () => {
     h.load.mockRejectedValueOnce(new Error("offline"));
     h.onError.mockImplementation((_message, _error, retry) => { expect(retry()).toBe(true); });
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
-    await screen.findByText("No live documents in this workspace.");
+    await screen.findByText("No live documents in this workspace. Reload after a document starts live editing.");
     expect(h.load).toHaveBeenCalledTimes(2);
   });
 
@@ -562,8 +562,9 @@ describe("LiveDocumentsDialog", () => {
     const h = harness();
     render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
 
-    expect(await screen.findByText("No live documents in this workspace.")).toBeTruthy();
-    expect(screen.getByText("Reload after a document starts live editing.")).toBeTruthy();
+    expect(
+      await screen.findByText("No live documents in this workspace. Reload after a document starts live editing."),
+    ).toBeTruthy();
     expect(
       screen.getByText(
         "Stopping live editing keeps the file and its history. Share permissions stay unchanged.",
@@ -899,7 +900,7 @@ describe("LiveDocumentsDialog", () => {
       const h = harness();
       render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
 
-      await screen.findByText("No live documents in this workspace.");
+      await screen.findByText("No live documents in this workspace. Reload after a document starts live editing.");
       expect(h.loadRefusals).toHaveBeenCalledWith("ws-1", undefined);
       expect(screen.queryByTestId("live-refusals")).toBeNull();
     });

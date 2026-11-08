@@ -504,7 +504,7 @@ describe("History timeline sources", () => {
     const state = screen.getByTestId("history-collections-unavailable");
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
     expect(state.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-danger");
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     // The standard Try again, not the small one a row uses.
     const retry = within(state).getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
@@ -527,7 +527,7 @@ describe("History timeline sources", () => {
     expect(state.querySelector(".lucide-info")!.getAttribute("class")).toContain("text-subtle");
     expect(state.querySelector(".lucide-triangle-alert")).toBeNull();
     expect(screen.queryByTestId("history-sources-retry")).toBeNull();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
   });
 
   it("says History is paused beside the Collections an empty paused page is missing", () => {
@@ -541,7 +541,10 @@ describe("History timeline sources", () => {
 
   it("says No changes yet only for a complete page", () => {
     view();
-    expect(screen.getByText("No changes yet")).toBeTruthy();
+    const line = screen.getByText("No changes yet.");
+    // The picture is decorative and there is no second line or action.
+    expect(line.parentElement!.textContent).toBe("No changes yet.");
+    expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("history-sources-notice")).toBeNull();
   });
 });

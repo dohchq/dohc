@@ -1,4 +1,4 @@
-import { Check, Layers, RotateCw } from "lucide-react";
+import { Check, Plus, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ListVersionLastChangesResult, ListWorkspaceVersionConflictsResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -7,7 +7,8 @@ import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
-import { NewVersionHint, SAME_IN_EVERY_VERSION, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
+import { EMPTY_ART } from "./EmptyArt";
+import { NewVersionHint, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
@@ -350,6 +351,9 @@ export function VersionsPage(props: {
   const creating = versions.busy === "create";
   const locked = versions.busy !== null || props.disabled === true;
 
+  const ready = snapshot !== null && lastChanges !== null;
+  const onlyMain = ready && ordered.length <= 1;
+
   // New version, or the name field in its place. One shows at a time: in the
   // header once a version exists, and in the empty state while only Main does.
   const newVersion = newName === null ? (
@@ -357,11 +361,14 @@ export function VersionsPage(props: {
       ref={newButton}
       data-testid="versions-page-new"
       disabled={locked}
+      size={onlyMain ? "compact" : "default"}
+      className={onlyMain ? "inline-flex items-center gap-1.5" : undefined}
       onClick={() => {
         setNameError(null);
         setNewName("");
       }}
     >
+      {onlyMain ? <Plus size={12} aria-hidden /> : null}
       New version
     </SecondaryButton>
   ) : (
@@ -404,14 +411,12 @@ export function VersionsPage(props: {
         </p>
       ) : (
         <p id={hintId} className="m-0 mt-1 text-[12px] leading-4 text-subtle">
-          {creating ? "Creating…" : <NewVersionHint versions={versions} />}
+          {creating ? "Creating…" : <NewVersionHint versions={versions} first={onlyMain} />}
         </p>
       )}
     </div>
   );
 
-  const ready = snapshot !== null && lastChanges !== null;
-  const onlyMain = ready && ordered.length <= 1;
   let body: ReactNode;
   if (!ready) {
     body = versions.loadFailed
@@ -419,9 +424,8 @@ export function VersionsPage(props: {
       : <SkeletonRows layout="list" label="Loading versions..." />;
   } else if (onlyMain) {
     body = (
-      <EmptyState icon={Layers} data-testid="versions-page-empty" title="Make a version to try changes without touching Main.">
+      <EmptyState picture={EMPTY_ART.versions} data-testid="versions-page-empty" title="Make a version to try changes without touching Main.">
         {newVersion}
-        <p data-testid="versions-page-same" className="m-0 max-w-sm text-[12px] text-muted">{SAME_IN_EVERY_VERSION}</p>
       </EmptyState>
     );
   } else {
