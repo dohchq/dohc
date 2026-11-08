@@ -15,6 +15,33 @@ workspace authority and does not read relay storage directly. Keep generic publi
 refusals, origin checks, and credential isolation.
 The [operations reference](../../services/share-web/README.md) defines deployment controls.
 
+## Agents act with their link's access
+
+An agent connection holds no authority beyond its link grant. The relay keeps
+only keyed hashes of its codes, tokens, and MCP address.
+
+Share-web calls the relay's link routes for an agent with
+`Authorization: DohcAgent <access token>`, the MCP address in
+`x-dohc-agent-resource`, and the relay exchange key. The relay refuses an agent
+request that also sends a link profile or a cookie. It refuses a link
+capability that names an MCP address. Every refusal is the response for a link
+that does not exist.
+
+Each read and write checks the access token's expiry, the connection's status,
+the MCP address, the link's current credential and generation, and the current
+access. A blob download checks again before each chunk. A discussion post or
+Collection write checks again in its transaction. The agent writes as its
+connection's link principal, so pause and block apply to it. Each message and
+Collection write it makes records its agent connection.
+
+The relay keeps every used refresh token until the connection ends. Reuse of
+any of them ends the connection. With this header, an agent reads the share,
+its files, its discussion, and a Group link's messages. It posts to the
+discussion and writes a Collection through an Edit link. Agent chat takes the
+access token and the MCP address in its request body and makes the same
+checks. Other link routes refuse an agent.
+See the [agent link tests](../../services/sync-relay/src/linkAgentAuthority.test.ts).
+
 ## Live documents have one canonical host
 
 The session host holds the canonical Y.Doc. It journals accepted updates durably

@@ -798,6 +798,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.readTx(() => collectionWriteStorage.authorizeLinkCollectionWrite(this, input).authorized);
   }
 
+  authorizeAgentCollectionWrite(input: Parameters<typeof collectionWriteStorage.authorizeAgentCollectionWrite>[1]) {
+    return this.readTx(() => collectionWriteStorage.authorizeAgentCollectionWrite(this, input).authorized);
+  }
+
   automationHostRecord(workspaceId: string) {
     return automationHostStorage.automationHostRecord(this, workspaceId);
   }
@@ -1187,15 +1191,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.findLinkSessionByCapabilityHash(this, capabilityHash);
   }
 
-  appendLinkDiscussionMessage(input: {
-    capabilityHash: string;
-    profileTokenHash: string;
-    claimedName?: string | null;
-    body: string;
-    idempotencyKey: string;
-    createdAtMs: number;
-    guard?: () => void;
-  }): AppendLinkDiscussionMessageResult {
+  appendLinkDiscussionMessage(input: discussionStorage.AppendLinkDiscussionMessageInput): AppendLinkDiscussionMessageResult {
     return discussionStorage.appendLinkDiscussionMessage(this, input);
   }
 
@@ -1684,6 +1680,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): agentConnectionStorage.AgentConnectionRow | null {
     return agentConnectionStorage.authenticateAgentAccessToken(this, accessTokenHash, nowMs);
+  }
+
+  authenticateAgentAuthority(check: agentConnectionStorage.AgentAccessCheck, nowMs: number): agentConnectionStorage.AgentConnectionRow | null {
+    return agentConnectionStorage.authenticateAgentAuthority(this, check, nowMs);
   }
 
   recordAgentConnectionAction(connectionId: string, atMs: number): void {

@@ -15,10 +15,12 @@ import {
   relayError,
   RelayError,
 } from "./errors";
+import { isAgentRequest, type LinkAuthorityResolver } from "./linkAuthority";
 import {
   hashLinkProfileSecret,
   type ValidatedLinkCapability,
 } from "./linkSecurity";
+import { agentName } from "./storage/agentConnections";
 import { cursorCodec, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
@@ -81,6 +83,9 @@ export function createDiscussionRoutes(
   linkReadRateLimiter: TokenBucketLimiter,
   linkGrantReadRateLimiter: TokenBucketLimiter,
   discussionActivity: Pick<DiscussionActivityHub, "wait" | "wake">,
+  // The link discussion's own route takes a holder or an agent. Its activity
+  // route stays on the holder's capability.
+  linkAuthority: Pick<LinkAuthorityResolver, "require" | "fresh">,
 ) {
   type DiscussionViewer = "public" | "named" | "owner";
 
@@ -243,20 +248,25 @@ export function createDiscussionRoutes(
     ) {
       return privateRefused();
     }
-    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
+    // An agent's token names its own principal; it sends no profile.
+    const agent = isAgentRequest(request);
+    const profileSecret = agent ? null : request.headers.get("x-dohc-link-profile-secret");
     if (
-      (request.method === "POST" && profileSecret === null) ||
-      (profileSecret !== null && !LINK_SECRET_PATTERN.test(profileSecret))
+      !agent &&
+      ((request.method === "POST" && profileSecret === null) ||
+        (profileSecret !== null && !LINK_SECRET_PATTERN.test(profileSecret)))
     ) {
       return privateRefused();
     }
 
     try {
-      const { capabilityToken, capability } = requireLinkRead(
+      const capability = linkAuthority.require(
         request,
         linkReadRateLimiter,
         linkGrantReadRateLimiter,
       );
+      const { credential } = capability;
+      const requireFresh = () => linkAuthority.fresh(capability);
 
       if (request.method === "GET") {
         const url = new URL(request.url);
@@ -282,31 +292,38 @@ export function createDiscussionRoutes(
         const page = discussionPage(
           storedPage,
           "public",
-          principal?.displayName ?? null,
+          credential.kind === "agent"
+            ? agentName(credential.connection.reportedName)
+            : principal?.displayName ?? null,
         );
-        requireFreshLinkRead(capabilityToken, capability);
+        requireFresh();
         return privateResponse(
           linkJsonResponse(capability.shareId, capability.grantId, page),
         );
       }
 
       const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
-      requireFreshLinkRead(capabilityToken, capability);
+      requireFresh();
       if (capability.access === "view") return linkRefusal("link_view_access");
+      const writer = credential.kind === "agent"
+        ? { agent: credential.check }
+        : {
+            capabilityHash: credential.capability.session.capabilityHash,
+            profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
+          };
       const result = storage.appendLinkDiscussionMessage({
-        capabilityHash: capability.session.capabilityHash,
-        profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
+        ...writer,
         claimedName: input.claimedName,
         body: input.body,
         idempotencyKey: input.idempotencyKey,
         createdAtMs: nowMs(),
         guard: () => {
-          requireFreshLinkRead(capabilityToken, capability);
+          requireFresh();
         },
       });
       if (!result.ok) {
         if (result.reason === "rate-limit") {
-          requireFreshLinkRead(capabilityToken, capability);
+          requireFresh();
           return linkRefusal("link_read_rate_limited");
         }
         if (result.reason === "invalid-input") {

@@ -172,7 +172,7 @@ A URL carrying the credential that authenticates a link grant: anyone holding it
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-Whoever uses a share link without a server account: a person in a browser, or an agent that signs in with the link. The relay records each one as a link principal with an optional unverified name. For an agent, it also records the agent connection it signed in with, and the name is the one its client reported.
+Whoever uses a share link without a server account: a person in a browser, or an agent that signs in with the link. The relay records each one as a link principal with an optional unverified name. For an agent, it also records the agent connection it signed in with. The agent's name is the one its client reported, under the rules for a person's name, or "Agent". Its chat posts, discussion messages, and Collection writes all show that name.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:

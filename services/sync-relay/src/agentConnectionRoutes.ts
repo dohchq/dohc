@@ -273,14 +273,14 @@ export function createAgentConnectionRoutes(input: {
     const refreshToken = newLinkBearer();
     let result: ReturnType<AgentStorage["refreshAgentTokens"]>;
     if (body.grantType === "authorization_code") {
-      fields(body, ["grantType", "clientId", "code", "redirectUri", "codeVerifier", "resource"]);
+      fields(body, ["grantType", "clientId", "code", "codeVerifier", "resource"], ["redirectUri"]);
       const verifier = text(body.codeVerifier, 128);
       if (!PKCE_VERIFIER_PATTERN.test(verifier)) throw new Refused();
       const connectionId = newId();
       result = storage.redeemAgentAuthorizationCode({
         codeHash: hash("code", text(body.code, 64)),
         clientId: text(body.clientId, AGENT_URI_CHAR_LIMIT),
-        redirectUri: text(body.redirectUri, AGENT_URI_CHAR_LIMIT),
+        redirectUri: body.redirectUri === undefined ? null : text(body.redirectUri, AGENT_URI_CHAR_LIMIT),
         resourceHash: hash("resource", text(body.resource, AGENT_URI_CHAR_LIMIT)),
         verifierChallenge: pkceS256Challenge(verifier),
         connectionId,

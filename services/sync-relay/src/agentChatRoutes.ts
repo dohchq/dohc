@@ -2,16 +2,18 @@ import { jsonResponse, readBoundedJson } from "@dohc/service-http";
 import { handleForName, normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound, RelayError, relayError } from "./errors";
+import { agentAccessCheck } from "./linkAuthority";
 import { linkChatMessage, refusePost, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
-import { hashAgentCredential } from "./linkSecurity";
 import { messageFromOp } from "./namedRecipientChat";
 import { authorizeLinkChatAction } from "./shareAuthorization";
 import { filterOpForShare } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import { agentName, type AgentAccessCheck } from "./storage/agentConnections";
 
 // share-web calls these over the relay exchange key for an agent connected
-// to a Group link. The access token alone names the connection; the
+// to a Group link. The access token names the connection, and the MCP
+// address must be the one it signed in at, as on the other link routes. The
 // connection names its link principal, which is the post's authority. No
 // field in the request can name the author.
 export type AgentChatRoute = { route: "agent-chat"; action: "post" | "wait" };
@@ -29,11 +31,10 @@ const WAIT_PAGE_ROWS = 16;
 // Half of share-web's result limit, so its projection of an answer, which
 // repeats the Group with each message, still fits it.
 export const AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES = 512 * 1024;
-const TOKEN_CHARS = 64;
 const THREAD_ID_CHARS = 256;
 
 type AgentChatStorage = Pick<SyncRelayStorage,
-  | "appendAgentChatPost" | "authenticateAgentAccessToken" | "fetchChatMessages"
+  | "appendAgentChatPost" | "authenticateAgentAuthority" | "fetchChatMessages"
   | "findChannelCreateKind" | "getShare" | "getShareGrant" | "getShareLabels" | "linkPrincipalThreadIds" | "workspaceIsOwnedBy"
 >;
 
@@ -57,7 +58,7 @@ function boundedInteger(value: unknown, max: number): number {
 // People mention an agent that joined with a link by the name its posts
 // show. The name is fixed when it signs in, so the mention is too.
 export function agentMention(reportedName: string | null): string {
-  return `@${handleForName(reportedName ?? "") || "Agent"}`;
+  return `@${handleForName(agentName(reportedName)) || "Agent"}`;
 }
 
 function mentions(body: string | null, mention: string): boolean {
@@ -112,12 +113,17 @@ export function createAgentChatRoutes(input: {
     return body as Record<string, unknown>;
   }
 
-  const accessHash = (body: Record<string, unknown>) => hashAgentCredential("access", text(body.accessToken, TOKEN_CHARS), linkKey!);
+  const credential = (body: Record<string, unknown>): AgentAccessCheck => {
+    const check = agentAccessCheck(body.accessToken, body.resource, linkKey!);
+    if (!check) throw new Refused();
+    return check;
+  };
 
-  // The connection is active, its link is current at the generation it
-  // signed in with, and the link is on a Group whose channel it may read.
-  const current = (tokenHash: string) => {
-    const connection = storage.authenticateAgentAccessToken(tokenHash, nowMs());
+  // The connection is active, the request names its MCP address, its link is
+  // current at the generation it signed in with, and the link is on a Group
+  // whose channel it may read.
+  const current = (check: AgentAccessCheck) => {
+    const connection = storage.authenticateAgentAuthority(check, nowMs());
     if (!connection) throw new Refused();
     const authorized = authorizeLinkChatAction({ storage, grantId: connection.grantId, action: "read" });
     if (!authorized.ok || authorized.grant.generation !== connection.generation ||
@@ -126,11 +132,11 @@ export function createAgentChatRoutes(input: {
   };
 
   function post(body: Record<string, unknown>): Response {
-    fields(body, ["accessToken", "body", "idempotencyKey"], ["threadId"]);
+    fields(body, ["accessToken", "resource", "body", "idempotencyKey"], ["threadId"]);
     if (typeof body.body !== "string" || typeof body.idempotencyKey !== "string" ||
         (body.threadId !== undefined && typeof body.threadId !== "string")) throw new Refused();
     const result = storage.appendAgentChatPost({
-      accessTokenHash: accessHash(body),
+      agent: credential(body),
       threadId: body.threadId ?? null,
       body: body.body,
       idempotencyKey: body.idempotencyKey,
@@ -156,13 +162,13 @@ export function createAgentChatRoutes(input: {
   // Access is checked before every scan, so before parking and after each
   // wake, and again before the answer leaves.
   async function wait(body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
-    fields(body, ["accessToken"], ["cursor", "threadId", "timeoutMs"]);
-    const tokenHash = accessHash(body);
+    fields(body, ["accessToken", "resource"], ["cursor", "threadId", "timeoutMs"]);
+    const check = credential(body);
     const threadId = body.threadId === undefined ? null : text(body.threadId, THREAD_ID_CHARS);
     const timeoutMs = body.timeoutMs === undefined ? AGENT_CHAT_MAX_WAIT_MS : boundedInteger(body.timeoutMs, AGENT_CHAT_MAX_WAIT_MS);
     const requestedCursor = body.cursor === undefined ? null : boundedInteger(body.cursor, Number.MAX_SAFE_INTEGER);
     const deadline = nowMs() + timeoutMs;
-    const first = current(tokenHash);
+    const first = current(check);
     const { connectionId, principalId, grantId } = first.connection;
     const { workspaceId, shareId } = first.authorized.share;
     const { channelWireId } = first.authorized.effectiveSelector;
@@ -179,7 +185,7 @@ export function createAgentChatRoutes(input: {
       // Progress lives only in the cursor each answer returns.
       let position = requestedCursor ?? first.connection.startSeq;
       const scan = () => {
-        const { authorized } = current(tokenHash);
+        const { authorized } = current(check);
         if (authorized.effectiveSelector.channelWireId !== channelWireId) throw new Refused();
         const page = storage.fetchChatMessages({ workspaceId, channelWireId, cursor: position, direction: "newer", limit: WAIT_PAGE_ROWS });
         const found: LinkChatMessage[] = [];
@@ -214,7 +220,7 @@ export function createAgentChatRoutes(input: {
         if (parkScanFailed || caughtUp(result)) result = scan();
       }
       if (signal.aborted) throw new Refused();
-      current(tokenHash);
+      current(check);
       const answer: AgentChatWaitBody = {
         ok: true, group: { channelWireId, name: storage.getShareLabels(shareId).subjectName }, mention, messages: [], cursor: position,
       };

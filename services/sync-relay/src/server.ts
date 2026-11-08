@@ -66,6 +66,7 @@ import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/sha
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkChatRoutes } from "./linkChatRoutes";
 import { createLinkReadRoutes } from "./linkReadRoutes";
+import { createLinkAuthorityResolver } from "./linkAuthority";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
 import { createShareInventoryRoutes } from "./shareInventoryRoutes";
@@ -589,16 +590,6 @@ export function createSyncRelayHandler({
     if (!capability) throw invalidLinkCapability();
     return {capabilityToken, capability};
   };
-  const respondToLinkCollectionWrites = linkKey ? createLinkCollectionWriteRoute({
-    storage,
-    rateLimiter: collectionWriteRateLimiter,
-    admission: linkCollectionWriteAdmission,
-    linkKey,
-    requireLinkCapability,
-    nowMs,
-    newId,
-    discussionActivity,
-  }) : null;
   const requireLinkRead = (
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
@@ -637,6 +628,29 @@ export function createSyncRelayHandler({
     }
     return fresh;
   };
+
+  // The routes share-web's MCP tool loop calls take a link holder's
+  // capability or a connected agent's access token through this one resolver.
+  const linkAuthority = createLinkAuthorityResolver({
+    storage,
+    linkKey,
+    publicEditRelease,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    requireLinkCapability,
+    requireFreshLinkRead,
+  });
+  const respondToLinkCollectionWrites = linkKey ? createLinkCollectionWriteRoute({
+    storage,
+    rateLimiter: collectionWriteRateLimiter,
+    admission: linkCollectionWriteAdmission,
+    linkKey,
+    linkAuthority,
+    nowMs,
+    newId,
+    discussionActivity,
+  }) : null;
 
   const linkJsonResponse = (
     shareId: string,
@@ -683,6 +697,7 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
+    linkAuthority,
   );
 
   const {
@@ -740,8 +755,7 @@ export function createSyncRelayHandler({
     storage,
     linkKey,
     nowMs,
-    requireLinkRead,
-    requireFreshLinkRead,
+    linkAuthority,
     linkJsonResponse,
     readLimiters: { capability: linkReadRateLimiter, grant: linkGrantReadRateLimiter },
     followLimiters: { capability: linkLogReadRateLimiter, grant: linkGrantLogReadRateLimiter },
@@ -755,8 +769,7 @@ export function createSyncRelayHandler({
     storage,
     nowMs,
     linkCurrentFileLimit,
-    requireLinkRead,
-    requireFreshLinkRead,
+    linkAuthority,
     linkJsonResponse,
     filteredLogPage,
     newestFilteredOpFreshness,
