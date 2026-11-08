@@ -64,7 +64,6 @@ export function ThreadedChat(props: {
   listRef: RefObject<ChatMessageListHandle | null>;
   firstUnreadMessageId?: string | null;
   flashMessageId?: string | null;
-  bottomSpace?: number;
 }) {
   const { testIdPrefix: prefix, listRef } = props;
   const [openRootId, setOpenRootId] = useState<string | null>(null);
@@ -302,7 +301,6 @@ export function ThreadedChat(props: {
             firstUnreadMessageId={props.firstUnreadMessageId}
             footer={working && workingRootId === null ? <WorkingRow testIdPrefix={prefix} working={working} density={narrow ? "narrow" : "stream"} /> : null}
             density={narrow ? "narrow" : "stream"}
-            bottomSpace={props.bottomSpace}
           />
           <span role="status" aria-live="polite" className="sr-only">
             {newCount > 0 ? `${newCount} ${newCount === 1 ? "new message" : "new messages"}` : ""}

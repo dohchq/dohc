@@ -116,7 +116,7 @@ import {
 } from "./chatMessages";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
-import { AGENT_OFFER_SPACE, NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
+import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import { agentMentionId, listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
@@ -4342,7 +4342,6 @@ export function ChatsView(props: {
             reactionControls={reactionControls}
             listRef={flatChatListRef}
             flashMessageId={flashMessageId}
-            bottomSpace={AGENT_OFFER_SPACE}
           />
         ) : (
           <>
@@ -4558,8 +4557,7 @@ export function ChatsView(props: {
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
-            // The top space holds a picked agent's offer, so it covers no comment.
-            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-6 sm:px-4">
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-3 sm:px-4">
               <MentionComposer
                 above={<>
                   {resolveTargetMessageId ? (

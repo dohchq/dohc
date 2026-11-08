@@ -19,26 +19,26 @@ const noop = () => {};
 // Every chat composer sends through the shared control: the lane, DM and
 // comment composers (stream), a group's new post (post), and a file's chats
 // in About (ChatComposer).
-const composers: { name: string; render: (sending: boolean) => ReactElement }[] = [
+const composers: { name: string; render: (sending: boolean, value?: string) => ReactElement }[] = [
   {
     name: "a group, DM or comment composer",
-    render: (sending) => (
-      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="Hello" sending={sending}
+    render: (sending, value = "Hello") => (
+      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={sending}
         placeholder="Message" sendLabel="Send message" candidates={[]} onChange={noop} onSend={noop} />
     ),
   },
   {
     name: "a group's new post",
-    render: (sending) => (
-      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="Hello" sending={sending}
+    render: (sending, value = "Hello") => (
+      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={sending}
         surface="post" authorName="Ada" placeholder="What's happening?" sendLabel="Send message"
         candidates={[]} onChange={noop} onSend={noop} />
     ),
   },
   {
     name: "a file's chat in About",
-    render: (sending) => (
-      <ChatComposer testIdPrefix="chats" composerId="chats-composer" value="Hello" sending={sending}
+    render: (sending, value = "Hello") => (
+      <ChatComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={sending}
         placeholder="Message" sendLabel="Send message" onChange={noop} onSend={noop} />
     ),
   },
@@ -46,10 +46,13 @@ const composers: { name: string; render: (sending: boolean) => ReactElement }[] 
 
 const send = () => screen.getByRole("button", { name: "Send message" });
 const status = () => screen.getByRole("status");
+const look = () => send().dataset.look;
 const showsPending = () => {
   const ring = screen.queryByTestId("chats-send-pending");
   const busy = send().getAttribute("aria-busy") === "true";
   expect(busy).toBe(ring !== null);
+  // A slow send has its own look, never the ready fill.
+  expect(look() === "busy").toBe(busy);
   expect(status().textContent).toBe(busy ? "Sending…" : "");
   return busy;
 };
@@ -61,6 +64,7 @@ describe.each(composers)("the send control in $name", ({ render: composer }) => 
     expect((send() as HTMLButtonElement).disabled).toBe(true);
     act(() => vi.advanceTimersByTime(999));
     expect(showsPending()).toBe(false);
+    expect(look()).toBe("ready");
     act(() => vi.advanceTimersByTime(1));
     expect(showsPending()).toBe(true);
     // The control keeps its name; the ring is not a second one.
@@ -78,6 +82,14 @@ describe.each(composers)("the send control in $name", ({ render: composer }) => 
     view.rerender(composer(true));
     act(() => vi.advanceTimersByTime(999));
     expect(showsPending()).toBe(false);
+  });
+
+  it("looks ready with something to send and unavailable with nothing", () => {
+    const view = render(composer(false, ""));
+    expect((send() as HTMLButtonElement).disabled).toBe(true);
+    expect(look()).toBe("off");
+    view.rerender(composer(false, "Hello"));
+    expect(look()).toBe("ready");
   });
 
   it("never shows for a send that ends under a second", () => {
@@ -106,4 +118,10 @@ it("does not show a composer that cannot send yet as sending", () => {
   expect((send() as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(true);
   expect(showsPending()).toBe(false);
+  expect(look()).toBe("off");
+});
+
+it("sends a file's chat from inside its field", () => {
+  render(composers[2]!.render(false));
+  expect(screen.getByTestId("chats-composer").parentElement!.contains(send())).toBe(true);
 });

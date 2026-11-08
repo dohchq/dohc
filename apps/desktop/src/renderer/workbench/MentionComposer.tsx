@@ -154,8 +154,7 @@ export function MentionComposer(props: {
   // What sending to the picked agent does. The parent derives it from the
   // pick it was told about.
   agentOffer?: AgentAddressedOffer | null;
-  // Bars on a stream composer's top edge, such as Replying to. The agent
-  // offer floats above them.
+  // Bars on a stream composer's top edge, such as Replying to.
   above?: ReactNode;
   // Where a chat's box sits: under a stream, in a thread's panel, or in a
   // narrow pane. Each keeps its own margins.
@@ -317,8 +316,8 @@ export function MentionComposer(props: {
     const stack = stackRef.current ?? form;
     const position = () => {
       const frame = form.getBoundingClientRect();
-      // The topmost bar, the poll, or the box itself: its border, not the
-      // stack's empty margin above it.
+      // The topmost bar or the box itself: its border, not the stack's empty
+      // margin above it.
       const top = (stackRef.current?.firstElementChild ?? form).getBoundingClientRect().top;
       const above = top - MENU_GAP_PX - MENU_EDGE_PX;
       const below = window.innerHeight - frame.bottom - MENU_GAP_PX - MENU_EDGE_PX;
@@ -669,7 +668,8 @@ export function MentionComposer(props: {
       className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"
     >
       <ListChecks size={14} strokeWidth={1.9} aria-hidden />
-      <span className="@max-[29rem]/composer:hidden">Poll</span>
+      {/* An open poll keeps its word, so the choices are never unexplained. */}
+      <span className={poll ? undefined : "@max-[29rem]/composer:hidden"}>Poll</span>
     </button>
   ) : null;
   const form = (
@@ -929,7 +929,7 @@ export function MentionComposer(props: {
             : "field-sizing-content block max-h-60 min-h-[34px] w-full resize-none bg-transparent px-3 pb-0.5 pt-2.5 text-[14px] leading-[22px] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
         }
       />
-      {isPost && expanded ? pollBlock : null}
+      {!isPost || expanded ? pollBlock : null}
       {isPost ? (
         expanded ? (
           <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
@@ -969,7 +969,7 @@ export function MentionComposer(props: {
             ) : null}
             {pollButton}
             {props.agentOffer ? (
-              <AgentOffer offer={props.agentOffer} surface="post" />
+              <AgentOffer offer={props.agentOffer} />
             ) : (
               <span className="flex-1" />
             )}
@@ -1034,7 +1034,7 @@ export function MentionComposer(props: {
           >
             <AtSign size={16} strokeWidth={1.9} aria-hidden />
           </button>
-          <span className="flex-1" />
+          {props.agentOffer ? <AgentOffer offer={props.agentOffer} /> : <span className="flex-1" />}
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}
             label={props.sendLabel}
@@ -1047,16 +1047,12 @@ export function MentionComposer(props: {
     </form>
   );
   if (isPost) return form;
-  // The bars, the poll, the box and the agent offer are one stack, so the
-  // offer floats above the topmost bar and never covers its ×.
+  // The bars and the box are one stack: a reply bar sits on the box, and the
+  // question comes before its choices inside it.
   return (
     <div ref={stackRef} className="@container/composer relative shrink-0">
       {props.above}
-      {pollBlock}
       {form}
-      {props.agentOffer ? (
-        <AgentOffer offer={props.agentOffer} surface="stream" hidden={showMenu} />
-      ) : null}
     </div>
   );
 }

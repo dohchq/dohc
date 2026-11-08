@@ -19,7 +19,7 @@ import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate, type MentionComposerHandle } from "./MentionComposer";
 import { agentMentionId } from "../../settings/userSettings";
-import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
+import { useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { CollectionChangeCard } from "./CollectionChangeCard";
@@ -657,7 +657,6 @@ export function ChatLane(props: {
       listRef={listRef}
       firstUnreadMessageId={firstUnreadMessageId}
       flashMessageId={flashMessageId}
-      bottomSpace={AGENT_OFFER_SPACE}
     />
   );
 }

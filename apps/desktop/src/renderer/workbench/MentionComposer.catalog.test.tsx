@@ -239,6 +239,14 @@ describe("the poll block", () => {
     expect(pollState()).toBeNull();
   });
 
+  it.each(["stream", "post"] as const)("puts a %s poll's choices under its question, in the box", (surface) => {
+    render(<Harness surface={surface === "post" ? surface : undefined} initialValue="Lunch?" initialPoll={["Soup", "Salad"]} />);
+    const question = screen.getByTestId("chats-composer");
+    const poll = screen.getByTestId("chats-poll");
+    expect(question.closest("form")!.contains(poll)).toBe(true);
+    expect(question.compareDocumentPosition(poll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("Enter moves to the next choice and adds one at the end", async () => {
     const onSend = vi.fn();
     render(<Harness initialValue="Lunch?" initialPoll={["Soup", ""]} onSend={onSend} />);

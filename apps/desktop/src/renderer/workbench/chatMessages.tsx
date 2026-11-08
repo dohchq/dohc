@@ -545,8 +545,6 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   flashMessageId?: string | null;
   // A "New" hairline sits before this message, the first the reader has not seen.
   firstUnreadMessageId?: string | null;
-  // Room under the last message, in pixels, that the list always keeps.
-  bottomSpace?: number;
   // More buttons on a row's hover bar, after the reactions.
   rowActions?: (message: ChatMessageRecord) => ReactNode;
   // The message whose thread is open beside the list.
@@ -846,7 +844,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     alwaysRender={pinned}
     className="min-h-0 flex-1 overflow-y-auto"
     // A narrow row's hover bar rises above it, so the first row needs the room.
-    style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: props.bottomSpace ?? 4 }}
+    style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: 8 }}
     role="list"
     data-chat-virtualized="true"
     onKeyDown={event => {
@@ -869,8 +867,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
 });
 
 // The fast composer: Enter sends (Shift+Enter for a newline), disabled while
-// a send is in flight, submit button gated on non-blank input. A slow send
-// shows on the shared send control.
+// a send is in flight, submit button gated on non-blank input. Send sits in
+// the field's corner, as in every other composer, and a slow send shows on
+// it.
 export function ChatComposer(props: {
   testIdPrefix: string;
   composerId: string;
@@ -889,7 +888,7 @@ export function ChatComposer(props: {
   return (
     <form
       ref={formRef}
-      className="flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+      className="shrink-0 border-t border-line p-2"
       onSubmit={(event) => {
         event.preventDefault();
         props.onSend();
@@ -898,35 +897,39 @@ export function ChatComposer(props: {
       <label className="sr-only" htmlFor={props.composerId}>
         Message
       </label>
-      <textarea
-        id={props.composerId}
-        data-testid={`${props.testIdPrefix}-composer`}
-        value={props.value}
-        disabled={props.sending}
-        rows={2}
-        placeholder={props.placeholder}
-        onChange={(event) => props.onChange(event.target.value)}
-        onKeyDown={(event) => {
-          // During IME composition (CJK input), Enter confirms the composed
-          // characters and Escape cancels them; neither sends or backs out.
-          if (isComposingKey(event)) return;
-          if (isSendKey(event)) {
-            event.preventDefault();
-            props.onSend();
-          } else if (event.key === "Escape" && props.onEscape) {
-            event.stopPropagation();
-            props.onEscape();
-          }
-        }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
-      />
-      <ComposerSendButton
-        testId={`${props.testIdPrefix}-send`}
-        label={props.sendLabel}
-        sending={props.sending}
-        disabled={props.value.trim().length === 0}
-        shape="icon"
-      />
+      <div className="relative">
+        <textarea
+          id={props.composerId}
+          data-testid={`${props.testIdPrefix}-composer`}
+          value={props.value}
+          disabled={props.sending}
+          rows={2}
+          placeholder={props.placeholder}
+          onChange={(event) => props.onChange(event.target.value)}
+          onKeyDown={(event) => {
+            // During IME composition (CJK input), Enter confirms the composed
+            // characters and Escape cancels them; neither sends or backs out.
+            if (isComposingKey(event)) return;
+            if (isSendKey(event)) {
+              event.preventDefault();
+              props.onSend();
+            } else if (event.key === "Escape" && props.onEscape) {
+              event.stopPropagation();
+              props.onEscape();
+            }
+          }}
+          className="block w-full resize-none rounded-md border border-line bg-bg py-1.5 pl-2.5 pr-10 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
+        />
+        <div className="absolute bottom-1.5 right-1.5 flex">
+          <ComposerSendButton
+            testId={`${props.testIdPrefix}-send`}
+            label={props.sendLabel}
+            sending={props.sending}
+            disabled={props.value.trim().length === 0}
+            shape="box"
+          />
+        </div>
+      </div>
     </form>
   );
 }

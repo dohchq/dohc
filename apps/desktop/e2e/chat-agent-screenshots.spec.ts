@@ -93,7 +93,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
       const card = page.getByRole("button", { name: tool, exact: true });
       await expect(card).toBeEnabled();
       await card.click();
-      await expect(page.getByText("Conversation through stdin")).toBeVisible();
+      await expect(page.getByTestId("agent-tool-permissions")).toBeVisible();
       await expect(card).toBeFocused();
       expect(await dialogTop()).toBe(topBeforePick);
       expect(await nameLeft()).toBe(leftBeforePick);

@@ -1159,11 +1159,9 @@ function AgentOfferComposer(props: {
           cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam</ComposerModeBar>
       ) : undefined} />
   );
-  // A stream composer floats its offer above its top edge, into the room the
-  // end of its conversation keeps, so it gets that room here.
   return props.surface === "post"
     ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{composer}</div>
-    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{composer}</div>;
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-2`}>{composer}</div>;
 }
 
 // The About rail at the drawing's 290px, on the chrome.
@@ -3092,7 +3090,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               candidates={[]} onChange={noop} onSend={noop} />
           </div>
         </Specimen>
-        <Specimen label="cannot send yet, or a send under a second">
+        <Specimen label="cannot send yet; a send under a second keeps the look at rest">
           <div className="w-[400px] rounded-lg border border-line bg-panel">
             <MentionComposer testIdPrefix={`states-composer-disabled-${theme}`} composerId={`states-composer-disabled-${theme}`}
               value={COMPOSER_DRAFT} sending={false} disabled placeholder="Message #general" sendLabel="Send message"
@@ -3235,8 +3233,8 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* Offers sit in space already there: a folder row's glyph, the tab
-          row's end, a row floating under a pasted line, the space before a
-          post's Send, and above a message composer's Send. */}
+          row's end, a row floating under a pasted line, and the space before
+          a composer's Send. */}
       <Section part="offers" title="Offers" menusAtRest>
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
@@ -3265,14 +3263,14 @@ function Pane(props: { theme: "light" | "dark" }) {
             ))}
           </div>
         </Specimen>
-        <Specimen label="the agent picked in a message or comment: the same states, above Send">
+        <Specimen label="the agent picked in a message or comment: the same states, before Send">
           <div className="flex flex-col gap-3">
             {AGENT_OFFER_STATES.map((state) => (
               <AgentOfferComposer key={state} state={state} surface="stream" id={`states-agent-stream-${state}-${theme}`} />
             ))}
           </div>
         </Specimen>
-        <Specimen label="Above a reply bar; then a narrow pane">
+        <Specimen label="Under a reply bar; then a narrow pane">
           <div className="flex flex-col gap-3">
             <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
             <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
@@ -3694,7 +3692,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               onChange={noop} onSend={noop} poll={{ choices: ["Porto", "Porto ", "Lisbon"], open: true }} onPollChange={noop} />
           </div>
         </Specimen>
-        <Specimen label="a narrow new post with a poll: Poll without its label">
+        <Specimen label="a narrow new post with a poll: Poll keeps its label">
           <div className="w-[400px]">
             <MentionComposer testIdPrefix={`states-poll-narrow-${theme}`} composerId={`states-poll-narrow-${theme}`}
               value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
@@ -3702,10 +3700,8 @@ function Pane(props: { theme: "light" | "dark" }) {
               onChange={noop} onSend={noop} poll={{ choices: ["Lisbon", "Porto"], open: true }} onPollChange={noop} />
           </div>
         </Specimen>
-        <Specimen label="a comment asking the agent, with a poll, replying to a message: the offer floats over the stack">
-          {/* A stream composer floats its offer above its top edge, into the
-              room the end of its conversation keeps, so it gets that room. */}
-          <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
+        <Specimen label="a comment asking the agent, with a poll, replying to a message: the choices under the question, the offer before Send">
+          <div className="w-[400px] rounded-lg border border-line bg-panel pt-2">
             <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
               value={`@Nova ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
               sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}

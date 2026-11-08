@@ -82,6 +82,20 @@ it("shows each agent with its controls, and an agent you run with no Check and n
   expect(terminal.getByRole("button", { name: "Claude in Terminal actions" })).toBeTruthy();
 });
 
+it("says under each name what starts the agent and where it stands, and On or Off by its switch", () => {
+  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
+  renderList({ settings: codexOff });
+  const state = (agent: string) => within(row(agent)).getByTestId("agent-state").textContent;
+  const word = (agent: string) => within(row(agent)).getByTestId("agent-switch-word").textContent;
+  expect(state("Claude Code")).toBe("Your command·Not checked");
+  expect(word("Claude Code")).toBe("On");
+  // Off says only its tool; the switch's word says Off.
+  expect(state("Codex")).toBe("Codex");
+  expect(word("Codex")).toBe("Off");
+  expect(state("Claude in Terminal")).toBe("Through MCP");
+  expect(within(row("Claude in Terminal")).queryByTestId("agent-switch-word")).toBeNull();
+});
+
 it("names an agent's switch by the agent, says what a click does, and dims a row that's off", () => {
   const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
   const { rerender } = renderList({ settings: codexOff });
@@ -95,7 +109,7 @@ it("names an agent's switch by the agent, says what a click does, and dims a row
   expect(off.title).toBe("Turn on Codex");
   expect(off.getAttribute("aria-description")).toBe("Turn on");
   // The off row's name and mark go muted; the on row keeps its ink.
-  const name = (agent: string) => within(row(agent)).getByText(agent).closest("button")!;
+  const name = (agent: string) => within(row(agent)).getByRole("button", { name: `Rename ${agent}` });
   const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;
   expect(name("Codex").className).toContain("text-muted");
   expect(name("Codex").className).not.toContain("text-ink");
