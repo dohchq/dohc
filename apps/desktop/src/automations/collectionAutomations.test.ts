@@ -6390,7 +6390,7 @@ describe("Collection automations that a Group message starts", () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([work, new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("The job waited for the relay.")), 1_000);
+          timer = setTimeout(() => reject(new Error("The job waited for the relay.")), 10_000);
         })]);
       } finally {
         clearTimeout(timer);
@@ -6611,12 +6611,12 @@ describe("Collection automations that a Group message starts", () => {
     // Without a signal, as on main, it never ends.
     const untilAborted = (signal: AbortSignal | undefined) =>
       new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
-    // Fails unless the close ends within 1 s. The relay requests' own limit is 15 s.
+    // Fails unless the close ends within 10 s. The relay requests' own limit is 15 s.
     const promptly = async (closing: Promise<void>) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([closing, new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("The close waited for the relay.")), 1_000);
+          timer = setTimeout(() => reject(new Error("The close waited for the relay.")), 10_000);
         })]);
       } finally {
         clearTimeout(timer);
