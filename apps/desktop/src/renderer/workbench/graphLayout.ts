@@ -330,8 +330,10 @@ export function tick(layout: GraphLayout, forces: GraphForces): void {
 // The layout runs in a worker so settling never holds up the main thread.
 // Positions travel as interleaved x, y in one of two Float32Array buffers. The
 // renderer keeps the one it last drew and hands the other back after drawing
-// the next, so the worker ticks at most once per drawn frame and stops when
-// drawing stops.
+// the next, so the worker steps only when a frame is drawn and stops when
+// drawing stops. While the layout cools it takes up to four steps per frame,
+// as many as fit in a few milliseconds, so it settles in about a quarter of
+// the frames. A held node takes one step per frame, to follow the pointer.
 export type LayoutRequest =
   | { type: "model"; generation: number; x: Float64Array; y: Float64Array; source: Uint32Array; target: Uint32Array; alpha: number }
   | { type: "frame"; generation: number; positions: Float32Array }
@@ -342,6 +344,9 @@ export type LayoutRequest =
   | { type: "release"; index: number };
 
 export type LayoutFrame = { generation: number; positions: Float32Array; settled: boolean };
+
+const STEPS_PER_FRAME = 4;
+const STEP_BUDGET_MS = 8;
 
 export function createLayoutEngine(post: (frame: LayoutFrame) => void, later: (run: () => void) => void) {
   let layout: GraphLayout | null = null;
@@ -374,7 +379,11 @@ export function createLayoutEngine(post: (frame: LayoutFrame) => void, later: (r
       layout.vx.fill(0);
       layout.vy.fill(0);
     } else {
-      tick(layout, forces);
+      const steps = layout.alphaTarget === 0 ? STEPS_PER_FRAME : 1;
+      const end = performance.now() + STEP_BUDGET_MS;
+      let step = 0;
+      do tick(layout, forces);
+      while (++step < steps && !settled(layout) && performance.now() < end);
     }
     const positions = free;
     free = null;

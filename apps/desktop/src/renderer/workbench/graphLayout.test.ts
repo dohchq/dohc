@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ALPHA_MIN,
   createLayout,
@@ -133,7 +133,7 @@ describe("layout engine", () => {
     return { layout, frames, queue, flush, model };
   }
 
-  it("ticks once per buffer the renderer hands back", () => {
+  it("posts one frame per buffer the renderer hands back", () => {
     const { layout, frames, flush, model } = engine();
     model(1, 6);
     flush();
@@ -144,6 +144,28 @@ describe("layout engine", () => {
     flush();
     expect(frames).toHaveLength(2);
     expect(frames[1]!.generation).toBe(1);
+  });
+
+  it("takes up to four steps per drawn frame while cooling, and one when steps are slow", () => {
+    const framesToSettle = () => {
+      const { layout, frames, flush, model } = engine();
+      model(1, 6);
+      flush();
+      while (!frames.at(-1)!.settled && frames.length < 2000) {
+        layout.receive({ type: "frame", generation: 1, positions: frames.at(-1)!.positions });
+        flush();
+      }
+      return frames.length;
+    };
+    // From alpha 1, the layout settles after 281 steps.
+    expect(framesToSettle()).toBe(71);
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 20));
+    try {
+      expect(framesToSettle()).toBe(281);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("drops a buffer from an older model", () => {
