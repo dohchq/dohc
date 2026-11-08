@@ -89,7 +89,7 @@ describe("EngineHistoryView protected rows", () => {
       />,
     );
     expect(screen.getAllByTestId("engine-moment-lock")).toHaveLength(1);
-    expect(screen.getByText("Updated .env")).toBeTruthy();
+    expect(screen.getAllByTestId("engine-moment-summary").find((summary) => summary.textContent === "Updated .env")).toBeTruthy();
     // The protected row is still a normal, clickable timeline row.
     const rows = screen.getAllByTestId("engine-moment-open");
     expect(rows).toHaveLength(2);

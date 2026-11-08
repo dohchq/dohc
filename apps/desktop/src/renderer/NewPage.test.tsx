@@ -72,6 +72,20 @@ it("leaves the title for the body on a press anywhere below it", async () => {
   expect((screen.getByLabelText("Page body") as HTMLTextAreaElement).value).toBe("Day one");
 });
 
+// The hint keeps one voice whether or not the body has the caret, so it shows
+// under the title and stays where it is when the caret arrives.
+it("shows the empty body's hint while the title has the caret, and keeps it when the caret moves in", async () => {
+  const user = userEvent.setup();
+  renderPage();
+  const body = screen.getByLabelText("Page body") as HTMLTextAreaElement;
+  const hint = () => [body.placeholder, [...body.classList].filter((name) => name.includes("placeholder:"))];
+  expect(screen.getByLabelText("Page title")).toBe(document.activeElement);
+  expect(hint()).toEqual(["Type '/' for commands", ["placeholder:text-subtle"]]);
+  await user.keyboard("{Enter}");
+  expect(body).toBe(document.activeElement);
+  expect(hint()).toEqual(["Type '/' for commands", ["placeholder:text-subtle"]]);
+});
+
 it("hands the title, the body and its caret to the editor at once, and steps aside", async () => {
   const user = userEvent.setup();
   const page = renderPage();

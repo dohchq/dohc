@@ -53,6 +53,20 @@ describe("PageIdentity", () => {
       expect(input.placeholder).toBe("2026-plan");
     });
 
+    // Untitled is a file name too, so a new page's draws the same way.
+    it("draws the file name in the secondary voice, and a folded Add title in the hint voice", () => {
+      const placeholder = (body: string, stem: string) => {
+        const view = render(<PageIdentity body={body} onChange={() => {}} filenameStem={stem} />);
+        const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
+        const drawn = [title.placeholder, title.classList.contains("placeholder:text-muted")];
+        view.unmount();
+        return drawn;
+      };
+      expect(placeholder("Body text\n", "2026-plan")).toEqual(["2026-plan", true]);
+      expect(placeholder("", "Untitled")).toEqual(["Untitled", true]);
+      expect(placeholder("# Plan\n", "plan")).toEqual(["Add title", false]);
+    });
+
     it("writes the title into frontmatter through onChange", async () => {
       const user = userEvent.setup();
       render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);

@@ -65,7 +65,8 @@ try {
   const { home } = session;
   for (const path of [profile, workspace]) await mkdir(path, { recursive: true });
   await writeFile(join(workspace, "debug.md"), "# Debug workspace\n\nThis workspace belongs to this debug session.\n");
-  const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: workspace };
+  // The session folder stands for the person's home, so a new workspace goes beside dohc's state.
+  const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_USER_HOME: directory, DOHC_TEST_PICK_PATH: workspace };
   if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
   const commit = git(["rev-parse", "HEAD"]);

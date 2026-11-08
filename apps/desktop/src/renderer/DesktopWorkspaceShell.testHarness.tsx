@@ -473,6 +473,7 @@ function makeBaseBridge(
     })),
     getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
     openUserSettingsFile: vi.fn(async () => undefined),
+    openWorkspacePolicyFile: vi.fn(async () => undefined),
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
@@ -728,6 +729,7 @@ function makeBaseBridge(
       };
     }),
     closeThisWindow: vi.fn(async (): Promise<void> => undefined),
+    goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
@@ -762,6 +764,7 @@ function makeBaseBridge(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
+    onCollectionRulesChanged: vi.fn(() => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,
@@ -1000,7 +1003,10 @@ export async function enterMarkdownSource(
   const toggle = (await queries.findByTestId(
     "markdown-edit-toggle",
   )) as HTMLButtonElement;
-  await waitFor(() => expect(toggle.disabled).toBe(false));
+  await waitFor(() => {
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
+  });
 
   // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
   // WYSIWYG (source).

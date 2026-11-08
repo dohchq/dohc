@@ -33,8 +33,8 @@ export function useVersionMergeNotices(options: {
       ...notice,
       ...(decideFrom === undefined
         ? {}
-        : { noDismiss: true, action: { label: "Decide what to keep", run: openConflictReview, reads: true } }),
-      ...(offersHistory ? { action: { label: "Open History", run: openHistory, reads: true, afterRetry: true } } : {}),
+        : { noDismiss: true, action: { label: "Decide what to keep", run: openConflictReview, reads: true }, target: { to: "conflicts" } as const }),
+      ...(offersHistory ? { action: { label: "Open History", run: openHistory, reads: true, afterRetry: true }, target: { to: "history" } as const } : {}),
     });
   }, [openConflictReview, openHistory, reportShellFailure]);
 

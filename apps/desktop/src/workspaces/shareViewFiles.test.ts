@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
+import { SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewFiles,
   ShareViewMountRollbackError,
@@ -627,6 +627,76 @@ describe("ShareViewFiles", () => {
     expect(registered.unsavedPaths).toEqual([]);
     expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient edit\n" }));
     expect(pull).not.toHaveBeenCalled();
+  });
+
+  it.each(["relay", "pull"] as const)(
+    "says the refresh set a damaged collision record aside when the %s then fails",
+    async (failing) => {
+      const rootPath = await workspaceRoot();
+      const registered = target(rootPath, "view");
+      const store = mutableTextStore();
+      const record = await writeRecord(rootPath, "share-collision-record.json", "not json");
+      const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+        resolveRelay: async () => {
+          if (failing === "relay") throw new Error("Sign in to your server first.");
+          return { baseUrl: "https://relay.example", token: "token" };
+        },
+        pull: async () => {
+          throw new Error("relay unavailable");
+        } });
+      const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const failed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+        expect(failed).toMatchObject({
+          kind: "refresh",
+          outcome: {
+            ok: false,
+            errorMessage: expect.stringContaining(failing === "relay" ? "Sign in to your server first." : "relay unavailable"),
+            collisionRecordQuarantined: true,
+            takesLocalWrites: false,
+          },
+        });
+        await expect(lstat(record)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        errorLog.mockRestore();
+      }
+    },
+  );
+
+  it("says the refresh set a damaged collision record aside when marking the ended share fails", async () => {
+    const rootPath = await workspaceRoot();
+    const registered = target(rootPath, "view");
+    const store = mutableTextStore();
+    const record = await writeRecord(rootPath, "share-collision-record.json", "not json");
+    const retireTarget = vi.fn(async () => undefined);
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+      pull: async () => {
+        throw new ShareUnavailableError();
+      },
+      markEnded: async () => {
+        throw new Error("could not save the ended share");
+      },
+      retireTarget });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const failed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+      expect(failed).toMatchObject({
+        kind: "refresh",
+        outcome: {
+          ok: false,
+          errorMessage: expect.stringContaining("could not save the ended share"),
+          collisionRecordQuarantined: true,
+          takesLocalWrites: false,
+        },
+      });
+      expect(retireTarget).not.toHaveBeenCalled();
+      await expect(lstat(record)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("reports a full capture failure during refresh and retries before pulling", async () => {

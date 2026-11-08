@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -35,7 +35,8 @@ async function rename(user: ReturnType<typeof userEvent.setup>, name = "renamed.
 const listing = (...paths: string[]) => ({
   visibility: { status: "ready" as const, rules: [] },
   files: paths.map((path) => ({ path, kind: "file" as const })),
-  folders: [],
+  // Each file's folder, as main lists it.
+  folders: [...new Set(paths.filter((path) => path.includes("/")).map((path) => path.slice(0, path.lastIndexOf("/"))))],
 });
 
 const listed = (marker: string) => screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === marker);
@@ -124,6 +125,60 @@ it("a failed move's toast and Notices row go once an agent makes the same move t
   expect(await noticeRows(user)).toEqual([]);
   expect(allowedCache(bridge).slice(-2)).toEqual([true, false]);
   expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1);
+});
+
+// #3154: a dragged selection whose moves fail reports them in one notice.
+const BATCH_WORDS = `dohc could not move "a.md" and "b.md".`;
+
+function refusedBatch() {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn().mockRejectedValue(LIVE_MOVE_REFUSAL) });
+  bridge.listWorkspaceFiles.mockResolvedValue(listing("a.md", "b.md", "docs/z.md", "notes/n.md"));
+  return bridge;
+}
+
+// Selects a.md and b.md, then drags them onto `folder`.
+async function dragSelection(user: ReturnType<typeof userEvent.setup>, folder: string) {
+  const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find((candidate) => candidate.dataset.path === path)!;
+  await user.click(await row("a.md"));
+  await user.keyboard("{Shift>}");
+  await user.click(await row("b.md"));
+  await user.keyboard("{/Shift}");
+  const dataTransfer = { effectAllowed: "move", dropEffect: "move", files: [], types: [], setData: vi.fn() };
+  fireEvent.dragStart(await row("a.md"), { dataTransfer });
+  fireEvent.dragOver(await row(folder), { dataTransfer });
+  fireEvent.drop(await row(folder), { dataTransfer });
+}
+
+it("a dragged selection's failed notice goes once an agent makes one of its moves through the CLI or MCP", async () => {
+  const bridge = refusedBatch();
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await dragSelection(user, "docs");
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+  expect(bridge.moveWorkspacePath.mock.calls.map(([input]) => input.toPath).sort()).toEqual(["docs/a.md", "docs/b.md"]);
+  expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(BATCH_WORDS);
+  expect(await noticeRows(user, BATCH_WORDS)).toHaveLength(1);
+  // A change that leaves both files where they were keeps the notice.
+  await listAfterActivity(bridge, ["a.md", "b.md", "docs/z.md", "notes/n.md"], "c.md");
+  expect(await noticeRows(user, BATCH_WORDS)).toHaveLength(1);
+  // The agent moves a.md into docs.
+  await listAfterActivity(bridge, ["docs/a.md", "b.md", "docs/z.md", "notes/n.md"], "d.md", ["a.md", "docs/a.md"]);
+  await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  expect(await noticeRows(user, BATCH_WORDS)).toEqual([]);
+});
+
+it("the same selection's failed drags to two folders keep a Notices row each", async () => {
+  const bridge = refusedBatch();
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await dragSelection(user, "docs");
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+  await screen.findByTestId("workspace-shell-error");
+  await dragSelection(user, "notes");
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(4));
+  expect(bridge.moveWorkspacePath.mock.calls.slice(2).map(([input]) => input.toPath).sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  await waitFor(() => expect(shownRows().filter((row) => row.textContent?.includes(BATCH_WORDS))).toHaveLength(2));
 });
 
 // More activity can paint the tree before the full listing that confirms a

@@ -11,6 +11,7 @@ import {
   EngineMayHoldDocumentNotice,
   ViewActions,
   OrphanedDraftNotices,
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
@@ -739,6 +740,8 @@ export const FileInspector = memo(function FileInspector(
                 ? "dohc could not save this drawing. Copy your set-aside drawing to keep it."
                 : kind === "drawing" && engine.readOnlyWhileEditing
                   ? "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
+          : engine.permanentFailureWhileEditing
+            ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
           : engine.readOnlyWhileEditing
             ? "This document became read-only before your edit saved. Copy your text to keep it."
             : undefined
@@ -754,7 +757,7 @@ export const FileInspector = memo(function FileInspector(
   const closedDocumentControls = (opening: boolean) =>
     kind === "markdown" ? (
       <DocumentControls
-        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : undefined }}
+        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : "dohc could not open this file." }}
         menu={{
           workspaceId: props.workspaceId,
           reportError: props.onButtonError,
@@ -1005,8 +1008,9 @@ export const FileInspector = memo(function FileInspector(
             contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
-            testId={kind === "json" ? "view-json" : "view-text"}
-            language={kind === "json" ? "json" : extensionOf(props.path) || "text"}
+            // Only a .json file claims JSON; the other data files keep the text view.
+            testId={extensionOf(props.path) === "json" ? "view-json" : "view-text"}
+            language={extensionOf(props.path) || "text"}
             workspaceId={props.workspaceId}
             path={props.path}
             truncated={truncated}

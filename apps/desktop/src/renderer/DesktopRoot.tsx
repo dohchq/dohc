@@ -25,10 +25,11 @@ import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from 
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
-import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
+import type { NoticeTarget } from "./shell/noticeTarget";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
+import { useOldWindowState } from "./shell/oldWindowState";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
@@ -83,10 +84,12 @@ export function DesktopRoot() {
   const pathOpenFailures = useHeldWorkspacePathOpenFailures();
   // Outlives every workspace switch, so a sent deletion still reports.
   const accountDeletion = useAccountDeletion();
+  // Forget can leave this window showing a workspace it can no longer edit.
+  const { oldWindow, recheck: recheckOldWindow } = useOldWindowState(isManagerWindow ? null : workspace?.workspaceId ?? null);
   // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
-    open: OpenOnSwitch;
+    open: NoticeTarget;
   } | null>(null);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
@@ -240,9 +243,19 @@ export function DesktopRoot() {
   useEffect(() => {
     return bridge().onWorkspaceActivity((event) => {
       if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId.current)) return;
-      void refreshWorkspaceRegistry().catch(() => undefined);
+      const refreshed = refreshWorkspaceRegistry();
+      if (event.workspaceId !== undefined) {
+        void refreshed.catch(() => undefined);
+        return;
+      }
+      // Forget changes the list. A window that keeps its workspace, because
+      // the list still has it or could not be read, may have been left by it.
+      const shown = activeWorkspaceId.current;
+      void refreshed.then((listed) => {
+        if (listed.some((entry) => entry.workspaceId === shown)) recheckOldWindow();
+      }, recheckOldWindow);
     });
-  }, [refreshWorkspaceRegistry]);
+  }, [refreshWorkspaceRegistry, recheckOldWindow]);
 
   useEffect(() => {
     return bridge().onWorkspaceActivated((next) => {
@@ -264,10 +277,15 @@ export function DesktopRoot() {
   }, [shownWorkspace]);
 
   // Signal first paint when real content is about to mount (not while the
-  // registry IPC is still pending and the root renders null).
+  // registry IPC is still pending and the root renders null). The two marks
+  // tell a window that never shows apart: no answer, or no frame.
   useEffect(() => {
     if (loaded) {
-      requestAnimationFrame(() => window.dohcDesktopInternal?.firstPaint());
+      performance.mark("dohc:workspace-registry-loaded");
+      requestAnimationFrame(() => {
+        performance.mark("dohc:first-frame");
+        window.dohcDesktopInternal?.firstPaint();
+      });
     }
   }, [loaded]);
 
@@ -393,6 +411,7 @@ export function DesktopRoot() {
             onManageWorkspaces={() => bridge().openWorkspaceManager()}
             sentNotices={sentNotices}
             accountDeletion={accountDeletion.deletion}
+            oldWindow={oldWindow}
             {...(openOnSwitch?.workspaceId === workspace.workspaceId
               ? { openOnReady: openOnSwitch.open }
               : {})}

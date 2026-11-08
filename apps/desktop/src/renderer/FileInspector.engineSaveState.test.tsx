@@ -23,6 +23,8 @@ const engineDocStore = vi.hoisted(() => {
     saveState: { kind: "saved-here" } as SaveState,
     readOnlyWhileEditing: false,
     saveError: null as string | null,
+    // FileInspector reads `!== null`, so undefined would mean a removal.
+    removalInProgress: null,
   };
   const listeners = new Set<() => void>();
   return {

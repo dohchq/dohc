@@ -137,6 +137,16 @@ describe("VersionsPage", () => {
     expect(row("main").getAttribute("aria-current")).toBeNull();
   });
 
+  it("marks the current version with Current after its name, hidden from screen readers that hear aria-current", async () => {
+    render(<Page />);
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    const current = within(row("draft")).getByTestId("versions-page-current");
+    expect(current.textContent).toBe("Current");
+    expect(current.getAttribute("aria-hidden")).toBe("true");
+    expect(current.previousElementSibling).toBe(within(row("draft")).getByTestId("versions-page-name"));
+    expect(screen.getAllByTestId("versions-page-current")).toHaveLength(1);
+  });
+
   it("says where each version came from, how it differs from Main, and when it last changed", async () => {
     render(<Page />);
     // Fresh is counted last.
@@ -382,13 +392,46 @@ describe("VersionsPage", () => {
     const onReviewConflicts = vi.fn();
     const user = userEvent.setup();
     render(<Page onReviewConflicts={onReviewConflicts} />);
-    const button = await waitFor(() => within(row("draft")).getByTestId("versions-page-conflicts"));
-    expect(button.textContent).toBe("2 to decide");
-    expect(within(row("draft")).getByRole("button", { name: "2 to decide", description: "Open the conflicts" })).toBe(button);
+    await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("2 to decide"));
     expect(within(row("fresh")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide");
     expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-1", afterConflictId: "c2" });
-    await user.click(button);
+    // The count leads the details line, before where the version came from.
+    expect(within(row("draft")).getByTestId("versions-page-details").firstElementChild)
+      .toBe(within(row("draft")).getByTestId("versions-page-conflicts"));
+    expect(details("draft")).toMatch(/^2 to decide · Made from Main · /);
+    // Deciding takes Merge into Main's place.
+    const actions = (versionId: string) => within(row(versionId)).queryAllByRole("button").map((button) => button.textContent);
+    expect(actions("draft")).toEqual(["Compare", "Decide what to keep"]);
+    expect(actions("fresh")).toEqual(["Switch", "Compare", "Decide what to keep"]);
+    expect(within(row("draft")).getByRole("button", { name: "Decide what to keep", description: "Draft" }))
+      .toBe(within(row("draft")).getByTestId("versions-page-decide"));
+    await user.click(within(row("draft")).getByTestId("versions-page-decide"));
     expect(onReviewConflicts).toHaveBeenCalledOnce();
+  });
+
+  it("says when there are more files to decide than it read", async () => {
+    const conflict = (conflictId: string) => ({
+      conflictId, path: `${conflictId}.md`, sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
+      contentKind: "text", currentText: "a", incomingText: "b", baseText: null,
+    });
+    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(async ({ afterConflictId }: { afterConflictId?: string }) => {
+      const page = Number(afterConflictId?.slice(1) ?? "0") + 1;
+      return { conflicts: [conflict(`c${page}`)], nextAfterConflictId: `c${page}` };
+    });
+    render(<Page />);
+    await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("5+ to decide"));
+  });
+
+  it("offers Merge into Main again once nothing is left to decide", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null });
+    const { rerender } = render(<Page />);
+    await waitFor(() => expect(within(row("draft")).queryByTestId("versions-page-decide")).not.toBeNull());
+    expect(within(row("draft")).queryByTestId("versions-page-merge")).toBeNull();
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
+    rerender(<Page versionKey={1} />);
+    await waitFor(() => expect(within(row("draft")).queryByTestId("versions-page-decide")).toBeNull());
+    expect(within(row("draft")).getByTestId("versions-page-merge").textContent).toBe("Merge into Main");
+    expect(within(row("draft")).queryByTestId("versions-page-conflicts")).toBeNull();
   });
 
   it("files a failed read of the files to decide with a Try again that reads them again", async () => {
@@ -633,16 +676,18 @@ describe("VersionsPage", () => {
     expect(right.onSettled).not.toHaveBeenCalled();
   });
 
-  it("shows an empty state that names what stays the same when only Main exists", async () => {
+  it("shows the versions picture and New version when only Main exists, and names what stays the same in its field", async () => {
+    const user = userEvent.setup();
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     render(<Page />);
     const empty = await waitFor(() => screen.getByTestId("versions-page-empty"));
-    expect(empty.textContent).toContain("Make a version to try changes without touching Main.");
-    expect(screen.getByTestId("versions-page-same").textContent)
-      .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+    expect(empty.textContent).toBe("Make a version to try changes without touching Main.New version");
     // One New version, the empty state's. The header's shows once a version exists.
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
-    expect(within(empty).getByTestId("versions-page-new")).toBeTruthy();
+    await user.click(within(empty).getByTestId("versions-page-new"));
+    expect(within(empty).getByTestId("version-new-same").textContent)
+      .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
   });
 
   it("opens the name field in the header, and Escape or leaving it empty puts the button back", async () => {

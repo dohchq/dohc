@@ -38,7 +38,8 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(usageSwitch(page)).toHaveAttribute("aria-checked", "true");
     await expect(errorSwitch(page)).toHaveAttribute("aria-checked", "true");
-    await expect(page.getByTestId("settings-row-usage-reports")).toContainText("Unavailable for this launch.");
+    await expect(page.getByTestId("settings-row-usage-reports")).toContainText("This launch sends no usage reports.");
+    await expect(page.getByTestId("settings-row-error-reports")).toContainText("This launch sends no error reports.");
 
     // Keyboard: the switch takes focus and Space changes only that switch.
     await usageSwitch(page).focus();

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoticeRow, SyncStatusResult } from "../../ipc/bridgeContract";
+import type { NoticeTarget } from "../shell/noticeTarget";
 import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
@@ -41,6 +42,10 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
+      {...(props.onConnectServer ? { onConnectServer: props.onConnectServer } : {})}
+      {...(props.onSignInAgain ? { onSignInAgain: props.onSignInAgain } : {})}
+      {...(props.onConfirmSyncAccount ? { onConfirmSyncAccount: props.onConfirmSyncAccount } : {})}
+      {...(props.onOpenSyncSettings ? { onOpenSyncSettings: props.onOpenSyncSettings } : {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
       {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
@@ -68,6 +73,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
       {...(props.onRetrySentNotice ? { onRetrySentNotice: props.onRetrySentNotice } : {})}
+      {...(props.onOpenTarget ? { onOpenTarget: props.onOpenTarget } : {})}
+      {...(props.onReviewShareChanges ? { onReviewShareChanges: props.onReviewShareChanges } : {})}
     />
   );
 }
@@ -1027,6 +1034,43 @@ describe("notice center", () => {
     expect(onRetryWorkspaceError).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Try again in a moment.", null],
+    ["dohc is busy. Try again in a moment.", "dohc is busy."],
+  ])("drops \"Try again in a moment.\" while Try again waits on the open merge: %s", async (message, body) => {
+    const user = userEvent.setup();
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-4", title: "dohc could not merge Draft into Main", message,
+        details: "Error: busy", atMs: 1_000, canRetry: true, retryBlocked: "Close the open merge first.", seen: false,
+      }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const says = (place: HTMLElement) => {
+      expect(place.textContent).not.toContain("Try again in a moment.");
+      if (body) expect(within(place).getByText(body)).toBeTruthy();
+      expect(within(place).getByText("Close the open merge first.")).toBeTruthy();
+    };
+    says(screen.getByTestId("workspace-shell-error"));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    says(screen.getByTestId("notice-shell-error-4"));
+  });
+
+  it("keeps \"Try again in a moment.\" when Try again can run", () => {
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-4", title: "dohc could not merge Draft into Main", message: "dohc is busy. Try again in a moment.",
+        details: "Error: busy", atMs: 1_000, canRetry: true, seen: false,
+      }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc is busy. Try again in a moment.");
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderNotices({
       syncStatus: {
@@ -1076,7 +1120,7 @@ describe("notice center", () => {
   ] as const)("says who must update when sync stopped on the relay API version (%s)", async (updateRequired, title, next) => {
     renderNotices({
       syncStatus: {
-        state: "cloud-disconnected",
+        state: "update-required",
         pendingChangeCount: 1,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
@@ -1090,9 +1134,94 @@ describe("notice center", () => {
     expect(notice.textContent).toContain(title);
     expect(notice.textContent).toContain(next);
     expect(notice.textContent).toContain("Your changes stay on this computer.");
-    // Reconnecting would not help, so the disconnected notice stays away.
-    expect(screen.queryByTestId("notice-cloud-disconnected")).toBeNull();
+    expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
   });
+
+  // A synced workspace that can't sync on this session. The server isn't the
+  // cause, so no row names it, and neither borrows the other's words. Each
+  // action runs its own callback. The row has no dismiss, and goes once sync
+  // can run.
+  const BLOCKED_ROWS = {
+    "not-connected": {
+      title: "Not connected to your server",
+      body: "This workspace isn't syncing until you connect your server. Your changes stay on this computer.",
+      actions: ["Connect server"],
+      notTitle: "Couldn't confirm this workspace's account",
+      copied: null,
+    },
+    "account-unconfirmed": {
+      title: "Couldn't confirm this workspace's account",
+      body: "dohc couldn't confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
+      actions: ["Try again", "Sync settings"],
+      notTitle: "Not connected to your server",
+      copied: "Couldn't confirm this workspace's account\ndohc couldn't confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
+    },
+    "sign-in-expired": {
+      title: "Your sign-in expired",
+      body: "This workspace isn't syncing until you sign in again. Your changes stay on this computer.",
+      actions: ["Sign in again"],
+      notTitle: "Couldn't confirm this workspace's account",
+      copied: "Your sign-in expired\nThis workspace isn't syncing until you sign in again. Your changes stay on this computer.",
+    },
+  } as const;
+  it.each(Object.keys(BLOCKED_ROWS) as Array<keyof typeof BLOCKED_ROWS>)(
+    "says why a synced workspace isn't syncing (%s)",
+    async (state) => {
+      const expected = BLOCKED_ROWS[state];
+      const callbacks = {
+        onConnectServer: vi.fn(),
+        onSignInAgain: vi.fn(),
+        onConfirmSyncAccount: vi.fn(),
+        onOpenSyncSettings: vi.fn(),
+      };
+      const byLabel: Record<string, ReturnType<typeof vi.fn>> = {
+        "Connect server": callbacks.onConnectServer,
+        "Sign in again": callbacks.onSignInAgain,
+        "Try again": callbacks.onConfirmSyncAccount,
+        "Sync settings": callbacks.onOpenSyncSettings,
+      };
+      const status = (shown: SyncStatusResult["state"]): SyncStatusResult => ({
+        state: shown,
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      });
+      const { rerender } = renderNotices({ syncStatus: status(state), ...callbacks });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      const row = () => screen.getByTestId(`notice-${state}`);
+      expect(row().textContent).toContain(expected.title);
+      expect(row().textContent).toContain(expected.body);
+      expect(row().textContent).not.toContain(expected.notTitle);
+      expect(row().textContent).not.toMatch(/server unreachable|could not/i);
+      // Copy holds exactly what the row says, and a choice has nothing to report.
+      if (expected.copied === null) {
+        expect(screen.queryByTestId(`notice-${state}-copy`)).toBeNull();
+      } else {
+        await userEvent.click(screen.getByTestId(`notice-${state}-copy`));
+        expect(await navigator.clipboard.readText()).toBe(expected.copied);
+      }
+      expect(within(row()).queryByRole("button", { name: /dismiss/i })).toBeNull();
+      const actionLabels = within(row())
+        .getAllByRole("button")
+        .map((button) => button.textContent)
+        .filter((label) => label !== null && label in byLabel);
+      expect(actionLabels).toEqual(expected.actions);
+      for (const label of expected.actions) {
+        // An action closes Notices, so open it again.
+        if (!screen.queryByTestId(`notice-${state}`)) await userEvent.click(screen.getByTestId("notice-center-toggle"));
+        await userEvent.click(within(row()).getByRole("button", { name: label }));
+        expect(byLabel[label]).toHaveBeenCalledTimes(1);
+      }
+      for (const [label, callback] of Object.entries(byLabel)) {
+        if (!(expected.actions as readonly string[]).includes(label)) expect(callback).not.toHaveBeenCalled();
+      }
+
+      rerender(noticeElement({ syncStatus: status("synced"), ...callbacks }));
+      expect(screen.queryByTestId(`notice-${state}`)).toBeNull();
+    },
+  );
 
   // A shared view records no history by design, a capability, not a
   // failure. The share banner speaks and this surface stays quiet.
@@ -1167,13 +1296,13 @@ describe("notice center", () => {
     const command = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.3-linux-amd64.deb'";
     renderNotices({
       workspaceErrors: [{
-        id: "deb", title: "dohc could not install update 1.2.3",
-        message: "The update did not install. Run this command in a terminal to install it.",
+        id: "deb", title: "dohc could not install the update",
+        message: "Run this command in a terminal to install it.",
         command, details: "", atMs: 0, canRetry: true, seen: false,
       }],
     });
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not install update 1.2.3");
+    expect(toast.textContent).toContain("dohc could not install the update");
     expect(within(toast).getByTestId("workspace-shell-toast-command").textContent).toBe(command);
     expect(within(toast).getByTestId("workspace-shell-toast-command-copy").getAttribute("aria-label")).toBe("Copy command");
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -1432,7 +1561,6 @@ describe("notice center", () => {
   // server's own toast and row report the outage, and live editing adds none.
   it.each([
     { label: "Server unreachable", server: serverUnreachable },
-    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
   ])("leaves the outage to the server while the title bar says $label", async ({ server }) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
@@ -1485,10 +1613,14 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
 
-  // A failed save or a required update takes the title bar's words from the
-  // server, so live editing reports its own state again.
+  // The title bar doesn't name the server, so live editing reports its own
+  // state: no server connection, an account dohc can't confirm, a failed
+  // save, or a required update.
   it.each([
-    { label: "a file couldn't save", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    { label: "nobody is connected", status: { state: "not-connected" as const }, failedSaves: 0 },
+    { label: "the account isn't confirmed", status: { state: "account-unconfirmed" as const }, failedSaves: 0 },
+    { label: "the sign-in expired", status: { state: "sign-in-expired" as const }, failedSaves: 0 },
+    { label: "a file couldn't save", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
     { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
   ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {
     renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying", "document-unavailable"), ...status }, failedSaves });
@@ -1730,7 +1862,7 @@ describe("notice center", () => {
   it("closes the notice popover on outside click while preserving inside clicks", async () => {
     renderNotices({
       syncStatus: {
-        state: "cloud-disconnected",
+        state: "account-unconfirmed",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
@@ -2022,7 +2154,7 @@ describe("notices sent to you", () => {
       const onReadSentNotice = vi.fn();
       renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => screen.getByTestId("sent-notice-a-open-row").focus());
       expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
       // Moving within the row reads nothing more.
       act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
@@ -2423,9 +2555,11 @@ describe("notices sent to you", () => {
     const onOpenSentNotice = vi.fn(async () => null);
     const onDismissSentNotice = vi.fn();
     const onOpenHistory = vi.fn();
+    const onOpenTarget = vi.fn(async () => null);
     renderNotices({
       agentActive: true,
       onOpenHistory,
+      onOpenTarget,
       sentNotices: [sentRow("a"), sentRow("b")],
       onOpenSentNotice,
       onDismissSentNotice,
@@ -2433,28 +2567,30 @@ describe("notices sent to you", () => {
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
 
+    // A row that opens is one stop: the control that opens it.
     await userEvent.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("notice-agent-active"));
+    expect(document.activeElement).toBe(screen.getByTestId("notice-agent-active-open-row"));
     await userEvent.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a-open-row"));
     await userEvent.keyboard("{ArrowDown}{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b-open-row"));
     await userEvent.keyboard("{ArrowUp}");
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a-open-row"));
 
     // Delete keeps the keyboard in the list: focus moves on first.
     await userEvent.keyboard("{Delete}");
     expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b-open-row"));
 
     await userEvent.keyboard("{Enter}");
     expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("b").notice, expect.any(AbortSignal));
     await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
 
-    // This computer's rows answer Enter with their own action.
+    // This computer's rows open where they are about, not their own action.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onOpenHistory).toHaveBeenCalledOnce();
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith({ to: "history" }, expect.any(AbortSignal));
+    expect(onOpenHistory).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.keyboard("{ArrowDown}{Escape}");
@@ -2591,4 +2727,147 @@ it("names the chat permission that stopped a step", async () => {
   }] });
   await userEvent.click(screen.getByTestId("notice-center-toggle"));
   expect((await screen.findByTestId("notice-automation-stops")).textContent).toContain("ana@dohc.test cannot post in Trip.");
+});
+
+describe("opening a row", () => {
+  const hold = {
+    automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
+    step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read" as const,
+    stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
+  };
+  const failedSave = {
+    id: "save", title: "Trip/day-2.md did not save", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false,
+    target: { to: "file" as const, path: "Trip/day-2.md" },
+  };
+
+  const rows: Array<[string, Partial<Parameters<typeof NoticeCenter>[0]>, NoticeTarget]> = [
+    ["agent-active", { agentActive: true }, { to: "history" }],
+    ["sync-conflict", {
+      syncStatus: { ...liveDeliveryStatus("active"), state: "conflict", conflictCount: 1 },
+      conflictSummaries: ["Both sides changed notes/today.md."],
+    }, { to: "conflicts" }],
+    ["save", { workspaceErrors: [failedSave] }, { to: "file", path: "Trip/day-2.md" }],
+    ["automation-hold-collection:Trip#task-0", { automationHolds: [hold], onAllowAutomationHold: vi.fn() }, { to: "automation", automation: "collection:Trip#task" }],
+  ];
+  it.each(rows)("opens the %s row where it is about", async (id, props, target) => {
+    const onOpenTarget = vi.fn(async () => null);
+    renderNotices({ ...props, onOpenTarget });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    // The title's button stretches over the row; jsdom has no hit-testing.
+    await userEvent.click(screen.getByTestId(`notice-${id}-open-row`));
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith(target, expect.any(AbortSignal));
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it.each(["{Enter}", " "])("opens with %s on the row", async (key) => {
+    const onOpenTarget = vi.fn(async () => null);
+    renderNotices({ agentActive: true, onOpenTarget });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    act(() => screen.getByTestId("notice-agent-active-open-row").focus());
+    await userEvent.keyboard(key);
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith({ to: "history" }, expect.any(AbortSignal));
+  });
+
+  it("lets a row's own buttons do only what they name", async () => {
+    const onOpenTarget = vi.fn(async () => null);
+    const onRetryWorkspaceError = vi.fn();
+    const onDismissWorkspaceError = vi.fn();
+    renderNotices({ workspaceErrors: [failedSave], onOpenTarget, onRetryWorkspaceError, onDismissWorkspaceError });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-save");
+    await userEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(onRetryWorkspaceError).toHaveBeenCalledOnce();
+    expect(onOpenTarget).not.toHaveBeenCalled();
+  });
+
+  it("reads the row it opens", () => {
+    const onHideWorkspaceError = vi.fn();
+    renderNotices({ workspaceErrors: [failedSave], onHideWorkspaceError, onOpenTarget: () => new Promise<null>(() => {}) });
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+    // A click with no pointer or focus on the way, so opening alone reads it.
+    fireEvent.click(screen.getByTestId("notice-save-open-row"));
+    expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("save");
+    expect(screen.queryByTestId("notice-save-unread")).toBeNull();
+    expect(screen.queryByTestId("notice-center-count")).toBeNull();
+  });
+
+  it.each(["dohc could not find this file.", "dohc could not find this chat."])(
+    "says %s in place, and the row stops opening",
+    async (note) => {
+      const onOpenTarget = vi.fn(async () => note);
+      renderNotices({ workspaceErrors: [failedSave], onOpenTarget });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("notice-save-open-row"));
+      const row = screen.getByTestId("notice-save");
+      expect((await within(row).findByText(note)).getAttribute("role")).toBe("status");
+      expect(row.textContent).not.toContain("dohc could not save");
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+      expect(screen.queryByTestId("notice-save-open-row")).toBeNull();
+      expect(row.className).not.toContain("dohc-row-open");
+      expect(onOpenTarget).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("gives a row with nowhere to go no button, role or Tab stop, but arrows still reach it", async () => {
+    renderNotices({ workspaceErrors: [{ ...failedSave, target: undefined }], onOpenTarget: vi.fn() });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-save");
+    expect(screen.queryByTestId("notice-save-open-row")).toBeNull();
+    expect(row.querySelector("[data-notice-open]")).toBeNull();
+    expect(row.getAttribute("role")).toBeNull();
+    expect(row.tabIndex).toBe(-1);
+    expect(row.className).not.toContain("dohc-row-open");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(row);
+  });
+
+  it("does not open when a drag selects opened text, and opens on a plain click there", async () => {
+    vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+    const onOpenTarget = vi.fn(() => new Promise<null>(() => {}));
+    const long = `${"Day two needs a ferry time. ".repeat(20)}End.`;
+    renderNotices({ workspaceErrors: [{ ...failedSave, message: long }], onOpenTarget });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-save");
+    fireEvent.click(screen.getByTestId("notice-save-more"));
+    expect(onOpenTarget).not.toHaveBeenCalled();
+    const body = within(row).getByText(/End\.$/, { selector: "p" });
+
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.click(body, { detail: 1 });
+    expect(onOpenTarget).not.toHaveBeenCalled();
+
+    window.getSelection()?.removeAllRanges();
+    fireEvent.click(body, { detail: 1 });
+    expect(onOpenTarget).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+  });
+});
+
+describe("a row's parts", () => {
+  it("draws a row's worded actions as the toast's bordered buttons, and its time line at 12px", () => {
+    const failed = { id: "e1", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false };
+    const toast = render(<WorkspaceErrorToast error={failed} onRetry={vi.fn()} />);
+    const toastAction = within(toast.container).getByRole("button", { name: "Try again" }).className;
+    toast.unmount();
+    renderNotices({ workspaceErrors: [failed], onRetryWorkspaceError: vi.fn(), sentNotices: [sentRow("a", {}, "Trip")] });
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const rowAction = within(screen.getByTestId("notice-e1")).getByRole("button", { name: "Try again" }).className;
+    expect(rowAction).toContain("border-line");
+    expect(rowAction.startsWith(toastAction.replace(/ disabled:opacity-50$/, ""))).toBe(true);
+    // A time and the folder beside it are one line at one size.
+    const times = [...screen.getByTestId("notice-center").querySelectorAll("time")];
+    expect(times.length).toBeGreaterThan(1);
+    for (const time of times) {
+      const line = time.parentElement?.tagName === "P" ? time.parentElement : time;
+      expect(line.className).toContain("text-[12px]");
+      for (const part of line.querySelectorAll("*")) expect(part.className).not.toMatch(/text-\[\d+px\]/);
+    }
+    expect(within(screen.getByTestId("sent-notice-a")).getByText("Trip").closest("p")?.className).toContain("text-[12px]");
+  });
 });

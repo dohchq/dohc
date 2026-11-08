@@ -9,7 +9,7 @@ const mine = { group: "agent-mine", hue: null, self: true } as const;
 const theirs = { group: "agent-theirs", hue: null, self: false } as const;
 const ada = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } };
 
-function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?: string }, presentation: typeof mine | typeof theirs, settings = settingsWithAgent({ name: "Nova", launch: { command: "local-tool --private-path" } }, ada)) {
+function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?: string; authorAgentId?: string }, presentation: typeof mine | typeof theirs, settings = settingsWithAgent({ name: "Nova", launch: { command: "local-tool --private-path" } }, ada)) {
   render(<AgentSettingsProvider settings={settings}>
     <AgentBadge testIdPrefix="chats-post" author={author} presentation={presentation} />
   </AgentSettingsProvider>);
@@ -19,27 +19,35 @@ function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?
 
 afterEach(cleanup);
 describe("agent badge", () => {
-  it("shows the chosen tool's command for your agent", () => {
-    const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, mine,
+  it("names your agent's tool on this computer, with the full command as its tooltip", () => {
+    const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, mine,
       settingsWithAgent({ name: "Nova", launch: { tool: "codex", executable: "/tools/codex" } }, ada));
-    expect(text).toContain("/tools/codex");
+    expect(text).toBe("NovaOwned by AdaCodex on this computer");
+    expect(screen.getByTestId("chats-post-agent-runs-with").getAttribute("title")).toContain("/tools/codex");
   });
 
-  it("shows the owner, and your command only on your agent's message", () => {
-    expect(tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, mine)).toContain("Current local command: local-tool --private-path");
+  it("shows the owner, and how your agent runs only on your agent's message", () => {
+    expect(tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, mine)).toContain("Your runner command");
+    expect(screen.getByTestId("chats-post-agent-runs-with").getAttribute("title")).toBe("local-tool --private-path");
     cleanup();
-    // In a shared workspace, another person's agent can carry your names. It is still theirs.
-    const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }, theirs);
-    expect(text).toContain("Owned by Ada");
-    expect(text).not.toContain("local-tool");
+    // In a shared workspace, another person's agent can carry your agent's name and id. It is still theirs.
+    const text = tooltipFor({ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorAgentId: "default" }, theirs);
+    expect(text).toBe("NovaOwned by Ada");
+    expect(screen.queryByTestId("chats-post-agent-runs-with")).toBeNull();
   });
 
-  it("finds your agent by the name its messages had before agents had ids", () => {
-    const renamed = settingsWithAgent({ name: "Atlas", nameBeforeMigration: "Nova", launch: { command: "local-tool" } }, ada);
-    expect(tooltipFor({ authorDisplayName: "Nova" }, mine, renamed)).toContain("Current local command: local-tool");
+  it("finds your agent only by the id its run's message carries", () => {
+    expect(tooltipFor({ authorDisplayName: "Atlas", authorAgentId: "default" }, mine)).toContain("Your runner command");
     cleanup();
-    // Your person's message from an agent you do not have shows no command.
-    expect(tooltipFor({ authorDisplayName: "Cursor" }, mine, renamed)).not.toContain("Current local command");
+    // An outside agent with no name posts as "Agent", and an older message can
+    // carry your agent's name. Neither is your agent's run.
+    for (const name of ["Agent", "Nova"]) {
+      expect(tooltipFor({ authorDisplayName: name }, mine, settingsWithAgent({ name, launch: { command: "local-tool" } }, ada)))
+        .not.toContain("Your runner command");
+      cleanup();
+    }
+    // An agent no longer in Settings shows no command.
+    expect(tooltipFor({ authorDisplayName: "Nova", authorAgentId: "codex" }, mine)).not.toContain("Your runner command");
   });
 
   it("adds what the agent reported as one line, and no line when it reported nothing", () => {
@@ -58,6 +66,20 @@ describe("agent badge", () => {
     expect(reported({ model: "Claude Opus 5.5" })).toBe("Claude Opus 5.5 (as reported)");
     expect(reported()).toBeNull();
     expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Ice");
+  });
+
+  it("names an agent that joined with a link, in olive, without an owner", () => {
+    const presentation = { group: "7", hue: "plum", self: false } as const;
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude Code", linkAgent: true }} presentation={presentation} />);
+    const badge = screen.getByTestId("chats-post-agent-badge");
+    expect(badge.getAttribute("aria-label")).toBe("agent");
+    expect(badge.parentElement!.className).toContain("text-agent");
+    expect(badge.parentElement!.className).not.toContain("hue");
+    fireEvent.focus(badge);
+    const text = screen.getByRole("tooltip", { hidden: true }).textContent ?? "";
+    expect(text).toContain("Claude Code");
+    expect(text).not.toContain("Owned by");
+    expect(text).not.toContain("Owner name unavailable");
   });
 
   it("closes on Escape, and stays open while it has focus", () => {

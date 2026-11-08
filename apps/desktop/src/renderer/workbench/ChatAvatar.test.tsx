@@ -67,6 +67,20 @@ describe("ChatAvatar presentation", () => {
       expect(screen.getByTitle(agent).className).toMatch(/\brounded(-lg)?\b/u);
     }
   });
+  it.each(["post", "row", "comment", "strip"] as const)("draws an agent that joined with a link as an olive square with a link holder's dashed edge at %s size", (size) => {
+    render(<ChatAvatar name="Claude Code" kind="link" linkAgent size={size} presentation={{ group: "7", hue: "plum", self: false }} />);
+    render(<ChatAvatar name="Wren" kind="link" size={size} presentation={neutralPresentation} />);
+    const agent = screen.getByTitle("Claude Code");
+    expect(agent.className).toMatch(/\brounded(-lg)?\b/u);
+    expect(agent.className).not.toContain("rounded-full");
+    expect(agent.className).toContain("border-dashed");
+    expect(agent.className).toContain("border-agent");
+    expect(agent.className).toContain("text-agent");
+    expect(agent.className).not.toMatch(/hue/u);
+    const person = screen.getByTitle("Wren");
+    expect(person.className).toMatch(/\brounded-full\b/u);
+    expect(person.className).toContain("border-dashed");
+  });
   it("keeps automation marks bare", () => {
     render(<ChatAvatar name="Job" kind="automation" presentation={neutralPresentation} />);
     expect(screen.getByTitle("Job").className).not.toMatch(/\b(border|hue|agent|rounded)/u);
@@ -98,6 +112,8 @@ it("paints an agent's name and sparkle in its avatar's hue, olive by default, an
     <AgentName kind="agent" presentation={nova}>Nova name</AgentName>
     <AgentBadge testIdPrefix="nova" author={{ authorDisplayName: "Nova" }} presentation={nova} />
     <p><AgentName kind="human" presentation={{ ...neutralPresentation, hue: "teal" }}>Sam name</AgentName></p>
+    <AgentName kind="link" linkAgent presentation={orbit}>Link agent name</AgentName>
+    <p><AgentName kind="link" presentation={orbit}>Link holder name</AgentName></p>
   </>);
   const badge = (prefix: string) => screen.getByTestId(`${prefix}-agent-badge`).parentElement!.className;
   expect(screen.getByText("Orbit name").className).toBe("text-hue-plum");
@@ -106,6 +122,9 @@ it("paints an agent's name and sparkle in its avatar's hue, olive by default, an
   expect(badge("nova")).toContain("text-agent");
   // A person's name keeps its own row's ink; no hue span wraps it.
   expect(screen.getByText("Sam name").tagName).not.toBe("SPAN");
+  // An agent that joined with a link has no hue of its own: olive, like an agent left at the default.
+  expect(screen.getByText("Link agent name").className).toBe("text-agent");
+  expect(screen.getByText("Link holder name").tagName).not.toBe("SPAN");
   act(() => changed({ workspaceId: "w", group: "orbit", hue: "teal" }));
   expect(screen.getByTitle("Orbit").className).toContain("text-hue-teal");
   expect(screen.getByText("Orbit name").className).toBe("text-hue-teal");

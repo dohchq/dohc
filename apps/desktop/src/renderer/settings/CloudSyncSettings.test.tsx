@@ -4,7 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { Overlay } from "../Overlay";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import {
   CloudSyncSettings,
@@ -113,6 +114,12 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("settings-row-account")).toBeNull();
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
+    // Disconnecting was a choice: the line names the way back, not a fault.
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.getByTestId("cloud-workspace-not-connected").textContent).toBe(SYNC_NOT_CONNECTED);
+    expect(row.queryByTestId("cloud-workspace-relink")).toBeNull();
+    expect(row.queryByText(/confirm/)).toBeNull();
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Pause sync"]);
 
     const pause = screen.getByRole("button", { name: "Pause sync" });
     pause.focus();
@@ -161,21 +168,49 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
   });
 
-  it("offers Delete account beside Disconnect, for the account the row shows", async () => {
+  it("offers Delete account in More actions beside Disconnect, for the account the row shows", async () => {
     const logout = deferred<void>();
     bridgeMock.cloudLogout.mockReturnValueOnce(logout.promise);
     const settings = cloud({ ...SIGNED_IN, serverUrl: "https://dohc.hollis.studio/" });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
-    const remove = within(screen.getByTestId("settings-row-account")).getByTestId("cloud-delete-account") as HTMLButtonElement;
-    expect(remove.textContent).toBe("Delete account…");
+    const row = within(screen.getByTestId("settings-row-account"));
+    expect(row.getByTestId("cloud-disconnect")).toBeTruthy();
+    expect(row.queryByTestId("cloud-delete-account")).toBeNull();
+    const more = row.getByRole("button", { name: "More actions" }) as HTMLButtonElement;
+    expect(more.title).toBe("More actions");
+    fireEvent.click(more);
+    const remove = screen.getByRole("menuitem", { name: "Delete account…" });
+    expect(remove.className).toContain("text-danger");
     fireEvent.click(remove);
     expect(settings.onDeleteAccount).toHaveBeenCalledWith({ email: "sam@hollis.studio", server: "https://dohc.hollis.studio" });
+    expect(screen.queryByRole("menu")).toBeNull();
 
     // Not while Disconnect is ending the same session.
     fireEvent.click(screen.getByTestId("cloud-disconnect"));
-    expect(remove.disabled).toBe(true);
+    expect(more.disabled).toBe(true);
     await act(async () => logout.resolve());
+  });
+
+  it("opens More actions from the keyboard, and Escape closes it back to the button", async () => {
+    const user = userEvent.setup();
+    const settings = cloud(SIGNED_IN);
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    const more = screen.getByRole("button", { name: "More actions" });
+    more.focus();
+    await user.keyboard("{Enter}");
+    const remove = screen.getByRole("menuitem", { name: "Delete account…" });
+    expect(document.activeElement).toBe(remove);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(more);
+
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Delete account…" }));
+    await user.keyboard("{Enter}");
+    expect(settings.onDeleteAccount).toHaveBeenCalledOnce();
   });
 
   // The words a mark cannot carry reach the keyboard and a screen reader, not
@@ -281,6 +316,9 @@ describe("CloudSyncSettings", () => {
     expect(control.getAttribute("aria-checked")).toBe("false");
     expect(control.getAttribute("aria-busy")).toBe("true");
     expect(control.disabled).toBe(true);
+    const spinner = within(screen.getByTestId("settings-row-sync-workspace")).getByTestId("switch-busy");
+    expect(spinner.getAttribute("class")).toContain("animate-spin");
+    expect(spinner.getAttribute("aria-hidden")).toBe("true");
     fireEvent.click(control);
     expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce();
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
@@ -291,6 +329,9 @@ describe("CloudSyncSettings", () => {
 
     expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
     expect(syncSwitch().getAttribute("aria-busy")).toBeNull();
+    expect(screen.queryByTestId("switch-busy")).toBeNull();
+    // The spinner's place stays, so the switch does not move when it goes.
+    expect(syncSwitch().previousElementSibling?.className).toContain("size-3");
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
     expect(screen.queryByTestId("cloud-sync-needs-server")).toBeNull();
@@ -456,6 +497,10 @@ describe("CloudSyncSettings", () => {
     const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
     fireEvent.click(syncSwitch());
     await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalled());
+    // Turning on waits for main the same way: busy, with the spinner beside it.
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(syncSwitch().getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByTestId("switch-busy")).toBeTruthy();
 
     unmount();
     await act(async () => {
@@ -548,6 +593,75 @@ describe("CloudSyncSettings", () => {
     await waitFor(() =>
       expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({ workspaceId: "ws-1", passphrase: "shared passphrase" }),
     );
+  });
+
+  describe("a press outside Settings", () => {
+    const pressBackdrop = () => {
+      const backdrop = document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+      fireEvent.pointerDown(backdrop);
+      fireEvent.click(backdrop);
+    };
+
+    it("stays open while a typed passphrase waits to be used, and says why after Tab to Protect", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" })} />
+        </Overlay>,
+      );
+      await user.click(screen.getByTestId("cloud-protect-secrets"));
+      const input = screen.getByTestId("cloud-sync-passphrase");
+      await user.type(input, "shared passphrase");
+      // Moving to Protect is how a passphrase gets used, so the row says nothing.
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByTestId("cloud-sync-passphrase-submit"));
+      expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
+
+      await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(input);
+      expect(screen.getByTestId("cloud-sync-hint").textContent).toBe("Press Protect to use this passphrase.");
+    });
+
+    it.each([
+      ["protect", "protected-key-present", "cloud-protect-secrets", "shared passphrase", "Press Protect to use this passphrase."],
+      ["protect", "protected-key-present", "cloud-protect-secrets", "short", "Enter at least 8 characters to protect synced secrets."],
+      ["unlock", "protected-key-missing", "cloud-unlock-secrets", "shared passphrase", "Press Unlock to use this passphrase."],
+    ] as const)("says how to %s with a passphrase left in the field", async (_, secretState, start, typed, words) => {
+      const user = userEvent.setup();
+      render(
+        <Overlay onClose={vi.fn()} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: secretState })} />
+        </Overlay>,
+      );
+      await user.click(screen.getByTestId(start));
+      const input = screen.getByTestId("cloud-sync-passphrase");
+      await user.type(input, typed);
+      await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+
+      expect(document.activeElement).toBe(input);
+      expect(screen.getByRole("alert").textContent).toBe(words);
+      await user.type(input, "x");
+      expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
+    });
+
+    it("closes from an empty passphrase prompt", async () => {
+      bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."));
+      const onClose = vi.fn();
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, workspaceSecretState: "protected-key-present" })} />
+        </Overlay>,
+      );
+      fireEvent.click(syncSwitch());
+      expect((await screen.findByTestId("cloud-sync-passphrase")).getAttribute("aria-invalid")).toBe("true");
+
+      pressBackdrop();
+
+      expect(onClose).toHaveBeenCalledOnce();
+    });
   });
 
   it("unlocks protected files, then offers to protect them", async () => {
@@ -648,7 +762,36 @@ describe("CloudSyncSettings", () => {
     expect(mark.getAttribute("class")).toContain("lucide-triangle-alert");
     expect(mark.getAttribute("aria-hidden")).toBe("true");
     expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Pause sync"]);
+    expect(row.queryByTestId("cloud-workspace-not-connected")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+  });
+
+  // The saved session still matches, but the server stopped accepting it, so
+  // a switch would read on while nothing syncs. Sign in again takes Try
+  // again's place, and enabling again is never asked for.
+  it("shows Sign in again and Pause sync, not the switch, once the sign-in expired", () => {
+    const onSignInAgain = vi.fn();
+    const { rerender } = render(
+      <CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: true, onSignInAgain })} />,
+    );
+
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.queryByRole("switch")).toBeNull();
+    const line = row.getByTestId("cloud-workspace-sign-in-expired");
+    expect(line.textContent).toBe(SYNC_SIGN_IN_EXPIRED);
+    expect(line.className).toContain("text-danger");
+    expect(row.queryByText(SYNC_UNCONFIRMED_ACCOUNT)).toBeNull();
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Sign in again", "Pause sync"]);
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+    fireEvent.click(row.getByRole("button", { name: "Sign in again" }));
+    expect(onSignInAgain).toHaveBeenCalledOnce();
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+    expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
+
+    // A new sign-in rebuilt the engine: the switch reads on again.
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: false, onSignInAgain })} />);
+    expect(screen.queryByTestId("cloud-workspace-sign-in-expired")).toBeNull();
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   // Pause sync is the switch's off. It saves the pause, so neither a restart

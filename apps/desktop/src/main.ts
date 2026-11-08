@@ -62,7 +62,8 @@ import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collectio
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
-import { detectAgentTools } from "./agents/agentToolDetection";
+import { windowsProbeOwner } from "./agents/agentProbeProcess";
+import { claudeCodeVersion, detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
@@ -184,6 +185,7 @@ import {
   crashReportOperations,
   collectionCopiesLeftOperations,
   workspaceTrustOperations,
+  oldWindowOperations,
   reportingOperations,
   usageRecordOperations,
   noticeOperations,
@@ -222,6 +224,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
+import { createOldWindows } from "./window/oldWindows";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
   createRendererWorkspaceOperationRunner,
@@ -261,6 +264,8 @@ import {
   titleBarOverlayOptions,
 } from "./window/createMainWindow";
 import {
+  assertNotStateFolder,
+  overlapsStateFolder,
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
   createWorkspaceFolderWithFreshness,
@@ -552,7 +557,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, automationAgent, firstAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, automationAgent, listAgents, isOwnAgentId, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -579,6 +584,7 @@ import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/tel
 import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
+  focusShareHandoffWindow,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
 import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemption";
@@ -873,10 +879,16 @@ function notifyCollectionAutomationsChanged(workspaceId: string): void {
   notifyWorkspaceWindows(workspaceId, CHANNELS.collectionAutomationsChanged);
 }
 
-function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
+// A change to a Collection's fields or rules applied: the windows on that
+// workspace read that Collection again where they show it.
+function notifyCollectionRulesChanged(workspaceId: string, datasetId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.collectionRulesChanged, { datasetId });
+}
+
+function notifyWorkspaceWindows(workspaceId: string, channel: string, details: Record<string, string> = {}): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
-    win.webContents.send(channel, { workspaceId });
+    win.webContents.send(channel, { ...details, workspaceId });
   }
 }
 
@@ -2125,9 +2137,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     await flushTypingCheckpoints(workspaceId);
     if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
     const answer = await showMessageBox({type: "warning", title: "Remove this workspace from the list?",
-      message: "This workspace has typing waiting to recover.", detail: "Removing it deletes its kept copies from dohc. The folder stays. This can't be undone.",
-      buttons: ["Go back", "Remove from list"], defaultId: 0, cancelId: 0});
-    return answer.response === 1;
+      message: "This workspace has typing waiting to recover.", detail: "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
+      buttons: ["Remove from list", "Cancel"], defaultId: 1, cancelId: 1});
+    return answer.response === 0;
   },
   removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
   onError: (workspaceId, error) => console.warn(`[desktop] Could not remove recovery records for workspace "${workspaceId}":`, error),
@@ -2149,7 +2161,7 @@ const forgetWorkspace = createWorkspaceForget({
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   canonicalizeRoot: canonicalWorkspaceRoot,
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
-  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), computer: thisComputer() }),
+  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), stateDir: stateDir(), computer: thisComputer() }),
   register: registerReservedPhysicalWorkspace,
   remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
   release: (reservation, cleanup) =>
@@ -2469,7 +2481,7 @@ const typingQuitRecovery=createTypingQuitRecovery({
  hasWindows:()=>desktopWindows.workspaceWindows.allLive().length > 0,
  unresolved:hasUnresolvedTypingCheckpoints,flush:flushTypingCheckpoints,quit:()=>app.quit(),beforeQuit:event=>quitGuard.beforeQuit(event),
  confirmLoss:async()=>{const drawing=[...typingRecoveryFailures.values()].some(rows=>[...rows.values()].some(f=>f.reason === "drawing-unavailable"));
- const answer=await showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
+ const answer=await showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Quit anyway","Go back"],defaultId:1,cancelId:1});return answer.response === 0;},
 });
 function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
@@ -2518,11 +2530,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     const workspace = findWorkspace(workspaceId);
     const remote = workspace?.remote;
     return {
-      enabled: !!remote,
       syncPause: workspace ? syncPauseFor(workspace, localInstallationId()) : undefined,
       // Legacy and different-account bindings stay local-only.
-      connected:
-        !!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
+      ...(remote && !workspaceRemoteMatchesCredentials(remote, cachedCredentials)
+        ? { syncBlocked: cachedCredentials ? "account-unconfirmed" as const : "not-connected" as const }
+        : {}),
     };
   },
   engineFor: engineForWorkspace,
@@ -2622,9 +2634,11 @@ function withWorkspaceActivityState<Result>(
 // physical attachment and then works only with that authority-owned state.
 const activity = {
   open: (workspace: RegistryEntry) =>
-    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
-      workspaceActivity.open(canonicalWorkspaceFor(lease), lease.state.activity),
-    ),
+    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
+      const canonical = canonicalWorkspaceFor(lease);
+      assertNotStateFolder(canonical.rootPath, { stateDir: stateDir(), workspace: "listed" });
+      return workspaceActivity.open(canonical, lease.state.activity);
+    }),
   close: (
     workspaceId: string,
     options?: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean; expectedRootPath?: string },
@@ -2820,9 +2834,11 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedRunId(lease.state.activity),
     ),
-  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
-    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
-  ),
+  // A run dohc started keeps its workspace after it ends; any other run only
+  // while it holds a slot.
+  agentRunWorkspace: (runId: string) => chatDispatchService.runWorkspace(runId) ??
+    workspaceAuthorities.workspaceIds().find((workspaceId) =>
+      withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId)),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3125,6 +3141,7 @@ function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null
   }
   const lease = requireWorkspaceAuthority(workspaceId);
   try {
+    if (overlapsStateFolder(lease.binding.canonicalRootPath, stateDir())) return null;
     return {
       workspaceId: lease.binding.workspaceId,
       rootPath: lease.binding.canonicalRootPath,
@@ -3173,6 +3190,8 @@ function withEngineStoreRecoveredForAuthority<Result>(
   body: () => Promise<Result>,
 ): Promise<Result> {
   const workspace = canonicalWorkspaceFor(lease);
+  // Recovery writes in the workspace's .dohc, so a refused folder stops here.
+  assertNotStateFolder(workspace.rootPath, { stateDir: stateDir(), workspace: "listed" });
   return runInWorkspaceAuthorityLane(lease, "engine-store", () =>
     withEngineStoreRecoveredUnderEngineStoreLock(workspace, body, (rootPath) =>
       completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
@@ -3347,6 +3366,7 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 ): Promise<SyncStatusResult> {
   return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
     const canonicalWorkspace = canonicalWorkspaceFor(lease);
+    assertNotStateFolder(canonicalWorkspace.rootPath, { stateDir: stateDir(), workspace: "listed" });
     return withEngineStoreRecoveredUnderEngineStoreLock(
       canonicalWorkspace,
       () => ensureWorkspaceActivityOpenBody(lease, options),
@@ -3562,11 +3582,13 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  agentToolVersion: (executable) => claudeCodeVersion(executable, resourcesBasePath()),
   stateDir,
   appRoot: desktopPackageRootInDev,
   isPackaged: () => app.isPackaged,
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  agentOwner: () => windowsProbeOwner(resourcesBasePath()),
   queueSync: syncWorkspaceForDispatch,
   prepareRunWorkspace: async (workspace) => {
     const { registered, release } = await withWorkspaceAttachmentAsync(
@@ -4931,10 +4953,11 @@ const chatWrites = createChatWrites({
   localUserDisplayName,
   agentDisplayName: async (agentId) => {
     const { settings } = await readCachedUserSettingsFile(stateDir());
-    return (agentId ? listAgents(settings).find(({ id }) => id === agentId) : firstAgent(settings))?.name ?? "Agent";
+    return listAgents(settings).find(({ id }) => id === agentId)?.name ?? "Agent";
   },
   agentIdsNamedIn: async (body) =>
     agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),
+  isOwnAgentId: async (name) => isOwnAgentId((await readCachedUserSettingsFile(stateDir())).settings, name),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5688,6 +5711,8 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
         const closingApps = appViews?.closeOwner(session.sender.id) ?? Promise.resolve();
         shareDirectWriteDelivery.retireSender(session.sender);
         const retiring = rendererWorkspaceRetirement.retireSender(session);
+        // The sender no longer shows its workspace.
+        oldWindows.notify();
         return { ...retiring,
           requiredForAdmission: Promise.all([retiring.requiredForAdmission, closingApps]).then(() => {}),
         };
@@ -5961,6 +5986,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       for (const workspace of listWorkspaces()) {
         if (workspace.remote === undefined && workspace.shareView === undefined) continue;
+        if (overlapsStateFolder(workspace.rootPath, stateDir())) continue;
         void recordSyncedIfNeeded(workspace).catch((error: unknown) =>
           console.warn(`[desktop] Could not record that workspace "${workspace.workspaceId}" synced:`, error));
       }
@@ -6084,6 +6110,14 @@ const workspaceFileOpens = createWorkspaceFileOpens<WebContents, WorkspaceSummar
   },
 });
 
+const oldWindows = createOldWindows<WebContents, BrowserWindow>({
+  windows: () => desktopWindows.workspaceWindows.allLive(),
+  sessionOf: (contents) => rendererWorkspaceSessions.current(contents),
+  authorities: workspaceAuthorities,
+  isQuitting: () => appLifecycle.isQuitting(),
+  focus: focusShareHandoffWindow,
+});
+
 // Opens a file or folder the OS or a launch handed dohc: its workspace, and
 // the file in a tab. A folder that is not yet a registered workspace becomes
 // one only when the person agrees.
@@ -6114,7 +6148,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     }, folder);
   },
   register: async (rootPath) => {
-    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
+    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), stateDir: stateDir(), kind: "personal", computer: thisComputer() });
     WorkspaceSummary.parse(created);
     // As Open folder does: a share forgotten in this folder opens as that share.
     return workspaceSummaryFor(await forgottenShareViews.reopen(created, registerPhysicalWorkspace));
@@ -6239,12 +6273,12 @@ const exitRounds = createExitRounds<BrowserWindow>({
       type: "warning",
       message: "dohc isn't responding.",
       detail: `${verb} now can lose unsaved recovery text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
-      buttons: ["Wait", kind === "quit" ? "Quit anyway" : "Install anyway"],
-      defaultId: 0,
-      cancelId: 0,
+      buttons: [kind === "quit" ? "Quit anyway" : "Install anyway", "Wait"],
+      defaultId: 1,
+      cancelId: 1,
       noLink: true,
     });
-    return response === 1;
+    return response === 0;
   },
 });
 
@@ -6450,6 +6484,7 @@ function registerIpcHandlers(): void {
     dialog,
     roots: workspaceRootApproval,
     effectiveHome,
+    stateDir,
     workspaceSummaries,
     prioritizePreferredWorkspace: (workspaces, event) =>
       prioritizePreferredWorkspace(workspaces, event.sender),
@@ -6767,6 +6802,7 @@ function registerIpcHandlers(): void {
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
     moveToServer,
+    collectionRulesChanged: notifyCollectionRulesChanged,
     collectionPlace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string, signal: AbortSignal): Promise<DatasetPlace> => {
       const authority = await collectionsAuthorityFor(workspace, signal);
       if (authority.kind === "server") return { kind: "server", host: new URL(authority.server.credentials.relayUrl ?? authority.server.credentials.serverUrl).host };
@@ -7399,6 +7435,11 @@ function registerIpcHandlers(): void {
     executeAppPreview,
   });
 
+  registerOperations(operationBoundary, oldWindowOperations, {
+    readOldWindowState: (_input, { event }) => oldWindows.read(event.sender),
+    goToWorkspaceWindow: (_input, { event }) => oldWindows.goTo(event.sender),
+  });
+
   registerOperations(operationBoundary, workspaceTrustOperations, workspaceTrustHandlers<IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     trust: workspaceTrust,
     identify: folderIdentity,
@@ -7431,7 +7472,10 @@ function registerIpcHandlers(): void {
       desktopWindows.setPreferredWorkspaceId(workspaceId, sender);
     },
     markWorkspaceOpened,
-    workspaceShown: (workspaceId, sender) => workspaceFileOpens.shown(sender, workspaceId),
+    workspaceShown: (workspaceId, sender) => {
+      workspaceFileOpens.shown(sender, workspaceId);
+      oldWindows.notify();
+    },
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: async (operation) => {
       // A root macOS refuses would open with every file and engine call failing.

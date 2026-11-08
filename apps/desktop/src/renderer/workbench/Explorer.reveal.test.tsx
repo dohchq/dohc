@@ -12,7 +12,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       { path: "apps/reading-list/index.html", kind: "file" },
       { path: "notes.md", kind: "file" },
@@ -33,7 +32,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),

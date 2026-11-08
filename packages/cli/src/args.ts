@@ -55,6 +55,7 @@ type CliCommandBody =
       needsDecision: boolean;
       options?: string[];
       body: string;
+      agent?: string;
     }
   | {
       verb: "reply";
@@ -66,6 +67,7 @@ type CliCommandBody =
       resolve?: string;
       choose?: string;
       body: string;
+      agent?: string;
     }
   | { verb: "react"; message: string; emoji: string }
   | {
@@ -231,6 +233,12 @@ const attachFlag: CliFlag = {
   value: "path",
   text: "Attach a workspace file. Repeat for more files.",
 };
+const chatAgentFlag: CliFlag = { name: "--agent", value: "name", text: "Record this agent name when --as-agent is set." };
+function chatAgent(input: VerbInput): { agent?: string } {
+  const agent = lastValue(input, "--agent");
+  if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name");
+  return agent === undefined ? {} : { agent };
+}
 const decisionFlags: readonly CliFlag[] = [
   { name: "--needs-decision", text: "Ask readers for a decision." },
   {
@@ -502,7 +510,7 @@ const CHAT_VERBS = {
     capabilityId: "chat.post",
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
-    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
+    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags, chatAgentFlag],
     freeText: true,
     notes: [stdinNote, "In a direct message, use reply instead."],
     parse: (input) => {
@@ -518,6 +526,7 @@ const CHAT_VERBS = {
         attachments: allValues(input, "--attach"),
         ...decisionFields(input),
         body,
+        ...chatAgent(input),
       };
     },
   },
@@ -531,6 +540,7 @@ const CHAT_VERBS = {
       ...decisionFlags,
       { name: "--resolve", value: "message", text: "Resolve this open decision with the reply." },
       { name: "--choose", value: "choice", text: "Pick this choice of the decision. Needs --resolve." },
+      chatAgentFlag,
     ],
     freeText: true,
     notes: [stdinNote],
@@ -552,6 +562,7 @@ const CHAT_VERBS = {
         ...(resolve ? { resolve } : {}),
         ...(choose ? { choose } : {}),
         body,
+        ...chatAgent(input),
       };
     },
   },
@@ -1074,7 +1085,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
-    notes: ["Review the source and the Collection access it asks for, then approve."],
+    notes: ["Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link."],
   },
   launchLocal: {
     summary: "Get a local URL for an approved app.",

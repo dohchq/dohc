@@ -1,6 +1,7 @@
 import { ViewActions } from "./fileInspectorUi";
 import { isComposingKey } from "./ui/keys";
 import { EmptyState, SectionLabel } from "./ui/controls";
+import { EMPTY_ART } from "./workbench/EmptyArt";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { ArrowDown, ArrowUp, Binary, Database, Hash, Search, TriangleAlert, Type, type LucideIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
@@ -465,7 +466,7 @@ export function DatabaseStudioView(props: {
                   onClick={() => selectTable(table.name)}
                   className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
                     active?.name === table.name
-                      ? "bg-selected text-ink"
+                      ? "bg-selected text-ink font-medium"
                       : "text-muted hover:bg-hover hover:text-ink"
                   }`}
                 >
@@ -536,7 +537,7 @@ export function DatabaseStudioView(props: {
               />
             </>
           ) : (
-            <EmptyState title="No tables in this database." />
+            <EmptyState picture={EMPTY_ART.table} title="No tables in this database." />
           )}
         </main>
       </div>

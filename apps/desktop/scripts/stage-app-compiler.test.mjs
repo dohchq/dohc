@@ -5,7 +5,6 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { load } from "js-yaml";
@@ -14,9 +13,8 @@ import { createInstalledDatasetCompiler } from "../src/workspaces/installedDatas
 import { stageAppCompiler, requireAppCompiler, readPinnedCompilerNode, archiveMember } from "./stage-app-compiler.mjs";
 
 import { PINNED_NODE } from "./pinned-node.mjs";
+import { builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
 const { getFileMatchers, copyFiles } = builderRequire("app-builder-lib/out/fileMatcher.js");
 
 async function packageCompiler(sourceRoot, resourcesRoot) {

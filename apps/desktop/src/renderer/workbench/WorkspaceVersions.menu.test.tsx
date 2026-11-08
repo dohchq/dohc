@@ -460,7 +460,7 @@ describe("VersionMenu", () => {
       tone: "success", title: "Merged 1 file from Draft into Main", message: "One protected file took Draft's copy.", paths: [".env"],
     }],
     ["files to decide", { ...merged, conflictCount: 2, conflicts: [conflict], nextAfterConflictId: "c-1" }, {
-      tone: "warning", title: "Merged Draft into Main", message: "2 files have two copies.", decideFrom: "draft",
+      tone: "warning", title: "Merging Draft into Main needs a decision", message: "2 files have two copies.", decideFrom: "draft",
     }],
   ])("keeps merging when the dialog closes, then reports %s as a notice", async (_name, result, notice) => {
     const answer = deferredMerge();

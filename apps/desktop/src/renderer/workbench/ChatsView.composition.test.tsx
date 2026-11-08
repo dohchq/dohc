@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import type { PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import {
@@ -433,6 +434,27 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     expect(onThreadStarted).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { when: "with no account", account: null, name: "Sam", initial: "S" },
+    { when: "when signed in", account: "Ada", name: "Ada", initial: "A" },
+  ])("puts $name's initial on the new post box $when", async ({ account, name, initial }) => {
+    const empty: PresenceSnapshot = { version: 1, peers: [] };
+    const transport: PresenceTransport = {
+      async publish() { return empty; },
+      async leave() {},
+      poll({ signal }) { return new Promise((resolve) => signal.addEventListener("abort", () => resolve(empty), { once: true })); },
+    };
+    renderView(vi.fn(), vi.fn(), {
+      // The name from Settings.
+      agentSetup: { workspaceId: "workspace-a", preferredName: "Sam", runnerConfigured: false, runnerEnabled: false, agentRunActive: false, agents: [] },
+      collaboration: account === null ? null : { transportForScope: () => transport, clientId: "me", displayName: account },
+    });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const box = (await screen.findByTestId("chats-new-thread-composer")).closest("form")!;
+    expect(within(box).getByTitle(name).textContent).toBe(initial);
+  });
+
   it("can react to a newly started thread before any reload", async () => {
     const user = userEvent.setup();
     const startedThread = thread();
@@ -620,6 +642,32 @@ describe("ChatsView document thread", () => {
     expect(toolbar.querySelector('[data-testid="chats-comment-reply"]')?.getAttribute("aria-label")).toBe("Reply");
     expect(toolbar.querySelector('[data-testid="chats-add-reaction"]')).not.toBeNull();
     expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
+  });
+
+  it("keeps agent, then link holder, for screen readers on a link agent's continued comment", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const linkAgent = { authorKind: "link", linkAgent: true, authorDisplayName: "Claude Code" } as const;
+    const first = message({ ...linkAgent, id: "comment-1", parentMessageId: opening.id, body: "First" });
+    const second = message({ ...linkAgent, id: "comment-2", parentMessageId: opening.id, body: "Second", createdAtMs: NOW + 60_000 });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, first, second] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-comments-divider");
+    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
+    expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true"]);
+    const spoken = (item: Element) => [...item.querySelectorAll(".sr-only")]
+      .map((word) => word.textContent?.trim().toLowerCase())
+      .filter((word) => word === "agent" || word === "link holder");
+    // The first comment's badge says agent; the continued one has no badge and says it in words.
+    expect(items[0]!.querySelector('[data-testid="chats-comment-agent-badge"]')).not.toBeNull();
+    expect(items[0]!.querySelector('[data-testid="chats-comment-link-agent"]')).toBeNull();
+    expect(spoken(items[0]!)).toEqual(["agent", "link holder"]);
+    expect(items[1]!.querySelector('[data-testid="chats-comment-agent-badge"]')).toBeNull();
+    expect(spoken(items[1]!)).toEqual(["agent", "link holder"]);
   });
 
   it("enters reply mode and sends the true parent message id", async () => {

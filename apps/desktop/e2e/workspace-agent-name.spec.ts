@@ -6,6 +6,7 @@ import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, trustOpenWorkspace } from "./helpers/workspace";
 
 test("a named agent replies to a group mention with its owner on hover and focus", async ({}, testInfo) => {
@@ -45,7 +46,11 @@ test("a named agent replies to a group mention with its owner on hover and focus
       await badge.hover();
       const hover = reply.getByRole("tooltip");
       await expect(hover).toContainText("Owned by Ada");
-      await expect(hover).toContainText(command);
+      // Your agent's card says it runs your command, and names it in full on hover.
+      const runsWith = hover.getByTestId("chats-comment-agent-runs-with");
+      await expect(runsWith).toHaveText("Your runner command");
+      await expect(runsWith).toHaveAttribute("title", command);
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`agent-owner-${theme}.png`) });
       await page.mouse.move(0, 0);
       await badge.focus();

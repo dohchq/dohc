@@ -352,7 +352,7 @@ describe("history page", () => {
     renderShell(bridge);
     await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
-    expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
+    expect((await screen.findByTestId("engine-moment-summary")).textContent).toBe("Renamed to b.md");
     await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
     await user.click(screen.getByTestId("engine-moment-open"));
     expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
@@ -386,7 +386,7 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-history-load-more"));
     expect(await screen.findByText("Older admitted edit")).toBeTruthy();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(bridge.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: timelineCursor(80) }));
   });
 
@@ -617,7 +617,20 @@ describe("history page", () => {
     );
     expect(hidden.textContent).not.toContain("TOML parse error");
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+
+    // Open goes to the file to fix, and a failure to open it is a toast.
+    const opened = "dohc could not open /w/.dohc/visibility.toml. No application is associated with this file. Open the file in a text editor.";
+    bridge.openWorkspacePolicyFile = vi.fn(async () => {
+      throw new Error(`Error invoking remote method 'desktop:open-workspace-policy-file': Error: ${opened}`);
+    });
+    await user.click(within(hidden).getByRole("button", { name: "Open visibility.toml" }));
+    expect(bridge.openWorkspacePolicyFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE.workspaceId,
+      file: ".dohc/visibility.toml",
+    });
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(opened);
+    expect(bridge.listHistory).toHaveBeenCalledOnce();
 
     await user.click(within(hidden).getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
@@ -1890,14 +1903,14 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
 
     await act(async () => {
       first.resolve(historyPage([]));
       await first.promise;
     });
-    expect(await screen.findByText("No changes yet")).toBeTruthy();
+    expect(await screen.findByText("No changes yet.")).toBeTruthy();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
@@ -1920,7 +1933,7 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     // The lanes share one banner, so the sentence has to say which one went
     // stale — the cause alone names none of them — and it has to offer the way
     // back that the rendered timeline has just hidden.
@@ -2065,7 +2078,7 @@ describe("history page", () => {
   // recovery read fails, and the switch's own refresh fails too. The surface
   // then has no page and no way to get one on its own — and it used to answer
   // that by telling a workspace with real history that it had no changes.
-  it("never says 'No changes yet' for a read that failed", async () => {
+  it("never says 'No changes yet.' for a read that failed", async () => {
     const stranded = deferred<TimelinePage>();
     const retry = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
@@ -2149,7 +2162,7 @@ describe("history page", () => {
 
     // No page, and no read on the way. The surface says what happened.
     await waitFor(() => expect(screen.getByTestId("history-load-failed")).toBeTruthy());
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(screen.queryByText("Wrote the note in the draft")).toBeNull();
     expect(screen.getByTestId("history-load-failed").textContent).toContain(
       "dohc could not load this workspace's history.",
@@ -2242,7 +2255,7 @@ describe("history page", () => {
     await waitFor(() =>
       expect(screen.queryByText("Wrote the note in the draft")).toBeNull(),
     );
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(await screen.findByTestId("history-load-failed")).toBeTruthy();
   });
 

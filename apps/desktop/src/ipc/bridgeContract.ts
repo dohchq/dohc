@@ -412,6 +412,9 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const CollectionRulesChangedEvent = z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid() });
+export type CollectionRulesChangedEvent = z.infer<typeof CollectionRulesChangedEvent>;
+
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
 });
@@ -983,7 +986,12 @@ export const ShowExplorerMenuPayload = z.object({
   // Absent for the root (container background) menu.
   path: PATH_STRING.optional(),
   kind: z.enum(["file", "folder", "root"]),
+  // Whether the row is pinned. For a selection, whether every row in it is.
   pinned: z.boolean(),
+  // How many rows the menu acts on, when the row is in a selection of two
+  // or more. The menu then offers only what acts on every row, and says how
+  // many.
+  count: z.number().int().min(2).optional(),
   // Shows this row in the file manager without the menu, as Try again does.
   reveal: z.literal(true).optional(),
 }).refine((input) => input.reveal === undefined || (input.path !== undefined && input.kind !== "root"), {
@@ -1380,7 +1388,13 @@ const SYNC_STATUS_BASE_FIELDS = {
     "local-changes",
     "conflict",
     "sync-failed",
-    "cloud-disconnected",
+    // A synced workspace while nobody is connected to a server.
+    "not-connected",
+    // Signed in, but not as the account that syncs this workspace.
+    "account-unconfirmed",
+    // The server stopped accepting this computer's sign-in.
+    "sign-in-expired",
+    "update-required",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
   lastSyncedAtMs: z.number().nullable(),
@@ -1391,6 +1405,10 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Sync stopped because the server does not serve this dohc's relay API
   // version: "app" means update dohc, "server" means the server is older.
   updateRequired: z.enum(["app", "server"]).optional(),
+  // True while the server refuses this computer's sign-in, even when a
+  // state ahead of it, such as a conflict, is the one shown. Omitted
+  // otherwise.
+  signInExpired: z.boolean().optional(),
   claimingIdentity: z.boolean().optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which
@@ -1651,6 +1669,8 @@ export const ActorPresentation = z.object({
   group: z.string(),
   hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
+  // The Settings agent that wrote your agent's message in one of its runs. Its Settings color wins over `hue`.
+  agentId: z.string().min(1).max(64).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
 export const AgentColorChangedEvent = z.object({
@@ -1816,6 +1836,14 @@ type ListEngineMomentsUpdatingResult = z.infer<
 // and the folder that holds them.
 export const WorkspacePolicyPath = z.enum(WORKSPACE_POLICY_PATHS);
 export type WorkspacePolicyPath = z.infer<typeof WorkspacePolicyPath>;
+// The two rules files, which a person can open to fix. Main maps each to its
+// file in the workspace's own .dohc folder; no other path opens.
+export const WorkspacePolicyFile = WorkspacePolicyPath.exclude([".dohc"]);
+export type WorkspacePolicyFile = z.infer<typeof WorkspacePolicyFile>;
+export const OpenWorkspacePolicyFilePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  file: WorkspacePolicyFile,
+}).strict();
 
 // History hides everything while those rules cannot be read. `unreadable`
 // names what to fix; `policyErrors` say why, for Copy details only.
@@ -2045,10 +2073,14 @@ export const ChatMessageRecord = z.object({
   threadId: OPAQUE_ID,
   presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+  // A link author that is an agent, signed in with the link.
+  linkAgent: z.literal(true).optional(),
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
   authorReported: ChatReportedAgentRecord.optional(),
+  // The agent that wrote it in one of its runs, which only main records.
+  authorAgentId: AgentId.optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
@@ -2392,6 +2424,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       id: OPAQUE_ID,
       presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+      linkAgent: z.literal(true).optional(),
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),
@@ -5694,6 +5727,9 @@ const RefreshSharedViewSuccessResult = z.object({
     }),
   ),
   collisionRecordQuarantined: z.boolean().optional(),
+  // Set with collisionRecordQuarantined: whether this view's refreshes count
+  // the person's changed files as their edits, which the notice says.
+  takesLocalWrites: z.boolean().optional(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),
@@ -5705,11 +5741,18 @@ const RefreshSharedViewSuccessResult = z.object({
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
   probed: z.literal(true).optional(),
-  errorKind: z.enum(["unauthorized", "transient"]).optional(),
+  errorKind: z.enum(["unauthorized", "transient", "collision-record"]).optional(),
   // Capture runs before the pull. A failed pull can still leave repaired
   // projection files that the renderer must repaint.
   changedPaths: z.number().int().nonnegative(),
   errorMessage: z.string(),
+  // For a collision-record refusal: what kept dohc from reading or setting
+  // aside the record, for Details.
+  errorCause: z.string().optional(),
+  // This refresh set the record aside before it failed, so the person hears
+  // of it all the same.
+  collisionRecordQuarantined: z.boolean().optional(),
+  takesLocalWrites: z.boolean().optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
@@ -5898,6 +5941,28 @@ export const ChatDispatchFailedRun = z.object({
   triggerMessageId: OPAQUE_ID,
   // "Nova didn't reply. Its run ended with an error."
   words: z.string().min(1).max(1_000),
+  // For a run that ended without its reply, what the person can do instead,
+  // on its own line. Its notice leaves it out.
+  nextStep: z.discriminatedUnion("kind", [
+    // An agent that is set up and on, asked again in a message. The chat
+    // words it: "Message Nova to ask again." in the agent's own chat, where
+    // any message asks it; elsewhere "Mention @Nova to ask again.", with the
+    // handle the composer inserts, or "Message 🦊 in its own chat to ask
+    // again." for a name with no handle.
+    z.object({
+      kind: z.literal("message"),
+      agentId: AgentId,
+      name: z.string().min(1).max(1_000),
+      handle: z.string().min(1).max(200).optional(),
+    }).strict(),
+    // For an agent the @ menu can't offer, a step in Settings: "Add an agent
+    // in Settings to ask again." when it's gone, "Turn Nova on in Settings
+    // to ask again." when it's off, and "Set up Nova in Settings to ask
+    // again." when it isn't set up.
+    z.object({ kind: z.literal("add-agent") }).strict(),
+    z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
+    z.object({ kind: z.literal("set-up"), name: z.string().min(1).max(1_000) }).strict(),
+  ]).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
 }).strict();
@@ -6003,6 +6068,11 @@ export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 // every change. macOS hides the traffic lights in full screen.
 export const WindowFullScreenEvent = z.object({ fullScreen: z.boolean() });
 export type WindowFullScreenEvent = z.infer<typeof WindowFullScreenEvent>;
+
+// Main sends whether a window has focus to its renderer on every load and every
+// change. Focus that moves into an app's webview leaves the window focused.
+export const WindowFocusedEvent = z.object({ focused: z.boolean() });
+export type WindowFocusedEvent = z.infer<typeof WindowFocusedEvent>;
 
 // One zoom mutation, owned by main: it persists appearance.zoomLevel before
 // applying it to the windows, and answers with the settings now on disk so
@@ -6503,6 +6573,33 @@ export const workspaceTrustOperations = {
   },
 } as const satisfies OperationTable;
 
+// A window left showing a workspace after Forget can no longer edit it.
+// OpenElsewhere: another window shows that workspace now. Null for a window
+// that shows its workspace as it is open now. Both rows read only the sending
+// window's own session; the renderer names no workspace or window.
+export const OldWindowState = z.strictObject({ workspaceId: WORKSPACE_ID, openElsewhere: z.boolean() }).nullable();
+export type OldWindowState = z.infer<typeof OldWindowState>;
+// A window's old window state may have changed: read it again.
+export const OldWindowStateChangedEvent = z.undefined();
+export const oldWindowOperations = {
+  readOldWindowState: {
+    capabilityId: "window.old.read",
+    scope: "workspace",
+    channel: "desktop:read-old-window-state",
+    payload: z.strictObject({}), result: OldWindowState, guard: "trusted-sender",
+    handlerCheck: { check: "rendererWorkspaceSessions.current(event.sender)", reason: "The handler reads only the sending window's own session." },
+  },
+  // Brings the other window that shows the sending window's workspace to the
+  // front. Opens no window, and does nothing when no other window shows it.
+  goToWorkspaceWindow: {
+    capabilityId: "window.old.go",
+    scope: "workspace",
+    channel: "desktop:go-to-workspace-window",
+    payload: z.strictObject({}), guard: "trusted-sender",
+    handlerCheck: { check: "rendererWorkspaceSessions.current(event.sender)", reason: "The handler finds the window from the sending window's own session." },
+  },
+} as const satisfies OperationTable;
+
 // Reports and diagnostics. Only main sends usage and error reports, and
 // only when this build names a report service and the person's switches in
 // Privacy allow it. Diagnostics stay on this computer unless the person
@@ -6805,14 +6902,14 @@ export const chatDispatchNoticeOperations = {
     scope: "workspace",
     channel: "desktop:register-chat-dispatch-notices",
     payload: WorkspaceIdPayload, result: ChatDispatchNoticesEvent,
-    guard: "active-workspace", inactiveMessage: "Open this workspace to read its dispatch notices.",
+    guard: "active-workspace", inactiveMessage: "Open this workspace to read its notices about agent replies.",
   },
   dismissChatDispatchNotice: {
     capabilityId: "chat.dispatch.notice.dismiss",
     scope: "workspace",
     channel: "desktop:dismiss-chat-dispatch-notice",
     payload: WorkspaceIdPayload.extend({ id: z.string().min(1) }),
-    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its dispatch notice.",
+    guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its notice about agent replies.",
   },
 } as const satisfies OperationTable;
 
@@ -7417,6 +7514,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof collectionCopiesLeftOperations>,
     OperationBridge<typeof workspaceTrustOperations>,
+    OperationBridge<typeof oldWindowOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
@@ -7614,6 +7712,7 @@ export interface DohcDesktopBridge
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
+  onWindowFocused(listener: (event: WindowFocusedEvent) => void): () => void;
   onAgentColorChanged(listener: (event: AgentColorChangedEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
@@ -7679,6 +7778,9 @@ export interface DohcDesktopBridge
   onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // A change to a Collection's fields or rules applied, from any window or
+  // the CLI: a page that shows that Collection reads it again.
+  onCollectionRulesChanged(listener: (event: CollectionRulesChangedEvent) => void): () => void;
   // A press this window made settled, or waits. Each event names its
   // workspace; a window on another workspace drops it.
   onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;
@@ -7709,6 +7811,8 @@ export interface DohcDesktopBridge
   onWorkspaceActivated(listener: (workspace: WorkspaceSummary, file?: string) => void): () => void;
   // A folder failure is waiting: take it with takeWorkspacePathOpenFailures.
   onWorkspacePathOpenFailed(listener: () => void): () => void;
+  // This window's old window state may have changed: read it with readOldWindowState.
+  onOldWindowStateChanged(listener: () => void): () => void;
   // Auto-update state pushes from main, validated against UpdateStateEvent in
   // the preload before they reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;

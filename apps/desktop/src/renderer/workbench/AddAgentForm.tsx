@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { FlaskConical } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
 import { DEFAULT_AGENT_ID, firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
-import { launchCommand, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
+import { launchCommand, launchCommandHint, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import { bridge } from "../bridge";
@@ -20,6 +20,12 @@ const LABEL_CLASS = "text-[11px] font-medium text-muted";
 const INPUT_CLASS =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
 const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-muted";
+// Fits the dialog under Overlay's 6rem top and above its 1rem bottom and the
+// toasts, so picking a tool grows it downward and its body scrolls. A window
+// too short for the title and actions alone (a CSS viewport under about 250px)
+// is left to Overlay: the actions run past the dialog's edge and its backdrop
+// scrolls to them.
+const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
 type CheckState =
   | { status: "idle" }
@@ -40,22 +46,44 @@ export function AddAgentForm(props: {
   const agent = firstAgent(settings);
   const savedProfile = agent?.launch ? launchProfile(agent.launch) : undefined;
   const savedCommand = agent?.launch && "command" in agent.launch ? agent.launch.command : "";
+  const savedProfileCommand = savedProfile ? launchCommand(savedProfile) : "";
   const [agentName, setAgentName] = useState(agent?.name ?? "");
   const [profile, setProfile] = useState(savedProfile);
-  const [advanced, setAdvanced] = useState(savedCommand.length > 0);
+  // The tool the command field started from. Typing keeps it only while the
+  // command starts that same program.
+  const [startProfile, setStartProfile] = useState(savedProfile);
+  const [advanced, setAdvanced] = useState(savedCommand.length > 0 || (savedProfile?.arguments?.length ?? 0) > 0);
   const requests = useRequestSequence([props.workspaceId]);
   const [command, setCommand] = useState(savedCommand);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [check, setCheck] = useState<CheckState>({ status: "idle" });
+  // While the body scrolls, the title and actions sit in bands with a rule.
+  // The bands keep the dialog's 20px inset, so the title, fields and actions
+  // stay where they were and only the rules come in. They come and go only
+  // while the body cannot scroll, so its scrollTop stays 0.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [scrolls, setScrolls] = useState(false);
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    const content = contentRef.current;
+    if (!body || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setScrolls(body.scrollHeight > body.clientHeight));
+    observer.observe(body);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     setAgentName(agent?.name ?? "");
     setCommand(savedCommand);
     setProfile(savedProfile);
-  }, [agent?.name, savedCommand, savedProfile?.tool, savedProfile?.executable]);
+    setStartProfile(savedProfile);
+  }, [agent?.name, savedCommand, savedProfile?.tool, savedProfileCommand]);
 
-  const launch = useMemo(() => launchFrom(profile, command), [profile, command]);
+  const launch = useMemo(() => launchFrom(profile, command, startProfile), [profile, command, startProfile]);
   const trimmedCommand = launch ? launchCommand(launch) : "";
   const preview = agentName.trim() || "Your agent";
 
@@ -135,15 +163,23 @@ export function AddAgentForm(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="chats-add-agent-title"
-        className="dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
+        data-scrolls={scrolls ? "" : undefined}
+        className={`dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-4 p-5"} ${DIALOG_HEIGHT_CLASS}`}
       >
-        <div className="flex items-center gap-2">
+        <div data-testid="chats-add-agent-header" className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}>
           <ChatAvatar presentation={ownAgentPresentation} name={preview} kind="agent" size="strip" />
           <h3 id="chats-add-agent-title" className="m-0 text-base font-semibold text-ink">
             Add an agent
           </h3>
         </div>
 
+        {/* A control's halo draws inset here, where the scroller would clip it. */}
+        <div
+          ref={bodyRef}
+          data-testid="chats-add-agent-body"
+          className={`min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "px-5 py-4" : "-mx-5 -my-1 px-5 py-1"}`}
+        >
+        <div ref={contentRef} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
           <label htmlFor="chats-add-agent-agent-name" className={LABEL_CLASS}>Agent name</label>
           <input
@@ -161,8 +197,8 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy}
-          onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
+        <AgentToolPicker workspaceId={props.workspaceId} profile={launch ? launchProfile(launch) : undefined} usingCommand={command.trim().length > 0} disabled={busy}
+          onError={props.onError} onChange={(value) => { setProfile(value); setStartProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
           {profile && command.trim() ? <SecondaryButton size="compact" disabled={busy} onClick={() => { setProfile(undefined); setCheck({ status: "idle" }); }}>Use saved command</SecondaryButton> : null}
@@ -184,12 +220,15 @@ export function AddAgentForm(props: {
             className={`${INPUT_CLASS} font-mono text-[12px]`}
           />
           <p className={HINT_CLASS}>
-            Editing this command turns off the tool profile. The conversation arrives through stdin.
+            {launchCommandHint(launch)}
           </p>
         </div>
 
         </details>
+        </div>
+        </div>
 
+        <div data-testid="chats-add-agent-footer" className={`flex flex-col gap-4 ${scrolls ? "border-t border-line px-5 pb-5 pt-4" : ""}`}>
         {error ? (
           <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
             {error}
@@ -235,6 +274,7 @@ export function AddAgentForm(props: {
           >
             {saving ? "Saving…" : "Add agent"}
           </PrimaryButton>
+        </div>
         </div>
       </form>
     </Overlay>

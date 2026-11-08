@@ -1,4 +1,4 @@
-import { Check, Layers, RotateCw } from "lucide-react";
+import { Check, Plus, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ListVersionLastChangesResult, ListWorkspaceVersionConflictsResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -7,7 +7,8 @@ import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
-import { NewVersionHint, SAME_IN_EVERY_VERSION, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
+import { EMPTY_ART } from "./EmptyArt";
+import { NewVersionHint, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
@@ -350,6 +351,9 @@ export function VersionsPage(props: {
   const creating = versions.busy === "create";
   const locked = versions.busy !== null || props.disabled === true;
 
+  const ready = snapshot !== null && lastChanges !== null;
+  const onlyMain = ready && ordered.length <= 1;
+
   // New version, or the name field in its place. One shows at a time: in the
   // header once a version exists, and in the empty state while only Main does.
   const newVersion = newName === null ? (
@@ -357,11 +361,14 @@ export function VersionsPage(props: {
       ref={newButton}
       data-testid="versions-page-new"
       disabled={locked}
+      size={onlyMain ? "compact" : "default"}
+      className={onlyMain ? "inline-flex items-center gap-1.5" : undefined}
       onClick={() => {
         setNameError(null);
         setNewName("");
       }}
     >
+      {onlyMain ? <Plus size={12} aria-hidden /> : null}
       New version
     </SecondaryButton>
   ) : (
@@ -404,14 +411,12 @@ export function VersionsPage(props: {
         </p>
       ) : (
         <p id={hintId} className="m-0 mt-1 text-[12px] leading-4 text-subtle">
-          {creating ? "Creating…" : <NewVersionHint versions={versions} />}
+          {creating ? "Creating…" : <NewVersionHint versions={versions} first={onlyMain} />}
         </p>
       )}
     </div>
   );
 
-  const ready = snapshot !== null && lastChanges !== null;
-  const onlyMain = ready && ordered.length <= 1;
   let body: ReactNode;
   if (!ready) {
     body = versions.loadFailed
@@ -419,9 +424,8 @@ export function VersionsPage(props: {
       : <SkeletonRows layout="list" label="Loading versions..." />;
   } else if (onlyMain) {
     body = (
-      <EmptyState icon={Layers} data-testid="versions-page-empty" title="Make a version to try changes without touching Main.">
+      <EmptyState picture={EMPTY_ART.versions} data-testid="versions-page-empty" title="Make a version to try changes without touching Main.">
         {newVersion}
-        <p data-testid="versions-page-same" className="m-0 max-w-sm text-[12px] text-muted">{SAME_IN_EVERY_VERSION}</p>
       </EmptyState>
     );
   } else {
@@ -557,23 +561,9 @@ function VersionRow(props: {
       `Changed ${relativeTime(lastChange.atMs)}${lastChange.personName === undefined ? "" : ` by ${lastChange.personName}`}`,
     ]);
   }
-  if (props.conflicts !== undefined && props.conflicts.count > 0) {
-    parts.push([
-      "conflicts",
-      <button
-        type="button"
-        data-testid="versions-page-conflicts"
-        // Named by its words, so voice control finds it by what it shows. The
-        // title is its tooltip and its description. The review it opens lists
-        // every open conflict, not only this version's.
-        title="Open the conflicts"
-        onClick={props.onReviewConflicts}
-        className="cursor-pointer text-warning hover:underline"
-      >
-        {props.conflicts.count}{props.conflicts.more ? "+" : ""} to decide
-      </button>,
-    ]);
-  }
+  // A merge from this version left files to decide: the row says so first
+  // and offers the decision in place of another merge.
+  const toDecide = props.conflicts !== undefined && props.conflicts.count > 0 ? props.conflicts : null;
 
   return (
     <li
@@ -592,36 +582,59 @@ function VersionRow(props: {
         {isMain ? null : <span aria-hidden className={`size-1.5 rounded-full ${versionDotClass(version.id)}`} />}
       </span>
       <div className="min-w-0 flex-1">
-        <div id={nameId} data-testid="versions-page-name" className="truncate text-[13px] font-medium leading-5 text-ink">{version.name}</div>
-        {/* One line that cuts off before the row's actions on a narrow tab. */}
-        <div data-testid="versions-page-details" className="min-h-4 truncate text-[12px] leading-4 text-muted">
-          {parts.map(([key, part], index) => (
-            <span key={key}>
-              {index > 0 ? <span aria-hidden>{" · "}</span> : null}
-              {part}
+        {/* The name gives way before Current does. */}
+        <div className="flex min-w-0 items-baseline gap-2">
+          <div id={nameId} data-testid="versions-page-name" className="truncate text-[13px] font-medium leading-5 text-ink">{version.name}</div>
+          {/* aria-current on the row already says it. */}
+          {props.active ? <span aria-hidden data-testid="versions-page-current" className="shrink-0 text-[12px] leading-5 text-muted">Current</span> : null}
+        </div>
+        {/* One line that cuts off before the row's actions on a narrow tab,
+            after the count to decide, which it never cuts. */}
+        <div data-testid="versions-page-details" className="flex min-h-4 text-[12px] leading-4 text-muted">
+          {toDecide ? (
+            <span data-testid="versions-page-conflicts" className="shrink-0 whitespace-nowrap text-warning">
+              {toDecide.count}{toDecide.more ? "+" : ""} to decide
             </span>
-          ))}
+          ) : null}
+          <span className="min-w-0 truncate">
+            {parts.map(([key, part], index) => (
+              <span key={key}>
+                {index > 0 || toDecide ? <span aria-hidden className="whitespace-pre">{" · "}</span> : null}
+                {part}
+              </span>
+            ))}
+          </span>
         </div>
       </div>
-      {/* Shown on hover and while keyboard focus is on one of them, and always
-          on the version you're in. A click on the row's text focuses the row,
-          which doesn't hold them open. */}
-      <div className={`flex shrink-0 items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}>
-        {props.active ? null : (
-          <SecondaryButton size="row" data-testid="versions-page-switch" {...rowAction(props.onSwitch)}>
-            Switch
+      <div className="flex shrink-0 items-center gap-2">
+        {/* Shown on hover and while keyboard focus is on one of them, and always
+            on the version you're in. A click on the row's text focuses the row,
+            which doesn't hold them open. */}
+        <div className={`flex items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}>
+          {props.active ? null : (
+            <SecondaryButton size="row" data-testid="versions-page-switch" {...rowAction(props.onSwitch)}>
+              Switch
+            </SecondaryButton>
+          )}
+          {isMain ? null : (
+            <SecondaryButton size="row" data-testid="versions-page-compare" aria-describedby={nameId} onClick={props.onCompare}>
+              Compare
+            </SecondaryButton>
+          )}
+          {isMain || toDecide || !version.canMergeIntoMain ? null : (
+            <SecondaryButton size="row" data-testid="versions-page-merge" {...rowAction(props.onMerge)}>
+              Merge into Main
+            </SecondaryButton>
+          )}
+        </div>
+        {/* Always shown while files wait. It opens the review the merge's
+            notice opens, which lists every open conflict, not only this
+            version's. */}
+        {toDecide ? (
+          <SecondaryButton size="row" data-testid="versions-page-decide" aria-describedby={nameId} onClick={props.onReviewConflicts}>
+            Decide what to keep
           </SecondaryButton>
-        )}
-        {isMain ? null : (
-          <SecondaryButton size="row" data-testid="versions-page-compare" aria-describedby={nameId} onClick={props.onCompare}>
-            Compare
-          </SecondaryButton>
-        )}
-        {isMain || !version.canMergeIntoMain ? null : (
-          <SecondaryButton size="row" data-testid="versions-page-merge" {...rowAction(props.onMerge)}>
-            Merge into Main
-          </SecondaryButton>
-        )}
+        ) : null}
       </div>
     </li>
   );

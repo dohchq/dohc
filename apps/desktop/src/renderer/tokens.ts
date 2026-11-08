@@ -16,6 +16,7 @@ export interface ThemeTokens {
   ink: string;
   hover: string;
   selected: string;
+  skeleton: string;
   scrim: string;
   muted: string;
   subtle: string;
@@ -26,6 +27,9 @@ export interface ThemeTokens {
   success: string;
   warning: string;
   danger: string;
+  dangerFill: string;
+  onDanger: string;
+  dangerTint: string;
   selection: string;
 }
 
@@ -39,10 +43,12 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     line: "#e4e1d8",
     ink: "#1c1b18",
     // State fills are ink alpha so one value serves both themes: 7% hover,
-    // 11% selected, far enough apart to tell a hovered row from the
+    // 14% selected, far enough apart to tell a hovered row from the
     // selection (see the contrast test).
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
-    selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
+    selected: "color-mix(in srgb, var(--dohc-ink) 14%, transparent)",
+    // The fill of loading bars.
+    skeleton: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
     scrim: "rgba(0, 0, 0, 0.40)",
     muted: "#55524a",
     // Decorative text must clear 3.0:1 on every surface it sits on —
@@ -58,16 +64,22 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     agent: "#666d2e",
     // Find-match highlight (search panel <mark>, pressed search toggles):
     // the editor's selection-blue family, tuned so the OPAQUE mark clears
-    // 3:1 against every surface and the 11% selected-row fill, with paper
+    // 3:1 against every surface and the 14% selected-row fill, with paper
     // (bg) text on it at AA — see the contrast test below. The graphite
     // accent stays the only structural accent; this token means exactly
     // one thing: "your match".
     match: "#326fce",
     success: "#38684e",
-    warning: "#8a6420",
-    // AA as text on a menu row's 11% fill, its tightest surface (see the
+    // AA as text on panel-2, where strips sit (see the contrast test).
+    warning: "#855f1e",
+    // AA as text on a menu row's 14% fill, its tightest surface (see the
     // contrast test).
-    danger: "#a43e2a",
+    danger: "#9d3c28",
+    // A danger confirm's fill and label.
+    dangerFill: "#9d3c28",
+    onDanger: "#faf9f5",
+    // The tile behind a danger confirmation's glyph, and nothing else.
+    dangerTint: "#eadcd3",
     selection: "rgba(58, 126, 233, 0.22)",
   },
   dark: {
@@ -80,21 +92,27 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     line: "#2a2925",
     ink: "#f6f4ee",
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
-    selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
+    selected: "color-mix(in srgb, var(--dohc-ink) 14%, transparent)",
+    skeleton: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
     // Black dims a near-black page far less than a paper one, so dark needs
     // more of it for the page behind a dialog to recede.
     scrim: "rgba(0, 0, 0, 0.65)",
-    muted: "#a9a599",
+    muted: "#aba79b",
     subtle: "#7d7a6e",
     accent: "#d7d0c0",
     focus: "color-mix(in srgb, var(--dohc-accent) 50%, transparent)",
     agent: "#c0c585",
-    // Dark variant: 3:1+ vs every surface and the 11% selected-row fill,
+    // Dark variant: 3:1+ vs every surface and the 14% selected-row fill,
     // with paper (bg) text on it at AA.
-    match: "#377afa",
+    match: "#4382fa",
     success: "#82c29b",
     warning: "#d9a94e",
-    danger: "#e08065",
+    danger: "#e1866c",
+    // Danger text needs the light red on the panel, but a fill that light
+    // reads soft with a dark label. The fill is deeper, under an ink label.
+    dangerFill: "#b04530",
+    onDanger: "#f6f4ee",
+    dangerTint: "#30241f",
     selection: "rgba(102, 148, 245, 0.30)",
   },
 };
@@ -111,6 +129,7 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   ink: "--dohc-ink",
   hover: "--dohc-hover",
   selected: "--dohc-selected",
+  skeleton: "--dohc-skeleton",
   scrim: "--dohc-scrim",
   muted: "--dohc-muted",
   subtle: "--dohc-subtle",
@@ -121,6 +140,9 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   success: "--dohc-success",
   warning: "--dohc-warning",
   danger: "--dohc-danger",
+  dangerFill: "--dohc-danger-fill",
+  onDanger: "--dohc-on-danger",
+  dangerTint: "--dohc-danger-tint",
   selection: "--dohc-selection",
 };
 

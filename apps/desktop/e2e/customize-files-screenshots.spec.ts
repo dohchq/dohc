@@ -108,14 +108,15 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // The Explorer without apps, which has no Apps section, and then with an
-    // app, which brings the section.
+    // The Explorer without apps, whose Apps section says so, and then with an
+    // app, which takes the line's place.
     await openExplorerHome(page);
     await expect(page.getByTestId("explorer-pages")).toBeVisible();
-    await expect(page.getByTestId("explorer-apps-section")).toHaveCount(0);
+    await expect(page.getByTestId("explorer-apps-empty")).toBeVisible();
     await shoot(page, "apps-empty");
     await writeWorkspaceFiles(temp, [{ path: "demo/index.html", contents: "<!doctype html><title>Demo</title><h1>Demo</h1>\n" }]);
     await expect(page.locator('[data-testid="sites-row"][data-root="demo"]')).toBeVisible();
+    await expect(page.getByTestId("explorer-apps-empty")).toHaveCount(0);
     await shoot(page, "apps-with-apps");
 
     // Settings opened from the sidebar's Customize…, then the settings file row.

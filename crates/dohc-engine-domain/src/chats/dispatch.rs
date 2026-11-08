@@ -177,22 +177,26 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Claim the oldest pending, non-paused dispatch trigger (`claimNextPending`):
+    /// Claim the agent's oldest pending, non-paused trigger (`claimNextPending`):
     /// flips it to `running`, marks the same agent's other pending triggers in
     /// the thread `done` under the same run, mints an `agent_run_records` row
     /// for that agent, and returns the claim. Another agent's triggers wait for
     /// their own run. Idempotent: retrying the same running `run_id` returns
     /// its existing claim; a different open run returns `None` (one run at a
-    /// time per workspace; no double-claim). `None` also when nothing is pending.
+    /// time per workspace; no double-claim). `None` also when this agent has no
+    /// pending request.
+    #[allow(clippy::too_many_arguments)]
     pub fn claim_next_pending(
         &mut self,
         workspace_id: &str,
+        agent_id: &str,
         run_id: &str,
         command: &str,
         log_path: Option<&str>,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<Option<DispatchClaim>, DomainError> {
+        let agent = normalize_dispatch_agent_id(agent_id)?;
         let run = normalize_dispatch_run_id(run_id)?;
         let ws = workspace_id.to_owned();
         let cmd = normalize_dispatch_command(command)?;
@@ -241,11 +245,12 @@ impl<'a> LinkedChatStore<'a> {
                     "SELECT l.trigger_message_id, l.agent_id, l.thread_id, l.attempt_count, \
                             l.created_at_ms \
                      FROM chat_dispatch_ledger l WHERE l.workspace_id = ?1 AND l.state = 'pending' \
+                       AND l.agent_id = ?2 \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_pause p \
                          WHERE p.workspace_id = l.workspace_id AND p.thread_id = l.thread_id \
                            AND p.paused = 1) \
                      ORDER BY l.created_at_ms, l.trigger_message_id, l.agent_id LIMIT 1",
-                    params![ws],
+                    params![ws, agent],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()

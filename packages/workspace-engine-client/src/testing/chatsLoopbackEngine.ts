@@ -817,7 +817,7 @@ function allowedKeys(method: string): readonly string[] {
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.dispatchEnqueue:
       return ["triggerMessageId", "agentId", "threadId", "nowMs"];
-    case CHATS_METHOD.dispatchClaimNextPending: return ["runId", "command", "logPath", "nowMs"];
+    case CHATS_METHOD.dispatchClaimNextPending: return ["agentId", "runId", "command", "logPath", "nowMs"];
     case CHATS_METHOD.dispatchListRunMessages: return ["runId", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchRunIdForMessage: return ["messageId"];
     case CHATS_METHOD.dispatchRunRecordsForThread:
@@ -1933,6 +1933,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
           ...(opening
             ? {
                 openingMessage: {
+                  ...(opening.authorActorKey !== undefined ? { authorActorKey: opening.authorActorKey } : {}),
+                  ...(opening.origin ? { origin: opening.origin } : {}),
                   id: opening.id,
                   author: opening.author,
                   ...(opening.authorOwnerDisplayName ? { authorOwnerDisplayName: opening.authorOwnerDisplayName } : {}),
@@ -1944,6 +1946,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
                       : opening.body,
                   ...(opening.automation ? { automation: opening.automation } : {}),
                   ...(opening.authorReported ? { authorReported: opening.authorReported } : {}),
+                  ...(opening.authorAgentId ? { authorAgentId: opening.authorAgentId } : {}),
                   reactions: activeMessageReactions(state, opening.id),
                 },
               }
@@ -1976,10 +1979,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
       ? all.filter((item) => compareStreamPosition(item.position, before) < 0).length
       : all.length;
     const start = Math.max(0, end - limit);
-    const items = all.slice(start, end).map(({ order: _order, ...item }) =>
-      item.position.lane === "posts"
-        ? { ...item, message: withAgentRequests(state, item.message), post: streamPost(state, item.position.id) }
-        : { ...item, message: withAgentRequests(state, item.message) });
+    const items = all.slice(start, end).map(({ order: _order, ...item }) => {
+      const decision = state.decisions.get(item.message.id);
+      return {
+        ...item,
+        message: withAgentRequests(state, item.message),
+        ...(decision ? { decision } : {}),
+        ...(item.position.lane === "posts" ? { post: streamPost(state, item.position.id) } : {}),
+      };
+    });
     const read = all.filter((item) => {
       const cursor = state.humanReads.get(item.message.threadId) ?? 0;
       return item.position.lane === "posts" ? cursor >= 1 : item.order < cursor;
@@ -2956,6 +2964,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
+    const agentId = requiredString(params, "agentId", "invalid-input");
+    if (!AGENT_ID_PATTERN.test(agentId)) throw new Error("invalid-input");
     const runId = normalizeNonempty(requiredString(params, "runId"), "invalid-input");
     const existingRun = state.runs.get(runId);
     if (existingRun) {
@@ -2976,7 +2986,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     if ([...state.dispatches.values()].some((row) => row.state === "running")) return null;
     const dispatch = [...state.dispatches.values()]
-      .filter((row) => row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
+      .filter((row) =>
+        row.agentId === agentId && row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
       .sort(compareDispatches)[0];
     if (!dispatch) return null;
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));

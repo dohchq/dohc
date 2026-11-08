@@ -898,9 +898,11 @@ const SERVED_CHAT_FIELDS = {
     // What an agent reported about itself: its product, version, and model.
     "authorReported",
     // A link post's link grant and link principal, which name the link and
-    // no account. Every desktop refuses a link post without them.
+    // no account. Every desktop refuses a link post without them. An agent's
+    // link post also names its agent connection.
     "linkGrantId",
     "linkPrincipalId",
+    "agentConnectionId",
   ],
   "chat.reaction.set": [
     "reactionId",

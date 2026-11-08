@@ -412,6 +412,12 @@ export function isAgentIdTaken(error: unknown): boolean {
   return parse(error).name === AGENT_ID_TAKEN_ERROR;
 }
 
+export const GROUP_NAME_TAKEN_ERROR = "GroupNameTakenError";
+
+export function isGroupNameTaken(error: unknown): boolean {
+  return parse(error).name === GROUP_NAME_TAKEN_ERROR;
+}
+
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
 export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
   const { name, code, retryAfterMs, message } = parse(error);
@@ -647,6 +653,23 @@ export const LIVE_PAGE_TRY_AGAIN_BODY = "In Live documents, stop live editing fo
 export function livePageBody(action: LivePageAction): string {
   if (action === "replace") return LIVE_PAGE_TRY_AGAIN_BODY;
   return `In Live documents, stop live editing for this page, then ${action} it again.`;
+}
+
+/** Up to three quoted names, then how many more. */
+export function namedList(names: readonly string[]): string {
+  const shown = names.slice(0, 3).map((name) => `"${name}"`);
+  const more = names.length - shown.length;
+  if (more > 0) return `${shown.join(", ")} and ${more} more`;
+  return shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
+/** Several pages one move or delete could not change, for live editing. */
+export function livePagesTitle(paths: readonly string[], action: "move" | "delete"): string {
+  return `dohc can't ${action} ${namedList(paths)} while they have live editing on`;
+}
+
+export function livePagesBody(action: "move" | "delete"): string {
+  return `In Live documents, stop live editing for these pages, then ${action} them again.`;
 }
 
 /** The change an Undo would reverse: a rename, a move, or a copy's creation. */

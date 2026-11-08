@@ -162,6 +162,7 @@ impl Relay {
                 self.inserted += inserted;
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
+                    registered_references: Vec::new(),
                     settlement_refusals: Vec::new(),
                     hosted_refusals: Vec::new(),
                     redundant_recoveries: Vec::new(),
@@ -291,6 +292,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 assert_eq!(push.after_seq, 1);
                 probes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
+                    registered_references: Vec::new(),
                     settlement_refusals: Vec::new(),
                     hosted_refusals: Vec::new(),
                     redundant_recoveries: Vec::new(),
@@ -310,6 +312,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 assert_eq!(push.ops[0].origin_seq, 1);
                 restored_prefixes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
+                    registered_references: Vec::new(),
                     settlement_refusals: Vec::new(),
                     hosted_refusals: Vec::new(),
                     redundant_recoveries: Vec::new(),

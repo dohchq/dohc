@@ -38,7 +38,8 @@ import {
 import { bridge } from "../bridge";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
-import { applyLookSettings } from "../theme";
+import { applyLookSettings, currentLookRevision } from "../theme";
+import { reportInstallationFailure } from "../shell/installationNotices";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ownPresentation } from "../workbench/actorPresentation";
@@ -110,6 +111,19 @@ function StatusPill(props: { state: SettingsSaveState }) {
   );
 }
 
+// A user settings write that closing Settings cut off. User settings belong to
+// every workspace, so its failure goes to the notices of the workspace open
+// when it fails, and its Try again sends the same write. A save sends only its
+// change, which main writes onto the file as it is then. Main's broadcast of
+// the file brings the look, so an answer that arrives late can't undo a newer one.
+function reportCutOffWrite(send: () => Promise<unknown>, words: (cause: unknown) => string, cause: unknown): void {
+  reportInstallationFailure({ message: words(cause), cause, serverUrl: null, retry: () => {
+    void send().catch((next: unknown) => reportCutOffWrite(send, words, next));
+    return true;
+  } });
+}
+const saveWords = (cause: unknown) => ipcErrorMessage(cause, "dohc could not save your settings.");
+
 export function SettingsDialog(props: {
   // `details` are facts for Copy details, one line each. A report with an
   // `identity` replaces the row of that identity, and `onClearError` takes it back.
@@ -168,6 +182,12 @@ export function SettingsDialog(props: {
   // (or, via the next full-settings save, overwrite) workspace B. Mirrors the
   // token guard DesktopWorkspaceShell uses for engine history.
   const workspaceTokenRef = useRequestSequence();
+  // A workspace write's failure shows while it is the newest write for this
+  // workspace, or when closing Settings cut it off. A newer write or another
+  // workspace keeps it quiet.
+  const workspaceWriteFailureShows = (token: number, requestId: number) =>
+    (workspaceTokenRef.isCurrent(token) && workspaceSaveRequestRef.isCurrent(requestId)) ||
+    (workspaceTokenRef.isCutOff(token) && workspaceSaveRequestRef.isCutOff(requestId));
   // A zoom broadcast arriving while the initial Promise.all load is in flight
   // is newer than the user-settings snapshot that load retained, and must not
   // be painted over.
@@ -330,6 +350,7 @@ export function SettingsDialog(props: {
       ...(current?.agentProblems ? { agentProblems: current.agentProblems } : {}),
     }));
     applyLookSettings(settings);
+    const look = currentLookRevision();
     markSaving();
     setError(null);
     try {
@@ -339,14 +360,20 @@ export function SettingsDialog(props: {
       markSaved();
       return saved;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return null;
+      // Closing Settings can cut a save off. Its failure still reports.
+      const cutOff = userSaveRequestRef.isCutOff(requestId);
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      const change = { settings, base: previous.settings };
+      if (cutOff) reportCutOffWrite(() => bridge().setUserSettings(change), saveWords, cause);
+      else props.onError?.(saveWords(cause), cause);
       // `previous` can hold a change an earlier save failed to make, so the
-      // dialog goes back to the settings the file holds.
+      // dialog goes back to the settings the file holds. A cut-off save puts
+      // back the look only while no newer look, from a reopened Settings or
+      // another window, has replaced its own.
       const restored = await bridge().getUserSettings().catch(() => previous);
-      if (!userSaveRequestRef.isCurrent(requestId)) return null;
+      if (cutOff ? currentLookRevision() !== look : !userSaveRequestRef.isCurrent(requestId)) return null;
       setUserResult(restored);
       applyLookSettings(restored.settings);
       return null;
@@ -365,10 +392,13 @@ export function SettingsDialog(props: {
       markSaved();
       return true;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return false;
+      const cutOff = userSaveRequestRef.isCutOff(requestId);
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return false;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(failure ? withErrorWords(failure, cause) : ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      const words = (reason: unknown) => (failure ? withErrorWords(failure, reason) : saveWords(reason));
+      if (cutOff) reportCutOffWrite(() => bridge().orderAgents({ order: [...order] }), words, cause);
+      else props.onError?.(words(cause), cause);
       return false;
     }
   }, [markSaved, markSaving, props.onError]);
@@ -417,12 +447,7 @@ export function SettingsDialog(props: {
         if (saved.refusal) setSaveState("error");
         else markSaved();
       } catch (cause) {
-        if (
-          !workspaceTokenRef.isCurrent(token) ||
-          !workspaceSaveRequestRef.isCurrent(requestId)
-        ) {
-          return;
-        }
+        if (!workspaceWriteFailureShows(token, requestId)) return;
         setWorkspaceResult(previous);
         setSaveState("error");
         setError(ipcErrorMessage(cause));
@@ -450,9 +475,13 @@ export function SettingsDialog(props: {
       setUserResult(saved);
       markSaved();
     } catch (cause) {
+      // Open Settings shows the refusal, which names the file and the way
+      // out. Once closing Settings cut the step off, it reports instead.
+      if (userSaveRequestRef.isCutOff(requestId)) {
+        reportCutOffWrite(() => bridge().stepWindowZoom({ step }), (reason) => ipcErrorMessage(reason, "dohc could not change the window zoom."), cause);
+      }
       if (!userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
-      // The refusal names the file and the way out.
       setError(ipcErrorMessage(cause));
     }
   }, [markSaved, markSaving]);
@@ -468,10 +497,13 @@ export function SettingsDialog(props: {
       applyLookSettings(next.settings);
       markSaved();
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      const cutOff = userSaveRequestRef.isCutOff(requestId);
+      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      props.onError?.(ipcErrorMessage(cause, "dohc could not reset your settings."), cause);
+      const words = (reason: unknown) => ipcErrorMessage(reason, "dohc could not reset your settings.");
+      if (cutOff) reportCutOffWrite(() => bridge().resetUserSettings(), words, cause);
+      else props.onError?.(words(cause), cause);
     }
   }, [markSaved, markSaving, props.onError]);
 
@@ -494,12 +526,7 @@ export function SettingsDialog(props: {
       onWorkspaceSettingsRead?.(next);
       markSaved();
     } catch (cause) {
-      if (
-        !workspaceTokenRef.isCurrent(token) ||
-        !workspaceSaveRequestRef.isCurrent(requestId)
-      ) {
-        return;
-      }
+      if (!workspaceWriteFailureShows(token, requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(
@@ -1108,11 +1135,13 @@ export function SettingsDialog(props: {
                 ) : undefined}
                 testId="settings-row-desktop-updates"
               >
-                <span className="mr-1 shrink-0 text-[12px] tabular-nums text-subtle">
-                  <span data-testid="desktop-updates-version">{updateState?.currentVersion ?? "unknown"}</span>
-                  {" · "}
-                  <span data-testid="desktop-updates-channel">{updateState?.channel ?? "unknown"}</span>
-                </span>
+                {/* No channel: a nightly's version names it, and "latest"
+                    beside a failure reads as up to date. */}
+                {updateState?.currentVersion ? (
+                  <span data-testid="desktop-updates-version" className="mr-1 shrink-0 text-[12px] tabular-nums text-subtle">
+                    Version {updateState.currentVersion}
+                  </span>
+                ) : null}
                 {/* One button for every step. It fills once the next step is
                     the person's: Update, then Restart to update. */}
                 {update.step ? (

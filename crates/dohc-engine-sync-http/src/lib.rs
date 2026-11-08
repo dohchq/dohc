@@ -801,6 +801,8 @@ impl RelayTransport for HttpRelayTransport {
             &[
                 ("since", req.cursor.to_string()),
                 ("limit", req.limit.to_string()),
+                ("includeReferences", req.include_work_references.to_string()),
+                ("referenceAfter", req.reference_after.unwrap_or_default()),
             ],
         )?;
         let wire: WireLogPage = self.json(
@@ -811,6 +813,9 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Workspace,
         )?;
         Ok(PullResponse {
+            work_references: wire.work_references,
+            next_reference_after: wire.next_reference_after,
+            reference_has_more: wire.reference_has_more,
             ops: workspace_envelopes(wire.ops, &req.workspace_id)?,
             next_cursor: wire.next_cursor,
             has_more: wire.has_more,
@@ -875,6 +880,8 @@ impl RelayTransport for HttpRelayTransport {
 
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
         let page = self.pull(PullRequest {
+            include_work_references: false,
+            reference_after: None,
             workspace_id: req.workspace_id,
             replication_epoch: req.replication_epoch,
             stream_identity: req.stream_identity,
@@ -1076,12 +1083,17 @@ impl RelayTransport for HttpRelayTransport {
             &[
                 ("channelWireId", req.channel_wire_id),
                 ("originId", req.origin_id),
+                ("referenceAfter", req.reference_after.unwrap_or_default()),
+                ("includeReferences", req.include_work_references.to_string()),
             ],
         )?;
         if has_origin && page.own_origin_id.as_ref().is_none_or(String::is_empty) {
             return Err(RelayError::InvalidResponse);
         }
         Ok(SharedChannelResponse {
+            work_references: page.work_references,
+            next_reference_after: page.next_reference_after,
+            reference_has_more: page.reference_has_more,
             own_origin_id: page.own_origin_id,
             ops: page
                 .ops
@@ -1109,6 +1121,7 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Share,
         )?;
         Ok(PushResponse {
+            registered_references: wire.registered_references,
             settlement_refusals: wire.settlement_refusals,
             hosted_refusals: wire.hosted_refusals,
             redundant_recoveries: wire.redundant_recoveries,
@@ -1120,9 +1133,19 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
-        let page =
-            self.read_share_log(&req.share_id, req.cursor, req.limit.min(MAX_PULL_OPS), &[])?;
+        let page = self.read_share_log(
+            &req.share_id,
+            req.cursor,
+            req.limit.min(MAX_PULL_OPS),
+            &[
+                ("referenceAfter", req.reference_after.unwrap_or_default()),
+                ("includeReferences", req.include_work_references.to_string()),
+            ],
+        )?;
         Ok(ShareViewResponse {
+            work_references: page.work_references,
+            next_reference_after: page.next_reference_after,
+            reference_has_more: page.reference_has_more,
             ops: page
                 .ops
                 .into_iter()
@@ -1271,6 +1294,7 @@ impl HttpRelayTransport {
         )?;
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WirePushRequest {
+            work_references: &req.work_references,
             replication_epoch: &req.replication_epoch,
             stream_identity: &req.stream_identity,
             origin_id: &req.origin_id,
@@ -1284,6 +1308,7 @@ impl HttpRelayTransport {
             RequestContext::Workspace,
         )?;
         Ok(PushResponse {
+            registered_references: wire.registered_references,
             settlement_refusals: wire.settlement_refusals,
             hosted_refusals: wire.hosted_refusals,
             redundant_recoveries: wire.redundant_recoveries,
@@ -1607,6 +1632,7 @@ struct WireEpochResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePushRequest<'a> {
+    work_references: &'a [dohc_engine_sync::WorkReferenceMapping],
     replication_epoch: &'a str,
     stream_identity: &'a str,
     origin_id: &'a str,
@@ -1706,6 +1732,8 @@ struct WireCollectionWriteError {
 #[serde(rename_all = "camelCase")]
 struct WirePushResponse {
     #[serde(default)]
+    registered_references: Vec<String>,
+    #[serde(default)]
     settlement_refusals: Vec<dohc_engine_sync::SettlementPublicationRefusal>,
     /// Only the hosted log refuses ops one at a time. Sync validates which push may carry them.
     #[serde(default, rename = "refusals")]
@@ -1722,6 +1750,11 @@ struct WirePushResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogPage {
+    #[serde(default)]
+    work_references: Vec<dohc_engine_sync::WorkReferenceMapping>,
+    next_reference_after: Option<String>,
+    #[serde(default)]
+    reference_has_more: bool,
     own_origin_id: Option<String>,
     ops: Vec<WireLogRow>,
     next_cursor: i64,
@@ -2094,6 +2127,8 @@ mod tests {
                 HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
             let pulled = transport
                 .pull(PullRequest {
+                    include_work_references: true,
+                    reference_after: None,
                     workspace_id: "ws".into(),
                     replication_epoch: "epoch".into(),
                     stream_identity: "stream".into(),
@@ -2157,6 +2192,7 @@ mod tests {
         let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
         let response = transport
             .push(PushRequest {
+                work_references: Vec::new(),
                 workspace_id: "ws".into(),
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),
@@ -2204,6 +2240,7 @@ mod tests {
             .hosted();
         let response = transport
             .push_hosted(PushRequest {
+                work_references: Vec::new(),
                 workspace_id: "ws".into(),
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),
@@ -2233,6 +2270,7 @@ mod tests {
         let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
         assert_eq!(
             transport.push(PushRequest {
+                work_references: Vec::new(),
                 workspace_id: "ws".into(),
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),

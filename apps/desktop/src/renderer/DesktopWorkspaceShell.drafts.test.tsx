@@ -1133,13 +1133,14 @@ describe("workspace switch-back file listing", () => {
     );
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(WORKSPACE));
-    expect(await screen.findByText("cached.md")).toBeTruthy();
+    // The tree row draws a long name in two parts, so find it by its name.
+    expect(await screen.findByRole("treeitem", { name: "cached.md" })).toBeTruthy();
 
     view.rerender(shell(OTHER_WORKSPACE));
     expect(await screen.findByText("other.md")).toBeTruthy();
 
     view.rerender(shell(WORKSPACE));
-    expect(await screen.findByText("cached.md")).toBeTruthy();
+    expect(await screen.findByRole("treeitem", { name: "cached.md" })).toBeTruthy();
     await waitFor(() => expect(workspaceACalls).toBe(3));
     expect(screen.queryByText("fresh.md")).toBeNull();
 
@@ -1151,7 +1152,7 @@ describe("workspace switch-back file listing", () => {
       await revalidation.promise;
     });
     expect(await screen.findByText("fresh.md")).toBeTruthy();
-    expect(screen.queryByText("cached.md")).toBeNull();
+    expect(screen.queryByRole("treeitem", { name: "cached.md" })).toBeNull();
 
     const workspaceARequests = bridge.listWorkspaceFiles.mock.calls
       .map(([payload]) => payload)
@@ -1791,8 +1792,9 @@ describe("dirty tab close boundaries", () => {
     await user.type(await enterMarkdownSource(user, left), "Draft!");
     await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
     await user.click(
-      within(left).getByRole("button", { name: "Close editor group" }),
+      within(left).getByRole("button", { name: "All tabs in editor group 1" }),
     );
+    await user.click(within(left).getByRole("menuitem", { name: "Close group" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
 
     fireEvent.contextMenu(screen.getByTestId("tab-b.md"));

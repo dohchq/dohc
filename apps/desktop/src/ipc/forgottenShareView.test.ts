@@ -32,7 +32,7 @@ const opened: ShareViewIdentity = {
 async function shareFolder(home: string, name: string, workspaceId: string): Promise<CreatedWorkspace> {
   const folder = join(home, name);
   await mkdir(folder);
-  const { workspace } = await createWorkspaceFolderWithFreshness({ rootPath: folder, homeDir: home, computer, kind: "personal", workspaceId });
+  const { workspace } = await createWorkspaceFolderWithFreshness({ rootPath: folder, homeDir: home, stateDir: await createTestScratch("forgotten-share-state-"), computer, kind: "personal", workspaceId });
   await mkdir(join(folder, ".dohc", "engine"), { recursive: true });
   await writeFile(join(folder, ".dohc", "engine", "store.db"), "engine");
   await writeFile(join(folder, "itinerary.md"), "# Day 1\n");
@@ -82,6 +82,7 @@ async function harness(home: string) {
     notifyRenderer: () => undefined,
   });
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
+  const stateDir = await createTestScratch("forgotten-share-state-");
   let picked = home;
   registerWorkspaceRegistryIpcHandlers<Event>({
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
@@ -90,6 +91,7 @@ async function harness(home: string) {
     dialog: { showOpenDialog: vi.fn(async () => ({ canceled: false, filePaths: [picked] })) },
     roots: createWorkspaceRootApproval(() => home),
     effectiveHome: () => home,
+    stateDir: () => stateDir,
     workspaceSummaries: () => workspaceSummariesFrom(registry.list()),
     prioritizePreferredWorkspace: (rows) => rows,
     createWorkspaceFolder: createWorkspaceFolderWithFreshness,

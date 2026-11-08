@@ -24,7 +24,7 @@ use dohc_workspace_engine::live_application_ingress::{
     LiveApplicationIngress, LiveApplicationIngressConfig, UploadCompletion,
 };
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -308,12 +308,17 @@ where
     let writer_signal = writer_gone_tx.clone();
     let writer_active_egress = Arc::clone(&active_egress);
     let writer_connection = Arc::clone(&connection);
+    let input_closed = Arc::new(AtomicBool::new(false));
+    let writer_input_closed = Arc::clone(&input_closed);
     let writer = tokio::spawn(async move {
         let result =
             write_output(output, &mut output_rx, &writer_limits, writer_active_egress).await;
+        // Read before this task retires anything, so a writer failure that came
+        // before the client closed its input stays a failure.
+        let after_input_closed = writer_input_closed.load(Ordering::SeqCst);
         writer_connection.retire();
         let _ = writer_signal.send(true);
-        result
+        (result, after_input_closed)
     });
 
     // Service-initiated notices become wire Event envelopes, sequenced per
@@ -408,6 +413,7 @@ where
             }
         };
         if read == 0 {
+            input_closed.store(true, Ordering::SeqCst);
             break;
         }
         decoder.push(&read_buf[..read]);
@@ -677,7 +683,7 @@ where
     let _ = event_forwarder.await;
     drop(output_tx);
     drop(writer_gone_tx);
-    let writer_result = writer
+    let (writer_result, after_input_closed) = writer
         .await
         .map_err(|_| io::Error::other("stdout writer task failed"))?;
     // Surface the guaranteed-run workspace close first (a resource/durability
@@ -686,6 +692,16 @@ where
     close_result?;
     if let Some(error) = read_error {
         return Err(error);
+    }
+    // The writer stopped after the client closed its input. This shutdown's
+    // retirement cuts any frame still being written, and the client is done
+    // sending, so that abort is not a failure.
+    if after_input_closed
+        && writer_result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionAborted)
+    {
+        return Ok(());
     }
     writer_result
 }
@@ -1579,7 +1595,7 @@ mod tests {
     use dohc_engine_protocol::transport::{RequestContext, ServiceResponse};
     use dohc_engine_protocol::wire::{BlobStart, Request as WireRequest, Response as WireResponse};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
     use std::task::{Context as TaskContext, Poll};
     use std::time::Duration;
     use tokio::io::ReadBuf;
@@ -4127,6 +4143,133 @@ mod tests {
                 result: serde_json::Value::Null,
             }))
         }
+    }
+
+    /// Answers each request with an acknowledgement that its connection's
+    /// retirement ends, as a live application's is.
+    struct ConnectionAckService {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl ProtocolEngineService for ConnectionAckService {
+        type Input = LiveApplicationInput;
+        async fn call(
+            &self,
+            ctx: RequestContext,
+            request: WireRequest,
+        ) -> Result<ServiceResponse, WireError> {
+            let connection = ctx.connection.expect("the transport passes its connection");
+            Ok(ServiceResponse {
+                response: WireResponse {
+                    id: request.id,
+                    result: serde_json::json!({"status": "applied"}),
+                },
+                blob_egress: None,
+                output_guard: Some(Arc::new(TestOutputGuard {
+                    cancel: CancelSignal::new(),
+                    retired: connection.cancel_signal(),
+                    deadline: None,
+                    dropped: self.dropped.clone(),
+                    read_connection: None,
+                })),
+            })
+        }
+    }
+
+    /// Passes writes through and lets the first flush finish, the HelloAck's.
+    /// Every later flush stays pending, so the acknowledgement after it has
+    /// all its bytes out and is still flushing when the client leaves.
+    struct HoldFlushesAfterFirst<W> {
+        output: W,
+        flushed: bool,
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for HoldFlushesAfterFirst<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.output).poll_write(cx, bytes)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            if self.flushed {
+                return Poll::Pending;
+            }
+            let result = Pin::new(&mut self.output).poll_flush(cx);
+            self.flushed = result.is_ready();
+            result
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.output).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_closing_its_input_during_a_flush_ends_the_daemon_cleanly() {
+        let mut input_bytes = encode_envelope(&Envelope::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            auth_token: TEST_AUTH_TOKEN.to_owned(),
+            capabilities: Vec::new(),
+            last_session_generation: None,
+            max_frame_bytes: None,
+        }));
+        input_bytes.extend_from_slice(&encode_envelope(&Envelope::Request(WireRequest {
+            id: 91,
+            method: "test.apply".to_owned(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: serde_json::Value::Null,
+        })));
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (server_input, server_output) = tokio::io::split(server);
+        let (mut client_input, mut client_output) = tokio::io::split(client);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let service = Arc::new(ConnectionAckService {
+            dropped: dropped.clone(),
+        });
+        let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+        let run = tokio::spawn(run_transport(
+            TEST_AUTH_TOKEN.to_owned(),
+            server_input,
+            HoldFlushesAfterFirst {
+                output: server_output,
+                flushed: false,
+            },
+            supervisor,
+            no_events(),
+            || Ok(()),
+        ));
+        client_output.write_all(&input_bytes).await.unwrap();
+        // Once the acknowledgement's last byte has arrived, its flush is all
+        // that is left, and that flush never finishes.
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        let Envelope::HelloAck(_) = next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("expected the helloAck");
+        };
+        let Envelope::Response(response) =
+            next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("expected the acknowledgement");
+        };
+        assert_eq!(response.id, 91);
+        client_output.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the daemon ends once its client leaves")
+            .unwrap()
+            .expect("a client closing its input is a clean exit");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the acknowledgement's guard is released"
+        );
     }
 
     struct BlobService;

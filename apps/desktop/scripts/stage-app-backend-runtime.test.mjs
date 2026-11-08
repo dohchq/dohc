@@ -10,9 +10,9 @@ import { load } from 'js-yaml';
 import { stageAppBackendRuntime, requireAppBackendRuntime } from './stage-app-backend-runtime.mjs';
 import { createInstalledDatasetCompiler } from '../src/workspaces/installedDatasetCompiler.ts';
 import { compileDatasetOperations } from '@dohc/app-backend-runtime/dataset-compiler';
+import { builderRequire } from './electron-builder.testSupport.mjs';
 
 const require = createRequire(import.meta.url);
-const builderRequire = createRequire(require.resolve('electron-builder/package.json'));
 const { getFileMatchers, copyFiles } = builderRequire('app-builder-lib/out/fileMatcher.js');
 
 test('packaging preserves the relocated child and Wasm closure and rejects resource drift', async t => {

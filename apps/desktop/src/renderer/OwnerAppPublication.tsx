@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, Globe, Link as LinkIcon, LogIn, Pencil, Table2, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, EyeOff, Globe, Link as LinkIcon, LogIn, Pencil, Table2, TriangleAlert, Unlink, X, type LucideIcon } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
@@ -142,27 +142,60 @@ const sourceCheckFailed = "dohc could not check whether this app's source change
 
 /** What a capability lets the app do, each item marked when the approval did not already allow it. */
 type Reach = { text: string; added: boolean };
-type Access = { key: string; name: string; path?: string; reads: Reach[]; changes: Reach[]; adds: boolean };
+/** One line under Reads or Changes. A document Collection's fields share one line. Each Collection operation has its own. */
+type Line = { key: string; prefix?: string; items: Reach[] };
+type Access = { key: string; name: string; path?: string; reads: Line[]; changes: Line[] };
 
-const approvedCapability = (row: LocalPublication): Capability => "datasetCapability" in row ? row.datasetCapability : row.collectionCapability;
+/** An approval of an app that reaches no workspace data has no capability. */
+const approvedCapabilities = (row: LocalPublication): Capability[] =>
+  "datasetCapability" in row ? [row.datasetCapability] : "collectionCapability" in row ? [row.collectionCapability] : [];
 
-/** `approved` is the capability the person approved earlier, or null on a first review, which marks nothing new. */
-function accessOf(capability: Capability, approved: Capability | null): Access {
-  if (capability.kind === "dataset") {
-    const same = approved?.kind === "dataset" && approved.datasetId === capability.datasetId ? approved : null;
-    const item = (operation: AppDatasetCapability["operations"][number]) => ({ text: operation.name, added: approved !== null && !same?.operationIds.includes(operation.operationId) });
-    return { key: capability.datasetId, name: capability.name, adds: false,
-      reads: capability.operations.filter(operation => operation.readOnly).map(item), changes: capability.operations.filter(operation => !operation.readOnly).map(item) };
+const addsRecords = "Adds records with ";
+
+/** dohc's words for an operation, from the kind it enforces. Only an action uses the app's words, its label. */
+function operationWords({ display }: AppDatasetCapability["operations"][number]): string {
+  // This device no longer has the revision the approval names.
+  if (!display) return "Records";
+  const fields = display.fields.join(", ");
+  switch (display.kind) {
+    case "read": return fields || "Records";
+    case "create": return fields ? `${addsRecords}${fields}` : "Adds records";
+    case "edit": return fields ? `Edits ${fields}` : "Edits records";
+    case "delete": return "Deletes records";
+    case "action": return `Runs "${display.label}"`;
   }
-  const same = approved && approved.kind !== "dataset" && approved.collectionPath === capability.collectionPath ? approved : null;
-  const item = (fields: readonly string[] | undefined) => (field: string) => ({ text: field, added: approved !== null && !fields?.includes(field) });
-  return { key: capability.collectionPath, name: capability.collectionPath.split("/").pop() || capability.collectionPath, path: capability.collectionPath, adds: true,
-    reads: capability.readFields.map(item(same?.readFields)), changes: capability.allowedFields.map(item(same?.allowedFields)) };
 }
 
-function Reaches({ items, prefix }: { items: Reach[]; prefix?: string }) {
-  return <dd className="m-0 min-w-0 break-words text-ink">{prefix}{items.map((item, index) => <span key={item.text}>{index ? ", " : ""}{item.text}
-    {item.added ? <span className="ml-1 inline-block"><Pill tone="warning">New</Pill></span> : null}</span>)}</dd>;
+/** `approved` is what the person approved earlier, or null on a first review, which marks nothing new. */
+function accessOf(capability: Capability, approved: readonly Capability[] | null): Access {
+  if (capability.kind === "dataset") {
+    const same = approved?.find((value): value is AppDatasetCapability => value.kind === "dataset" && value.datasetId === capability.datasetId);
+    // Operations with the same words share one line, marked New if any of them is new.
+    // An action's words are only its label, and two actions with one label can do different things, so each keeps its own line.
+    const lines = (operations: AppDatasetCapability["operations"]) => {
+      const byWords = new Map<string, Reach & { key: string }>();
+      for (const operation of operations) {
+        const text = operationWords(operation), added = approved !== null && !same?.operationIds.includes(operation.operationId);
+        const group = operation.display?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`;
+        const seen = byWords.get(group);
+        if (seen) seen.added ||= added;
+        else byWords.set(group, { key: operation.operationId, text, added });
+      }
+      return [...byWords.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
+    };
+    return { key: capability.datasetId, name: capability.name,
+      reads: lines(capability.operations.filter(operation => operation.readOnly)), changes: lines(capability.operations.filter(operation => !operation.readOnly)) };
+  }
+  const same = approved?.find((value): value is AppCollectionCapability => value.kind !== "dataset" && value.collectionPath === capability.collectionPath);
+  const items = (fields: readonly string[], allowed: readonly string[] | undefined) => fields.map(field => ({ text: field, added: approved !== null && !allowed?.includes(field) }));
+  return { key: capability.collectionPath, name: capability.collectionPath.split("/").pop() || capability.collectionPath, path: capability.collectionPath,
+    reads: capability.readFields.length ? [{ key: "fields", items: items(capability.readFields, same?.readFields) }] : [],
+    changes: capability.allowedFields.length ? [{ key: "fields", prefix: addsRecords, items: items(capability.allowedFields, same?.allowedFields) }] : [] };
+}
+
+function Reaches({ lines }: { lines: Line[] }) {
+  return <dd className="m-0 min-w-0 break-words text-ink">{lines.map(line => <div key={line.key}>{line.prefix}{line.items.map((item, index) => <span key={item.text}>{index ? ", " : ""}{item.text}
+    {item.added ? <span className="ml-1 inline-block"><Pill tone="warning">New</Pill></span> : null}</span>)}</div>)}</dd>;
 }
 
 function AccessRows({ access }: { access: Access }) {
@@ -170,21 +203,25 @@ function AccessRows({ access }: { access: Access }) {
     <Table2 size={14} aria-hidden className="text-muted" />
     <span className="truncate text-[13px] font-medium text-ink" title={access.path}>{access.name}</span>
     <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
-      {access.reads.length ? <><dt className="flex items-center gap-2 text-muted"><Eye size={12} aria-hidden />Reads</dt><Reaches items={access.reads} /></> : null}
-      {access.changes.length ? <><dt className="flex items-center gap-2 text-muted"><Pencil size={12} aria-hidden />Changes</dt>
-        <Reaches items={access.changes} prefix={access.adds ? "Adds records with " : undefined} /></> : null}
+      {/* Each label sits on its first line. */}
+      {access.reads.length ? <><dt className="flex items-center gap-2 self-start text-muted"><Eye size={12} aria-hidden />Reads</dt><Reaches lines={access.reads} /></> : null}
+      {access.changes.length ? <><dt className="flex items-center gap-2 self-start text-muted"><Pencil size={12} aria-hidden />Changes</dt><Reaches lines={access.changes} /></> : null}
     </dl>
   </div>;
 }
 
 /** What the app can reach: the approved capabilities, or the candidate's with what the approval lacks marked New. */
-function AccessBox({ capabilities, approved, failed, onRetry }: { capabilities: readonly Capability[] | null; approved: Capability | null; failed: boolean; onRetry(): void }) {
+function AccessBox({ capabilities, approved, failed, onRetry }: { capabilities: readonly Capability[] | null; approved: readonly Capability[] | null; failed: boolean; onRetry(): void }) {
   const id = useId();
   return <section aria-labelledby={id}>
     <h3 id={id} className="m-0 mb-2 text-[13px] font-medium text-ink">What it can reach</h3>
     <div data-testid="app-access" className="rounded-lg border border-line bg-bg">
       {capabilities ? <>
-        <div className="flex flex-col gap-3 py-3">{capabilities.map(capability => { const access = accessOf(capability, approved); return <AccessRows key={access.key} access={access} />; })}</div>
+        <div className="flex flex-col gap-3 py-3">{capabilities.length ? capabilities.map(capability => { const access = accessOf(capability, approved); return <AccessRows key={access.key} access={access} />; }) :
+          <div className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3">
+            <Table2 size={14} aria-hidden className="text-muted" />
+            <span className="text-[13px] text-muted">No workspace data</span>
+          </div>}</div>
         <p className="m-0 flex items-start gap-2 border-t border-line px-3 py-2 text-[12px] text-muted"><Globe size={12} aria-hidden className="mt-0.5 shrink-0" />It can send what it receives to other websites.</p>
       </> : failed ? <RetryRow testId="app-access-retry" onRetry={onRetry} /> : <SkeletonRows rows={3} label="Loading what this app can reach…" className="p-3" />}
     </div>
@@ -352,9 +389,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
 
   // Signed out of the workspace's server: Share links offers Connect server instead of reading the list.
   // The links view keeps its own errors, so only the review on this device skips the list.
-  // An app that reaches no Collection has nothing to approve here, so it opens on its links, as a plain site does.
-  const linksOnly = localReview.status === "ready" && !localReview.approval && localReview.source?.declaresCollection === false;
-  const linksSignedOut = !!props.localApproval && !linksOnly && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
+  const linksSignedOut = !!props.localApproval && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
   useEffect(() => {
     let current = true;
     setPublicationsLoading(true); setPublicationsError(null); setLinksHidden(false);
@@ -378,12 +413,13 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       if (current) { setPublications(rows); setLinksFailed(false); }
     })().catch(async error => {
       if (!current) return;
-      // Offline: the sync status already reports the server, so Share links adds nothing of its own.
+      // Offline, or stopped until one side updates: the title bar already
+      // reports it, so Share links adds nothing of its own.
       let status: SyncStatusResult | null = null;
       try { status = await api.getSyncStatus({ workspaceId: props.workspaceId }); } catch { /* Without a status, the line shows. */ }
       if (!current) return;
       setPublicationsError(ipcErrorMessage(error, "dohc could not load app publications. Reload the publications."));
-      const offline = syncNamesServer(status);
+      const offline = syncNamesServer(status) || status?.updateRequired !== undefined;
       setLinksHidden(offline); setLinksFailed(!offline);
     }).finally(() => { if (current) setPublicationsLoading(false); });
     return () => { current = false; };
@@ -434,7 +470,6 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const review = localReview.status === "ready" ? localReview : null;
   const approval = review?.approval ?? null;
   const changed = !!approval && !!review?.source && review.source.sourceRevision !== approval.sourceRevision;
-  const shownView = linksOnly ? "links" : view;
   const needsCandidate = !!review && (!approval || changed);
 
   // A first review or changed source shows the exact candidate, so approval binds what the person read.
@@ -468,7 +503,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     }
   };
   useEffect(() => {
-    if (shownView === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
+    if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
   });
   // A retry waits in this effect for any running action, so it never takes over an approval or a removal.
   const retryPreparation = () => setCandidateState(value => value === "failed" ? "idle" : value);
@@ -638,11 +673,11 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     heading.current?.focus();
   };
 
-  const localView = shownView === "local" && !prepared;
+  const localView = view === "local" && !prepared;
   // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
   const paths = localView ? (needsCandidate ? localCandidate?.sourcePaths : undefined) ?? review?.source?.sourcePaths : undefined;
   const shown = (path: string) => path.startsWith(`${props.appRoot}/`) ? path.slice(props.appRoot.length + 1) : path;
-  const boxCapabilities = !review ? null : !needsCandidate && approval ? [approvedCapability(approval)] : localCandidate?.capabilities ?? null;
+  const boxCapabilities = !review ? null : !needsCandidate && approval ? approvedCapabilities(approval) : localCandidate?.capabilities ?? null;
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
@@ -689,8 +724,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         {review?.rows.filter(row => !row.approved).map(row => "pendingCreates" in row ? row.pendingCreates > 0 ? <div key={row.publicationId} className="flex items-center gap-2 text-[12px] text-warning">
           <p className="m-0 flex-1">{unconfirmedResponses(row.pendingCreates)}</p>
           <SecondaryButton size="row" disabled={!!busy || responsesBusy} onClick={() => void withdraw(row, true)}>Try again</SecondaryButton>
-        </div> : null : <p key={row.publicationId} className="m-0 text-[12px] text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>)}
-        <AccessBox capabilities={boxCapabilities} approved={changed && approval ? approvedCapability(approval) : null} failed={localReview.status === "failed" || candidateState === "failed"}
+        </div> : null : "datasetCapability" in row ? <p key={row.publicationId} className="m-0 text-[12px] text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p> : null)}
+        <AccessBox capabilities={boxCapabilities} approved={changed && approval ? approvedCapabilities(approval) : null} failed={localReview.status === "failed" || candidateState === "failed"}
           onRetry={() => localReview.status === "failed" ? setLocalReload(value => value + 1) : retryPreparation()} />
         {showLinks ? <section aria-labelledby="app-links-title">
           <h3 id="app-links-title" className="m-0 mb-2 text-[13px] font-medium text-ink">Share links</h3>
@@ -810,7 +845,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} disabled={publicationsLoading || !!busy} onBusyChange={responseBusyChanged} />
         </div>)}
         <div><h3 className="m-0 text-[13px] font-medium text-ink">Publish on a share link</h3>
-          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? `Sync this workspace to publish on a share link.${linksOnly ? "" : " Opening on this device does not need sync."}` : `Publishing on a link needs a connection to your dohc host.${linksOnly ? "" : " Approval for this device does not."}`}</p></div>
+          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? "Sync this workspace to publish on a share link. Opening on this device does not need sync." : "Publishing on a link needs a connection to your dohc host. Approval for this device does not."}</p></div>
         {synced === false ? null : <>
           <label className="text-[13px] text-ink">Share link
             <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
@@ -824,23 +859,23 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}
         {synced === false ? null : <p className="m-0 text-[13px] text-muted">Prepare the app to review its source and data access before publishing.</p>}
         <footer className="flex justify-end gap-2">
-          {props.localApproval && !linksOnly ? <SecondaryButton disabled={committing} onClick={() => { setError(null); setNotice(null); setView("local"); }}>Back</SecondaryButton> :
+          {props.localApproval ? <SecondaryButton disabled={committing} onClick={() => { setError(null); setNotice(null); setView("local"); }}>Back</SecondaryButton> :
             <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>}
           {synced === false ? null : <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" && !busyPublicationId ? "Preparing app…" : "Prepare app"}</PrimaryButton>}</footer>
       </>}
       </section></Overlay>
-      {pendingRevoke ? <ConfirmDialog intent="danger" testId="app-collection-revoke-confirm" cancelTestId="app-collection-revoke-cancel" confirmTestId="app-collection-revoke-action" title="Revoke collection access?" confirmLabel="Revoke access" onCancel={closeRevocation} onConfirm={() => { const value = pendingRevoke; closeRevocation(); void revokeCollection(value); }}>
-        <p className="mt-3 mb-0 text-[13px] text-muted">The app stays published. It can no longer read the collection or accept responses through dohc.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">Saved responses stay in your workspace. Copies already received cannot be removed.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">Prepare the app again to review and restore access.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">To reduce access, revoke it first. Change the app's data request, then prepare and review a new publication.</p>
-        {pendingRevoke.manifestUnavailable ? <p className="mt-2 mb-0 text-[13px] text-warning">Source details are unavailable. This publication may belong to another app.</p> : null}
-        <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingRevoke.publicationId}</p>
+      {pendingRevoke ? <ConfirmDialog intent="danger" icon={Unlink} testId="app-collection-revoke-confirm" cancelTestId="app-collection-revoke-cancel" confirmTestId="app-collection-revoke-action" title="Revoke collection access?" confirmLabel="Revoke access" onCancel={closeRevocation} onConfirm={() => { const value = pendingRevoke; closeRevocation(); void revokeCollection(value); }}>
+        <p>The app stays published. It can no longer read the collection or accept responses through dohc.</p>
+        <p>Saved responses stay in your workspace. Copies already received cannot be removed.</p>
+        <p>Prepare the app again to review and restore access.</p>
+        <p>To reduce access, revoke it first. Change the app's data request, then prepare and review a new publication.</p>
+        {pendingRevoke.manifestUnavailable ? <p className="text-warning">Source details are unavailable. This publication may belong to another app.</p> : null}
+        <p className="break-all font-mono text-[12px]">{pendingRevoke.publicationId}</p>
       </ConfirmDialog> : null}
-      {pendingWithdraw ? <ConfirmDialog intent="danger" testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
-        <p className="mt-3 mb-0 text-[13px] text-muted">This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">{!pendingWithdraw.linkCurrent ? "This publication belongs to a changed link. Choose a current link to publish the app again." : pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
-        <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
+      {pendingWithdraw ? <ConfirmDialog intent="danger" icon={EyeOff} testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
+        <p>This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
+        <p>{!pendingWithdraw.linkCurrent ? "This publication belongs to a changed link. Choose a current link to publish the app again." : pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
+        <p className="break-all font-mono text-[12px]">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
       </ConfirmDialog> : null}
   </>;
 }

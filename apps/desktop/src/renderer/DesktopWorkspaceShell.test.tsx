@@ -21,7 +21,7 @@ import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
-import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW, OTHER_WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 vi.mock("./shell/useWorkspaceListing", { spy: true });
@@ -820,7 +820,9 @@ describe("content search", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("clears the activity badge as soon as the query is cleared", async () => {
+  // The rail's badge means something waits for you; a search's results
+  // don't. The panel's header counts them.
+  it("shows no count on the Search button while results exist", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -859,14 +861,15 @@ describe("content search", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByTestId("activity-search-count").textContent).toBe("2"),
+      expect(screen.getByTestId("search-summary").textContent).toBe("2 results in 2 files"),
     );
+    const searchButton = screen.getByTestId("activity-search");
+    expect(searchButton.getAttribute("aria-label")).toBe("Search");
+    expect(searchButton.textContent).toBe("");
 
-    await user.clear(input);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId("activity-search-count")).toBeNull();
-    });
+    await user.click(screen.getByTestId("activity-explorer"));
+    expect(screen.getByTestId("activity-search").getAttribute("aria-label")).toBe("Search");
+    expect(screen.getByTestId("activity-search").textContent).toBe("");
   });
 
   // The results outlive the panel, so the criteria that produced them
@@ -1226,43 +1229,24 @@ describe("open editors", () => {
     expect(await screen.findAllByTestId("tree-row")).toHaveLength(2);
   });
 
-  it("surfaces open-editor title actions for untitled files and close-all", async () => {
+  it("closes every editor from the Open editors header, which has no new-file action", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New untitled text file"));
+    const rows = await screen.findAllByTestId("tree-row");
+    for (const path of ["a.md", "b.md"]) {
+      await user.click(rows.find((row) => row.getAttribute("data-path") === path)!);
+      expect(await screen.findByTestId(`tab-${path}`)).toBeTruthy();
+    }
+    expect(screen.getAllByTestId("open-editor-row")).toHaveLength(2);
+    const header = screen.getByTestId("open-editors-header");
+    expect(within(header).queryByLabelText("New untitled text file")).toBeNull();
 
-    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-      relativePath: "Untitled.txt",
-      initialText: "",
-    });
-    expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
-
-    await user.click(screen.getByLabelText("Close all editors"));
-    await waitFor(() => expect(screen.queryByTestId("tab-Untitled.txt")).toBeNull());
-    expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
-  });
-
-  it("numbers untitled text files after case-insensitive file and folder matches", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
-      files: [{ path: "untitled.txt", kind: "file" as const }],
-      folders: ["UNTITLED 2.TXT"],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New untitled text file"));
-
-    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-      relativePath: "Untitled 3.txt",
-      initialText: "",
-    });
+    await user.click(within(header).getByLabelText("Close all editors"));
+    await waitFor(() => expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0));
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
   });
 
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
@@ -1788,6 +1772,67 @@ describe("settings entry points", () => {
 
     await user.click(await screen.findByTestId("activity-settings"));
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+
+  it("closes settings on a press outside them", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await screen.findByTestId("settings-dialog");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  });
+
+  it("reports a save that fails after settings closed, with Try again, in a toast and Notices", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("The settings file is read-only.");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).getByText(/The settings file is read-only\./)).toBeTruthy();
+  });
+
+  it("reports a save that fails after settings closed in the workspace open by then", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    const user = userEvent.setup();
+    const view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    const change = bridge.setUserSettings.mock.lastCall![0];
+    // The root mounts a new shell for the workspace switched to.
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell key={OTHER_WORKSPACE.workspaceId} workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      </>,
+    );
+    await screen.findByTestId("activity-settings");
+    await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("The settings file is read-only.");
+    bridge.setUserSettings.mockClear();
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.setUserSettings).toHaveBeenCalledExactlyOnceWith(change));
   });
 
   it("opens settings from the command palette and menu command", async () => {

@@ -21,6 +21,8 @@ type FloatingMenuPositionInput = {
   menuMaxHeight?: number;
   margin?: number;
   gap?: number;
+  // The side to open on when it has room; the other side otherwise.
+  prefer?: FloatingMenuPlacement;
 };
 
 const FLOATING_MENU_VIEWPORT_MARGIN = 12;
@@ -36,6 +38,7 @@ export function resolveFloatingMenuPosition({
   menuMaxHeight = FLOATING_MENU_MAX_HEIGHT,
   margin = FLOATING_MENU_VIEWPORT_MARGIN,
   gap = FLOATING_MENU_CURSOR_GAP,
+  prefer = "below",
 }: FloatingMenuPositionInput): FloatingMenuPosition {
   const maxLeft = Math.max(margin, viewportWidth - menuWidth - margin);
   const x = Math.min(Math.max(cursorRect.left, margin), maxLeft);
@@ -46,8 +49,9 @@ export function resolveFloatingMenuPosition({
   const availableAbove = Math.max(0, cursorRect.top - gap - margin);
   const belowHeight = Math.min(menuMaxHeight, availableBelow);
   const aboveHeight = Math.min(menuMaxHeight, availableAbove);
-  const placement =
-    belowHeight >= menuMaxHeight || belowHeight >= aboveHeight ? "below" : "above";
+  const placement = prefer === "above"
+    ? aboveHeight >= menuMaxHeight || aboveHeight >= belowHeight ? "above" : "below"
+    : belowHeight >= menuMaxHeight || belowHeight >= aboveHeight ? "below" : "above";
   const maxHeight = placement === "above" ? aboveHeight : belowHeight;
   const y =
     placement === "above"

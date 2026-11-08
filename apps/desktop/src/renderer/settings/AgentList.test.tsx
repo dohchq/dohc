@@ -73,13 +73,42 @@ it("shows each agent with its controls, and an agent you run with no Check and n
   expect(screen.getAllByTestId("agent-row").map((element) => element.dataset.agentId)).toEqual(["default", "codex", "terminal"]);
   const claude = within(row("Claude Code"));
   expect(claude.getByRole("button", { name: "Check" })).toBeTruthy();
-  expect(claude.getByRole("switch", { name: "Turn on Claude Code" }).getAttribute("aria-checked")).toBe("true");
+  expect(claude.getByRole("switch", { name: "Claude Code" }).getAttribute("aria-checked")).toBe("true");
   expect(claude.getByRole("button", { name: "Claude Code actions" })).toBeTruthy();
   const terminal = within(row("Claude in Terminal"));
   expect(terminal.getByText("Through MCP")).toBeTruthy();
   expect(terminal.queryByRole("button", { name: "Check" })).toBeNull();
   expect(terminal.queryByRole("switch")).toBeNull();
   expect(terminal.getByRole("button", { name: "Claude in Terminal actions" })).toBeTruthy();
+});
+
+it("names an agent's switch by the agent, says what a click does, and dims a row that's off", () => {
+  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
+  const { rerender } = renderList({ settings: codexOff });
+  const on = within(row("Claude Code")).getByRole("switch", { name: "Claude Code" });
+  expect(on.getAttribute("aria-checked")).toBe("true");
+  expect(on.title).toBe("Turn off Claude Code");
+  // Read after the name, so it leaves the name out.
+  expect(on.getAttribute("aria-description")).toBe("Turn off");
+  const off = within(row("Codex")).getByRole("switch", { name: "Codex" });
+  expect(off.getAttribute("aria-checked")).toBe("false");
+  expect(off.title).toBe("Turn on Codex");
+  expect(off.getAttribute("aria-description")).toBe("Turn on");
+  // The off row's name and mark go muted; the on row keeps its ink.
+  const name = (agent: string) => within(row(agent)).getByText(agent).closest("button")!;
+  const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;
+  expect(name("Codex").className).toContain("text-muted");
+  expect(name("Codex").className).not.toContain("text-ink");
+  expect(mark("Codex").getAttribute("class")).toContain("opacity-50");
+  expect(name("Claude Code").className).toContain("text-ink");
+  expect(mark("Claude Code").getAttribute("class")).not.toContain("opacity-50");
+
+  rerender({ settings: SETTINGS });
+  const turnedOn = within(row("Codex")).getByRole("switch", { name: "Codex" });
+  expect(turnedOn.getAttribute("aria-checked")).toBe("true");
+  expect(turnedOn.title).toBe("Turn off Codex");
+  expect(name("Codex").className).toContain("text-ink");
+  expect(mark("Codex").getAttribute("class")).not.toContain("opacity-50");
 });
 
 it("keeps an entry dohc could not use in its place, with its problem and a way to the file", async () => {
@@ -222,6 +251,39 @@ it("shows how dohc starts an agent in its details", async () => {
   expect(within(row("Codex")).queryByTestId("agent-details")).toBeNull();
 });
 
+it("keeps a tool's profile when its command is saved as shown, and adds your own flags to it", async () => {
+  const { onSave } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const details = within(row("Codex"));
+  await userEvent.click(details.getByRole("button", { name: "Use your own command" }));
+  const field = details.getByRole<HTMLInputElement>("textbox", { name: "Command that starts Codex" });
+  expect(field.value).toBe("C:\\Tools\\codex.exe");
+  expect(details.getByText("dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds.")).toBeTruthy();
+  await userEvent.type(field, "x", { initialSelectionStart: field.value.length, initialSelectionEnd: field.value.length });
+  expect(field.value).toBe("C:\\Tools\\codex.exex");
+  expect(details.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  await userEvent.keyboard("{Backspace}{Enter}");
+  expect(onSave).not.toHaveBeenCalled();
+  await userEvent.click(details.getByRole("button", { name: "Use your own command" }));
+  const again = details.getByRole<HTMLInputElement>("textbox", { name: "Command that starts Codex" });
+  await userEvent.type(again, " --model o3{Enter}", { initialSelectionStart: again.value.length, initialSelectionEnd: again.value.length });
+  expect(onSave).toHaveBeenCalledOnce();
+  expect(onSave.mock.calls[0]![0].agents.codex?.launch).toEqual({ tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] });
+});
+
+it("shows a tool's program with your own flags as its command", async () => {
+  renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents,
+    codex: testAgent({ name: "Codex", hue: "blue", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] } }) } } });
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const details = within(row("Codex"));
+  expect(await details.findByText("Codex 0.98, signed in")).toBeTruthy();
+  expect(details.getByText("C:\\Tools\\codex.exe --model o3")).toBeTruthy();
+  expect(details.queryByText("Program")).toBeNull();
+  expect(details.getByRole("button", { name: "Change the command that starts Codex" })).toBeTruthy();
+});
+
 // An agent's swatches are squares, olive first, and set only that agent's color.
 it("sets an agent's color in its details", async () => {
   const { onSave } = renderList();
@@ -242,7 +304,7 @@ it("says what each tool needs before it can be added", async () => {
   bridgeMock.detectAgentTools.mockResolvedValueOnce({
     workingDirectory: "C:\\Work",
     tools: [
-      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.300", auth: "signed-out", probe: "detected" },
+      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-out", probe: "detected" },
       { tool: "codex", executable: null, version: null, auth: "unknown", probe: "not-found" },
     ],
   });
@@ -252,7 +314,7 @@ it("says what each tool needs before it can be added", async () => {
   expect(tile("Add Claude Code").disabled).toBe(true);
   expect(within(tile("Add Codex")).getByText("Not found")).toBeTruthy();
   expect(tile("Add Codex").disabled).toBe(true);
-  expect(within(tile("Add one you run")).getByText("Through MCP")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^Add one you run/ })).toBeNull();
   expect(screen.getByText("Runs on this computer. Turn an agent on for one computer per workspace.")).toBeTruthy();
 });
 
@@ -285,16 +347,6 @@ it("gives the first agent you add the default id", async () => {
   await within(tile("Add Codex")).findByText("Ready");
   await userEvent.click(tile("Add Codex"));
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
-});
-
-it("adds an agent you run, off, and opens it on its name", async () => {
-  const { onSave, rerender } = renderList();
-  await userEvent.click(tile("Add one you run"));
-  const saved = onSave.mock.calls[0]![0];
-  expect(saved.agents.agent).toEqual({ name: "Agent", hue: expect.any(String), changesFiles: true, enabled: false, timeoutMinutes: 30 });
-  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
-  rerender({ settings: saved });
-  expect(screen.getByRole("textbox", { name: "Name of Agent" })).toBeTruthy();
 });
 
 it("says on each tile that dohc couldn't look for tools, and looks again from the toast", async () => {
@@ -574,7 +626,7 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(onError).not.toHaveBeenCalled();
   expect(screen.queryByText("Didn't reply.")).toBeNull();
   // The switch still works.
-  await userEvent.click(within(row("Codex")).getByRole("switch", { name: "Turn on Codex" }));
+  await userEvent.click(within(row("Codex")).getByRole("switch", { name: "Codex" }));
   expect(onSave).toHaveBeenCalledTimes(2);
 });
 
@@ -680,6 +732,14 @@ it("moves focus to the first Add tile it can when there are no agents", async ()
   expect(document.activeElement).toBe(tile("Add Codex"));
 });
 
+it("moves focus to the Agents heading when trust turns on nothing", async () => {
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+  const { rerender, onTrust } = await pressTrust({ settings: { ...SETTINGS, agents: {} } });
+  await within(tile("Add Codex")).findByText("Not found");
+  rerender({ trust: { trusted: true, asking: false, onTrust } });
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
+});
+
 it("puts focus back on Trust workspace when the person cancels main's dialog", async () => {
   const { rerender, onTrust } = await pressTrust();
   expect(document.activeElement).toBe(document.body);
@@ -694,7 +754,7 @@ it("leaves focus alone when trust comes from somewhere else, or the person moved
 
   cleanup();
   const pressed = await pressTrust();
-  const toggle = within(row("Codex")).getByRole("switch", { name: "Turn on Codex" });
+  const toggle = within(row("Codex")).getByRole("switch", { name: "Codex" });
   act(() => toggle.focus());
   pressed.rerender({ trust: { trusted: true, asking: false, onTrust: pressed.onTrust } });
   expect(document.activeElement).toBe(toggle);

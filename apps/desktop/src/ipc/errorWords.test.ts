@@ -20,13 +20,16 @@ import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, MergeStoppedPartwayError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
+import { sharedViewRefusal, sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   CollectionMoveUnfinishedError,
   collectionsRefusalError,
   ERROR_WORDS,
+  GROUP_NAME_TAKEN_ERROR,
   HistoryStillPausedError,
   ipcWireError,
+  isGroupNameTaken,
   isChatMentionPageChanged,
   isDatasetServerNotFound,
   markDatasetServerNotFound,
@@ -36,7 +39,10 @@ import {
   isLivePageOwnedRefusal,
   isMergeStoppedPartway,
   livePageBody,
+  livePagesBody,
+  livePagesTitle,
   livePageTitle,
+  namedList,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   isHistoryCatchingUp,
@@ -47,6 +53,7 @@ import {
   readCollectionReopenWait,
   readCollectionsRefusal,
   readError,
+  refusalCode,
   shouldRecheckShareAccess,
   versionNameRefusal,
   VOLUME_SHARES_NEW_FILES_WORDS,
@@ -70,6 +77,13 @@ function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"):
   return new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(error))}`);
 }
 
+it("shows a refused shared-file read in plain words after an IPC rejection", async () => {
+  const received = acrossIpc(await sharedViewRefusal(), "desktop:read-workspace-text");
+  expect(readError(received).words, "IPC refusal uses only the shared-file message").toBe(sharedViewRefusalWords);
+  expect(refusalCode(received)).toBe("share-collision-record");
+  expect(ipcErrorMessage(received, "Could not read the file.")).toBe(sharedViewRefusalWords);
+});
+
 it("keeps a server Collection's not found code across Electron, with the words other callers show", () => {
   const error = acrossIpc(markDatasetServerNotFound(new Error("That share isn't available anymore."), 404, { code: "not_found" }), "desktop:dataset");
   expect(isDatasetServerNotFound(error)).toBe(true);
@@ -82,6 +96,19 @@ it("keeps a server Collection's not found code across Electron, with the words o
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
 }
+
+it("keeps the taken group name signal across IPC without matching its words", () => {
+  const error = new Error("A group with that name already exists.");
+  error.name = GROUP_NAME_TAKEN_ERROR;
+  expect(isGroupNameTaken(error)).toBe(true);
+  const received = acrossIpc(error, "desktop:create-chat-channel");
+  expect(isGroupNameTaken(received)).toBe(true);
+  expect(readError(received).words).toBe(error.message);
+  error.message = "The name is taken.";
+  expect(isGroupNameTaken(acrossIpc(error))).toBe(true);
+  expect(isGroupNameTaken(new Error("A group with that name already exists."))).toBe(false);
+  expect(isGroupNameTaken(acrossIpc(new Error("channel-exists")))).toBe(false);
+});
 
 it("keeps the synced deletion refusal words across Electron for History and conflict choices", () => {
   const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
@@ -431,6 +458,12 @@ describe("error words", () => {
       `dohc can't rename "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then rename it again.",
     ]);
+    expect([livePagesTitle(["a.md", "b.md"], "delete"), livePagesBody("delete")]).toEqual([
+      `dohc can't delete "a.md" and "b.md" while they have live editing on`,
+      "In Live documents, stop live editing for these pages, then delete them again.",
+    ]);
+    expect(namedList(["a", "b", "c"])).toBe(`"a", "b" and "c"`);
+    expect(namedList(["a", "b", "c", "d", "e"])).toBe(`"a", "b", "c" and 2 more`);
     expect([livePageTitle("docs/a.md", "replace"), livePageBody("replace")]).toEqual([
       `dohc can't replace "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then try again.",

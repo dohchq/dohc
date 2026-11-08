@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { RotateCcw } from "lucide-react";
 import type { AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
 import type { RetryCollectionAutomationResult } from "../../ipc/bridgeContract";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -51,6 +52,7 @@ export function useAutomationRetry<Target>(options: {
   const retry = useCallback((target: Target) => run(target, false), [run]);
   const dialog = confirming && workspace.isCurrent(confirming.epoch) ? (
     <ConfirmDialog
+      icon={RotateCcw}
       title="Run from the start?"
       confirmLabel="Run from the start"
       testId="automation-start-over"
@@ -62,7 +64,7 @@ export function useAutomationRetry<Target>(options: {
         run(confirming.target, true);
       }}
     >
-      <p className="m-0 mt-2 text-[13px] text-muted">{START_OVER_SENTENCE}{confirming.repeatsMessages ? ` ${REPEATS_MESSAGES_SENTENCE}` : ""}</p>
+      <p>{START_OVER_SENTENCE}{confirming.repeatsMessages ? ` ${REPEATS_MESSAGES_SENTENCE}` : ""}</p>
     </ConfirmDialog>
   ) : null;
   return { retry, dialog };

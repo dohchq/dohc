@@ -18,7 +18,7 @@ import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
 import type { ActiveAgentRun } from "../agents/activeAgentRun";
-import type { AgentRunStateEvent } from "../ipc/bridgeContract";
+import { SyncStatusResult, type AgentRunStateEvent } from "../ipc/bridgeContract";
 
 // The shared-view pin drives the real gate, which never reaches the engine
 // for a shared view — these sessions prove it by throwing on any use.
@@ -692,7 +692,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     };
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => engine,
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     // Before open: silently nothing (a resolve on an unopened workspace
     // cannot happen, but the method must never throw).
@@ -721,7 +721,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       const atOpen = Promise.resolve(input.atOpen);
       const service = createPhysicalWorkspaceActivity(() => {}, {
         observationFor: idleObservation,
-        cloudStateFor: () => ({ enabled: true, connected: signedIn }),
+        cloudStateFor: () => (signedIn ? {} : { syncBlocked: "not-connected" }),
         engineFor: () => (signedIn ? syncEngine() : null),
         collectionsWaitingFor: () => atOpen,
       });
@@ -855,7 +855,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const reads: Promise<boolean>[] = [];
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => null,
-      cloudStateFor: () => ({ enabled: true, connected: false }),
+      cloudStateFor: () => ({ syncBlocked: "not-connected" }),
       // The same promise the test awaits, so the activity's answer lands first.
       collectionsWaitingFor: () => {
         const read = Promise.resolve(pullUnfinished);
@@ -923,7 +923,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     };
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => engine,
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     await activity.open(workspace());
     await expect(activity.syncNow("activity-test")).resolves.toBeUndefined();
@@ -933,7 +933,129 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
-  it("reads an engine stopped on the relay API version as disconnected, naming the side to update", async () => {
+  it("says why it can't sync on this session, and syncs again once it can, stopping nothing", async () => {
+    let blocked: "not-connected" | "account-unconfirmed" | undefined = "not-connected";
+    let authExpired = false;
+    let conflictCount = 0;
+    const stop = vi.fn(async () => {});
+    const engine = {
+      start: async () => {}, queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
+      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      snapshot: () => ({
+        syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
+        conflictCount, authExpired, sharingDeclined: [],
+      }),
+      stop,
+    };
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => engine,
+      cloudStateFor: () => (blocked ? { syncBlocked: blocked } : {}),
+    });
+    await activity.open(workspace());
+    const read = () => SyncStatusResult.parse(activity.getStatus("activity-test"));
+    expect(read().state).toBe("not-connected");
+    blocked = "account-unconfirmed";
+    expect(read().state).toBe("account-unconfirmed");
+    blocked = undefined;
+    authExpired = true;
+    expect(read().state).toBe("sign-in-expired");
+    expect(read().signInExpired).toBe(true);
+    // A conflict shows first, and the expired sign-in still reaches Settings.
+    conflictCount = 1;
+    expect(read().state).toBe("conflict");
+    expect(read().signInExpired).toBe(true);
+    conflictCount = 0;
+    // Main's own reason comes first: a session that no longer matches says
+    // so, whatever the stopped engine last saw.
+    blocked = "not-connected";
+    expect(read().state).toBe("not-connected");
+    blocked = undefined;
+    // The account matches and the sign-in is accepted: sync reads normal
+    // again, with no pause and the engine never stopped.
+    authExpired = false;
+    const confirmed = read();
+    expect(confirmed.state).toBe("synced");
+    expect(confirmed.signInExpired).toBeUndefined();
+    expect(confirmed.syncPause).toBeUndefined();
+    expect(stop).not.toHaveBeenCalled();
+    await activity.stopAll();
+  });
+
+  // Main's completed sign-in stops every engine and attaches one built from
+  // the new session, as adoptCompletedCloudLoginSession does. Main builds no
+  // engine for a paused workspace, whose pause removed its remote.
+  describe("signing in again after the server stopped accepting the sign-in", () => {
+    const PAUSE = { atMs: 7, author: { kind: "person" as const, personId: "local:person", self: true } };
+    function engineFor(remote: () => boolean) {
+      const built: Array<{ start: ReturnType<typeof vi.fn>; expire: () => void }> = [];
+      const build = () => {
+        if (!remote()) return null;
+        let authExpired = false;
+        const start = vi.fn(async () => {});
+        built.push({ start, expire: () => { authExpired = true; } });
+        return {
+          start, queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
+          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+          snapshot: () => ({
+            syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
+            conflictCount: 0, authExpired, sharingDeclined: [],
+          }),
+          stop: async () => {},
+        };
+      };
+      return { build, built };
+    }
+
+    it("resumes sync on the new sign-in's engine, with no pause and no enable", async () => {
+      const engines = engineFor(() => true);
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => ({}),
+        engineFor: engines.build,
+      });
+      const state = new WorkspaceActivityState();
+      await service.open(workspace(), state);
+      engines.built[0]!.expire();
+      expect(service.getStatus(workspace(), state).state).toBe("sign-in-expired");
+
+      await service.stopEngine(state, false);
+      service.reconcileCloud(state, engines.build, false);
+      const status = SyncStatusResult.parse(service.getStatus(workspace(), state));
+      expect(status.state).toBe("synced");
+      expect(status.syncPause).toBeUndefined();
+      expect(engines.built).toHaveLength(2);
+      expect(engines.built[1]!.start).toHaveBeenCalledOnce();
+      await service.stop(state);
+    });
+
+    it("keeps a pause saved before the sign-in expired paused after signing in again", async () => {
+      let remote = true;
+      let pause: typeof PAUSE | undefined;
+      const engines = engineFor(() => remote);
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => (pause ? { syncPause: pause } : {}),
+        engineFor: engines.build,
+      });
+      const state = new WorkspaceActivityState();
+      await service.open(workspace(), state);
+      // Pause sync: main saves the pause, drops the remote, and stops the
+      // engine. The session then expires with nothing running to see it.
+      pause = PAUSE;
+      remote = false;
+      await service.stopEngine(state, false);
+
+      await service.stopEngine(state, false);
+      service.reconcileCloud(state, engines.build, false);
+      const status = SyncStatusResult.parse(service.getStatus(workspace(), state));
+      expect(status.syncPause).toEqual(PAUSE);
+      expect(status.state).not.toBe("sign-in-expired");
+      expect(engines.built).toHaveLength(1);
+      await service.stop(state);
+    });
+  });
+
+  it("reads an engine stopped on the relay API version as update-required, naming the side to update", async () => {
     const engine = {
       start: async () => {},
       queueSync: () => {},
@@ -955,10 +1077,10 @@ describe("workspaceActivity cloud sync nudge", () => {
     };
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => engine,
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     const status = await activity.open(workspace());
-    expect(status.state).toBe("cloud-disconnected");
+    expect(status.state).toBe("update-required");
     expect(status.updateRequired).toBe("server");
     await activity.stopAll();
   });
@@ -991,7 +1113,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     };
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => engine,
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     await activity.open(workspace());
     expect(activity.getStatus("activity-test").state).toBe("sync-failed");
@@ -1027,7 +1149,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     };
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => engine,
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     await activity.open(workspace());
     await activity.close("activity-test");
@@ -1080,7 +1202,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           },
         };
       },
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     await activity.open(workspace());
 
@@ -1139,7 +1261,7 @@ describe("workspaceActivity cloud sync nudge", () => {
             throw closeError;
           },
         }),
-        cloudStateFor: () => ({ enabled: true, connected: true }),
+        cloudStateFor: () => ({}),
       },
     );
     await activity.open(workspace());
@@ -1313,7 +1435,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           });
         },
       }),
-      cloudStateFor: () => ({ enabled: true, connected: true }),
+      cloudStateFor: () => ({}),
     });
     await activity.open(workspace());
 
@@ -1453,7 +1575,7 @@ it("reads current pause metadata even while activity preserves a failure status"
   let atMs = 42;
   const activity = createPhysicalWorkspaceActivity(vi.fn(), {
     observationFor: w => idleObservation(w, {} as never),
-    cloudStateFor: () => ({ enabled: false, connected: false, syncPause: { atMs,
+    cloudStateFor: () => ({ syncPause: { atMs,
       author: { kind: "person", personId: "local:person", self: true } } }),
   });
   const state = new WorkspaceActivityState();

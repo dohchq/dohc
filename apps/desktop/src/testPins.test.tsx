@@ -15,7 +15,7 @@ describe("shared desktop pins", () => {
   it("lets e2e readers find literal and generated frame producers", () => {
     render(<>
       <Titlebar aboutSidebar={{ visible: true, onToggle: noop }} primarySidebar={{ visible: true, onToggle: noop }} onQuickOpen={noop} />
-      <ActivityBar views={VIEW_IDS} activeView="search" sidebarVisible hasConflict={false} searchResultCount={3} onSelectView={noop} onOpenSettings={noop} />
+      <ActivityBar views={VIEW_IDS} activeView="search" sidebarVisible hasConflict={false} onSelectView={noop} onOpenSettings={noop} />
       <AboutRail width={320} onWidthChange={noop}>About</AboutRail>
       <SidePanel title="Explorer" width={320} onWidthChange={noop}>Files</SidePanel>
     </>);

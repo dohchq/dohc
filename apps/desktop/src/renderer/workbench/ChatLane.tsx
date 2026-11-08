@@ -17,7 +17,8 @@ import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages
 import { FailedRunLine, failedRunEnd, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
-import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
+import { MentionComposer, type FileMentionCandidate, type MentionComposerHandle } from "./MentionComposer";
+import { agentMentionId } from "../../settings/userSettings";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
@@ -25,6 +26,7 @@ import { CollectionChangeCard } from "./CollectionChangeCard";
 import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./ChatsControls";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
+import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
@@ -63,7 +65,11 @@ export function ChatLane(props: {
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // What a change card's Apply or Undo did, when it finishes after the chat closed.
+  onNotice?: (message: string) => void;
   onThreadRead?: () => void;
+  // Opens Settings at Agents, from a failed run whose agent is gone.
+  onOpenAgentSettings?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
   // What a picked agent's offer says. Only an agent DM's lane reads its
@@ -89,6 +95,9 @@ export function ChatLane(props: {
   // One line over the composer when something stops the agent answering,
   // with the action that fixes it.
   notice?: ReactNode;
+  // A message to land on once it loads, such as the reply a notice named.
+  // One the lane does not hold leaves it at its end.
+  focusMessageId?: string;
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [postThreadIds, setPostThreadIds] = useState<readonly string[]>([]);
@@ -114,9 +123,16 @@ export function ChatLane(props: {
   onThreadRead.current = props.onThreadRead;
   const listRef = useRef<ChatMessageListHandle | null>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
-  const { workspaceId, onError } = props;
+  const { workspaceId, onError, focusMessageId } = props;
   const channelId = props.channel.id;
+  // Lands once per message asked for: scrolls to it, washes it and moves
+  // focus to it.
+  const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
+  const landed = useRef<string | null>(null);
+  const flashTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   const agentDm = props.channel.kind === "agent";
+  const chatAgentId = agentDm ? props.channel.agentId : undefined;
   const agentOffer = useAgentOffer({
     workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
   });
@@ -250,6 +266,26 @@ export function ChatLane(props: {
     void load();
     return () => { loadSequence.current += 1; };
   }, [load, props.revision]);
+
+  useEffect(() => {
+    if (focusMessageId === undefined || loading || !messages.some((message) => message.id === focusMessageId)) return;
+    const key = `${channelId}:${focusMessageId}`;
+    if (landed.current === key) return;
+    const frame = requestAnimationFrame(() => {
+      if (landed.current === key || !listRef.current?.scrollToMessage(focusMessageId)) return;
+      landed.current = key;
+      setFlashMessageId(focusMessageId);
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(() => setFlashMessageId(null), TARGET_FLASH_MS);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [channelId, focusMessageId, loading, messages]);
+  // A row the list mounts for the scroll paints a frame later.
+  useEffect(() => {
+    if (flashMessageId === null) return;
+    const frame = requestAnimationFrame(() => focusMessage(document, flashMessageId));
+    return () => cancelAnimationFrame(frame);
+  }, [flashMessageId]);
 
   useEffect(() => {
     let queued = false;
@@ -502,7 +538,15 @@ export function ChatLane(props: {
   const failedEnd = useMemo(() => failedRun ? failedRunEnd(failedRun, runs, messages) : null, [failedRun, messages, runs]);
   // Under a message: its question, and why the agent didn't answer it. A
   // choice answers at once. Answer starts a reply in the question's thread.
-  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void) => {
+  // Where a change card's reply posts, as a reply that fails to post names it.
+  const replyPlace = agentDm ? `your chat with ${props.agentName ?? "your agent"}` : `#${props.channel.name}`;
+  // A failed run's ask-again readies this composer; it never sends.
+  const composerHandle = useRef<MentionComposerHandle>(null);
+  const askAgain = useCallback((agentId: string, mention: boolean) => {
+    if (mention) composerHandle.current?.mention(agentMentionId(agentId));
+    else composerHandle.current?.focus();
+  }, []);
+  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void, place: "stream" | "thread") => {
     const decision = decisionsByMessage.get(message.id);
     const asked = decision ? changeFileOf(message) : undefined;
     const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
@@ -526,6 +570,8 @@ export function ChatLane(props: {
         onOpenPath={props.onOpenPath}
         onReply={(input) => replyToChange(message, changeFile, input)}
         onError={onError}
+        onNotice={props.onNotice}
+        chatName={replyPlace}
         testIdPrefix="chats-lane"
       /> : decision ? <DecisionStatus
         decision={decision}
@@ -538,9 +584,12 @@ export function ChatLane(props: {
         busy={retrying}
         className="mt-1"
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
+        {...(props.onOpenAgentSettings ? { onOpenAgentSettings: props.onOpenAgentSettings } : {})}
+        {...(chatAgentId ? { chatAgentId } : {})}
+        {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (
@@ -551,7 +600,7 @@ export function ChatLane(props: {
       messages={messages}
       runs={runs}
       loading={loading}
-      emptyLabel={agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}
+      emptyLabel={`${agentDm ? "No messages yet." : `No messages in #${props.channel.name} yet.`}${props.locked ? "" : " Start one below."}`}
       place={place}
       header={(
         <>
@@ -588,6 +637,7 @@ export function ChatLane(props: {
           rosterScope={agentOffer.scope}
           agentOffer={agentOffer.offer}
           inset={inset}
+          handle={composerHandle}
         />
       )}
       replyNotice={props.locked ? (
@@ -606,6 +656,7 @@ export function ChatLane(props: {
       workingMessageId={dispatch?.liveTriggerMessageId ?? null}
       listRef={listRef}
       firstUnreadMessageId={firstUnreadMessageId}
+      flashMessageId={flashMessageId}
       bottomSpace={AGENT_OFFER_SPACE}
     />
   );

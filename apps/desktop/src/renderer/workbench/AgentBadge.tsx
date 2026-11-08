@@ -1,8 +1,8 @@
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
-import { ownAgentNamed, type DesktopUserSettings } from "../../settings/userSettings";
-import { launchCommand } from "../../agents/agentToolCatalog";
+import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { AGENT_TOOLS, launchCommand } from "../../agents/agentToolCatalog";
 import { useAgentInk } from "./ChatAvatar";
 import { AS_REPORTED, reportedAgentLine } from "./reportedAgent";
 import { resolveFloatingMenuPosition } from "../editor/floatingMenuPosition";
@@ -21,6 +21,10 @@ type AgentAuthor = {
   authorOwnerDisplayName?: string;
   authorUserId?: string;
   authorReported?: ChatReportedAgentRecord;
+  // Your agent's run records its id. A name an agent gives itself never makes it yours.
+  authorAgentId?: string;
+  // An agent that signed in with a share link: no owner here, and the default agent color.
+  linkAgent?: boolean;
 };
 
 export function AgentBadge(props: {
@@ -34,12 +38,20 @@ export function AgentBadge(props: {
   children?: ReactNode;
 }) {
   const settings = useContext(AgentSettingsContext);
-  const ink = useAgentInk(props.presentation);
+  const ink = useAgentInk(props.author.linkAgent ? undefined : props.presentation);
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
-  const ownAgent = props.presentation?.self && settings ? ownAgentNamed(settings, author.authorDisplayName) : null;
-  const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
+  const ownAgent = props.presentation?.self && settings && author.authorAgentId
+    ? listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null
+    : null;
+  // Only your agent runs on this computer, so only its card names how: its
+  // tool, or your runner command. The full command is the line's tooltip.
+  const launch = ownAgent?.launch;
+  const command = launch ? launchCommand(launch) : undefined;
+  const runsWith = !launch ? undefined : "tool" in launch
+    ? `${AGENT_TOOLS.find((tool) => tool.id === launch.tool)?.name ?? "Its tool"} on this computer`
+    : "Your runner command";
   const reported = reportedAgentLine(author.authorReported);
   const trigger = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
@@ -59,6 +71,8 @@ export function AgentBadge(props: {
         menuMaxHeight: card.scrollHeight + card.offsetHeight - card.clientHeight,
         margin: 4,
         gap: 4,
+        // Above, so it covers neither the agent's message nor the box under it.
+        prefer: "above",
       }));
     };
     position();
@@ -119,15 +133,17 @@ export function AgentBadge(props: {
           className="dohc-popover dohc-pop-in fixed z-50 flex w-max max-w-72 flex-col gap-1 overflow-y-auto rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
         >
           <span className="font-medium">{author.authorDisplayName}</span>
-          <span className="text-muted">
-            {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
-          </span>
+          {author.linkAgent ? null : (
+            <span className="text-muted">
+              {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+            </span>
+          )}
+          {runsWith ? <span data-testid={`${props.testIdPrefix}-agent-runs-with`} title={command} className="text-muted">{runsWith}</span> : null}
           {reported ? (
             <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">
               {reported.slice(0, -AS_REPORTED.length)}<span className="whitespace-nowrap">{AS_REPORTED}</span>
             </span>
           ) : null}
-          {command ? <span className="break-all text-[11px] text-muted">Current local command: <code className="font-mono">{command}</code></span> : null}
         </span>
       ) : null}
     </span>

@@ -431,6 +431,8 @@ export interface ChatMessageAppendPayload {
   // message carries no `authorUserId`, `authorOwnerDisplayName` or `origin`.
   linkGrantId?: string;
   linkPrincipalId?: string;
+  // The agent connection that wrote a link message. Only the relay sets it.
+  agentConnectionId?: string;
   // The agent that wrote an agent message in one of its runs.
   authorAgentId?: string;
   // What an agent reported about itself.
@@ -737,7 +739,9 @@ type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string }
   | { kind: "automation"; displayName: string }
-  | { kind: "link"; displayName: string; grantId: string; principalId: string };
+  // `agentConnectionId` marks an agent that joined with the link and posted
+  // through its sign-in; the link principal stays the authority.
+  | { kind: "link"; displayName: string; grantId: string; principalId: string; agentConnectionId?: string };
 type ChatWriteActor = Exclude<ChatActor, { kind: "link" }>;
 
 // The automation executor's claim on a message it writes. Stays on this computer.
@@ -845,6 +849,8 @@ export interface ChannelThreadSummary {
     bodySnippet: string;
     automation?: ChatMessageAutomation;
     authorReported?: ChatReportedAgent;
+    // The agent that wrote the message in one of its runs. Provenance only.
+    authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
@@ -882,6 +888,7 @@ interface ChatStreamPost {
 export interface ChatStreamItem {
   position: ChatStreamPosition;
   message: ChatMessage;
+  decision?: Omit<ChatDecisionRecord, "workspaceId">;
   reactions: ChatReaction[];
   // Set for, and only for, a post.
   post?: ChatStreamPost;
@@ -1526,7 +1533,7 @@ export interface AgentDispatchStore {
   }): boolean;
   claimNextPending(
     workspaceId: WorkspaceId,
-    options?: { command?: string; logPath?: string },
+    options: { agentId: string; command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
   // Fails one agent's pending requests in the thread.
   failPendingForThread(input: {

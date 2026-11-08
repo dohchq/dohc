@@ -32,7 +32,6 @@ export const APP_CRASHED = "This app stopped working.";
 export const APP_LIMIT = "Close another app before opening this one.";
 export const APP_SESSION_ENDED = "This app lost its connection to dohc.";
 export const APP_DOWNLOAD_BLOCKED = "Apps in dohc can't save files. Download it from your browser.";
-export const APP_NEEDS_LINK = "This app uses no Collection, so it can't run on this device. Publish it on a share link to open it in a browser.";
 const BROWSER_OPEN_FAILED = "dohc could not open this app in your browser.";
 // A load the app replaced before it finished, such as a second click.
 const LOAD_ABORTED = -3;
@@ -41,27 +40,22 @@ function readTheme(): ColorScheme {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
 
-// Review app's source check. If it can't answer, the tab still offers review, where the dialog reports the problem.
-async function canRunHere(workspaceId: string, appRoot: string): Promise<boolean> {
-  try {
-    const checked = await bridge().publishOwnerApp({ action: "checkLocal", workspaceId, appRoot });
-    return !(checked.kind === "localChecked" && checked.appRoot === appRoot && !checked.declaresCollection);
-  } catch {
-    return true;
-  }
-}
-
 function subscribeTheme(onChange: () => void): () => void {
   const observer = new MutationObserver(onChange);
   observer.observe(document.documentElement, { attributeFilter: ["data-theme"] });
   return () => observer.disconnect();
 }
 
+// Focus is on the page, or on the focused editor group's own area.
+function focusWentNowhere(): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || active.matches('[data-focus-surface="editor"][data-active]');
+}
+
 type ViewState =
   | { status: "checking" }
   // `ended`: this view had opened the app, so its approval ended since.
-  // `runsHere`: false for an app that uses no Collection, which this device can't approve.
-  | { status: "unapproved"; ended: boolean; runsHere: boolean }
+  | { status: "unapproved"; ended: boolean }
   // `launch` keys the webview, so each launch gets a new guest.
   | { status: "open"; url: string; partition: string; launch: number }
   | { status: "failed" };
@@ -79,6 +73,8 @@ export function useAppView(options: {
   enabled: boolean;
   visible: boolean;
   focused: boolean;
+  // Changes each time the person presses the app's tab. 0 until then.
+  focusRequest: number;
   approvals: number;
   holdFocus: boolean;
   notices?: AppViewNotices | undefined;
@@ -113,8 +109,9 @@ export function useAppView(options: {
     const { holdFocus, focused, visible } = latest.current;
     if (!wantsFocus.current || holdFocus || !focused || !visible || !webview.current) return;
     wantsFocus.current = false;
-    // A dialog that opened while the app was opening keeps focus.
-    if (!hasBlockingModal()) webview.current.focus();
+    // A dialog that opened while the app was opening keeps focus. Shift+Tab into the app passes through its page's
+    // end stop, and the browser goes on from there into the app's last control.
+    if (!hasBlockingModal() && !document.activeElement?.matches("[data-app-stop]")) webview.current.focus();
   }, []);
 
   const fail = useCallback((message: string, cause: unknown) => {
@@ -138,9 +135,7 @@ export function useAppView(options: {
       if (!current()) return;
       if (result.kind === "unapproved" && result.viewId === viewId) {
         notices?.clear(failureId);
-        const runsHere = await canRunHere(workspaceId, appRoot);
-        if (!current()) return;
-        setState({ status: "unapproved", ended: opened.current, runsHere });
+        setState({ status: "unapproved", ended: opened.current });
         return;
       }
       if (result.kind !== "opened" || result.viewId !== viewId || !localLaunchUrl(result.url)) throw new Error(APP_OPEN_FAILED);
@@ -235,7 +230,7 @@ export function useAppView(options: {
         notices?.clear(sessionId);
         notices?.clear(downloadId);
         setLoading(false);
-        setState({ status: "unapproved", ended: true, runsHere: true });
+        setState({ status: "unapproved", ended: true });
       } else if (event.kind === "session-ended") {
         // Never tear down a page the person is using. A hidden one opens again when it shows.
         if (!latest.current.visible) {
@@ -270,17 +265,38 @@ export function useAppView(options: {
     void bridge().appView({ action: "colorScheme", workspaceId, colorScheme: theme }).catch(() => undefined);
   }, [enabled, theme, workspaceId]);
 
-  // Switching to the tab, or clicking it, puts focus in the app.
-  const wasFocused = useRef(options.focused);
+  // Switching to the tab puts focus in the app. Focus that only makes the app's group the focused one, such as Tab
+  // onto the group's tabs or a click on its toolbar, stays where it went. Focus that went nowhere when the other group
+  // closed, to the page or to this group's own area, goes to the app.
+  const wasVisible = useRef(options.visible);
   useEffect(() => {
-    const before = wasFocused.current;
-    wasFocused.current = options.focused;
+    const switched = !wasVisible.current;
+    wasVisible.current = options.visible;
     // Focus that moved elsewhere before the app finished opening stays there.
     if (!options.focused) { wantsFocus.current = false; return; }
-    if (before) return;
+    if (!switched && !focusWentNowhere()) return;
+    wantsFocus.current = true;
+    if (switched) { tryFocus(); return; }
+    // A press on the group's blank area makes it the focused one before the browser focuses that area, and focus
+    // stays where the person pressed. Focus that something put back, such as a closing palette, stays there too.
+    const press = () => { wantsFocus.current = false; };
+    document.addEventListener("mousedown", press, { capture: true, once: true });
+    const later = setTimeout(() => {
+      document.removeEventListener("mousedown", press, true);
+      if (focusWentNowhere()) tryFocus();
+      else wantsFocus.current = false;
+    });
+    return () => { clearTimeout(later); document.removeEventListener("mousedown", press, true); };
+  }, [options.visible, options.focused, tryFocus]);
+  // A click on the app's tab, or Enter or Space on it, puts focus in the app, also when the tab was already shown.
+  const pressSeen = useRef(options.focusRequest);
+  useEffect(() => {
+    if (pressSeen.current === options.focusRequest) return;
+    pressSeen.current = options.focusRequest;
+    if (!options.focusRequest) return;
     wantsFocus.current = true;
     tryFocus();
-  }, [options.focused, tryFocus]);
+  }, [options.focusRequest, tryFocus]);
   useEffect(() => {
     if (!options.holdFocus) tryFocus();
   }, [options.holdFocus, tryFocus]);
@@ -353,11 +369,9 @@ export function AppViewBody(props: { view: AppView; onReview: () => void }) {
       <div data-testid="app-view-unapproved" className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
         <AppWindow size={24} aria-hidden className="text-subtle" />
         <p className="m-0 max-w-sm text-sm text-muted">
-          {!state.runsHere ? APP_NEEDS_LINK
-            : state.ended ? "This app's approval ended. Review it to open it again." : "Review this app to open it here."}
+          {state.ended ? "This app's approval ended. Review it to open it again." : "Review this app to open it here."}
         </p>
-        {/* For an app that can't run here, Review app opens on publishing it on a link. */}
-        <PrimaryButton onClick={props.onReview}>{state.runsHere ? "Review and open app" : "Publish on a link"}</PrimaryButton>
+        <PrimaryButton onClick={props.onReview}>Review and open app</PrimaryButton>
       </div>
     );
   }

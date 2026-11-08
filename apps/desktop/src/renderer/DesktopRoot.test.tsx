@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MenuCommand, ShareHandoffStatus, UpdateCheckResult, UpdateStateEvent, WorkspaceActivityEvent } from "../ipc/bridgeContract";
+import type { MenuCommand, OldWindowState, ShareHandoffStatus, UpdateCheckResult, UpdateStateEvent, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { ipcWireError } from "../ipc/errorWords";
 import { RegistryReadError } from "../workspaces/registryReadFailure";
@@ -11,6 +11,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
+import type { NoticeTarget } from "./shell/noticeTarget";
 
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
 const shellCommits = vi.hoisted(() => ({ onCommit: null as ((workspace: Workspace) => void) | null }));
@@ -57,8 +58,9 @@ vi.mock("./DesktopWorkspaceShell", async () => {
     handoffStatus: ShareHandoffStatus;
     onDismissShareHandoff: () => void;
     onShareHandoffOpened: () => void;
-    onSwitchWorkspace: (workspace: Workspace, open?: string | { automationControls: string }) => void;
-    openOnReady?: string | { automationControls: string };
+    onSwitchWorkspace: (workspace: Workspace, open?: NoticeTarget) => void;
+    openOnReady?: NoticeTarget;
+    oldWindow?: { openElsewhere: boolean } | null;
   }) => {
     shellRenders.count += 1;
     shellReactions.current = useReactions();
@@ -71,15 +73,16 @@ vi.mock("./DesktopWorkspaceShell", async () => {
       <span data-testid="share-summary">{JSON.stringify(props.workspace.shareView ?? null)}</span>
       <span data-testid="workspace-count">{props.workspaces.length}</span>
       <span data-testid="open-on-ready">{JSON.stringify(props.openOnReady ?? null)}</span>
+      <span data-testid="old-window">{JSON.stringify(props.oldWindow ?? null)}</span>
       {props.workspaces.map((next) => (
         <span key={next.workspaceId}>
           <button type="button" onClick={() => props.onSwitchWorkspace(next)}>
             {`Switch to ${next.workspaceId}`}
           </button>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next, "trip/day-1.md")}>
+          <button type="button" onClick={() => props.onSwitchWorkspace(next, { to: "file", path: "trip/day-1.md" })}>
             {`Open a notice in ${next.workspaceId}`}
           </button>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next, { automationControls: "collection:tasks#stamp" })}>
+          <button type="button" onClick={() => props.onSwitchWorkspace(next, { to: "automation-controls", automation: "collection:tasks#stamp" })}>
             {`Open an automation in ${next.workspaceId}`}
           </button>
         </span>
@@ -107,6 +110,8 @@ function windowBridge() {
     onNoticesChanged: vi.fn(() => () => undefined),
     onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
     takeWorkspacePathOpenFailures: vi.fn(async () => []),
+    readOldWindowState: vi.fn(async () => null),
+    onOldWindowStateChanged: vi.fn(() => () => undefined),
     onMenuCommand: vi.fn(() => () => undefined),
   };
 }
@@ -248,6 +253,103 @@ afterEach(() => {
   shellCommits.onCommit = null;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+describe("a window Forget left showing its workspace", () => {
+  function setup() {
+    let registry = { workspaces: [workspace("a"), workspace("b")] };
+    let emit: ((event: WorkspaceActivityEvent) => void) | undefined;
+    let ping: () => void = () => undefined;
+    let answer: OldWindowState = null;
+    const getWorkspaceRegistry = vi.fn(async () => registry);
+    const readOldWindowState = vi.fn(async (_payload: Record<string, never>): Promise<OldWindowState> => answer);
+    vi.stubGlobal("dohcDesktop", {
+      ...windowBridge(),
+      readOldWindowState,
+      onOldWindowStateChanged: vi.fn((listener: () => void) => { ping = listener; return () => undefined; }),
+      getWorkspaceRegistry,
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
+      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" })),
+    });
+    return {
+      getWorkspaceRegistry, readOldWindowState,
+      emit: (event: WorkspaceActivityEvent) => emit?.(event),
+      ping: () => ping(),
+      answer: (next: OldWindowState) => { answer = next; },
+      replace: (next: Workspace[]) => { registry = { workspaces: next }; },
+    };
+  }
+  const oldWindow = () => JSON.parse(screen.getByTestId("old-window").textContent!) as OldWindowState;
+  async function shown() {
+    const h = setup();
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    await act(async () => undefined);
+    expect(oldWindow()).toBeNull();
+    expect(h.readOldWindowState).toHaveBeenCalledOnce();
+    return h;
+  }
+
+  it("follows the other window as it opens and closes the workspace", async () => {
+    const h = await shown();
+    h.answer({ workspaceId: "a", openElsewhere: true });
+    await act(async () => h.ping());
+    expect(oldWindow()).toEqual({ workspaceId: "a", openElsewhere: true });
+    h.answer({ workspaceId: "a", openElsewhere: false });
+    await act(async () => h.ping());
+    expect(oldWindow()).toEqual({ workspaceId: "a", openElsewhere: false });
+    h.answer({ workspaceId: "a", openElsewhere: true });
+    await act(async () => h.ping());
+    expect(oldWindow()).toEqual({ workspaceId: "a", openElsewhere: true });
+  });
+
+  it("reads again after Forget when the window keeps its workspace", async () => {
+    const h = await shown();
+    h.answer({ workspaceId: "a", openElsewhere: true });
+    await act(async () => h.emit({}));
+    expect(oldWindow()).toEqual({ workspaceId: "a", openElsewhere: true });
+    h.answer({ workspaceId: "a", openElsewhere: false });
+    h.getWorkspaceRegistry.mockRejectedValueOnce(new Error("The registry could not be read."));
+    await act(async () => h.emit({}));
+    expect(oldWindow()).toEqual({ workspaceId: "a", openElsewhere: false });
+    expect(screen.getByTestId("active-workspace").textContent).toBe("a");
+  });
+
+  it("reads nothing for a workspace Forget moved the window away from", async () => {
+    const h = await shown();
+    h.answer({ workspaceId: "a", openElsewhere: false });
+    h.replace([workspace("b")]);
+    await act(async () => h.emit({}));
+    await waitFor(() => expect(screen.getByTestId("active-workspace").textContent).toBe("b"));
+    await act(async () => undefined);
+    expect(oldWindow()).toBeNull();
+    // One read for each workspace shown, none for the one it left.
+    expect(h.readOldWindowState).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads nothing again for activity in the workspace", async () => {
+    const h = await shown();
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(h.getWorkspaceRegistry).toHaveBeenCalledTimes(2);
+    expect(h.readOldWindowState).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the newest answer", async () => {
+    const h = await shown();
+    const first = deferred<OldWindowState>();
+    h.readOldWindowState.mockReturnValueOnce(first.promise);
+    act(() => h.ping());
+    await act(async () => h.ping());
+    await act(async () => first.resolve({ workspaceId: "a", openElsewhere: false }));
+    expect(oldWindow()).toBeNull();
+  });
 });
 
 describe("DesktopRoot", () => {
@@ -1001,7 +1103,7 @@ describe("opening a notice in another workspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open a notice in b" }));
     expect(screen.getByTestId("active-workspace").textContent).toBe("b");
-    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify("trip/day-1.md"));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "file", path: "trip/day-1.md" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
@@ -1011,7 +1113,7 @@ describe("opening a notice in another workspace", () => {
     // A switched-off automation's switch, asked for from another workspace.
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Open an automation in b" }));
-    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ automationControls: "collection:tasks#stamp" }));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "automation-controls", automation: "collection:tasks#stamp" }));
   });
 });
 

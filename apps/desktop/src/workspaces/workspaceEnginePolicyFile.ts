@@ -214,3 +214,26 @@ export async function readWorkspaceVisibilityPolicy(rootPath: string): Promise<P
     return { rules: null, errors: [errorMessage(error)] };
   }
 }
+
+// A person opens a rules file to fix it. Only these two names open, inside the
+// workspace's own .dohc folder, and only as a regular file, as the reader
+// above requires.
+const POLICY_FILE_NAMES: Record<Exclude<WorkspacePolicyPath, ".dohc">, string> = {
+  ".dohc/files.toml": "files.toml",
+  ".dohc/visibility.toml": "visibility.toml",
+};
+
+export async function workspacePolicyFilePath(
+  rootPath: string,
+  file: Exclude<WorkspacePolicyPath, ".dohc">,
+): Promise<string> {
+  const dir = await resolveWorkspaceMetadataDir(rootPath, { create: false });
+  const path = join(dir ?? join(rootPath, ".dohc"), POLICY_FILE_NAMES[file]);
+  const stats = dir === null ? null : await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (stats === null) throw new Error(`dohc could not open ${path}. The file doesn't exist.`);
+  if (!stats.isFile()) throw new Error(`dohc could not open ${path}. It isn't a regular file.`);
+  return path;
+}

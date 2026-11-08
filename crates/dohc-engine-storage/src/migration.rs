@@ -3619,6 +3619,19 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_reported_agent.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 86,
+        id: "v2-learned-work-references",
+        sql: include_str!("learned_work_references.sql"),
+        sets_user_version: None,
+    },
+    // An agent's link message names the agent connection it signed in with.
+    Migration {
+        ordinal: 87,
+        id: "v2-chat-agent-connection-author",
+        sql: include_str!("chat_agent_connection_author.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5614,6 +5627,14 @@ mod tests {
             (
                 "v2-chat-reported-agent",
                 "7e66943ecdb7659231ac8aab7a3629304243c0fb7264b14f381a2c98a58c551a",
+            ),
+            (
+                "v2-learned-work-references",
+                "eb375cd867263916724d5795e53d02ceb5ad6bf51ddb11e0b1692289a9c63457",
+            ),
+            (
+                "v2-chat-agent-connection-author",
+                "1566c6535a6a8ce8ef35f5c690e6ce2441c4cf95a6ae2dcf9e2642844b40b28d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -8701,6 +8722,55 @@ mod tests {
             [],
         )
         .expect("a link mention");
+    }
+
+    /// Only a link message names an agent connection, and never an empty one.
+    #[test]
+    fn only_a_link_message_names_an_agent_connection() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("current store");
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1);",
+        )
+        .expect("seed a thread");
+        let insert = |order: i64, kind: &str, link: bool, connection: Option<&str>| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      body, created_at_ms, link_grant_id, link_principal_id, agent_connection_id, \
+                      author_user_id, author_owner_display_name, origin) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Helper', 'Done', 2, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    order,
+                    if link { format!("link-message:{order}") } else { format!("message-{order}") },
+                    kind,
+                    link.then_some("grant-1"),
+                    link.then_some("principal-1"),
+                    connection,
+                    (!link).then_some("user-ice"),
+                    (kind == "agent").then_some("Ice"),
+                    (kind == "agent").then_some("cli")
+                ],
+            )
+        };
+        insert(0, "link", true, Some("connection-1")).expect("an agent's link message");
+        insert(1, "link", true, None).expect("a link holder's message");
+        // Each author kind's message saves until it names a connection.
+        for (order, kind) in [(2, "human"), (4, "agent"), (6, "automation")] {
+            insert(order, kind, false, None).expect("a message without a link");
+            assert!(
+                insert(order + 1, kind, false, Some("connection-1")).is_err(),
+                "a {kind} message names no agent connection"
+            );
+        }
+        assert!(
+            insert(8, "link", true, Some("")).is_err(),
+            "an agent connection id is never empty"
+        );
     }
 
     /// With foreign keys off, as on a bare connection, dropping the message

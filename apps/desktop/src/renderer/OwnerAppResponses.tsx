@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Trash2 } from "lucide-react";
 import { createPortal } from "react-dom";
 import { OwnerAppResponsesResult } from "@dohc/cli/app-responses";
 import { bridge } from "./bridge";
@@ -116,13 +117,13 @@ function ResponsePanel({ workspaceId, grantId, disabled, onBusyChange }: { works
       <SecondaryButton disabled={!!busy || disabled} onClick={() => void undo(continuation)}>{error || (counts?.failed ?? 0) > 0 ? "Retry removal" : "Continue removing responses"}</SecondaryButton>
       <SecondaryButton disabled={!!busy || disabled} onClick={() => { setContinuation(null); setError(null); }}>Stop here</SecondaryButton>
     </div> : null}
-    {confirmation ? createPortal(<ConfirmDialog intent="danger" title="Remove this holder’s responses?" confirmLabel="Remove responses"
+    {confirmation ? createPortal(<ConfirmDialog intent="danger" icon={Trash2} title="Remove this holder’s responses?" confirmLabel="Remove responses"
       testId="app-responses-confirm" cancelTestId="app-responses-cancel" confirmTestId="app-responses-remove"
       onCancel={() => { setConfirmation(null); focusAfterConfirm.current?.focus(); }} onConfirm={() => void undo(confirmation)}>
-      <p className="text-[13px] text-muted">This removes up to 100 responses from this holder on this link, including responses outside this page.</p>
-      <p className="text-[13px] text-muted">This includes responses to other apps on this link. Each continuation removes up to 100 more.</p>
-      <p className="text-[13px] text-muted">Files with conflicts stay in place. You can restore removed files from workspace history.</p>
-      <p className="break-all font-mono text-[12px] text-muted">{confirmation.principalId}</p>
+      <p>This removes up to 100 responses from this holder on this link, including responses outside this page.</p>
+      <p>This includes responses to other apps on this link. Each continuation removes up to 100 more.</p>
+      <p>Files with conflicts stay in place. You can restore removed files from workspace history.</p>
+      <p className="break-all font-mono text-[12px]">{confirmation.principalId}</p>
     </ConfirmDialog>, document.body) : null}
   </section>;
 }

@@ -961,13 +961,14 @@ export class ChatsLiveAdapter {
 
   async claimNextPending(
     workspaceId: string,
-    options?: { command?: string; logPath?: string },
+    options: { agentId: string; command?: string; logPath?: string },
   ): Promise<ChatDispatchClaim | null> {
     this.assertWorkspace(workspaceId);
     return this.request(CHATS_METHOD.dispatchClaimNextPending, {
+      agentId: options.agentId,
       runId: this.createId("run"),
-      ...(options?.command !== undefined ? { command: options.command } : {}),
-      ...(options?.logPath !== undefined ? { logPath: options.logPath } : {}),
+      ...(options.command !== undefined ? { command: options.command } : {}),
+      ...(options.logPath !== undefined ? { logPath: options.logPath } : {}),
     });
   }
 

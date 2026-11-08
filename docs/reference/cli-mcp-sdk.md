@@ -519,7 +519,7 @@ Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[]
 
 ### `dohc_read_chat`
 
-Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
+Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
 
 - `threadId`: `string`
 - `group`: `string`
@@ -1067,6 +1067,7 @@ Use - as the body to read it from stdin. In a direct message, use reply instead.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.
 - `--needs-decision`: Ask readers for a decision.
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
+- `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threadId, messageId, title, warning? }`.
 
@@ -1086,6 +1087,7 @@ Use - as the body to read it from stdin. Put options first, then --, then text t
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
 - `--resolve <message>`: Resolve this open decision with the reply.
 - `--choose <choice>`: Pick this choice of the decision. Needs --resolve.
+- `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
@@ -1663,7 +1665,7 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
 
 #### `dohc app checkLocal`
 
@@ -1674,13 +1676,13 @@ Compare sourceRevision with the one listLocal returns. They differ once the app'
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths, declaresCollection }`.
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
 
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
 
-Review the source and the Collection access it asks for, then approve.
+Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.

@@ -83,7 +83,7 @@ async function fixture(synced = true, collectionsWaiting = false) {
     },
     cloudStateFor: () => {
       const entry = store.find(workspace.workspaceId)!;
-      return { enabled: !!entry.remote, connected: !!entry.remote,
+      return {
         syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person") : undefined };
     },
     engineFor: () => store.find(workspace.workspaceId)?.remote ? ({

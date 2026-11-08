@@ -8,9 +8,12 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
+  LOSSY_NOTE_TITLE,
   OpeningState,
   ViewActions,
   OrphanedDraftNotices,
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
+  MarkdownSourceStrip,
   EngineRemovalInProgressNotice,
   LossyNoteNotice,
   OpenExternallyLink,
@@ -18,12 +21,14 @@ import {
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  SAVE_STATE,
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
 import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
+import { readOnlyReasons, transitionReason } from "./readOnlyReasons";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
@@ -31,7 +36,6 @@ import {
 } from "./useAutosavedTextDraft";
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
-import { CopyButton } from "./ui/CopyButton";
 import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
@@ -867,6 +871,17 @@ export function MarkdownView(props: {
   const hasSetAsideEdit =
     engine.deletedDraftId !== null &&
     orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
+  // Why editing is off. The source strip and the chip's tooltip both say it,
+  // and with no sentence the chip has no tooltip.
+  const readOnlyWords = readOnlyReasons({
+    gone: engine.deletedWhileEditing,
+    accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
+    shared: !!props.forceReadOnly,
+    transition: transitionReason(engine),
+    // Its set-aside row says why until the person dismisses it.
+    notSaved: engine.permanentFailureWhileEditing &&
+      !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
+  }).join(" ");
 
   useEffect(() => {
     if (surfaceMode === "read") preloadMarkdownEditor();
@@ -998,6 +1013,12 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
+  // A disabled Edit says why: the chip's words, or else the restriction its
+  // notice states. Never the chip's save state: a set-aside edit doesn't stop
+  // editing.
+  const editReason = readOnlyWords || (props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
+    : props.truncated ? SAVE_STATE["too-large"].title
+    : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
@@ -2104,8 +2125,10 @@ export function MarkdownView(props: {
       <OrphanedDraftNotices
         workspaceId={props.workspaceId}
         path={props.path}
-        message="This document became read-only. Copy your text to keep it."
-        messageDraftId={readOnlyDraftId.current}
+        message={engine.permanentFailureWhileEditing
+          ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
+          : "This document became read-only. Copy your text to keep it."}
+        messageDraftId={engine.permanentFailureWhileEditing ? engine.permanentFailureDraftId : readOnlyDraftId.current}
         replacedDraftIds={engine.replacedDraftIds}
       />
     </>
@@ -2134,17 +2157,11 @@ export function MarkdownView(props: {
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
                 : engineChipState}
               title={
-                engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
-                  ? "Your access to this document ended."
+                readOnly
+                  ? readOnlyWords
                   : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
                     engine.saveState.kind === "changed-on-disk"
-                  ? CHANGED_OUTSIDE_NOTICE
-                  : (engineChipState === "deleted" ||
-                  engineChipState === "object-changed") &&
-                hasSetAsideEdit
-                  ? goneNotice(engine.goneCause, true)
-                  : typeof engineChipState !== "string" && engineChipState.kind === "error" && engine.saveError
-                    ? engine.saveError
+                    ? CHANGED_OUTSIDE_NOTICE
                     : undefined
               }
               onRetry={engine.retryReplacement ?? undefined}
@@ -2178,10 +2195,10 @@ export function MarkdownView(props: {
           // the top-matter zone (which renders the same metadata as chrome)
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
-              <span>{readOnly ? "Read-only markdown source" : "Read-only markdown source — switch back to Editor to make changes."}</span>
-              <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
-            </div>
+            <MarkdownSourceStrip
+              words={readOnly ? readOnlyWords : "Read-only markdown source — switch back to Editor to make changes."}
+              getText={() => sourceMarkdown}
+            />
             {sourceMarkdown === null ? (
               <SkeletonRows layout="panel" label="Loading source..." />
             ) : (
@@ -2291,7 +2308,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={readOnly ? readOnlyWords : undefined} />
             ) : null}
           </>
         }
@@ -2301,7 +2318,7 @@ export function MarkdownView(props: {
               label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : undefined,
+              title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
               onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {

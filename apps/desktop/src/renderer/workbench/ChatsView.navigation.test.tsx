@@ -285,7 +285,7 @@ describe("ChatsView expand-to-tab", () => {
 
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
     await waitFor(() => {
-      expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+      expect(screen.getByTestId("chats-dm-message").className).toContain("dohc-target-flash");
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     });
   });

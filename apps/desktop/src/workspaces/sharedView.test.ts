@@ -62,6 +62,7 @@ import { deniedReadCode, denyRead, restoreRead } from "@dohc/workspace-fs/testin
 import { createTestScratch } from "./testTemp";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { LocalStateUnavailableError, readLocalStateFrom } from "./workspaceLocalState";
+import { ipcWireError, readError, refusalCode } from "../ipc/errorWords";
 
 // This suite isolates shared-view primitives. Owner admission itself is kept
 // real in shareViewFiles.test.ts and every file-operation/mount e2e suite.
@@ -153,6 +154,8 @@ let realpathOverride:
   | null = null;
 let lstatInodeAlias: string | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
+// Keyed on the old path: a set-aside renames to a name with the time in it.
+let failRenameFromPathOnce: { path: string; error: Error } | null = null;
 let failRemovePathOnce: { path: string; error: Error } | null = null;
 let failReaddirPathOnce: { path: string; error: Error } | null = null;
 let beforeOpen: ((path: string) => Promise<void>) | null = null;
@@ -202,6 +205,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (failure !== null && String(newPath) === failure.path) {
         failRenameToPathOnce = null;
         throw failure.error;
+      }
+      const fromFailure = failRenameFromPathOnce;
+      if (fromFailure !== null && String(oldPath) === fromFailure.path) {
+        failRenameFromPathOnce = null;
+        throw fromFailure.error;
       }
       return actual.rename(oldPath, newPath);
     }) as typeof actual.rename,
@@ -359,6 +367,7 @@ beforeEach(() => {
   realpathOverride = null;
   lstatInodeAlias = null;
   failRenameToPathOnce = null;
+  failRenameFromPathOnce = null;
   failRemovePathOnce = null;
   failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
@@ -368,8 +377,10 @@ afterEach(async () => {
   realpathOverride = null;
   lstatInodeAlias = null;
   failRenameToPathOnce = null;
+  failRenameFromPathOnce = null;
   failRemovePathOnce = null;
   failReaddirPathOnce = null;
+  beforeOpen = null;
   collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(
@@ -4745,6 +4756,7 @@ describe("shared view refresh", () => {
         repairedPaths: 0,
         unjournalablePaths: [],
         collisionRecordQuarantined: true,
+        takesLocalWrites: false,
       });
 
       await expect(
@@ -8451,6 +8463,262 @@ describe("share-refresh records in .dohc/local", () => {
       await view.store.close();
     }
   });
+
+  const NOT_OPENED_WORDS =
+    "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.";
+  const UNREADABLE_RECORD_WORDS =
+    "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +
+    "It keeps a refresh from replacing your own files.";
+
+  // On Windows dohc reads `.dohc/local` only while one open of the view holds
+  // it throughout. This ends that open as dohc opens `name` there, by closing
+  // the view or by starting a new open of it, while `armed`.
+  function openEndsWhileReading(rootDir: string, name: string, how: "close" | "rebind") {
+    const bindings = [{ localStateReady: true }];
+    readLocalStateFrom({
+      currentBinding: (view) =>
+        closedViews.has(view.rootPath) ? null : view.rootPath === rootDir ? bindings.at(-1)! : OPENED,
+      localStateOpenAt: async (rootPath) => {
+        if (closedViews.has(rootPath)) return null;
+        const at = bindings.length;
+        return { current: () => at === bindings.length && !closedViews.has(rootPath) };
+      },
+    });
+    const record = join(recordsDir(rootDir), name);
+    const trip = { armed: true, ended: 0 };
+    beforeOpen = async (path) => {
+      if (!trip.armed || path !== record) return;
+      trip.armed = false;
+      trip.ended += 1;
+      if (how === "close") closedViews.add(rootDir);
+      else bindings.push({ localStateReady: true });
+    };
+    return trip;
+  }
+
+  // A read the open didn't hold found nothing wrong with the record, so the
+  // record stays and still keeps the person's file apart.
+  it.runIf(process.platform === "win32").each(["close", "rebind"] as const)(
+    "refuses a refresh and keeps the collision record when a %s ends the view's open as dohc reads it",
+    async (how) => {
+      const view = await collidedView();
+      try {
+        view.relay.addWrite(view.path, "granter file two");
+        const record = await readFile(view.collisionRecord, "utf8");
+        const logRequests = view.relay.logRequests;
+        const trip = openEndsWhileReading(view.rootDir, "share-collision-record.json", how);
+
+        await expect(view.refresh()).resolves.toEqual({ ok: false, changedPaths: 0, errorMessage: NOT_OPENED_WORDS });
+        expect(trip.ended).toBe(1);
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+        expect(await readFile(view.collisionRecord, "utf8")).toBe(record);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+
+        closedViews.delete(view.rootDir);
+        await expect(view.refresh()).resolves.toMatchObject({
+          ok: true,
+          unjournalablePaths: [{ path: view.path, reason: "local-collision" }],
+        });
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  it.runIf(process.platform === "win32").each(["close", "rebind"] as const)(
+    "refuses a refresh and keeps the collision record when a %s ends the view's open as dohc reads it after the pull",
+    async (how) => {
+      const view = await collidedView();
+      try {
+        view.relay.addWrite(view.path, "granter file two");
+        view.relay.addWrite("docs/new.md", "new");
+        const record = await readFile(view.collisionRecord, "utf8");
+        const trip = openEndsWhileReading(view.rootDir, "share-collision-record.json", how);
+        trip.armed = false;
+
+        await expect(
+          view.refresh(async (input) => {
+            const pulled = await view.harness.pullFor(view.target)(input);
+            trip.armed = true;
+            return pulled;
+          }),
+        ).resolves.toMatchObject({ ok: false, errorMessage: NOT_OPENED_WORDS });
+        expect(trip.ended).toBe(1);
+        expect(await readFile(view.collisionRecord, "utf8")).toBe(record);
+        expect((await readdir(recordsDir(view.rootDir))).filter((name) => name.includes(".invalid-"))).toEqual([]);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+
+        closedViews.delete(view.rootDir);
+        await expect(view.refresh()).resolves.toMatchObject({
+          ok: true,
+          unjournalablePaths: [{ path: view.path, reason: "local-collision" }],
+        });
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        expect(await readFile(join(view.rootDir, "docs/new.md"), "utf8")).toBe("new");
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  it.runIf(process.platform === "win32").each(["close", "rebind"] as const)(
+    "keeps the collision record as it was when a %s ends the view's open as dohc adds to it",
+    async (how) => {
+      const view = await collidedView();
+      try {
+        const record = await readFile(view.collisionRecord, "utf8");
+        const trip = openEndsWhileReading(view.rootDir, "share-collision-record.json", how);
+
+        await expect(recordCollisionPaths(view.rootDir, SHARE_ID, ["docs/other.md"])).rejects.toMatchObject({
+          refusal: "not-opened",
+          message: NOT_OPENED_WORDS,
+        });
+        expect(trip.ended).toBe(1);
+        expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+        expect(await readFile(view.collisionRecord, "utf8")).toBe(record);
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "refuses a refresh and keeps the pending record when a new open of the view starts as dohc reads it",
+    async () => {
+      const view = await collidedView();
+      try {
+        await writePendingMaterializationPaths(view.rootDir, ["docs/seed.md"]);
+        const pending = join(recordsDir(view.rootDir), "pending-materialization.json");
+        const before = await readFile(pending, "utf8");
+        const trip = openEndsWhileReading(view.rootDir, "pending-materialization.json", "rebind");
+
+        await expect(view.refresh()).resolves.toEqual({ ok: false, changedPaths: 0, errorMessage: NOT_OPENED_WORDS });
+        expect(trip.ended).toBe(1);
+        expect(await readFile(pending, "utf8")).toBe(before);
+        expect((await readdir(recordsDir(view.rootDir))).filter((name) => name.includes(".invalid-"))).toEqual([]);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  // Only the capture sets an unreadable record aside, and only once it is
+  // aside does the notice say so. Any other reader refuses.
+  it("refuses to add to a collision record it can't read, and leaves the record as it was", async () => {
+    const view = await collidedView();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await writeFile(view.collisionRecord, "not json", "utf8");
+
+      await expect(recordCollisionPaths(view.rootDir, SHARE_ID, ["docs/other.md"]), "A refused shared-file update keeps the shared-view code").rejects.toMatchObject({
+        name: "Error",
+        code: "share-collision-record",
+        message: UNREADABLE_RECORD_WORDS,
+      });
+      expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+      expect(await readFile(view.collisionRecord, "utf8")).toBe("not json");
+      expect(errorLog).not.toHaveBeenCalledWith(expect.stringContaining("set it aside"));
+    } finally {
+      errorLog.mockRestore();
+      await view.store.close();
+    }
+  });
+
+  it("keeps a late refused shared-file read recognizable across IPC", async () => {
+    const view = await collidedView();
+    try {
+      await rm(join(view.rootDir, view.path));
+      await writeFile(join(view.rootDir, "docs/seed.md"), "edited seed", "utf8");
+      const failure = await captureSharedViewLocalDivergence(
+        view.rootDir, WORKSPACE, view.store, true, SHARE_ID,
+        { beforeCaptureWrite: async () => { await writeFile(view.collisionRecord, "not json", "utf8"); } },
+      ).catch(error => error);
+      const received = new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(failure))}`);
+      expect(refusalCode(received), "A late refusal keeps the shared-view code").toBe("share-collision-record");
+      expect(readError(received).words).toBe(UNREADABLE_RECORD_WORDS);
+      expect(failure).toMatchObject({ capturedPaths: 1, repairedPaths: 1 });
+      expect(await readFile(view.collisionRecord, "utf8")).toBe("not json");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it.each(["invalid JSON", "another share"])("shows only the refusal after a pull finds %s", async kind => {
+    const view = await collidedView();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      view.relay.addWrite(view.path, "granter file two");
+      const content = kind === "invalid JSON" ? "not json" : JSON.stringify({ shareId: "another-share", paths: [view.path] });
+      const outcome = await view.refresh(async (input) => {
+        const pulled = await view.harness.pullFor(view.target)(input);
+        await writeFile(view.collisionRecord, content, "utf8");
+        return pulled;
+      });
+      expect(outcome).toMatchObject({
+        ok: false,
+        errorKind: "collision-record",
+        errorMessage: UNREADABLE_RECORD_WORDS,
+      });
+      expect(outcome, "A content refusal has no filesystem cause").not.toHaveProperty("errorCause");
+      expect(await readFile(view.collisionRecord, "utf8")).toBe(content);
+      expect((await readdir(recordsDir(view.rootDir))).filter((name) => name.includes(".invalid-"))).toEqual([]);
+      expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+    } finally {
+      errorLog.mockRestore();
+      await view.store.close();
+    }
+  });
+
+  // The person's file stays until the notice has said the record is aside.
+  // The refresh after that follows the share's ordinary rules, as it warns.
+  it.each([
+    ["view", false, "granter file"],
+    ["edit", true, "my own file"],
+  ] as const)(
+    "refuses a %s share's refresh while it can't set aside a collision record it can't read",
+    async (access, takesLocalWrites, afterNotice) => {
+      const view = await collidedView();
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await writeFile(view.collisionRecord, "not json", "utf8");
+        const logRequests = view.relay.logRequests;
+        failRenameFromPathOnce = { path: view.collisionRecord, error: Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }) };
+
+        await expect(view.refresh(undefined, access)).resolves.toEqual({
+          ok: false,
+          changedPaths: 0,
+          errorKind: "collision-record",
+          errorMessage: UNREADABLE_RECORD_WORDS,
+          errorCause: "EBUSY: resource busy or locked",
+        });
+        expect(failRenameFromPathOnce).toBeNull();
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+        expect(await readFile(view.collisionRecord, "utf8")).toBe("not json");
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+
+        await expect(view.refresh(undefined, access)).resolves.toMatchObject({
+          ok: true,
+          collisionRecordQuarantined: true,
+          takesLocalWrites,
+        });
+        expect(
+          (await readdir(recordsDir(view.rootDir))).some((name) => /^share-collision-record\.json\.invalid-\d+$/.test(name)),
+        ).toBe(true);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+
+        await expect(view.refresh(undefined, access)).resolves.toMatchObject({ ok: true });
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe(afterNotice);
+      } finally {
+        failRenameFromPathOnce = null;
+        errorLog.mockRestore();
+        await view.store.close();
+      }
+    },
+  );
 
   // What another user, a second name or a link could make a collision record
   // say. The planted record protects nothing, so a refresh that trusted it

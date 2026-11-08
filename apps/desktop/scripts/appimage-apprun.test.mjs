@@ -2,13 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { load } from "js-yaml";
+import { builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
 const { generateAppRunScript } = builderRequire("app-builder-lib/out/targets/appimage/appImageUtil.js");
 const { default: AppImageTarget } = builderRequire("app-builder-lib/out/targets/appimage/AppImageTarget.js");
 

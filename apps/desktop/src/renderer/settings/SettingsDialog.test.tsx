@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -25,6 +26,8 @@ import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
+import { useInstallationNotices } from "../shell/installationNotices";
+import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 const config = {
@@ -130,7 +133,7 @@ const bridge = {
   readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
   setChatDispatchPaused: vi.fn(async () => undefined),
   onChatDispatchPaused: vi.fn(() => () => undefined),
-  getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
+  getUpdateState: vi.fn(async (): Promise<SettingsUpdateState> => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
     state: SettingsUpdateState;
@@ -370,6 +373,317 @@ describe("SettingsDialog", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  describe("an edit in place", () => {
+    const renderAgents = (onClose: () => void) => {
+      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      render(
+        <Overlay onClose={onClose}>
+          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={onClose} />
+        </Overlay>,
+      );
+    };
+    const editCommand = async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+      await user.click(screen.getByRole("menuitem", { name: "Details" }));
+      await user.click(screen.getByRole("button", { name: "Change the command that starts Nova" }));
+      return screen.getByRole("textbox", { name: "Command that starts Nova" });
+    };
+
+    it("takes the first Escape in an agent's command, keeping the old one, and Settings closes on the next", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderAgents(onClose);
+      const command = await editCommand(user);
+      await user.type(command, " --verbose");
+      bridge.setUserSettings.mockClear();
+      await user.keyboard("{Escape}");
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.queryByRole("textbox", { name: "Command that starts Nova" })).toBeNull();
+      expect(screen.getByText("node agent.mjs")).toBeTruthy();
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it("closes nothing on an Escape that ends an input method's composition", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderAgents(onClose);
+      const command = await editCommand(user);
+      fireEvent.keyDown(command, { key: "Escape", isComposing: true });
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByRole("textbox", { name: "Command that starts Nova" })).toBe(command);
+    });
+
+    it("takes the first Escape in an agent's name, keeping the old one, and Settings closes on the next", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderAgents(onClose);
+      await user.click(await screen.findByRole("button", { name: "Rename Nova" }));
+      await user.type(screen.getByRole("textbox", { name: "Name of Nova" }), "Vega");
+      bridge.setUserSettings.mockClear();
+      await user.keyboard("{Escape}");
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.queryByRole("textbox", { name: "Name of Nova" })).toBeNull();
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("a press outside Settings", () => {
+    const backdrop = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+    const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onClose={onClose} />
+        </Overlay>,
+      );
+
+    it("saves the name being typed, then closes", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderInOverlay(onClose, "general");
+      // The save is still on its way when the press ends.
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+      await user.click(backdrop());
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(savedSettings()?.profile).toEqual({ preferredName: "Sam" }));
+      await act(async () => save.resolve({ settings: savedSettings()!, source: "stored" }));
+    });
+
+    it("stays open on a name it refuses, with the field focused", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderInOverlay(onClose, "general");
+      const field = await screen.findByTestId("general-preferred-name-input");
+      await user.click(field);
+      await user.paste("Sam");
+      bridge.setUserSettings.mockClear();
+      await user.click(backdrop());
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(field);
+      expect(screen.getByRole("alert").textContent).toBe("Names cannot contain control characters.");
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    });
+
+    it("saves a new agent name, then closes", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      renderInOverlay(onClose, "agents");
+      await user.click(await screen.findByRole("button", { name: "Rename Nova" }));
+      const field = screen.getByRole("textbox", { name: "Name of Nova" });
+      await user.clear(field);
+      await user.type(field, "Vega");
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.click(backdrop());
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(savedSettings()?.agents.default?.name).toBe("Vega"));
+      await act(async () => save.resolve({ settings: savedSettings()!, source: "stored" }));
+    });
+
+    it("stays open on an agent name another agent has, with the field focused", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const settings = settingsWithAgent({ name: "Nova" });
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: { ...settings, agents: { ...settings.agents, other: testAgent({ name: "Orion" }) } },
+        source: "stored",
+      });
+      renderInOverlay(onClose, "agents");
+      await user.click(await screen.findByRole("button", { name: "Rename Nova" }));
+      const field = screen.getByRole("textbox", { name: "Name of Nova" });
+      await user.clear(field);
+      await user.type(field, "Orion");
+      bridge.setUserSettings.mockClear();
+      await user.click(backdrop());
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(field);
+      expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    });
+
+    // Applies a look with this accent, and answers the accent the window shows.
+    const look = (accentColor: string) => {
+      applyLookSettings({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor } });
+      return document.documentElement.style.getPropertyValue("--dohc-accent");
+    };
+    // Settings that unmounts once it closes, as the shell's does, beside the
+    // installation notices a write it cut off reports to.
+    const renderClosable = (initialSection: "general" | "appearance" | "advanced" | "agents") => {
+      const onError = vi.fn();
+      const report = vi.fn<(error: ConnectionErrorReport) => void>();
+      function Notices() {
+        useInstallationNotices(report);
+        return null;
+      }
+      function Closable() {
+        const [open, setOpen] = useState(true);
+        const close = () => setOpen(false);
+        return open ? (
+          <Overlay onClose={close} closeOnBackdrop>
+            <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onError={onError} onClose={close} />
+          </Overlay>
+        ) : null;
+      }
+      render(<><Notices /><Closable /></>);
+      return { onError, report };
+    };
+
+    it("reports a save that fails after Settings closed, and Try again sends it again", async () => {
+      const user = userEvent.setup();
+      const { onError, report } = renderClosable("general");
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+      const change = bridge.setUserSettings.mock.lastCall![0];
+      expect(change.settings.profile).toEqual({ preferredName: "Sam" });
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => save.reject(cause));
+
+      // The workspace open when the save fails shows it, even after a switch.
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      expect(onError).not.toHaveBeenCalled();
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      bridge.setUserSettings.mockClear();
+      const resent = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => resent.promise);
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(bridge.setUserSettings).toHaveBeenCalledExactlyOnceWith(change);
+      // A look applied while Try again waits stays. Main's broadcast brings the file's.
+      const newer = look("#884422");
+      await act(async () => resent.resolve({ settings: DEFAULT_USER_SETTINGS, source: "stored" }));
+      expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe(newer);
+      applyLookSettings(DEFAULT_USER_SETTINGS);
+    });
+
+    it.each([
+      ["puts back the look the file holds", false],
+      ["leaves a newer look in place", true],
+    ] as const)("%s when a save that closing Settings cut off fails", async (_, newerLook) => {
+      const user = userEvent.setup();
+      const fileAccent = look("#224488");
+      applyLookSettings(DEFAULT_USER_SETTINGS);
+      renderClosable("general");
+      const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+      await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+      // A reopened Settings applies its own look before this save fails.
+      const shown = newerLook ? look("#884422") : fileAccent;
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: { ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor: "#224488" } },
+        source: "stored",
+      });
+      const reads = bridge.getUserSettings.mock.calls.length;
+
+      await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+      await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalledTimes(reads + 1));
+      await act(async () => {});
+      expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe(shown);
+      applyLookSettings(DEFAULT_USER_SETTINGS);
+    });
+
+    it("reports a zoom step that fails after Settings closed, and Try again steps again", async () => {
+      const user = userEvent.setup();
+      const { report } = renderClosable("appearance");
+      const step = deferred<Awaited<ReturnType<typeof bridge.stepWindowZoom>>>();
+      bridge.stepWindowZoom.mockImplementationOnce(() => step.promise);
+      await user.click(within(await screen.findByTestId("settings-row-zoom")).getByRole("button", { name: "Zoom in" }));
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => step.reject(cause));
+
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      bridge.stepWindowZoom.mockClear();
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(bridge.stepWindowZoom).toHaveBeenCalledExactlyOnceWith({ step: "in" });
+    });
+
+    it("reports a reset that fails after Settings closed, and Try again resets again", async () => {
+      const user = userEvent.setup();
+      const { report } = renderClosable("advanced");
+      const reset = deferred<Awaited<ReturnType<typeof bridge.resetUserSettings>>>();
+      bridge.resetUserSettings.mockImplementationOnce(() => reset.promise);
+      await user.click(within(await screen.findByTestId("settings-row-reset-user")).getByRole("button", { name: "Reset user" }));
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => reset.reject(cause));
+
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      bridge.resetUserSettings.mockClear();
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(bridge.resetUserSettings).toHaveBeenCalledOnce();
+    });
+
+    it("reports an agent order that fails after Settings closed, and Try again sends it again", async () => {
+      const user = userEvent.setup();
+      const order = deferred<DesktopUserSettingsResult>();
+      const orderAgents = vi.fn((_payload: { order: string[] }) => order.promise);
+      vi.stubGlobal("dohcDesktop", { ...bridge, orderAgents });
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }), codex: testAgent({ name: "Codex" }) } },
+        source: "stored",
+      });
+      const { report } = renderClosable("agents");
+      await user.click(await screen.findByRole("button", { name: "Codex actions" }));
+      await user.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+      await user.click(backdrop());
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+      const cause = new Error("The settings file is read-only.");
+      await act(async () => order.reject(cause));
+
+      await waitFor(() => expect(report).toHaveBeenCalledOnce());
+      const [{ cause: reported, retry }] = report.mock.lastCall!;
+      expect(reported).toBe(cause);
+      orderAgents.mockClear();
+      await act(async () => expect(retry?.()).toBe(true));
+      expect(orderAgents).toHaveBeenCalledExactlyOnceWith({ order: ["codex"] });
+    });
+
+    it("stays open on minutes it can't save, and says why", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      renderInOverlay(onClose, "agents");
+      await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+      await user.click(screen.getByRole("menuitem", { name: "Details" }));
+      await user.click(screen.getByRole("button", { name: "Change when Nova stops" }));
+      const minutes = screen.getByRole("spinbutton", { name: "Minutes before Nova stops" });
+      await user.clear(minutes);
+      await user.type(minutes, "2000");
+      await user.click(backdrop());
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(minutes);
+      expect(screen.getByRole("alert").textContent).toBe("Enter whole minutes from 1 to 1440.");
+      // A value it can save then saves and closes.
+      await user.clear(minutes);
+      await user.type(minutes, "90");
+      await user.click(backdrop());
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(savedSettings()?.agents.default?.timeoutMinutes).toBe(90));
+    });
+  });
+
   it("leaves Tab and Escape to a higher overlay", async () => {
     const onClose = vi.fn();
     render(
@@ -570,7 +884,8 @@ describe("SettingsDialog", () => {
     const row = await screen.findByTestId("settings-row-editor-size");
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
     const controls = larger.closest("div.rounded-md")!.parentElement!;
-    const slots = () => [...controls.children].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
+    // Reset's place is the row item just before the controls.
+    const slots = () => [controls.previousElementSibling!, controls].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
     // Unchanged, the row keeps Reset's place left of the stepper, so nothing moves or wraps when it appears.
     expect(slots()).toEqual(["SPAN:hidden.24", "DIV.control"]);
     expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
@@ -871,16 +1186,18 @@ describe("SettingsDialog", () => {
     );
   });
 
-  it("cancels a preferred-name edit without saving or closing settings", async () => {
+  it("cancels a preferred-name edit without saving or closing settings, and closes on the next Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(
-      <SettingsDialog workspaceIsReady
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="general"
-        onClose={onClose}
-      />,
+      <Overlay onClose={onClose}>
+        <SettingsDialog workspaceIsReady
+          workspaceId="ws-1"
+          workspacePath="/x"
+          initialSection="general"
+          onClose={onClose}
+        />
+      </Overlay>,
     );
 
     const input = await screen.findByTestId("general-preferred-name-input");
@@ -892,6 +1209,9 @@ describe("SettingsDialog", () => {
     expect(bridge.setUserSettings).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+    // With nothing left to put back, the field leaves Escape to Settings.
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("reports a failed save with the error it came from, so Copy keeps the path", async () => {
@@ -1056,7 +1376,7 @@ describe("SettingsDialog", () => {
       source: "default",
     });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    expect((await screen.findByRole("switch", { name: "Turn on Nova" })).getAttribute("aria-checked")).toBe("true");
+    expect((await screen.findByRole("switch", { name: "Nova" })).getAttribute("aria-checked")).toBe("true");
   });
 
   it("keeps an agent entry dohc could not use in its row while a save runs", async () => {
@@ -1071,7 +1391,7 @@ describe("SettingsDialog", () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     const problem = await screen.findByTestId("agent-problem");
     expect(problem.textContent).toBe("hue must be one of: olive.");
-    await user.click(screen.getByRole("switch", { name: "Turn on Nova" }));
+    await user.click(screen.getByRole("switch", { name: "Nova" }));
     expect(screen.getByTestId("agent-problem")).toBe(problem);
     await act(async () => saved.resolve({ settings: settingsWithAgent({ name: "Nova", enabled: false }), source: "stored" }));
   });
@@ -1339,7 +1659,7 @@ describe("SettingsDialog", () => {
     expect(onError).toHaveBeenCalledWith("Nova didn't reply to the check.", undefined, expect.any(Function), [
       ["Cause", "Runner did not report within 120 seconds."],
     ], "agent-check:ws-1:default");
-    expect(screen.getByRole("switch", { name: "Turn on Nova" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("switch", { name: "Nova" }).getAttribute("aria-checked")).toBe("false");
     expect(bridge.setUserSettings).not.toHaveBeenCalled();
   });
 
@@ -1563,7 +1883,7 @@ describe("SettingsDialog", () => {
     );
     await mcpConfigLoaded();
     await user.click(copyMcpConfig());
-    expect(await screen.findByRole("button", { name: "Couldn't copy" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Could not copy" })).toBeTruthy();
     expect(report).toHaveBeenCalledWith({
       message: "dohc could not copy to the clipboard. Clipboard denied",
       cause: denied,
@@ -2241,7 +2561,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Start run");
   });
 
-  it("shows current desktop update version and channel", async () => {
+  it("shows the version, and not the default channel's name", async () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     await waitFor(() =>
@@ -2249,8 +2569,19 @@ describe("SettingsDialog", () => {
         "idle",
       ),
     );
-    expect(screen.getByTestId("desktop-updates-version").textContent).toBe("1.2.3");
-    expect(screen.getByTestId("desktop-updates-channel").textContent).toBe("latest");
+    expect(screen.getByTestId("desktop-updates-version").textContent).toBe("Version 1.2.3");
+    expect(screen.getByTestId("settings-row-desktop-updates").textContent).not.toContain("latest");
+  });
+
+  it("names a nightly once, in its version", async () => {
+    const nightly = "0.1.1-nightly.20261105.42.1";
+    bridge.getUpdateState.mockResolvedValueOnce({ ...idleUpdateState, currentVersion: nightly, channel: "nightly" });
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-version").textContent).toBe(`Version ${nightly}`),
+    );
+    expect(screen.getByTestId("settings-row-desktop-updates").textContent?.match(/nightly/gi)).toHaveLength(1);
   });
 
   it("checks for updates, downloads only when asked, then restarts", async () => {
@@ -2426,7 +2757,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(report).toHaveBeenCalledWith({
-        message: "dohc could not install update 1.2.4.",
+        message: "dohc could not install the update.",
         cause: undefined,
         retry: expect.any(Function),
       }),
@@ -2436,7 +2767,7 @@ describe("SettingsDialog", () => {
 
   it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
     updateReady = true;
-    const reason = "dohc did not get permission to install the update. Run this command in a terminal to install it.";
+    const reason = "dohc did not get permission. Run this command in a terminal to install it.";
     const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,
@@ -2459,7 +2790,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").textContent).toBe(
-        `dohc could not install update 1.2.4. ${reason}`,
+        `dohc could not install version 1.2.4. ${reason}`,
       ),
     );
     expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);

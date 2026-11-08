@@ -6,7 +6,8 @@ import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
 import { ReactionStoreProvider } from "./reactionStore";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
-import type { SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { ask, asked, id, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
@@ -17,11 +18,12 @@ let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
 const onAgentWaitsForTrust = vi.fn();
-function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel") {
+const onOpenAgentSettings = vi.fn();
+function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel", agentId?: string, mentionCandidates: MentionCandidate[] = []) {
   return <ReactionStoreProvider workspaceId={workspaceId}>
-    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat", kind })}
-      locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
-      onAgentWaitsForTrust={onAgentWaitsForTrust} />
+    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat", kind, ...(agentId ? { agentId } : {}) })}
+      locked={false} mentionCandidates={mentionCandidates} onError={onError} onThreadRead={onThreadRead} revision={0}
+      onAgentWaitsForTrust={onAgentWaitsForTrust} onOpenAgentSettings={onOpenAgentSettings} />
   </ReactionStoreProvider>;
 }
 function send(body: string) {
@@ -33,6 +35,7 @@ beforeEach(() => {
   onError.mockReset();
   onThreadRead.mockReset();
   onAgentWaitsForTrust.mockReset();
+  onOpenAgentSettings.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation(callback => { activity = callback; return vi.fn(); });
   // An agent DM also lists its earlier posts; these tests have none.
   bridgeMock.listChannelThreads.mockImplementation(async ({ lane }) => ({ threads: lane === "posts" ? [] : [thread()] }));
@@ -291,7 +294,7 @@ describe("ChatLane", () => {
       return { thread: thread(), message: message({ id: "ours", body: "Our first message" }), viewerAuthorId: "you" };
     });
     render(lane());
-    await screen.findByText("No messages in #general yet.");
+    await screen.findByText("No messages in #general yet. Start one below.");
     send("Our first message");
     await screen.findByText("Their first message");
     expect(screen.getByText("Our first message")).toBeTruthy();
@@ -336,6 +339,24 @@ describe("ChatLane", () => {
     await act(async () => activity({ workspaceId: "workspace-a" }));
     await screen.findByText("First unread after refresh");
     expect(screen.getByTestId("chats-lane-new-divider")).toBeTruthy();
+  });
+
+  it("lands on the message a notice named: scrolls to it, washes it once and moves focus there", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "m1", body: "Asked" }), message({ id: "m2", body: "The reply" }), message({ id: "m3", body: "Later" }),
+    ] });
+    render(<ReactionStoreProvider workspaceId="workspace-a">
+      <ChatLane workspaceId="workspace-a" channel={channel({ id: "channel-1", type: "chat", kind: "agent" })}
+        locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
+        onAgentWaitsForTrust={onAgentWaitsForTrust} focusMessageId="m2" />
+    </ReactionStoreProvider>);
+    await screen.findByText("The reply");
+    const landed = () => document.querySelector<HTMLElement>('[data-message-id="m2"]');
+    await waitFor(() => expect(landed()?.className).toContain("dohc-target-flash"));
+    await waitFor(() => expect(document.activeElement).toBe(landed()));
+    expect(document.querySelector('[data-message-id="m3"]')?.className).not.toContain("dohc-target-flash");
+    // The wash clears once; it does not stay as a selection.
+    await waitFor(() => expect(landed()?.className).not.toContain("dohc-target-flash"), { timeout: 2000 });
   });
 
   it("shows no New divider when everything was read", async () => {
@@ -505,7 +526,7 @@ describe("ChatLane", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
     bridgeMock.startChannelThread.mockResolvedValueOnce({ thread: thread(), message: message({ id: "poll", body: "Lunch?" }), viewerAuthorId: "you" });
     render(lane());
-    await screen.findByText("No messages in #general yet.");
+    await screen.findByText("No messages in #general yet. Start one below.");
     fireEvent.keyDown(draftPoll("Lunch?", ["Soup", "Salad"]), { key: "Enter" });
     expect(bridgeMock.startChannelThread).toHaveBeenCalledWith({
       workspaceId: "workspace-a", channelId: "channel-1", body: "Lunch?", needsDecision: true, options: ["Soup", "Salad"], lane: "chat",
@@ -541,10 +562,11 @@ describe("ChatLane", () => {
   it("says why a run didn't reply under the message that asked, with Try again only when it can run again", async () => {
     const failedRun = { runId: "run-1", triggerMessageId: "message-1", words: "Nova didn't reply. dohc quit during its run.", retryable: true };
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, failedRun });
-    render(lane("agent-dm", "workspace-a", "agent"));
+    render(lane("agent-dm", "workspace-a", "agent", "nova"));
     const line = await screen.findByTestId("chats-lane-run-failed");
     expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("message-1");
     expect(line.textContent).toBe(`${failedRun.words}Try again`);
+    expect(screen.queryByTestId("chats-lane-run-next-step")).toBeNull();
 
     bridgeMock.retryStoppedRun.mockImplementationOnce(async () => {
       bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, pendingCount: 1 });
@@ -555,11 +577,93 @@ describe("ChatLane", () => {
     await waitFor(() => expect(screen.queryByTestId("chats-lane-run-failed")).toBeNull());
 
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-      ...idle, failedRun: { ...failedRun, words: "Nova didn't reply. Its run ended with an error.", retryable: false },
+      ...idle,
+      failedRun: {
+        ...failedRun,
+        words: "Nova didn't reply. Its run ended with an error.",
+        nextStep: { kind: "message", agentId: "nova", name: "Nova", handle: "Nova" },
+        retryable: false,
+      },
     });
     await act(async () => activity({ workspaceId: "workspace-a" }));
-    expect((await screen.findByTestId("chats-lane-run-failed")).textContent).toBe("Nova didn't reply. Its run ended with an error.");
+    const failed = await screen.findByTestId("chats-lane-run-failed");
+    // In Nova's own chat a message asks it: the button focuses the composer
+    // and adds nothing to the draft.
+    expect(within(failed).getAllByRole("status").map((node) => node.textContent))
+      .toEqual(["Nova didn't reply. Its run ended with an error."]);
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
+    expect(screen.queryByTestId("chats-lane-run-next-step")).toBeNull();
+    const composer = screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement;
+    await waitFor(() => expect(composer.disabled).toBe(false));
+    const sends = bridgeMock.sendChatMessage.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Message Nova" }));
+    expect(document.activeElement).toBe(composer);
+    expect(composer.value).toBe("");
+    expect(bridgeMock.sendChatMessage.mock.calls.length).toBe(sends);
+
+    // Another agent's run with no @handle: its own chat, in words, since no
+    // button can ready that message here.
+    const failedWith = async (nextStep: NonNullable<ChatDispatchFailedRun["nextStep"]>) => {
+      bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+        ...idle,
+        failedRun: { ...failedRun, words: "Nova didn't reply. Its run ended with an error.", nextStep, retryable: false },
+      });
+      await act(async () => activity({ workspaceId: "workspace-a" }));
+    };
+    await failedWith({ kind: "message", agentId: "fox", name: "\u{1F98A}" });
+    await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent)
+      .toBe("Message \u{1F98A} in its own chat to ask again."));
+    expect(screen.queryByTestId("chats-lane-run-actions")).toBeNull();
+    // An agent a message won't wake: the step in Settings is a button that
+    // opens the Agents page, on the same line a message button takes.
+    for (const [nextStep, label] of [
+      [{ kind: "add-agent" }, "Add an agent in Settings"],
+      [{ kind: "turn-on", name: "Nova" }, "Turn Nova on in Settings"],
+      [{ kind: "set-up", name: "Nova" }, "Set up Nova in Settings"],
+    ] as const) {
+      await failedWith(nextStep);
+      await waitFor(() => expect(screen.getByTestId("chats-lane-run-open-settings").textContent).toBe(label));
+      expect(screen.queryByTestId("chats-lane-run-next-step")).toBeNull();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Set up Nova in Settings" }));
+    expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("readies a mention of another agent to ask again, and never sends", async () => {
+    const failedRun = {
+      runId: "run-1", triggerMessageId: "message-1", words: "Atlas didn't reply. Its run ended with an error.", retryable: false,
+      nextStep: { kind: "message", agentId: "atlas", name: "Atlas", handle: "Atlas" },
+    } as const;
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, failedRun });
+    const atlas: MentionCandidate = { id: "agent:atlas", kind: "agent", handle: "Atlas", label: "Atlas", description: "your agent" };
+    // Atlas's run failed in Nova's chat, so a mention asks Atlas.
+    render(lane("agent-dm", "workspace-a", "agent", "nova", [atlas]));
+    const failed = await screen.findByTestId("chats-lane-run-failed");
+    expect(within(failed).getAllByRole("status").map((node) => node.textContent)).toEqual([failedRun.words]);
+    const composer = screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement;
+    await waitFor(() => expect(composer.disabled).toBe(false));
+    const sends = bridgeMock.sendChatMessage.mock.calls.length;
+    fireEvent.change(composer, { target: { value: "Try the coast" } });
+    fireEvent.click(within(failed).getByRole("button", { name: "Mention @Atlas" }));
+    expect(composer.value).toBe("Try the coast @Atlas ");
+    expect(document.activeElement).toBe(composer);
+    expect(composer.selectionStart).toBe(composer.value.length);
+    // A second press keeps the one mention and puts the caret back at the end.
+    composer.setSelectionRange(3, 3);
+    fireEvent.select(composer);
+    fireEvent.click(within(failed).getByRole("button", { name: "Mention @Atlas" }));
+    expect(composer.value).toBe("Try the coast @Atlas ");
+    expect(composer.selectionStart).toBe(composer.value.length);
+    expect(bridgeMock.sendChatMessage.mock.calls.length).toBe(sends);
+
+    // While a message sends, the box is locked, so nothing can change its draft.
+    const pending = deferred<{ message: ReturnType<typeof message> }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(pending.promise);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(composer.disabled).toBe(true));
+    expect(within(screen.getByTestId("chats-lane-run-failed")).queryByRole("button", { name: "Mention @Atlas" })).toBeNull();
+    await act(async () => pending.resolve({ message: message({ id: "sent", body: "Try the coast @Atlas" }) }));
+    await waitFor(() => expect(composer.disabled).toBe(false));
   });
 
   it("stops the agent's run from its DM", async () => {

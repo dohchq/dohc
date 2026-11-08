@@ -134,15 +134,16 @@ export function ComposerPoll(props: {
           </button>
         ) : null}
         <span className="flex-1" />
+        {/* Drawn as Add a choice is, so it reads as a step of the poll and
+            not as one choice's ×. */}
         <button
           type="button"
           data-testid={`${props.testIdPrefix}-poll-remove`}
-          aria-label="Remove poll"
-          title="Remove poll"
           onClick={props.onRemove}
-          className={GHOST_ICON}
+          className="flex h-7 items-center gap-2 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
         >
           <Trash2 size={12} aria-hidden />
+          Remove poll
         </button>
       </div>
     </fieldset>

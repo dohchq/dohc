@@ -14,38 +14,42 @@ function cx(...parts: Array<string | false | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
+// A disabled button keeps its shape and drops its color: a primary or danger
+// confirm takes the line fill, and the label turns subtle, with no hover. An
+// icon button is subtle at rest, so it fades instead.
 const primaryButtonClass =
-  "h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+  "h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
 const secondaryButtonClass =
-  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
+  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
-  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
+  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 type DangerButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
-  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 // The secondary recipe at a table row's height, for a control inside a
 // cell. `aria-disabled` keeps a button that says why it cannot run in the
 // tab order, where `disabled` would drop it.
 const rowSecondaryButtonClass =
-  "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted";
+  "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors enabled:not-aria-disabled:hover:bg-hover enabled:not-aria-disabled:hover:text-ink disabled:text-subtle aria-disabled:cursor-default aria-disabled:text-subtle";
 const compactSecondaryButtonClass =
-  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted enabled:hover:bg-hover enabled:hover:text-ink disabled:cursor-wait disabled:text-subtle";
 // The primary recipe on the danger fill, for the confirm of an action that
-// removes or revokes something. Paper text on danger clears AA in both
-// themes (tokens.test.ts guards the pair).
+// removes or revokes something. Its label clears AA at rest and on hover in
+// both themes (tokens.test.ts guards the pairs). Disabled, it looks like a
+// disabled primary, so it turns red only once pressing it will act.
 const dangerButtonClass =
-  "h-8 rounded-lg bg-danger px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+  "h-8 rounded-lg bg-danger-fill px-3 text-[13px] font-medium text-on-danger transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
 const compactDangerButtonClass =
-  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-danger-fill px-2.5 text-[11px] font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 // The danger confirm at the secondary row button's height, so a row's
 // confirm takes its place without the row growing.
 const rowDangerButtonClass =
-  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger px-2 text-xs font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
+  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger-fill px-2 text-xs font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
@@ -159,25 +163,37 @@ const emptyGlyphToneClass = {
   warning: { glyph: "text-warning", mark: "text-warning" },
 } as const;
 
-/** Centered empty state: a ghost glyph, one muted line that says what is
- * missing, and the surface's own next action as children. The glyph is the
- * drop-lobe mark unless the surface names its own; a state that exists
- * because something failed draws it in the danger tone. Every other
- * attribute, such as a pinned `data-testid` or `role`, lands on the root. */
+/** Centered empty state: one muted line that says what is missing, and the
+ * surface's own next action as children. A surface with nothing yet shows a
+ * `picture` of what it holds once it has items. A state that exists because
+ * something failed or holds back shows a glyph in its tone instead, never a
+ * picture; with neither, it shows the drop-lobe mark. Every other attribute,
+ * such as a pinned `data-testid` or `role`, lands on the root. */
 export function EmptyState({
+  picture,
   icon: Icon,
   tone = "ghost",
   title,
-  hint,
   children,
   ...rest
-}: {
-  icon?: LucideIcon;
-  tone?: keyof typeof emptyGlyphToneClass;
+}: (
+  | { picture: ReactNode; icon?: never; tone?: never }
+  | { picture?: never; icon?: LucideIcon; tone?: keyof typeof emptyGlyphToneClass }
+) & {
   title: ReactNode;
-  hint?: string;
   children?: ReactNode;
 } & Omit<HTMLAttributes<HTMLDivElement>, "title" | "className" | "children">) {
+  if (picture) {
+    return (
+      <div {...rest} className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+        {/* The fade's mask gets its own layer: in the page's layer, software
+            rendering drops subpixel text across the page. */}
+        <span aria-hidden className="relative h-19 w-30 shrink-0 mask-b-from-58% will-change-transform">{picture}</span>
+        <span className="mt-3 max-w-60 text-[13px] text-balance text-muted wrap-anywhere">{title}</span>
+        {children ? <div className="mt-4 flex items-center gap-2">{children}</div> : null}
+      </div>
+    );
+  }
   const toneClass = emptyGlyphToneClass[tone];
   return (
     <div {...rest} className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
@@ -186,10 +202,7 @@ export function EmptyState({
       ) : (
         <DohcMark size={30} className={toneClass.mark} />
       )}
-      <div className="flex max-w-sm flex-col gap-1 text-balance wrap-anywhere">
-        <span className="text-sm text-muted">{title}</span>
-        {hint ? <span className="text-[11px] text-subtle">{hint}</span> : null}
-      </div>
+      <span className="max-w-sm text-sm text-balance text-muted wrap-anywhere">{title}</span>
       {children}
     </div>
   );
@@ -211,11 +224,20 @@ export function FieldError(props: { id: string; children: ReactNode; className?:
 
 /** A list or section whose read failed. Its words are in the toast and its
  * Notices row, reported through the shell's error hook; here the mark says it
- * failed and Try again reads again. */
-export function RetryRow(props: { testId: string; onRetry: () => void }) {
+ * failed and Try again reads again. A caller that passes `children` also shows
+ * that sentence beside the mark. It wraps, and Try again follows it on the same
+ * line when both fit. */
+export function RetryRow(props: { testId: string; onRetry: () => void; children?: ReactNode }) {
   return (
-    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
-      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+    <div data-testid={props.testId} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1">
+      {props.children ? (
+        <p className="m-0 flex min-w-0 items-start gap-1.5 text-[12px] leading-4 text-muted">
+          <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+          <span>{props.children}</span>
+        </p>
+      ) : (
+        <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+      )}
       <SecondaryButton size="compact" onClick={props.onRetry}>
         Try again
       </SecondaryButton>

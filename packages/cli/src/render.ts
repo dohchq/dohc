@@ -4,7 +4,7 @@ import type {
   CliResultByVerb,
 } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
-import { formatStreamPosition, messageMetadata, renderThreadMarkdown } from "./threadMarkdown";
+import { formatStreamPosition, messageMetadata, renderDecisionOptions, renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
 import { formatStoredBytes } from "./account";
 
@@ -81,6 +81,7 @@ function renderStream(stream: StreamResult): string {
   const read = stream.readPosition && formatStreamPosition(stream.readPosition);
   for (const item of stream.items) {
     const metadata = messageMetadata(item.message, item.post ? item.threadId : item.message.id);
+    if (item.message.decisionState) metadata.push(`needs-decision(${item.message.decisionState})`);
     const { post } = item;
     if (post) {
       metadata.push(countLabel(post.replyCount, "reply", "replies"));
@@ -91,6 +92,7 @@ function renderStream(stream: StreamResult): string {
       if (post.openDecisionCount > 0) metadata.push(`open decisions: ${post.openDecisionCount}`);
     }
     lines.push("", metadata.join(" · "), item.message.body);
+    lines.push(...renderDecisionOptions(item.message));
     if (post?.latestAgentReply) {
       const reply = post.latestAgentReply;
       lines.push(`> **${renderAuthorDisplayName(reply.author)}** · ${dateTime(reply.createdAtMs)} · ${reply.id}: ${lineSafe(reply.bodyExcerpt)}`);

@@ -118,6 +118,9 @@ export function NewPage(props: {
             </div>
           </div>
           <div className="dohc-notion-editor">
+            {/* The empty body shows its hint while the caret is still in the
+                title, where the editor draws it, so nothing changes when the
+                caret or the editor arrives. */}
             <textarea
               ref={bodyRef}
               aria-label="Page body"
@@ -135,7 +138,7 @@ export function NewPage(props: {
                 waitingEditor.current = null;
                 if (waiting) handOff(waiting);
               }}
-              className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 field-sizing-content [font:inherit] tracking-[inherit] text-ink outline-none placeholder:text-transparent focus:shadow-none! focus:placeholder:text-subtle"
+              className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 field-sizing-content [font:inherit] tracking-[inherit] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
             />
           </div>
         </div>

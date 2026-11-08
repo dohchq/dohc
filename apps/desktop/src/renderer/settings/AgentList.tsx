@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, AGENTS_RESTRICTED_MESSAGE, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
@@ -33,6 +33,7 @@ import { ownPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar, useAgentInk } from "../workbench/ChatAvatar";
 import { AgentDetails } from "./AgentDetails";
 import { SwitchControl } from "./SettingRow";
+import { ToolReadiness, type ReadinessTone } from "./ToolReadiness";
 
 export type AgentListRow =
   | { kind: "agent"; agent: Agent }
@@ -125,7 +126,7 @@ type CheckState = { status: "replied"; seconds: number } | { status: "failed" };
 const ROW = "border-b border-line last:border-b-0";
 const ROW_LINE = "flex items-center gap-3 py-4";
 const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
-const TILE_LINE = "mt-0.5 flex items-center gap-1 text-[12px]";
+const TILE_LINE = "mt-0.5 text-[12px]";
 const BUTTON_ICON = "inline-flex shrink-0 items-center gap-1.5";
 // Holds the place of a control the row does not have, so every row's controls line up.
 const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
@@ -173,6 +174,8 @@ function AgentNameField(props: {
       aria-invalid={error ? true : undefined}
       aria-describedby={error ? `agent-name-error-${props.agent.id}` : undefined}
       data-testid="agent-name-input"
+      data-unsaved={draft.trim() !== props.agent.name ? true : undefined}
+      data-edit-in-place
       value={draft}
       maxLength={MAX_PREFERRED_NAME_LENGTH}
       disabled={saving}
@@ -237,7 +240,10 @@ function AgentRow(props: {
   const { agent, editing, onEditingChange: setEditing } = props;
   const [menuOpen, setMenuOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const nameId = useId();
   const launched = agent.launch !== undefined;
+  // Only a switch turns an agent off, so only a row with one dims.
+  const off = launched && !agent.enabled;
   const state = !launched ? (
     <p className={`${STATE} text-muted`}><Plug size={12} aria-hidden />Through MCP</p>
   ) : props.checking ? (
@@ -255,7 +261,7 @@ function AgentRow(props: {
   return (
     <div data-testid="agent-row" data-agent-id={agent.id} className={ROW}>
       <div className={ROW_LINE}>
-        <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" />
+        <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" className={off ? "opacity-50" : undefined} />
         <div className="min-w-0 flex-1">
           {editing ? (
             <AgentNameField agent={agent} agents={props.agents} onSave={props.onRename} onDone={() => setEditing(false)} />
@@ -266,9 +272,9 @@ function AgentRow(props: {
                 title="Rename"
                 aria-label={`Rename ${agent.name}`}
                 onClick={() => setEditing(true)}
-                className="min-w-0 truncate rounded text-left text-[13px] font-medium text-ink"
+                className={`min-w-0 truncate rounded text-left text-[13px] font-medium ${off ? "text-muted" : "text-ink"}`}
               >
-                {agent.name}
+                <span id={nameId}>{agent.name}</span>
               </button>
               {props.forAutomations ? <AutomationChip hue={agent.hue} /> : null}
             </div>
@@ -288,7 +294,9 @@ function AgentRow(props: {
             </SecondaryButton>
           ) : null}
           {launched ? (
-            <SwitchControl label={`Turn on ${agent.name}`} checked={agent.enabled}
+            <SwitchControl label={agent.name} labelledBy={nameId}
+              tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`}
+              description={agent.enabled ? "Turn off" : "Turn on"} checked={agent.enabled}
               onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
           ) : switchSpace}
           <Menu
@@ -330,11 +338,11 @@ function toolTileState(tool: "claude" | "codex", tools: AgentToolsResult | null)
   return found.auth === "signed-out" ? { status: "sign-in" } : { status: "ready", executable: found.executable };
 }
 
-const TILE_STATE: Record<ToolTileState["status"], { text: string; className: string }> = {
-  ready: { text: "Ready", className: "text-success" },
-  "sign-in": { text: "Sign in first", className: "text-warning" },
-  update: { text: "Update first", className: "text-warning" },
-  "not-found": { text: "Not found", className: "text-muted" },
+const TILE_STATE: Record<ToolTileState["status"], { text: string; tone: ReadinessTone }> = {
+  ready: { text: "Ready", tone: "ready" },
+  "sign-in": { text: "Sign in first", tone: "blocked" },
+  update: { text: "Update first", tone: "blocked" },
+  "not-found": { text: "Not found", tone: "unknown" },
 };
 
 function AddTile(props: { title: string; state: ReactNode; disabled: boolean; hint?: string; onAdd: () => void }) {
@@ -372,7 +380,7 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
         <SecondaryButton onClick={props.onOpenSettingsFile} className={BUTTON_ICON}>
           <FilePenLine size={14} aria-hidden />Open settings file
         </SecondaryButton>
-        <SwitchControl label={`Turn on ${name}`} checked={false} disabled onChange={() => undefined} />
+        <SwitchControl label={name} checked={false} disabled onChange={() => undefined} />
         {menuSpace}
       </div>
     </div>
@@ -407,7 +415,7 @@ export function AgentList(props: {
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onClearError, onNotice } = props;
   const paused = useChatDispatchPaused((cause) =>
-    onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
+    onError?.(withErrorWords("dohc could not read whether agent replies are paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
@@ -451,8 +459,10 @@ export function AgentList(props: {
   const asking = props.trust?.asking ?? false;
   // Set while main's dialog answers the card's Trust workspace. When it
   // answers, focus that was on the band goes to the first thing trust turned
-  // on, or back to Trust workspace when the person stayed in Restricted Mode.
+  // on, or to the Agents heading when it turned on nothing. It goes back to
+  // Trust workspace when the person stayed in Restricted Mode.
   const card = useRef<HTMLDivElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const trustPressed = useRef(false);
   useEffect(() => {
     if (!trustPressed.current || asking) return;
@@ -460,9 +470,9 @@ export function AgentList(props: {
     const band = card.current?.querySelector(`[data-testid="restricted-agents-state"]`);
     const active = document.activeElement;
     if (active !== null && active !== document.body && !band?.contains(active)) return;
-    card.current?.querySelector<HTMLElement>(restricted
-      ? `[data-testid="restricted-agents-state"] button`
-      : `[data-testid="agent-check"]:not(:disabled), [data-testid="agent-add"] button:not(:disabled)`)?.focus();
+    (restricted
+      ? card.current?.querySelector<HTMLElement>(`[data-testid="restricted-agents-state"] button`)
+      : card.current?.querySelector<HTMLElement>(`[data-testid="agent-check"]:not(:disabled), [data-testid="agent-add"] button:not(:disabled)`) ?? heading.current)?.focus();
   }, [asking, restricted]);
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn, restricted);
   // Why Check can't start now. Try again on a toast can come at such a time.
@@ -517,16 +527,14 @@ export function AgentList(props: {
     setChecking(null);
   }, [onClearError, onError, requests, workspaceId]);
 
-  // A new agent takes the first free id and name. One dohc starts is on and
-  // is checked at once; one you run opens on its name.
-  const add = async (fields: Pick<AgentSettings, "name" | "launch" | "enabled">, idBase: string) => {
+  // A new agent takes the first free id and name, is on, and is checked at once.
+  const add = async (fields: Required<Pick<AgentSettings, "name" | "launch" | "enabled">>, idBase: string) => {
     const id = newAgentId([...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)], idBase);
     const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
-    if (!agent.launch) setRenaming(id);
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
-    if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
+    if (saved && !paused && checkNote === null) void check({ id, ...agent });
   };
 
   const neighbours = (id: string) => {
@@ -612,7 +620,7 @@ export function AgentList(props: {
 
   const setPaused = (next: boolean) => {
     void bridge().setChatDispatchPaused({ paused: next }).catch((cause: unknown) => onError?.(
-      withErrorWords(next ? "dohc could not pause agent dispatch." : "dohc could not resume agent dispatch.", cause),
+      withErrorWords(next ? "dohc could not pause agent replies." : "dohc could not resume agent replies.", cause),
       cause,
     ));
   };
@@ -621,7 +629,7 @@ export function AgentList(props: {
     <section data-testid="agent-list" aria-labelledby="agents-title">
       {/* The title sits where every Settings page title sits; the buttons beside it reach 4 px higher. */}
       <div className="-mt-1 mb-5 flex min-h-8 items-center gap-2">
-        <h3 id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
+        <h3 ref={heading} tabIndex={-1} id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
         <CopyButton
           key={workspaceId}
           label="Copy MCP config"
@@ -684,7 +692,7 @@ export function AgentList(props: {
             onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
           />
         ))}
-        <div data-testid="agent-add" className="grid grid-cols-3 gap-2 py-4 max-[640px]:grid-cols-1">
+        <div data-testid="agent-add" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
           {(["claude", "codex"] as const).map((tool) => {
             const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
             const found = toolTileState(tool, tools);
@@ -695,13 +703,11 @@ export function AgentList(props: {
                 disabled={found?.status !== "ready" || adding || checking !== null}
                 hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
                 state={found ? (
-                  <span className={`${TILE_LINE} ${TILE_STATE[found.status].className}`}>
-                    {found.status === "ready" ? <Check size={12} aria-hidden /> : null}{TILE_STATE[found.status].text}
-                  </span>
+                  <ToolReadiness tone={TILE_STATE[found.status].tone} className={TILE_LINE}>{TILE_STATE[found.status].text}</ToolReadiness>
                 ) : detection === "failed" ? (
-                  <span className={`${TILE_LINE} text-muted`}>Couldn't check</span>
+                  <span className={`${TILE_LINE} block text-muted`}>Couldn't check</span>
                 ) : (
-                  <span className={`${TILE_LINE} text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
+                  <span className={`${TILE_LINE} flex text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
                 )}
                 onAdd={() => {
                   if (found?.status === "ready") {
@@ -711,12 +717,6 @@ export function AgentList(props: {
               />
             );
           })}
-          <AddTile
-            title="Add one you run"
-            disabled={adding}
-            state={<span className={`${TILE_LINE} text-muted`}>Through MCP</span>}
-            onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
-          />
         </div>
       </div>
       <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">

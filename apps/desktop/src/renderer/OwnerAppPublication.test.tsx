@@ -563,15 +563,19 @@ describe("owner app publication", () => {
   describe("review on this device", () => {
     type LocalRow = Extract<OwnerAppPublicationResult, { kind: "localListed" }>["publications"][number];
     type Capability = Extract<OwnerAppPublicationResult, { kind: "prepared" }>["capabilities"][number];
-    const listOperation = { operationId: "00000000-0000-4000-8000-000000000003", name: "list", access: "helper" as const, readOnly: true };
-    const cancelOperation = { operationId: "00000000-0000-4000-8000-000000000007", name: "cancel", access: "link" as const, readOnly: false };
-    const submitOperation = datasetCapability.operations[0]!;
+    const listOperation = { operationId: "00000000-0000-4000-8000-000000000003", name: "list", access: "helper" as const, readOnly: true,
+      display: { kind: "read" as const, label: "View orders", fields: ["Item", "Status"] } };
+    const cancelOperation = { operationId: "00000000-0000-4000-8000-000000000007", name: "cancel", access: "link" as const, readOnly: false,
+      display: { kind: "action" as const, label: "Cancel order", fields: [] } };
+    const submitOperation = { ...datasetCapability.operations[0]!, display: { kind: "create" as const, label: "Submit", fields: ["Item", "Quantity"] } };
     const approvedAccess = { ...datasetCapability, operationIds: [listOperation.operationId, submitOperation.operationId], operations: [listOperation, submitOperation] };
     const grownAccess = { ...approvedAccess, operationIds: [...approvedAccess.operationIds, cancelOperation.operationId], operations: [listOperation, submitOperation, cancelOperation] };
     const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), datasetCapability: approvedAccess, approved: true, active: true };
     const collectionRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), approved: true, active: true, collectionCapability: approvedCollection, pendingCreates: 0 };
+    // An approved app that reaches no workspace data has no capability.
+    const unconnectedRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), approved: true, active: true };
     const checked: Extract<OwnerAppPublicationResult, { kind: "localChecked" }> = { kind: "localChecked", appRoot: "trip", sourceRevision: "b".repeat(64),
-      sourcePaths: ["trip/app.publish.json", "trip/main.tsx", "shared/theme.css"], declaresCollection: true };
+      sourcePaths: ["trip/app.publish.json", "trip/main.tsx", "shared/theme.css"] };
     const secondApproval = "0f6d2c1e-4b8a-4c3e-9d2f-1a2b3c4d5e6f";
     const checkFailed = "dohc could not check whether this app is approved on this device.";
 
@@ -596,6 +600,8 @@ describe("owner app publication", () => {
     const ready = () => waitFor(() => expect(approveButton().disabled).toBe(false));
     // The text beside Reads or Changes in the access box.
     const reach = (term: "Reads" | "Changes") => within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.textContent;
+    // Each line beside Reads or Changes.
+    const lines = (term: "Reads" | "Changes") => Array.from(within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.children ?? [], line => line.textContent);
     const dialog = () => screen.queryByTestId("app-publication-dialog");
 
     it("asks for a first approval, shows what the app reaches, and approves and opens it", async () => {
@@ -611,8 +617,8 @@ describe("owner app publication", () => {
       expect(actions("checkLocal")).toEqual([{ action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" }]);
       const access = screen.getByTestId("app-access");
       expect(within(access).getByText("Orders")).toBeTruthy();
-      expect(reach("Reads")).toBe("list");
-      expect(reach("Changes")).toBe("submit");
+      expect(reach("Reads")).toBe("Item, Status");
+      expect(reach("Changes")).toBe("Adds records with Item, Quantity");
       expect(within(access).queryByText("New")).toBeNull();
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
@@ -666,8 +672,8 @@ describe("owner app publication", () => {
       expect(await stateText()).toBe("Approved on this device");
       expect(actions("checkLocal")).toEqual([{ action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" }]);
       expect(actions("prepareLocal")).toEqual([]);
-      expect(reach("Reads")).toBe("list");
-      expect(reach("Changes")).toBe("submit");
+      expect(reach("Reads")).toBe("Item, Status");
+      expect(reach("Changes")).toBe("Adds records with Item, Quantity");
       expect(screen.queryByTestId("app-publication-approve")).toBeNull();
       expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
       expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
@@ -686,8 +692,9 @@ describe("owner app publication", () => {
       expect(await stateText()).toBe("Its source changed since you approved it.The app runs the approved version until you approve the changes.");
       await ready();
       expect(approveButton().textContent).toBe("Approve changes");
-      expect(reach("Reads")).toBe("list");
-      expect(reach("Changes")).toBe("submit, cancelNew");
+      expect(reach("Reads")).toBe("Item, Status");
+      // One line for each operation, and the New pill stays on the line it marks.
+      expect(lines("Changes")).toEqual(["Adds records with Item, Quantity", 'Runs "Cancel order"New']);
       expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
       expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
       await userEvent.setup().click(approveButton());
@@ -740,6 +747,65 @@ describe("owner app publication", () => {
       expect(reach("Reads")).toBe("destination, notesNew");
       expect(reach("Changes")).toBe("Adds records with destination, notesNew");
       expect(access.textContent).not.toContain("People with this share can read every response file");
+    });
+
+    type Display = NonNullable<Extract<Capability, { kind: "dataset" }>["operations"][number]["display"]>;
+    it.each<[string, Display, boolean, "Reads" | "Changes", string]>([
+      ["a read by the fields it reads", { kind: "read", label: "View entries", fields: ["Name", "Email"] }, true, "Reads", "Name, Email"],
+      ["a read that lists no fields as records", { kind: "read", label: "View entries", fields: [] }, true, "Reads", "Records"],
+      ["a create by the fields it adds", { kind: "create", label: "Submit", fields: ["Name", "Email"] }, false, "Changes", "Adds records with Name, Email"],
+      ["an edit by the fields it edits", { kind: "edit", label: "Fix entry", fields: ["Name", "Email"] }, false, "Changes", "Edits Name, Email"],
+      ["a delete", { kind: "delete", label: "Remove entry", fields: [] }, false, "Changes", "Deletes records"],
+      ["an action by its label", { kind: "action", label: "Archive old entries", fields: [] }, false, "Changes", 'Runs "Archive old entries"'],
+      ["a read-only action under Reads", { kind: "action", label: "Count entries", fields: [] }, true, "Reads", 'Runs "Count entries"'],
+    ])("says what %s does, not its operation name", async (_name, display, readOnly, term, words) => {
+      const operation = { operationId: submitOperation.operationId, name: "records.create", access: "link" as const, readOnly, display };
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: { ...datasetCapability, operations: [operation] } }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(lines(term)).toEqual([words]);
+      expect(screen.getByTestId("app-access").textContent).not.toContain("records.create");
+    });
+
+    // Past the size limit each operation keeps its kind and label without field names, so reads share their words.
+    const pastLimit = (removes: number) => {
+      const operations = [
+        ...Array.from({ length: 20 }, (_, n) => ({ operationId: `00000000-0000-4000-8000-${String(100 + n).padStart(12, "0")}`, name: `read${n}`, access: "helper" as const, readOnly: true,
+          display: { kind: "read" as const, label: `Read ${n}`, fields: [] } })),
+        ...Array.from({ length: removes }, (_, n) => ({ operationId: `00000000-0000-4000-8000-${String(200 + n).padStart(12, "0")}`, name: `remove${n}`, access: "helper" as const, readOnly: false,
+          display: { kind: "delete" as const, label: `Remove entry ${n}`, fields: [] } })),
+      ];
+      return { ...datasetCapability, operationIds: operations.map(operation => operation.operationId), operations };
+    };
+
+    it("shows operations with the same words as one line, as 20 reads past the size limit have", async () => {
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: pastLimit(1) }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(lines("Reads")).toEqual(["Records"]);
+      expect(lines("Changes")).toEqual(["Deletes records"]);
+    });
+
+    it("gives each action its own line, even with the same label, while deletes still share one", async () => {
+      const operation = (n: number, display: Display) => ({ operationId: `00000000-0000-4000-8000-${String(300 + n).padStart(12, "0")}`, name: `op${n}`, access: "helper" as const, readOnly: false, display });
+      const operations = [operation(0, { kind: "action", label: "Archive", fields: [] }), operation(1, { kind: "action", label: "Archive", fields: [] }),
+        operation(2, { kind: "delete", label: "Remove entry", fields: [] }), operation(3, { kind: "delete", label: "Clear entry", fields: [] })];
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: { ...datasetCapability, operationIds: operations.map(value => value.operationId), operations } }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(lines("Changes")).toEqual(['Runs "Archive"', 'Runs "Archive"', "Deletes records"]);
+    });
+
+    it("marks a shared line New when any of its operations is new", async () => {
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: pastLimit(1) }], { revision: "e".repeat(64), capabilities: [pastLimit(2)] }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(lines("Reads")).toEqual(["Records"]);
+      expect(lines("Changes")).toEqual(["Deletes recordsNew"]);
     });
 
     it("removes an approval in place and returns to a first review", async () => {
@@ -1081,13 +1147,17 @@ describe("owner app publication", () => {
       ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false }), () => api.cloudStatus],
       // main answers listUnavailable for the relay's not_found 404.
       ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request)), () => api.publishOwnerApp],
-      ["the sync status says the server is disconnected", () => {
-        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
-        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "cloud-disconnected" });
-      }, () => api.getSyncStatus],
       ["the sync status says the server is unreachable", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
         api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "sync-failed", syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 2 } });
+      }, () => api.getSyncStatus],
+      ["sync waits for dohc to update", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "update-required", updateRequired: "app" });
+      }, () => api.getSyncStatus],
+      ["sync waits for the server to update", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "update-required", updateRequired: "server" });
       }, () => api.getSyncStatus],
     ])("hides Share links when %s", async (_, arrange, decider) => {
       const reportError = vi.fn();
@@ -1106,6 +1176,23 @@ describe("owner app publication", () => {
       expect(screen.queryByRole("alert")).toBeNull();
       expect(reportError).not.toHaveBeenCalled();
     });
+
+    // The server isn't the cause when nobody is connected, dohc can't confirm
+    // the account, or the sign-in expired, so Share links says what it
+    // couldn't read instead of leaving it to the title bar.
+    it.each(["not-connected", "account-unconfirmed", "sign-in-expired"] as const)(
+      "keeps Share links with its line while the workspace can't sync (%s)",
+      async (state) => {
+        const reportError = vi.fn();
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state });
+        renderLocal({ reportError });
+        await openLocal();
+        const line = await screen.findByText(linksLine);
+        expect(screen.getByRole("region", { name: "Share links" }).contains(line)).toBe(true);
+        expect(api.getSyncStatus).toHaveBeenCalledWith({ workspaceId: "ws-trip" });
+      },
+    );
 
     it.each([
       ["a 5xx", "Error: Sharing failed (503)."],
@@ -1214,40 +1301,70 @@ describe("owner app publication", () => {
       expect(api.getSyncStatus).not.toHaveBeenCalled();
     });
 
-    it("opens an app that reaches no Collection on its links, as a plain site opens, and never prepares it", async () => {
-      const reportError = vi.fn();
-      const answers = local();
-      api.publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? { ...checked, declaresCollection: false } : answers(request));
-      renderLocal({ reportError });
-      await openLocal();
-      expect(await screen.findByRole("button", { name: "Prepare app" })).toBeTruthy();
-      expect(screen.getByRole("heading", { name: "Publications" })).toBeTruthy();
-      expect(screen.queryByTestId("app-review-state")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
-      expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
-      expect(actions("prepareLocal")).toEqual([]);
-      expect(reportError).not.toHaveBeenCalled();
-    });
-
-    it("asks only for a connection before publishing a synced app that reaches no Collection, since it has no approval here", async () => {
-      const answers = local();
-      api.publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? { ...checked, declaresCollection: false } : answers(request));
+    it("shows an app that reaches no workspace data as one muted row, and approves and opens it", async () => {
+      api.publishOwnerApp.mockImplementation(local([], { capabilities: [] }));
       renderLocal();
       await openLocal();
-      expect(await screen.findByText("Publishing on a link needs a connection to your dohc host.")).toBeTruthy();
-      expect(screen.queryByText(/Approval for this device does not/)).toBeNull();
-      expect(actions("prepareLocal")).toEqual([]);
+      expect(await stateText()).toBe("Approve it to run this version on this device.Later edits to its source wait for your approval.");
+      await ready();
+      const access = screen.getByTestId("app-access");
+      const row = within(access).getByText("No workspace data");
+      expect(row.className).toContain("text-muted");
+      expect(row.className).not.toContain("font-medium");
+      expect(within(access).queryByText("Reads")).toBeNull();
+      expect(within(access).queryByText("Changes")).toBeNull();
+      expect(within(access).queryByText("New")).toBeNull();
+      expect(access.textContent).toContain("It can send what it receives to other websites.");
+      expect(approveButton().textContent).toBe("Approve and open");
+      await userEvent.setup().click(approveButton());
+      await waitFor(() => expect(dialog()).toBeNull());
+      expect(actions("approve")).toEqual([{ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest }]);
     });
 
-    it("asks only for sync before publishing an unsynced app that reaches no Collection, since it can't open on this device", async () => {
-      const answers = local();
-      api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false });
-      api.publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? { ...checked, declaresCollection: false } : answers(request));
+    it("shows an unchanged approval of an app that reaches no workspace data without preparing it", async () => {
+      api.publishOwnerApp.mockImplementation(local([unconnectedRow]));
       renderLocal();
       await openLocal();
-      expect(await screen.findByText("Sync this workspace to publish on a share link.")).toBeTruthy();
-      expect(screen.queryByText(/Opening on this device does not need sync/)).toBeNull();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(within(screen.getByTestId("app-access")).getByText("No workspace data")).toBeTruthy();
       expect(actions("prepareLocal")).toEqual([]);
+      expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
+    });
+
+    it("marks a Collection New when changed source adds one to an app that reached no workspace data", async () => {
+      api.publishOwnerApp.mockImplementation(local([unconnectedRow], { revision: "e".repeat(64), capabilities: [approvedCollection] }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      const access = screen.getByTestId("app-access");
+      expect(within(access).getByText("responses")).toBeTruthy();
+      expect(within(access).queryByText("No workspace data")).toBeNull();
+      expect(reach("Reads")).toBe("destinationNew");
+      expect(reach("Changes")).toBe("Adds records with destinationNew");
+      expect(within(access).getAllByText("New")).toHaveLength(2);
+      expect(approveButton().textContent).toBe("Approve changes");
+    });
+
+    it("shows No workspace data when changed source drops the app's last Collection", async () => {
+      api.publishOwnerApp.mockImplementation(local([collectionRow], { revision: "e".repeat(64), capabilities: [] }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      const access = screen.getByTestId("app-access");
+      expect(within(access).getByText("No workspace data")).toBeTruthy();
+      expect(within(access).queryByText("responses")).toBeNull();
+      expect(within(access).queryByText("New")).toBeNull();
+      expect(access.textContent).toContain("It can send what it receives to other websites.");
+      expect(approveButton().textContent).toBe("Approve changes");
+    });
+
+    it("says nothing about data for an ended approval of an app that reaches no workspace data", async () => {
+      api.publishOwnerApp.mockImplementation(local([{ ...unconnectedRow, approved: false, active: false }], { capabilities: [] }));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toContain("Approve it to run this version on this device.");
+      await ready();
+      expect(screen.queryByText(/Its data is not active here/)).toBeNull();
     });
 
     it("ignores an approvals answer that arrives after the workspace changed", async () => {

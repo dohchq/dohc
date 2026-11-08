@@ -11,6 +11,8 @@ export interface NamedChatChannel {shareId: string; userId: string; channelWireI
 export interface NamedChatMessage {
   relaySeq: number; messageId: string; threadId: string; authorUserId: string | null; authorDisplayName: string;
   authorKind: "human" | "agent" | "automation" | "link"; authorOwnerDisplayName: string | null; createdAtMs: number; body: string | null;
+  /** A link author that is an agent, signed in with the link. */
+  linkAgent: boolean;
 }
 
 /**
@@ -53,10 +55,13 @@ export function chatMessage(value: unknown): NamedChatMessage {
       (value.authorOwnerDisplayName !== null && typeof value.authorOwnerDisplayName !== "string") ||
       // A link holder has no account.
       (value.authorKind === "link" && (value.authorUserId !== null || value.authorOwnerDisplayName !== null)) ||
+      // Only a link post can come from an agent connection.
+      (value.linkAgent !== undefined && value.linkAgent !== false && !(value.linkAgent === true && value.authorKind === "link")) ||
       !Number.isSafeInteger(value.createdAtMs) || !Number.isSafeInteger(value.relaySeq) || Number(value.relaySeq) <= 0) throw invalid();
   return {relaySeq: Number(value.relaySeq), messageId: String(value.messageId), threadId: String(value.threadId),
     authorUserId: value.authorUserId, authorDisplayName: String(value.authorDisplayName), authorKind: value.authorKind,
-    authorOwnerDisplayName: value.authorOwnerDisplayName, createdAtMs: Number(value.createdAtMs), body: value.body};
+    authorOwnerDisplayName: value.authorOwnerDisplayName, createdAtMs: Number(value.createdAtMs), body: value.body,
+    linkAgent: value.linkAgent === true};
 }
 
 function page(value: Record<string, unknown>, channel: NamedChatChannel): NamedChatMessage[] {

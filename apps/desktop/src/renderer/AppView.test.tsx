@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, configure, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
@@ -7,7 +7,7 @@ import type { SitePackageInfo } from "../ipc/bridgeContract";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { deferred } from "../testing/deferred";
-import { APP_CRASHED, APP_DOWNLOAD_BLOCKED, APP_LIMIT, APP_NEEDS_LINK, APP_OPEN_FAILED, APP_SESSION_ENDED } from "./AppView";
+import { APP_CRASHED, APP_DOWNLOAD_BLOCKED, APP_LIMIT, APP_OPEN_FAILED, APP_SESSION_ENDED } from "./AppView";
 import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
 import { SitePreviewPage } from "./SitePreviewPage";
 
@@ -204,31 +204,20 @@ describe("an owner app in its tab", () => {
     expect(guest.focus.mock.contexts.at(-1)).toBe(webview());
   });
 
-  it("offers to publish an app that uses no Collection on a link, since it can't be approved here", async () => {
+  it("offers Review and open app for an app that reaches no workspace data, and opens it here once approved", async () => {
     approved = false;
-    const checked = { kind: "localChecked" as const, appRoot: "preorders", sourceRevision: "b".repeat(64), sourcePaths: ["preorders/frontend.js"], declaresCollection: false };
+    const checked = { kind: "localChecked" as const, appRoot: "preorders", sourceRevision: "b".repeat(64), sourcePaths: ["preorders/frontend.js"] };
     publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? checked : publication(request));
     const user = userEvent.setup();
     render(<Page />);
-    expect(await screen.findByText(APP_NEEDS_LINK)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Review and open app" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Publish on a link" }));
-    // Review app opens on publishing it on a link. This workspace isn't synced, so that view asks for sync first.
-    expect(await screen.findByText("Sync this workspace to publish on a share link.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Approve and open" })).toBeNull();
-    expect(publishOwnerApp.mock.calls.some(([request]) => request.action === "prepareLocal")).toBe(false);
-  });
-
-  it("still offers review when the source check fails, so Review app can report it", async () => {
-    approved = false;
-    publishOwnerApp.mockImplementation(async request => {
-      if (request.action === "checkLocal") throw new Error("source unreadable");
-      return publication(request);
-    });
-    render(<Page />);
     expect(await screen.findByText("Review this app to open it here.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.queryByText(APP_NEEDS_LINK)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Review and open app" }));
+    const approve = await screen.findByRole("button", { name: "Approve and open" }) as HTMLButtonElement;
+    await waitFor(() => expect(approve.disabled).toBe(false));
+    expect(within(screen.getByTestId("app-access")).getByText("No workspace data")).toBeTruthy();
+    await user.click(approve);
+    await screen.findByTestId("app-view-webview");
+    expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
   });
 
   it("reports a failed open once, offers Try again in the body, and takes the notice back when the app opens", async () => {
@@ -383,13 +372,100 @@ describe("an owner app in its tab", () => {
       .toEqual([["p", "KeyP", true, false, false, false]]);
   });
 
-  it("puts focus in the app when its tab becomes the focused one", async () => {
-    const view = render(<Page focused={false} />);
+  it("puts focus in the app when its tab becomes the shown one", async () => {
+    const view = render(<Page visible={false} focused={false} />);
     await openedView();
     expect(guest.focus).not.toHaveBeenCalled();
-    view.rerender(<Page focused />);
+    view.rerender(<Page visible focused />);
     expect(guest.focus).toHaveBeenCalledOnce();
     expect(guest.focus.mock.contexts[0]).toBe(webview());
+  });
+
+  // Runs after any timer the app set before it.
+  const handled = () => act(() => new Promise(resolve => setTimeout(resolve)));
+
+  it("leaves focus where it went when focus in its group makes the shown app's group the focused one", async () => {
+    const tab = document.body.appendChild(document.createElement("button"));
+    try {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      tab.focus();
+      view.rerender(<Page visible focused />);
+      await handled();
+      expect(guest.focus).not.toHaveBeenCalled();
+    } finally {
+      tab.remove();
+    }
+  });
+
+  it("puts focus in the app each time its tab is pressed, also when the tab was already shown", async () => {
+    const tab = document.body.appendChild(document.createElement("button"));
+    try {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      tab.focus();
+      view.rerender(<Page visible focused />);
+      view.rerender(<Page visible focused focusRequest={1} />);
+      expect(guest.focus).toHaveBeenCalledOnce();
+      // Another app's tab was pressed.
+      view.rerender(<Page visible focused focusRequest={0} />);
+      expect(guest.focus).toHaveBeenCalledOnce();
+      view.rerender(<Page visible focused focusRequest={3} />);
+      expect(guest.focus).toHaveBeenCalledTimes(2);
+    } finally {
+      tab.remove();
+    }
+  });
+
+  describe("when its group becomes the focused one with focus on the page or the group's own area", () => {
+    let group: HTMLElement;
+    beforeEach(() => {
+      group = document.body.appendChild(document.createElement("section"));
+      group.dataset.focusSurface = "editor";
+      group.tabIndex = -1;
+    });
+    afterEach(() => group.remove());
+
+    it("puts focus in the app, as when the other group closes", async () => {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      // Focus fell to the page.
+      view.rerender(<Page visible focused />);
+      await waitFor(() => expect(guest.focus).toHaveBeenCalledOnce());
+      view.rerender(<Page visible focused={false} />);
+      // Focus fell back to the app's group itself.
+      group.dataset.active = "";
+      group.focus();
+      view.rerender(<Page visible focused />);
+      await waitFor(() => expect(guest.focus).toHaveBeenCalledTimes(2));
+    });
+
+    it("leaves focus on the group's blank area when a press there made the group the focused one", async () => {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      // The press makes the group the focused one, then the browser focuses the area pressed.
+      view.rerender(<Page visible focused />);
+      group.dataset.active = "";
+      fireEvent.mouseDown(group);
+      group.focus();
+      await handled();
+      expect(guest.focus).not.toHaveBeenCalled();
+    });
+
+    it("leaves focus where a closing palette put it back", async () => {
+      const control = document.body.appendChild(document.createElement("button"));
+      try {
+        const view = render(<Page visible focused={false} />);
+        await openedView();
+        // The palette closes with the other group, so focus falls to the page before the palette puts it back.
+        view.rerender(<Page visible focused />);
+        control.focus();
+        await handled();
+        expect(guest.focus).not.toHaveBeenCalled();
+      } finally {
+        control.remove();
+      }
+    });
   });
 
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {

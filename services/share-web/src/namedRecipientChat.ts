@@ -11,7 +11,7 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function message(value: unknown): boolean {
-  if (!record(value) || Object.keys(value).sort().join() !== "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,messageId,relaySeq,threadId") return false;
+  if (!record(value) || Object.keys(value).sort().join() !== "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,linkAgent,messageId,relaySeq,threadId") return false;
   return ["messageId", "threadId", "authorDisplayName"].every(key => typeof value[key] === "string") &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
     ((value.bodyTooLarge === true && value.body === null) || (value.bodyTooLarge === false && typeof value.body === "string")) &&
@@ -19,6 +19,8 @@ function message(value: unknown): boolean {
     (value.authorOwnerDisplayName === null || typeof value.authorOwnerDisplayName === "string") &&
     // A link holder has no account.
     (value.authorKind !== "link" || (value.authorUserId === null && value.authorOwnerDisplayName === null)) &&
+    // Only a link post can come from an agent connection.
+    (value.linkAgent === false || (value.linkAgent === true && value.authorKind === "link")) &&
     Number.isSafeInteger(value.createdAtMs) && Number.isSafeInteger(value.relaySeq) && Number(value.relaySeq) > 0;
 }
 

@@ -1483,6 +1483,7 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     let link = Some(ChatMessageLinkAuthor {
         grant_id: "grant-1".to_owned(),
         principal_id: "principal-1".to_owned(),
+        agent_connection_id: None,
     });
     assert_eq!(read.link_author, link);
     let mention: String = engine
@@ -1549,6 +1550,9 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         ("linkGrantId", json!(" grant-1")),
         ("linkPrincipalId", json!("")),
         ("linkPrincipalId", json!("principal-2")),
+        ("agentConnectionId", json!("")),
+        ("agentConnectionId", json!(" connection-1")),
+        ("agentConnectionId", json!(1)),
         ("authorKind", json!("human")),
         ("messageId", json!("forged")),
     ] {
@@ -1608,6 +1612,61 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         apply_chat_envelope(&mut engine, &at_cap, &NoFaults).expect("link message at the cap"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
+}
+
+/// An agent that joined with a link posts as that link, and its post also
+/// names the agent connection the relay authenticated.
+#[test]
+fn a_link_agent_post_replays_with_its_agent_connection() {
+    use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let mut payload = link_message_payload("link-message:agent", "Done");
+    payload["agentConnectionId"] = json!("connection-1");
+    let message = envelope(LINK_ORIGIN, 0, "chat.message.append", payload);
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults).expect("agent link message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let read = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message:agent")
+        .expect("read the agent link message");
+    let agent = Some(ChatMessageLinkAuthor {
+        grant_id: "grant-1".to_owned(),
+        principal_id: "principal-1".to_owned(),
+        agent_connection_id: Some("connection-1".to_owned()),
+    });
+    assert_eq!(read.link_author, agent);
+
+    // A post that waits for its thread replays with its connection.
+    let mut early = link_message_payload("link-message:agent-early", "Early");
+    early["threadId"] = json!("late-thread");
+    early["agentConnectionId"] = json!("connection-1");
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(LINK_ORIGIN, 1, "chat.message.append", early),
+        &NoFaults,
+    )
+    .expect("parked agent link message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let replayed = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message:agent-early")
+        .expect("read the replayed agent link message");
+    assert_eq!(replayed.link_author, agent);
 }
 
 /// Only the relay names a message with the link message prefix. A device's
@@ -2054,6 +2113,9 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![
                 group_message("peer", 3, "m-1", "thread-imported", "human", "/task One"),
                 group_message("peer", 4, "m-2", "thread-imported", "human", "/task Two"),
@@ -2061,6 +2123,7 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let pull = |engine: &mut EngineStore| {
         client.pull_chat_workspace(
@@ -6429,5 +6492,124 @@ fn a_parked_agent_message_keeps_its_report_and_a_bad_parked_report_is_refused() 
             "{bad}"
         );
         assert_eq!(stored(&engine), 0, "{bad}");
+    }
+}
+
+/// A build that did not know `agentConnectionId` parked it unchecked. Replay
+/// keeps a good one on a link message, and refuses one on another message or
+/// one not in its stored form instead of failing the thread.
+#[test]
+fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() {
+    use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
+
+    // Parks `message` before its thread exists, then plants `connection`
+    // in its payload as an older build kept it.
+    fn park(engine: &mut EngineStore, message: &ReplicationEnvelope, connection: &str) {
+        imported_chat_fixture(engine, "peer");
+        assert_eq!(
+            apply_chat_envelope(engine, message, &NoFaults).expect("park"),
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+        );
+        assert_eq!(pending_chat_coordinate_count(engine), 1);
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log \
+                     SET payload_json=json_set(payload_json,'$.agentConnectionId',?1) \
+                     WHERE origin_id=?2 AND origin_seq=0",
+                    params![connection, message.origin_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("park the connection an older build kept");
+    }
+
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
+    );
+    let mut link_payload = link_message_payload("link-message:parked", "Early");
+    link_payload["threadId"] = json!("late-thread");
+    let link = envelope(LINK_ORIGIN, 0, "chat.message.append", link_payload);
+    let human = envelope(
+        "message-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "parked",
+            "threadId": "late-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Early",
+            "createdAtMs": 30
+        }),
+    );
+    let stored = |engine: &EngineStore| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE thread_id = 'late-thread'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("count messages")
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    park(&mut engine, &link, "connection-1");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .get_message("ws", "link-message:parked")
+            .expect("replayed link message")
+            .link_author,
+        Some(ChatMessageLinkAuthor {
+            grant_id: "grant-1".to_owned(),
+            principal_id: "principal-1".to_owned(),
+            agent_connection_id: Some("connection-1".to_owned()),
+        })
+    );
+
+    for (message, bad) in [
+        (&human, "connection-1"),
+        (&link, " connection-1"),
+        (&link, "connection-\u{1}"),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        park(&mut engine, message, bad);
+        let ApplyOutcome {
+            primary,
+            refusals,
+            sharing_declined,
+        } = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread applies");
+        assert!(sharing_declined.is_empty());
+        assert_eq!(primary, ApplyDisposition::Applied(Vec::new()), "{bad:?}");
+        assert_eq!(
+            refusals,
+            vec![ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: message.origin_id.clone(),
+                origin_seq: 0,
+                op_kind: "chat.message.append".to_owned(),
+                reason: RefusalReason::InvalidInput {
+                    reason: "pending chat message link author is invalid".to_owned(),
+                },
+            }],
+            "{bad:?}"
+        );
+        assert_eq!(stored(&engine), 0, "{bad:?}");
     }
 }

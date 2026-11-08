@@ -75,11 +75,11 @@ async function announced(): Promise<string> {
 }
 
 describe("CopyButton feedback", () => {
-  it.each(["Copied", "Couldn't copy"] as const)(
+  it.each(["Copied", "Could not copy"] as const)(
     "keeps the original reset deadline when unavailable text follows %s",
     async (feedback) => {
       const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-      if (feedback === "Couldn't copy") writeText.mockRejectedValueOnce(new Error("unavailable"));
+      if (feedback === "Could not copy") writeText.mockRejectedValueOnce(new Error("unavailable"));
       const getText = vi.fn<() => string | null>().mockReturnValueOnce("first").mockReturnValue(null);
       render(<CopyButton getText={getText} testId="copy" />);
       const button = screen.getByTestId("copy");
@@ -226,6 +226,39 @@ describe("CopyButton feedback", () => {
   });
 });
 
+describe("CopyButton tone", () => {
+  // Every class on the control and inside it.
+  const classes = (id: string) =>
+    [screen.getByTestId(id), ...screen.getByTestId(id).querySelectorAll("*")].map((el) => el.getAttribute("class") ?? "").join(" ");
+
+  it("keeps the control's own tone at Copied, and danger for a failed copy", async () => {
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    render(
+      <>
+        <CopyButton getText={() => "text"} testId="words" />
+        <CopyButton iconOnly getText={() => "text"} testId="tile" />
+      </>,
+    );
+
+    await click(screen.getByTestId("words"));
+    await click(screen.getByTestId("tile"));
+    expect(screen.getByTestId("words").textContent).toBe("Copied");
+    expect(screen.getByTestId("tile").getAttribute("title")).toBe("Copied");
+    expect(classes("words")).not.toContain("text-success");
+    expect(classes("tile")).not.toContain("text-success");
+    expect(screen.getByTestId("tile").getAttribute("class")).toContain("bg-hover text-ink");
+
+    await act(() => vi.advanceTimersByTimeAsync(COPY_FEEDBACK_MS));
+    writeText.mockRejectedValue(refusal());
+    await click(screen.getByTestId("words"));
+    await click(screen.getByTestId("tile"));
+    expect(screen.getByTestId("words").textContent).toBe("Could not copy");
+    expect(screen.getByTestId("words").querySelector("svg")?.getAttribute("class")).toContain("text-danger");
+    expect(screen.getByTestId("tile").getAttribute("title")).toBe("Could not copy");
+    expect(screen.getByTestId("tile").getAttribute("class")).toContain("bg-hover text-danger");
+  });
+});
+
 describe("CopyButton failure", () => {
   it("says a refused copy in place and reports it, reason second, with a Try again that reads the text afresh", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
@@ -235,8 +268,8 @@ describe("CopyButton failure", () => {
     const button = screen.getByTestId("copy");
 
     await click(button);
-    expect(button.textContent).toBe("Couldn't copy");
-    expect(await announced()).toBe("Couldn't copy");
+    expect(button.textContent).toBe("Could not copy");
+    expect(await announced()).toBe("Could not copy");
     expect(report).toHaveBeenCalledExactlyOnceWith({
       message: `dohc could not copy to the clipboard. ${REFUSED}`,
       cause: refusal(),
@@ -257,7 +290,7 @@ describe("CopyButton failure", () => {
     render(withReporter(report, <CopyButton getText={() => Promise.reject(projection)} testId="copy" />));
 
     await click(screen.getByTestId("copy"));
-    expect(screen.getByTestId("copy").textContent).toBe("Couldn't copy");
+    expect(screen.getByTestId("copy").textContent).toBe("Could not copy");
     expect(writeText).not.toHaveBeenCalled();
     expect(report).toHaveBeenCalledWith({
       message: "dohc could not copy to the clipboard. The draft could not be read.",
@@ -271,7 +304,7 @@ describe("CopyButton failure", () => {
     render(<CopyButton iconOnly label="Copy" getText={() => "text"} testId="copy" />);
 
     await click(screen.getByTestId("copy"));
-    expect(screen.getByTestId("copy").getAttribute("title")).toBe("Couldn't copy");
+    expect(screen.getByTestId("copy").getAttribute("title")).toBe("Could not copy");
   });
 
   // A secret's failure names it. While its button is on screen, Try again is

@@ -177,6 +177,20 @@ async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
 }
 
 describe("chat over a file share", () => {
+  it("reads a named share without a received-identity key", async () => {
+    const storage = await testStorage();
+    const h = testHandler(storage, {linkKey: undefined});
+    await seedWorkspace(h);
+    const shareId = await createShare(h, "view");
+    const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0&includeReferences=true`));
+    expect(response.status).toBe(200);
+    const page = await json(response);
+    expect(page.ops).not.toEqual([]);
+    expect(page).not.toHaveProperty("workReferences");
+    expect(page).not.toHaveProperty("nextReferenceAfter");
+    expect(page).not.toHaveProperty("referenceHasMore");
+  });
+
   it("keeps received tokens on rows arriving during a held named-share read", async () => {
     const storage = await testStorage();
     const activity = new DiscussionActivityHub();
@@ -200,7 +214,12 @@ describe("chat over a file share", () => {
         }) }),
       ]);
       const immediate = await json(await h(request(RECIPIENT, path + initial.nextCursor)));
-      expect(page).toEqual(immediate);
+      const {nextReferenceAfter: heldCursor, ...heldPage} = page;
+      const {nextReferenceAfter: immediateCursor, ...immediatePage} = immediate;
+      expect(heldPage).toEqual(immediatePage);
+      expect(heldCursor).toBeTypeOf("string");
+      expect(immediateCursor).toBeTypeOf("string");
+      expect(heldCursor).toHaveLength(String(immediateCursor).length);
       expect(activity.stats().waiters).toBe(0);
     } finally {
       controller.abort();

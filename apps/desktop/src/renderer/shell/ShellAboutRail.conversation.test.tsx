@@ -438,16 +438,21 @@ describe("Links for an open conversation", () => {
     expect(screen.queryByTestId("about-links-toggle")).toBeNull();
   });
 
-  it("names an agent or an automation as one to a screen reader, as the avatar shows it", async () => {
+  it("names an agent, an automation or a link holder as one to a screen reader, as the avatar shows it", async () => {
     const automation = { kind: "automation", displayName: "Stamp the date", presentation: { group: "stamp", hue: null, self: false } } as const;
+    const linkAgent = { kind: "link", linkAgent: true, displayName: "Claude Code", presentation: { group: "7", hue: null, self: false } } as const;
+    const linkHolder = { kind: "link", displayName: "Wren", presentation: { group: "8", hue: null, self: false } } as const;
     bridgeMock.chatLinks.mockResolvedValue(linksPage([
-      mention("data/funnel.csv", NOVA, 3), mention("notes/plan.md", automation, 2), mention("notes/brief.md", SAM, 1),
+      mention("data/funnel.csv", NOVA, 5), mention("notes/plan.md", automation, 4), mention("notes/brief.md", SAM, 3),
+      mention("trip/cabin.md", linkAgent, 2), mention("trip/cabin.md", linkHolder, 1),
     ]));
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     const rows = await screen.findAllByRole("button", { name: /Mentioned by/ });
     expect(rows.map((row) => row.textContent?.slice(row.textContent.indexOf("Mentioned by")))).toEqual([
       "Mentioned by agent Nova", "Mentioned by automation Stamp the date", "Mentioned by Sam Rivera",
+      // An agent that joined with a link is an agent, then a link holder, as beside its posts.
+      "Mentioned by agent link holder Claude Code, link holder Wren",
     ]);
     // The words are for screen readers; the avatar's shape shows the kind.
     const words = screen.getAllByText(/^(agent|automation)$/);
@@ -492,16 +497,22 @@ describe("Links for an open conversation", () => {
     );
   });
 
-  it("files a failed read in Notices with Try again, and a read that lands clears it", async () => {
-    const error = new Error("disk is busy");
+  // The row says only what failed. Its notice says that first, then why
+  // when the error says.
+  it.each([
+    ["a known reason", new Error("Error [EBUSY]: EBUSY: resource busy or locked"),
+      "dohc could not load the links. Another program is using this file or folder."],
+    ["its own words", new Error("The disk is busy."), "dohc could not load the links. The disk is busy."],
+    ["no words", new Error(""), "dohc could not load the links."],
+  ])("files a failed read with %s in Notices with Try again, and a read that lands clears it", async (_why, error, message) => {
     bridgeMock.chatLinks.mockRejectedValueOnce(error).mockResolvedValueOnce(linksPage([mention("data/funnel.csv", NOVA, 1)]));
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     const failed = await screen.findByTestId("about-conversation-links-failed");
-    expect(failed.textContent).toBe("Try again");
+    expect(failed.textContent).toBe("dohc could not load the links.Try again");
     expect(notices.report).toHaveBeenCalledExactlyOnceWith({
       identity: "about-conversation-links:wire-general",
-      message: expect.stringContaining("disk is busy"),
+      message,
       cause: error,
       retry: expect.any(Function),
     });

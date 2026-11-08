@@ -1,6 +1,6 @@
 import { DohcMark } from "@dohc/brand";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FolderOpen, Laptop, Link, MoreHorizontal, type LucideIcon } from "lucide-react";
+import { FolderOpen, Laptop, Link, ListMinus, MoreHorizontal, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -123,7 +123,7 @@ function WorkspaceRow(props: {
       data-testid="workspace-manager-row"
       data-workspace-id={props.workspace.workspaceId}
       className={`group relative flex items-center gap-2 rounded-lg px-3 py-2.5 transition-colors ${
-        props.current ? "bg-selected" : "hover:bg-hover"
+        props.current ? "bg-selected font-medium" : "hover:bg-hover"
       }`}
     >
       <button
@@ -489,6 +489,7 @@ export function WorkspaceManager(props: {
       </div>
       {removing ? (
         <ConfirmDialog
+          icon={ListMinus}
           title={`Remove ${workspaceName(removing.workspace)} from this list?`}
           confirmLabel={removing.busy ? "Removing…" : "Remove from list"}
           confirmDisabled={removing.busy}
@@ -501,10 +502,10 @@ export function WorkspaceManager(props: {
           onConfirm={() => void confirmRemoval(removing.workspace)}
         >
           {removalFacts(removing.workspace).map((fact) => (
-            <p key={fact} className="m-0 mt-2 text-[13px] text-muted">{fact}</p>
+            <p key={fact} className="m-0">{fact}</p>
           ))}
           {removing.error ? (
-            <p data-testid="workspace-remove-error" role="alert" className="m-0 mt-3 text-[13px] text-danger">
+            <p data-testid="workspace-remove-error" role="alert" className="m-0 text-danger">
               {removing.error}
             </p>
           ) : null}

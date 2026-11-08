@@ -2,10 +2,10 @@
 //! one list, oldest first, read a page at a time from the newest end.
 
 use super::{
-    ChatActorKind, ChatChannel, ChatMessage, ChatMessageLinkAuthor, ChatReaction, ChatThread,
-    ChatThreadLane, FEED_LIMIT_MAX, LinkedChatStore, active_reactions_for_messages, collect,
-    hydrate_attachments_for_messages, map_message_row, message_count_for_thread,
-    persisted_nonnegative_safe, require_channel, require_thread,
+    ChatActorKind, ChatChannel, ChatDecision, ChatMessage, ChatMessageLinkAuthor, ChatReaction,
+    ChatThread, ChatThreadLane, FEED_LIMIT_MAX, LinkedChatStore, active_reactions_for_messages,
+    collect, hydrate_attachments_for_messages, map_decision_row, map_message_row,
+    message_count_for_thread, persisted_nonnegative_safe, require_channel, require_thread,
 };
 use crate::error::DomainError;
 use rusqlite::{Connection, params};
@@ -127,6 +127,7 @@ pub struct StreamAgentRequest {
 pub struct StreamItem {
     pub position: StreamPosition,
     pub message: ChatMessage,
+    pub decision: Option<ChatDecision>,
     pub reactions: Vec<ChatReaction>,
     pub agent_requests: Vec<StreamAgentRequest>,
     /// Set for, and only for, a post.
@@ -155,7 +156,7 @@ pub struct ThreadWithChannel {
 const MESSAGE_COLUMNS: &str = "workspace_id, thread_id, message_order, message_id, author_kind, \
      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
      author_owner_display_name, automation_id, chain_depth, author_actor_key, link_grant_id, \
-     link_principal_id, author_agent_id, author_reported";
+     link_principal_id, author_agent_id, author_reported, agent_connection_id";
 
 fn corrupt(reason: &'static str) -> DomainError {
     DomainError::StateCorrupt { reason }
@@ -316,6 +317,7 @@ impl<'a> LinkedChatStore<'a> {
             hydrate_attachments_for_messages(conn, workspace_id, messages.values_mut())?;
             let mut agent_replies = messages_by_id(conn, workspace_id, &agent_reply_ids)?;
             let mut reactions = active_reactions_for_messages(conn, workspace_id, &item_ids)?;
+            let mut decisions = decisions_for_messages(conn, workspace_id, &item_ids)?;
             let mut requests = agent_requests_for_messages(conn, workspace_id, &item_ids)?;
 
             let mut items = Vec::with_capacity(keys.len());
@@ -348,6 +350,7 @@ impl<'a> LinkedChatStore<'a> {
                     .remove(&message_id)
                     .ok_or_else(|| corrupt("stream item message is missing"))?;
                 items.push(StreamItem {
+                    decision: decisions.remove(&message_id),
                     reactions: reactions.remove(&message_id).unwrap_or_default(),
                     agent_requests: requests.remove(&message_id).unwrap_or_default(),
                     position,
@@ -503,12 +506,13 @@ fn post_repliers(
     let mut stmt = conn
         .prepare_cached(
             "SELECT m.thread_id, m.author_kind, m.author_display_name, m.author_user_id, \
-                    MAX(m.created_at_ms) AS at, m.link_grant_id, m.link_principal_id, m.author_agent_id \
+                    MAX(m.created_at_ms) AS at, m.link_grant_id, m.link_principal_id, m.author_agent_id, \
+                    m.agent_connection_id \
              FROM json_each(?2) ids \
              CROSS JOIN chat_messages m ON m.workspace_id = ?1 AND m.thread_id = ids.value \
              WHERE m.message_id NOT IN (SELECT value FROM json_each(?3)) \
              GROUP BY m.thread_id, m.author_kind, m.author_display_name, m.author_user_id, \
-                      m.link_grant_id, m.link_principal_id, m.author_agent_id",
+                      m.link_grant_id, m.link_principal_id, m.author_agent_id, m.agent_connection_id",
         )
         .map_err(DomainError::sql_corrupt)?;
     let rows = stmt
@@ -523,10 +527,12 @@ fn post_repliers(
                 let link_grant_id: Option<String> = row.get(5)?;
                 let link_principal_id: Option<String> = row.get(6)?;
                 let author_agent_id: Option<String> = row.get(7)?;
+                let agent_connection_id: Option<String> = row.get(8)?;
                 let link_author = match (link_grant_id, link_principal_id) {
                     (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
                         grant_id,
                         principal_id,
+                        agent_connection_id,
                     }),
                     _ => None,
                 };
@@ -560,6 +566,34 @@ fn post_repliers(
         repliers.truncate(STREAM_REPLIERS_MAX);
     }
     Ok(grouped)
+}
+
+fn decisions_for_messages(
+    conn: &Connection,
+    workspace_id: &str,
+    message_ids: &[String],
+) -> Result<HashMap<String, ChatDecision>, DomainError> {
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms, \
+                    d.options_json, d.chosen_option \
+             FROM json_each(?2) ids \
+             CROSS JOIN chat_decisions d ON d.workspace_id = ?1 AND d.message_id = ids.value",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, json_ids(message_ids)?],
+            map_decision_row,
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(collect(rows)?
+        .into_iter()
+        .map(|decision| (decision.message_id.clone(), decision))
+        .collect())
 }
 
 fn messages_by_id(

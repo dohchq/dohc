@@ -142,9 +142,12 @@ export interface ToolContext {
   // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
   // The only tools to offer, from repeated --tool flags, within the share
-  // level's. Absent offers all of the level's tools. A dohc agent run offers
-  // only the reply tool.
+  // level's. Absent offers all of the level's tools. The self-test of a dohc
+  // agent run offers only the reply tool.
   tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
+  // The local agent run this server works for, from DOHC_RUN_ID. A chat
+  // write that names no run names this one.
+  runId?: string;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
   request?: (request: CliRequestWithoutToken, options?: { signal?: AbortSignal }) => Promise<unknown>;
@@ -2095,9 +2098,11 @@ export function reportedAgent(
   };
 }
 
-function chatWriteArgs(input: ChatWriteInput, reported: CliReportedAgent | undefined) {
+function chatWriteArgs(ctx: ToolContext, input: ChatWriteInput, reported: CliReportedAgent | undefined) {
+  // The run this server works for wins over a run the caller names.
+  const runId = ctx.runId ?? input.runId;
   return {
-    ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    ...(runId !== undefined ? { runId } : {}),
     ...(reported !== undefined ? { reported } : {}),
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
@@ -2112,12 +2117,14 @@ function chatWriteArgs(input: ChatWriteInput, reported: CliReportedAgent | undef
 export async function startGroupChat(
   ctx: ToolContext,
   args: ChatWriteInput & { group: string; title?: string },
+  agent?: string,
   reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "post", {
     group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
-    ...chatWriteArgs(args, reported),
+    ...chatWriteArgs(ctx, args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2145,6 +2152,7 @@ export async function replyToChat(
     resolve?: string;
     choose?: string;
   },
+  agent?: string,
   reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "reply", {
@@ -2152,7 +2160,8 @@ export async function replyToChat(
     ...(args.to !== undefined ? { to: args.to } : {}),
     ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
     ...(args.choose !== undefined ? { choose: args.choose } : {}),
-    ...chatWriteArgs(args, reported),
+    ...chatWriteArgs(ctx, args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2480,8 +2489,10 @@ export async function startFileChat(
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const runId = ctx.runId ?? args.runId;
   return requestCli(ctx, "fileChatStart", {
     ...args,
+    ...(runId !== undefined ? { runId } : {}),
     path: resolved.normalized,
     ...(agent === undefined ? {} : { agent }),
     ...(reported === undefined ? {} : { reported }),

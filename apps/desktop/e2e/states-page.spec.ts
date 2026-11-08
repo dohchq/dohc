@@ -46,14 +46,13 @@ const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "collections-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-first-version", "menu-overflow", "menu-danger",
-  "editor-groups", "editor-groups-empty",
+  "editor-groups", "editor-groups-empty", "editor-group-focus",
   "kind-glyph",
   "block-menu", "table-menu",
   "history",
   "history-timeline",
   "tab-row-actions",
   "slash-menu",
-  "editor-group-focus",
   "title-bar-status",
   "capture-recovery",
   "recovery-row",
@@ -87,6 +86,8 @@ const PARTS = [
   "chat-messages",
   "ref",
   "agent-color",
+  "tab-unsaved",
+  "read-only-reasons",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
@@ -379,7 +380,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       for (const theme of THEMES) {
         const pane = page.getByTestId(`states-${theme}`);
-        for (const [answer, words] of [["copied", "Copied"], ["failed", "Couldn't copy"]] as const) {
+        for (const [answer, words] of [["copied", "Copied"], ["failed", "Could not copy"]] as const) {
           const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
           await press(page, withWords, remainingMs());
           await expect(withWords).toHaveText(words, { timeout: remainingMs() });
@@ -396,15 +397,21 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // A send shows its ring only after a second on the timer the page started
     // when it mounted, before the clock was faked. Three composers per theme.
     await expect(page.locator('[data-part="composer-sending"] button[aria-busy="true"]')).toHaveCount(2 * 3);
+    // The self-test notice exists to show a clipped row: in the 420px Notices
+    // part its body runs past three lines, so the row offers Show more.
+    for (const theme of THEMES) {
+      const more = page.getByTestId(`states-${theme}`).locator('[data-part="notices"]').getByTestId("notice-self-test-more");
+      await expect(more).toHaveText("Show more");
+      expect(await more.evaluate((button) => button.closest("ul")?.parentElement?.getBoundingClientRect().width)).toBe(420);
+    }
 
     const failures: string[] = [];
     // A tab row keeps Share and the document's controls inside itself at any
     // width, and its save state gives way before the tab's file name: the
     // name is cut only once the save state shows little more than an
     // ellipsis (under 13px; the ellipsis is 9.5px of 11px Inter). A row whose
-    // save state shows no words draws the same width as the loading row. The
-    // narrow specimen must really have cut its save state short, or the check
-    // proves nothing.
+    // calm save state draws the same width as the loading row. The narrow
+    // specimen must show only its mark, with its words kept for screen readers.
     for (const theme of THEMES) {
       const part = page.getByTestId(`states-${theme}`).locator('[data-part="tab-row-actions"]');
       const widths: number[] = [];
@@ -436,12 +443,53 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         failures.push(`the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`);
       }
       const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
-      if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
-        failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      if (!(await label.evaluate((el) => getComputedStyle(el).position === "absolute" && el.clientWidth === 1))) {
+        failures.push(`the narrow tab row's save state (${theme}) does not show only its mark`);
       }
+      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveText("Changed outside dohc");
+      await expect(page.getByTestId(`states-mark-changed-on-disk-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
+    }
+    // At the sidebar's default width, a Collection change cuts who made it
+    // and what changed before its Collection's name, even a long name, and
+    // no part runs past its line. A part counts as cut when its words are
+    // wider than its box by any fraction of a pixel, since that draws an
+    // ellipsis. The specimen must really cut something, and its long name's
+    // title must really give way, or the check proves nothing.
+    for (const theme of THEMES) {
+      const shown = await page.getByTestId(`states-history-collections-narrow-${theme}`).evaluate((el) => {
+        const natural = (node: Element) => {
+          const probe = document.createElement("span");
+          const style = getComputedStyle(node);
+          probe.textContent = node.textContent;
+          probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+          for (const key of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch", "fontFeatureSettings", "fontVariationSettings", "letterSpacing"] as const) {
+            probe.style[key] = style[key];
+          }
+          document.body.append(probe);
+          const width = probe.getBoundingClientRect().width;
+          probe.remove();
+          return width;
+        };
+        const cut = (selector: string) => Array.from(el.querySelectorAll(selector))
+          .filter((node) => natural(node) > node.getBoundingClientRect().width + 0.01).length;
+        const over = (selector: string) => Array.from(el.querySelectorAll(selector)).filter((node) => node.scrollWidth > node.clientWidth).length;
+        const long = Array.from(el.querySelectorAll('[data-testid="history-collection-line"]'))
+          .find((line) => line.querySelector('[data-testid="history-collection-name"]')?.textContent === "Registrations 2026");
+        const longTitle = long?.querySelector('[data-testid="history-collection-title"]');
+        return {
+          longTitleCut: longTitle ? natural(longTitle) > longTitle.getBoundingClientRect().width + 0.01 : false,
+          names: cut('[data-testid="history-collection-name"]'),
+          lines: over('[data-testid="history-collection-line"]'),
+          parts: cut('[data-testid="history-collection-title"], [data-testid="history-collection-agent"]'),
+        };
+      });
+      if (shown.names > 0) failures.push(`a Collection's name (${theme}) is cut at the sidebar's default width`);
+      if (shown.lines > 0) failures.push(`a Collection change's parts (${theme}) run past their line`);
+      if (shown.parts === 0) failures.push(`the default-width Collections (${theme}) cut nothing, so the check proves nothing`);
+      if (!shown.longTitleCut) failures.push(`the long Collection name's title (${theme}) is missing or uncut, so the long-name check proves nothing`);
     }
     // An overflowing strip fades only the edges it can still scroll past,
-    // 24px each, and its active tab sits clear of them. Each specimen must
+    // 40px each, and its active tab sits clear of them. Each specimen must
     // really overflow the way its label says, or its capture proves nothing.
     for (const theme of THEMES) {
       for (const [at, left, right] of [["start", false, true], ["middle", true, true], ["end", true, false]] as const) {
@@ -459,7 +507,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         if (shown.left !== left || shown.right !== right) {
           failures.push(`the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`);
         }
-        if (shown.before < (left ? 24 : 0) || shown.after < (right ? 24 : 0)) {
+        if (shown.before < (left ? 40 : 0) || shown.after < (right ? 40 : 0)) {
           failures.push(`the strip at the ${at} (${theme}) shows its active tab under a fade or cut`);
         }
       }
@@ -572,6 +620,64 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       failures.push(`${name}-${theme} among the other parts ${far}; the capture is at ${actualPath}`);
     });
     expect(failures, "every part must equal its baseline").toEqual([]);
+  });
+});
+
+// An unsaved tab draws its dot in its close's slot, so a tab has one width
+// saved, unsaved, hovered, with the pointer on its close, and focused from
+// the keyboard. The states are forced through the browser, as the capture
+// forces them, and the widths come from layout. It compares no pixels, so it
+// runs on every platform.
+const TAB_WIDTH_SLACK = 0.5;
+test("@states-page @tab-unsaved-width an unsaved tab keeps its width in every state", async () => {
+  test.setTimeout(120_000);
+  await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
+    await page.setViewportSize({ width: WIDTH, height: 900 });
+    await expect(page.getByTestId("first-run-open-share")).toBeVisible();
+    await page.evaluate((hash) => {
+      window.location.hash = hash;
+    }, STATES_PAGE_HASH);
+    await expect(page.getByTestId("states-page")).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
+    await showOnly(page, "tab-unsaved");
+    await parkPointer(page);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
+    await forceMarkedStates(cdp, '[data-testid="states-page"] [data-part="tab-unsaved"]');
+
+    const failures: string[] = [];
+    for (const theme of THEMES) {
+      const strip = (state: string) => page.getByTestId(`states-tab-unsaved-${state}-${theme}`);
+      const width = async (state: string, tab: string) => {
+        const box = await strip(state).locator(tab).boundingBox();
+        if (!box) throw new Error(`the ${state} strip (${theme}) has no box for ${tab}`);
+        return box.width;
+      };
+      const active = '[role="tab"][data-active]';
+      const inactive = '[role="tab"]:not([data-active])';
+      const sameWidth = async (tab: string, states: string[]) => {
+        const widths = await Promise.all(states.map((state) => width(state, tab)));
+        if (Math.max(...widths) - Math.min(...widths) > TAB_WIDTH_SLACK) {
+          failures.push(`${tab} (${theme}) is ${states.map((state, index) => `${widths[index]}px ${state}`).join(", ")}`);
+        }
+      };
+      await sameWidth(active, ["clean", "dirty", "hover", "close", "focus"]);
+      await sameWidth(inactive, ["clean", "recovered"]);
+
+      // The forced states must have taken, or the widths prove nothing: the
+      // dot shows at rest, and the close shows in its place on hover and
+      // keyboard focus.
+      const opacity = (state: string, part: string) =>
+        strip(state).locator(`${active} ${part}`).evaluate((el) => getComputedStyle(el).opacity);
+      for (const [state, dot, close] of [["dirty", "1", "0"], ["hover", "0", "1"], ["focus", "0", "1"]] as const) {
+        const shown = [await opacity(state, '[data-testid="tab-dirty"]'), await opacity(state, "button")];
+        if (shown[0] !== dot || shown[1] !== close) {
+          failures.push(`the ${state} strip (${theme}) shows the dot at ${shown[0]} and the close at ${shown[1]}`);
+        }
+      }
+    }
+    expect(failures, "a tab keeps one width in every state").toEqual([]);
   });
 });
 

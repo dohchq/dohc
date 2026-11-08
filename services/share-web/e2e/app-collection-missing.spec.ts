@@ -49,7 +49,7 @@ async function reloadAfterCollectionLost() {
   expect(opened.status).toBe(200);
   missing = true;
   const cookie = opened.headers.get("set-cookie")!.split(";")[0]!;
-  return {url: action, response: await handler.handle(new Request(action, {headers: {host: new URL(action).host, cookie}}))};
+  return {url: action, response: await handler.handle(new Request(action, {headers: {host: new URL(action).host, cookie, "sec-fetch-mode": "navigate"}}))};
 }
 
 for (const colorScheme of ["light", "dark"] as const) {
@@ -68,13 +68,13 @@ for (const colorScheme of ["light", "dark"] as const) {
   test(`a reloaded app page says its data is missing, in ${colorScheme}`, async ({browser}, testInfo) => {
     const {url, response} = await reloadAfterCollectionLost();
     const body = await response.text();
-    expect(response.status).toBe(410); expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8"); expect(body).toBe(words);
+    expect(response.status).toBe(410); expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
     const context = await browser.newContext({colorScheme, viewport: {width: 1280, height: 860}});
     try {
       const page = await context.newPage();
       await page.route(url, route => route.fulfill({status: response.status, headers: Object.fromEntries(response.headers), body}));
       await page.goto(url);
-      await expect(page.locator("body")).toHaveText(words);
+      await expect(page.getByRole("status")).toHaveText(words);
       await page.screenshot({path: testInfo.outputPath(`bootstrap-collection-missing-${colorScheme}.png`), fullPage: true});
     } finally {await context.close();}
   });

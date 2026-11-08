@@ -592,7 +592,7 @@ function rawChatThread(thread: ChatThread) {
 
 function rawChatMessage(
   message: ChatMessage,
-  decision: Awaited<ReturnType<LinkedChatStore["listThreadDecisions"]>>[number] | undefined,
+  decision: ChatStreamItem["decision"],
 ) {
   return {
     id: message.id,
@@ -739,6 +739,17 @@ function writeActor(
   options: CliServerOptions,
 ): CliActor {
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
+}
+
+// Who a chat message or reaction through this socket is. While a run dohc
+// started holds the run slot, it is that run's agent, whatever actor the
+// caller named.
+function chatWriteActor(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): CliActor {
+  return options.dispatchedAgent(context.workspaceId) === null ? writeActor(actor, context, options) : "agent";
 }
 
 // The agent writing through this socket: its handshake or --agent name. A
@@ -1198,7 +1209,7 @@ async function buildThreadContent(
     loaded.thread.id,
   );
   const decisionByMessage = new Map(
-    decisions.map((decision) => [decision.messageId, decision.state]),
+    decisions.map((decision) => [decision.messageId, decision]),
   );
   const counts = await threadCounts(context, loaded, allMessages);
   const selected = rootMessage
@@ -1216,7 +1227,7 @@ async function buildThreadContent(
   };
 }
 
-function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved" | undefined): CliShowMessage {
+function cliShowMessage(message: ChatMessage, decision: ChatStreamItem["decision"]): CliShowMessage {
   return {
     id: cliMessageId(message.id),
     author: authorForCli(message),
@@ -1225,7 +1236,11 @@ function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved"
     ...(message.parentMessageId
       ? { parentMessageId: cliMessageId(message.parentMessageId) }
       : {}),
-    ...(decisionState ? { decisionState } : {}),
+    ...(decision ? {
+      decisionState: decision.state,
+      ...(decision.options ? { decisionOptions: [...decision.options] } : {}),
+      ...(decision.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
+    } : {}),
     attachments: message.attachments.map((attachment) => ({
       ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
@@ -1255,10 +1270,6 @@ async function readGroupStream(
     ...(before ? { before } : {}),
     ...(page.limit ? { limit: page.limit } : {}),
   });
-  // A conversation message's decision comes from its conversation's decisions.
-  const conversations = [...new Set(stream.items.filter((item) => !item.post).map((item) => item.message.threadId))];
-  const decisions = new Map((await Promise.all(conversations.map((threadId) =>
-    context.store.listThreadDecisions(context.workspaceId, threadId)))).flat().map((decision) => [decision.messageId, decision]));
   const threadId = (id: string) => ids === "cli" ? cliThreadId(id) : id;
   const messageId = (id: string) => ids === "cli" ? cliMessageId(id) : id;
   const position = (value: ChatStreamItem["position"]): CliStreamPosition => ({
@@ -1270,7 +1281,7 @@ async function readGroupStream(
       position: position(item.position),
       threadId: threadId(item.message.threadId),
       message: item.message,
-      decision: decisions.get(item.message.id),
+      decision: item.decision,
       ...(item.post ? {
         post: {
           replyCount: item.post.replyCount,
@@ -3620,7 +3631,7 @@ async function dispatchWorkspace(
             ...page,
             items: page.items.map(({ message, decision, ...item }) => ({
               ...item,
-              message: cliShowMessage(message, decision?.state),
+              message: cliShowMessage(message, decision),
             })),
           },
         };
@@ -3669,9 +3680,9 @@ async function dispatchWorkspace(
       if (channel.engine.kind === "agent" && request.args.title) {
         throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
       }
-      const actor = writeActor(request.args.actor, context, options);
+      const actor = chatWriteActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
+        writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         channelId: channel.engine.id,
         // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
@@ -3699,7 +3710,7 @@ async function dispatchWorkspace(
 
     case "reply": {
       const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
-      const actor = writeActor(request.args.actor, context, options);
+      const actor = chatWriteActor(request.args.actor, context, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : actor === "agent"
@@ -3730,7 +3741,7 @@ async function dispatchWorkspace(
         }
       }
       const reply = {
-        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
+        writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -3806,7 +3817,7 @@ async function dispatchWorkspace(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: cliChatWriter(writeActor(request.args.actor, context, options), context, options),
+        writer: cliChatWriter(chatWriteActor(request.args.actor, context, options), context, options),
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,

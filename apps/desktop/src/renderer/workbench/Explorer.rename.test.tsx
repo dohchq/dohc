@@ -28,7 +28,6 @@ function explorerProps(): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       { path: "hello.m", kind: "file" },
       { path: "notes.md", kind: "file" },
@@ -52,7 +51,6 @@ function explorerProps(): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),

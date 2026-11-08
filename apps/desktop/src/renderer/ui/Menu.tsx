@@ -28,6 +28,8 @@ export type MenuItem = {
   icon?: ReactNode;
   /** A second line under the label, such as why a disabled row cannot run. It stays at full strength. */
   description?: string;
+  /** The chord that runs the row's action anywhere: `label` after the label, `keys` as aria-keyshortcuts. */
+  shortcut?: { label: string; keys: string | undefined };
   title?: string;
   testId?: string;
   data?: Readonly<Record<`data-${string}`, string>>;
@@ -74,9 +76,9 @@ export type MenuTriggerProps = {
 
 const MENU_WIDTH_PX = 144;
 // Between the trigger and the list.
-const GAP_PX = 4;
+export const MENU_GAP_PX = 4;
 // Between the list and the window's edge, as toasts and the editor's menus keep.
-const EDGE_PX = 12;
+export const MENU_EDGE_PX = 12;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
@@ -87,13 +89,13 @@ type Place = { left: number; maxHeight: number; top?: number; bottom?: number; a
 /** The list's frame. The owner adds its position and width. */
 export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border-line bg-panel p-1";
 /**
- * One row. The list-row ladder: hover 7%, and 11% for the current or checked
+ * One row. The list-row ladder: hover 7%, and 14% for the current or checked
  * row whatever has focus. A disabled row dims its icon and label, not the
  * row, so its fill and any second line keep their strength.
  */
 export const MENU_ROW =
   "flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
-export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
+export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink font-medium", danger: "text-danger" };
 /**
  * The active option of a list whose focus stays on its frame, with
  * aria-activedescendant naming the option: the selected fill, whether the
@@ -115,9 +117,9 @@ export const MENU_LABEL = "min-w-0 flex-1 truncate";
 /** A row's label when a detail follows it on the same line, such as a path or a hint. */
 export const MENU_TITLE = "max-w-[65%] shrink-0 truncate";
 /** The detail after a row's title, in the rest of the row. */
-export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-subtle";
+export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-muted";
 /** The line a list shows when nothing matches. */
-export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-subtle";
+export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-muted";
 
 /**
  * Whether a mousemove came from a pointer that moved. A row that opens or
@@ -161,7 +163,7 @@ export const MENU_SECTION = "dohc-section-label px-2 pb-1 pt-1.5";
 export const MENU_ENTER = "dohc-menu-in";
 /** The custom properties MENU_ENTER reads: where the list starts, toward its trigger. */
 export function menuEnterFrom(side: "above" | "below" | "left" | "right"): CSSProperties {
-  const offset = `${side === "below" || side === "right" ? "-" : ""}${GAP_PX}px`;
+  const offset = `${side === "below" || side === "right" ? "-" : ""}${MENU_GAP_PX}px`;
   const properties: Record<string, string> =
     side === "left" || side === "right"
       ? { "--dohc-menu-from": "0px", "--dohc-menu-from-x": offset }
@@ -292,14 +294,14 @@ export function Menu(props: {
     const height = list.current?.offsetHeight ?? 0;
     if (box && edge) {
       const left = props.align === "start"
-        ? Math.max(EDGE_PX, Math.min(box.left, window.innerWidth - EDGE_PX - width))
-        : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
-      const below = window.innerHeight - edge.bottom - GAP_PX - EDGE_PX;
-      const above = edge.top - GAP_PX - EDGE_PX;
+        ? Math.max(MENU_EDGE_PX, Math.min(box.left, window.innerWidth - MENU_EDGE_PX - width))
+        : Math.max(MENU_EDGE_PX, Math.min(box.right, window.innerWidth - MENU_EDGE_PX) - width);
+      const below = window.innerHeight - edge.bottom - MENU_GAP_PX - MENU_EDGE_PX;
+      const above = edge.top - MENU_GAP_PX - MENU_EDGE_PX;
       setPlace(
         height > below && above > below
-          ? { left, bottom: window.innerHeight - edge.top + GAP_PX, maxHeight: above, above: true }
-          : { left, top: edge.bottom + GAP_PX, maxHeight: below, above: false },
+          ? { left, bottom: window.innerHeight - edge.top + MENU_GAP_PX, maxHeight: above, above: true }
+          : { left, top: edge.bottom + MENU_GAP_PX, maxHeight: below, above: false },
       );
     }
     // A field that took focus as it mounted keeps it.
@@ -471,7 +473,7 @@ export function Menu(props: {
                       <span>{field.error}</span>
                     </p>
                   ) : field.hint ? (
-                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p>
+                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-muted">{field.hint}</p>
                   ) : null}
                 </div>
               );
@@ -490,6 +492,7 @@ export function Menu(props: {
                 aria-current={entry.current || undefined}
                 aria-disabled={entry.disabled || undefined}
                 aria-describedby={describedBy}
+                aria-keyshortcuts={entry.shortcut?.keys}
                 title={entry.title}
                 data-testid={entry.testId}
                 {...entry.data}
@@ -521,6 +524,7 @@ export function Menu(props: {
                 ) : (
                   <span className={`${MENU_LABEL} ${dim}`}>{entry.label}</span>
                 )}
+                {entry.shortcut ? <span aria-hidden className={`${MENU_SHORTCUT} ${dim}`}>{entry.shortcut.label}</span> : null}
               </button>
             );
           })}

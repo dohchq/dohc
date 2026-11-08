@@ -86,6 +86,7 @@ export function useChatDispatchNotices(
               // Landing in the chat reads the notice: its toast closes and
               // its row stays until Resume or the person dismisses it.
               action: { label: "Open", reads: true, run: () => { if (isCurrent()) void openPaused(pausedIn, notice.threadId); } },
+              target: { to: "chat", thread: notice.threadId } as const,
             } : {}),
           } : {}),
           details: [
@@ -107,7 +108,7 @@ export function useChatDispatchNotices(
     };
     const unsubscribe = bridge().onChatDispatchNotices(receive);
     void bridge().registerChatDispatchNotices({ workspaceId }).then(receive).catch((cause: unknown) => {
-      if (isCurrent()) report({ message: "dohc could not load dispatch notices. Open this workspace again to try again.", cause });
+      if (isCurrent()) report({ message: "dohc could not load notices about agent replies. Open this workspace again to try again.", cause });
     });
     return () => { active = false; unsubscribe(); };
   }, [workspaceId, ready, report, clear, clearIdentity]);

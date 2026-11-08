@@ -2,6 +2,7 @@ import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service
 import type { PublicEditRelease } from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
+import type { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound, relayError, RelayError, RELAY_ERRORS } from "./errors";
 import {
   constantTimeHashEqual,
@@ -116,6 +117,8 @@ export function createAgentConnectionRoutes(input: {
   linkExchangeGlobalRateLimiter: TokenBucketLimiter;
   requireShareWorkspace: (share: { workspaceId: string }, workspaceId: string) => void;
   publicEditRelease?: PublicEditRelease;
+  // Disconnect wakes the connection's held waits, so they end now.
+  activity: Pick<DiscussionActivityHub, "wakeLog">;
 }) {
   const { storage, linkKey, shareWebOrigin, nowMs, newId, newLinkBearer } = input;
   const hash = (kind: AgentCredentialKind, value: string) => hashAgentCredential(kind, value, linkKey!);
@@ -385,6 +388,7 @@ export function createAgentConnectionRoutes(input: {
       guard: owned,
     });
     if (!connection) throw notFound();
+    input.activity.wakeLog(route.workspaceId);
     return jsonResponse({ ok: true, agent: toAgent(connection) });
   }
 

@@ -1,6 +1,7 @@
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { mapWidgetOwners } from "./widgetOwnership";
 import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
+import { CODE_LANGUAGE_OPTIONS, cleanCodeLanguage } from "./codeLanguages";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -35,25 +36,6 @@ function copyIcon(feedback: CopyFeedback | null): SVGSVGElement {
 
 // What each toolbar's copy needs when ProseMirror destroys the toolbar.
 const disposeToolbar = new WeakMap<Node, () => void>();
-
-const CODE_LANGUAGE_OPTIONS = [
-  { value: "", label: "Plain text" },
-  { value: "typescript", label: "TypeScript" },
-  { value: "javascript", label: "JavaScript" },
-  { value: "tsx", label: "TSX" },
-  { value: "jsx", label: "JSX" },
-  { value: "python", label: "Python" },
-  { value: "bash", label: "Shell" },
-  { value: "json", label: "JSON" },
-  { value: "markdown", label: "Markdown" },
-  { value: "mermaid", label: "Mermaid" },
-  { value: "html", label: "HTML" },
-  { value: "css", label: "CSS" },
-  { value: "sql", label: "SQL" },
-  { value: "yaml", label: "YAML" },
-  { value: "go", label: "Go" },
-  { value: "rust", label: "Rust" },
-] as const;
 
 const codeLanguageKey = new PluginKey("dohc-code-language");
 const codeBlockContinuationKey = new PluginKey("dohc-code-block-continuation");
@@ -126,13 +108,6 @@ function focusEmptyListItemParagraph(
     return true;
   }
   return false;
-}
-
-function cleanCodeLanguage(value: string): string {
-  return (value.trim().match(/^[A-Za-z0-9_+#.-]{0,48}/)?.[0] ?? "").slice(
-    0,
-    48,
-  );
 }
 
 function insertParagraphAfterBlock(view: EditorView, blockPos: number): boolean {
@@ -221,13 +196,9 @@ function buildCodeLanguageDecorations(
           const left = document.createElement("div");
           left.className = "dohc-code-block-toolbar-left";
 
-          const dot = document.createElement("span");
-          dot.className = "dohc-code-block-dot";
-          dot.setAttribute("aria-hidden", "true");
-
           const select = document.createElement("select");
           select.className = "dohc-code-language-select";
-          select.setAttribute("aria-label", "code language");
+          select.setAttribute("aria-label", "Code language");
           select.disabled = view.editable === false;
 
           const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
@@ -281,10 +252,10 @@ function buildCodeLanguageDecorations(
           select.addEventListener("change", commit);
 
           // The shared copy tile, drawn here because React does not render
-          // this toolbar. Its name stays "copy code".
+          // this toolbar. Its name stays "Copy code".
           const copy = document.createElement("button");
           copy.type = "button";
-          copy.setAttribute("aria-label", "copy code");
+          copy.setAttribute("aria-label", "Copy code");
           const status = document.createElement("span");
           status.setAttribute("role", "status");
           status.setAttribute("aria-live", "polite");
@@ -322,7 +293,7 @@ function buildCodeLanguageDecorations(
             void action.copy();
           });
 
-          left.append(dot, select);
+          left.append(select);
           toolbar.append(left, copy, status);
           disposeToolbar.set(toolbar, () => {
             action.dispose();

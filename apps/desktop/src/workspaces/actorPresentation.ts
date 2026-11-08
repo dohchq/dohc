@@ -9,7 +9,7 @@ import type { AgentColors } from "../settings/userSettings";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { readLocalChatActor, resolveThreadActorIssuer } from "./chatRelayIdentity";
 
-type DisplayMessage = Pick<ChatMessage, "author" | "authorActorKey" | "authorUserId" | "origin">;
+type DisplayMessage = Pick<ChatMessage, "author" | "authorActorKey" | "authorUserId" | "origin" | "authorAgentId">;
 const groups = new Map<string, { known: Map<string, string>; unknownSecret: Buffer }>();
 let nextGroup = 0;
 
@@ -86,13 +86,16 @@ function localPersonKeys(installationId: string, account: LocalActorIdentity["ac
   return [localPersonKey(installationId, null), ...(account ? [localPersonKey(installationId, account)] : [])].map(serializeActorKey);
 }
 // Chat and History share one rule: a group per key, a personal agent hue or a human hash, and self for this computer's person and their agents.
-function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>): ActorPresentation {
+// Your agent's message from one of its runs also names its agent, so the renderer colors it as Settings does.
+function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>, agentId?: string): ActorPresentation {
   const serialized = serializeActorKey(key);
   const unknown = key.kind === "unknown";
   const group = groupFor(workspaceId, unknown ? unknownIdentity() : serialized, unknown);
   const ownerKey = key.kind === "agent" ? serializeActorKey(key.ownerKey) : serialized;
   const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
-  return { group, hue: key.kind === "agent" ? colors.get(serialized) ?? null : humanHue(key), self: (human || key.kind === "agent") && own.includes(ownerKey) };
+  const self = (human || key.kind === "agent") && own.includes(ownerKey);
+  return { group, hue: key.kind === "agent" ? colors.get(serialized) ?? null : humanHue(key), self,
+    ...(self && key.kind === "agent" && agentId !== undefined ? { agentId } : {}) };
 }
 export function ownActorPresentation(installationId: string, credentials: CloudCredentials | null): ActorPresentation {
   return { group: "own", hue: humanHue(localPersonKey(installationId, localAccount(credentials))), self: true };
@@ -140,7 +143,8 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
     const workspaceId = input.readWorkspace()?.workspaceId;
     if (workspaceId === undefined) throw new Error("Chat workspace closed.");
     return presentationFor(workspaceId, key,
-      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own, colors());
+      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own, colors(),
+      message.authorAgentId);
   };
 }
 

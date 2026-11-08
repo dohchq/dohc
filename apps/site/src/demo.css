@@ -91,6 +91,25 @@
   contain: layout paint;
 }
 
+/* The desktop places its toasts and Notices against the app window, which is
+   the page here. The demo places them against the demo window instead. On a
+   phone that window is narrower than the page, so their widths also stop at
+   the window, clear of the activity bar. A toast then never covers the
+   Notices button. */
+.demo-window [data-testid="notice-toasts"],
+.demo-window [data-testid="notice-center"] {
+  position: absolute;
+  max-width: calc(100% - 68px);
+}
+
+.demo-window [data-testid="notice-toasts"] > * {
+  max-width: 100%;
+}
+
+.demo-window [data-testid="notice-center"] {
+  max-height: calc(100% - 100px);
+}
+
 .demo-workbench {
   display: flex;
   flex: 1;

@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, type AppDatasetCapability } from "@dohc/security-contract/app-publication";
-import { verifyAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import { displayAppDatasetCapability, verifyAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { parseAppBackendInvokeRequest, parseAppBackendUploadRequest } from "@dohc/security-contract/app-backend";
 import type { AppDatasetBinding, DatasetRevision } from "@dohc/security-contract/dataset";
 import { resolveCompatibleDatasetRevision, type DatasetAccess, type DatasetAuthority, type InvokeDatasetInput } from "@dohc/app-backend-runtime/dataset-host";
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
+import { hasGeneratedDatasetSources } from "./datasetFieldMigration";
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import type { LocalAppStore, LocalAppRow, LocalAppPrepared, LocalAppStorage } from "./localAppStore";
 import type { LocalAppAction } from "./localAppLaunch";
@@ -26,7 +27,7 @@ export function createLocalDatasetApps(options: {
   agentRun(): LocalDatasetAgent | null;
   /** The person on this computer, whom a local app's commits are made for. */
   localPersonId(): string;
-  approved(datasetId: string): { revision: DatasetRevision; active: boolean };
+  approved(datasetId: string): { revision: DatasetRevision; schemaSql: string; active: boolean };
   bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
   upload(context: LocalDatasetAppContext, input: LocalDatasetUpload): Promise<unknown>;
@@ -44,6 +45,15 @@ export function createLocalDatasetApps(options: {
     return verifyAppDatasetCapability(requested, resolveCompatibleDatasetRevision(db,{workspaceId:options.workspaceId,datasetId:value.resourceId},requested,current.revision));
   }
   function current(id: string, expected?: number) { const value = options.store.row(id, expected); return { row: value, capability: capability(value) }; }
+  /** The approval as Review app shows it: what each operation does in the revision it names, when this device still has that revision. */
+  function shown(value: LocalAppRow, declared: AppDatasetCapability): AppDatasetCapability {
+    try {
+      const key = { workspaceId: options.workspaceId, datasetId: value.resourceId }, approved = options.approved(value.resourceId);
+      // A compatible earlier revision names the same schema and operation code as the approved one.
+      const revision = resolveCompatibleDatasetRevision(db, key, declared, approved.revision);
+      return displayAppDatasetCapability(declared, revision, hasGeneratedDatasetSources(revision, approved.schemaSql));
+    } catch { return declared; }
+  }
   function resolveAuthority(context: LocalDatasetAppContext, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority {
     if (!contexts.has(context) || request.workspaceId !== options.workspaceId || request.access.kind !== "app" || request.access.appId !== context.publicationId) throw new Error("App access is not permitted.");
     const checked = current(context.publicationId, context.authorityRevision);
@@ -89,7 +99,7 @@ export function createLocalDatasetApps(options: {
       if (declared?.kind !== "dataset") throw new Error("Invalid app approval.");
       let active = false; try { current(value.publicationId, value.authorityRevision); active = true; } catch {}
       return { publicationId: value.publicationId, authorityRevision: value.authorityRevision, appRoot: value.appRoot,
-        sourceRevision: value.candidate.sourceRevision, datasetCapability: declared, approved: options.store.held(value), active };
+        sourceRevision: value.candidate.sourceRevision, datasetCapability: shown(value, declared), approved: options.store.held(value), active };
     },
     request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal): Promise<unknown> {
       if (action === "list" || action === "create") throw new Error("This app is not approved for document Collection access.");

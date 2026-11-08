@@ -2,8 +2,10 @@ import "../../testing/legendListMock";
 // @vitest-environment jsdom
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reconcileResolvedChatDecision } from "./ChatsView";
+import { chatOnScreen } from "./chatsOnScreen";
+import { tellWindowFocused } from "../../testing/windowFocus";
 import {
   NOW,
   thread,
@@ -474,7 +476,7 @@ describe("ChatsView work and run links", () => {
 
     const chip = await screen.findByRole("button", { name: "3f2a91c0-5b7d-4e2a-9c1f-2d8e6a4b7c90.json" });
     expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
-    expect(chip.querySelector("svg")?.classList.contains("lucide-file-code")).toBe(true);
+    expect(chip.querySelector("svg")?.classList.contains("lucide-file-braces")).toBe(true);
   });
 
   it("opens attachment paths and shows linked agent-run details", async () => {
@@ -537,12 +539,19 @@ describe("ChatsView work and run links", () => {
 
     const runLine = screen.getByTestId("chats-run-line");
     expect(runLine.getAttribute("data-state")).toBe("done");
-    expect(runLine.textContent).toBe("Ran dohc · 1m 24srun run-123");
-    const runChip = screen.getByTestId("chats-run-chip");
-    expect(runChip.textContent).toBe("run run-123");
+    // The line says how the run went. Its id and command wait in Details,
+    // where an agent or a person can read and copy them.
+    expect(runLine.textContent).toBe("Finished in 1m 24sDetails");
+    const runChip = screen.getByRole("button", { name: "Details of run run-123456789" });
+    expect(runChip).toBe(screen.getByTestId("chats-run-chip"));
     await user.click(runChip);
     expect(screen.getByTestId("chats-run-command").textContent).toBe(
       "dohc agent run review",
+    );
+    expect(screen.getByTestId("chats-run-id").textContent).toBe("run-123456789");
+    await user.click(screen.getByTestId("chats-run-copy-id"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("run-123456789"),
     );
     expect(screen.getByTestId("chats-run-exit-code").textContent).toBe("0");
     expect(screen.getByTestId("chats-run-log-path").textContent).toBe(
@@ -764,5 +773,30 @@ describe("ChatsView runs that didn't reply", () => {
     await act(async () => fail(new Error("This workspace is not open. Open it again.")));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
     expect(onError.mock.calls[0]![0]).toContain("dohc could not start your agent's run in \"Should we ship on Friday?\" again.");
+  });
+});
+
+describe("ChatsView post on screen", () => {
+  beforeEach(() => {
+    tellWindowFocused(true);
+  });
+  afterEach(() => {
+    tellWindowFocused(false);
+  });
+
+  it("counts an open post as on screen, so a notice about its run is skipped", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView();
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect(chatOnScreen("thread-1")).toBe(false);
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    expect(chatOnScreen("thread-1")).toBe(true);
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await screen.findByTestId("chats-channel-view");
+    expect(chatOnScreen("thread-1")).toBe(false);
   });
 });

@@ -125,6 +125,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
     agentIdsNamedIn: async () => [],
+    isOwnAgentId: async () => false,
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -1112,7 +1113,7 @@ describe("raw fileWrite socket requests", () => {
     const opened = join(await createTestScratch("dohc-cli-linked-"), "linked");
     await symlink(real, opened, process.platform === "win32" ? "junction" : "dir");
     const registered = await createWorkspaceFolder({
-      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal", computer: { installId: "install-here", label: "This Mac" },
+      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), stateDir: await createTestScratch("dohc-cli-linked-state-"), kind: "personal", computer: { installId: "install-here", label: "This Mac" },
     });
     // The authority resolves roots the way main does.
     const f = fixture(registered.rootPath, (root) => realpathSync.native(root));
