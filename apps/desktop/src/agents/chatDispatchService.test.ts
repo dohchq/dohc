@@ -3666,6 +3666,23 @@ describe("chatDispatchService", () => {
     });
   });
 
+  it("leaves no space before the … when a start failure is cut just after one", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
+      agentId: "default",
+    });
+    const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "claude -p" });
+    if (!claim) throw new Error("Expected a run.");
+    // The body keeps the reason's first 480 characters, which end with its space.
+    await fixture.dispatch.failRun({ runId: claim.run.runId, reason: `runner failed to start: ${"x".repeat(479)} and more` });
+    await activate(fixture);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.words)
+      .toBe(`Nova didn't reply. It couldn't start: ${"x".repeat(479)}…`);
+  });
+
   it("flushes a live run for next-boot recovery without posting during quit", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture();
