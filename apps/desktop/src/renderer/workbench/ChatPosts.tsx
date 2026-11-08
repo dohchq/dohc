@@ -1,6 +1,6 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, MessagesSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -19,7 +19,7 @@ import { COLLECTION_CHANGE_FILE, readCollectionChangeProposal } from "../collect
 import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { SecondaryButton } from "../ui/controls";
+import { EmptyState, SecondaryButton } from "../ui/controls";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
@@ -34,7 +34,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
-import { runnerProgram, type ChatsNav } from "./ChatsView";
+import type { ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
 import { AS_REPORTED, reportedProduct } from "./reportedAgent";
@@ -60,17 +60,16 @@ function automationAsking(
   return trigger?.authorKind === "automation" ? trigger : undefined;
 }
 
-// What the agent ran, under its reply: the program and how it ended, then
-// the chip that opens the details.
+// Under an agent's reply: how its run went, then Details, which holds the
+// command, the run's id and its log.
 function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   const { endedAtMs, exitCode } = props.run;
   const failed = endedAtMs !== undefined && exitCode !== 0;
-  const program = runnerProgram(props.run.command);
   const label = endedAtMs === undefined
-    ? `Running ${program}`
+    ? "Running"
     : failed
-      ? `Failed ${program}${exitCode === undefined ? "" : ` · exit ${exitCode}`}`
-      : `Ran ${program} · ${formatRunDuration(endedAtMs - props.run.startedAtMs)}`;
+      ? "Failed"
+      : `Finished in ${formatRunDuration(endedAtMs - props.run.startedAtMs)}`;
   return (
     <div
       data-testid="chats-run-line"
@@ -104,7 +103,7 @@ export function PollOptions(props: {
   return (
     <ol
       data-testid={`${props.testIdPrefix}-poll-options`}
-      className="m-0 mt-2 flex list-none flex-col gap-1 p-0"
+      className="m-0 mt-2 flex max-w-sm list-none flex-col gap-1 p-0"
     >
       {options.map((option) => {
         const taken = chosen === option;
@@ -126,7 +125,7 @@ export function PollOptions(props: {
               <span
                 aria-hidden
                 className={`grid size-3.5 shrink-0 place-items-center rounded-full border ${
-                  taken ? "border-success bg-success text-bg" : "border-line"
+                  taken ? "border-success bg-success text-bg" : "border-subtle"
                 }`}
               >
                 {taken ? <CircleCheck size={10} strokeWidth={3} /> : null}
@@ -151,9 +150,9 @@ export function DecisionStatus(props: {
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           data-testid={`${props.testIdPrefix}-decision-resolved`}
-          className="inline-flex items-center gap-1 text-[11px] text-success"
+          className="inline-flex items-center gap-1 text-[12px] text-success"
         >
-          <CircleCheck size={11} strokeWidth={2} aria-hidden />
+          <CircleCheck size={12} strokeWidth={2} aria-hidden />
           Answered
         </span>
         <PollOptions decision={props.decision} testIdPrefix={props.testIdPrefix} />
@@ -165,9 +164,9 @@ export function DecisionStatus(props: {
       <span className="inline-flex flex-wrap items-center gap-1.5">
         <span
           data-testid={`${props.testIdPrefix}-decision-open`}
-          className="inline-flex items-center gap-1 text-[11px] text-warning"
+          className="inline-flex items-center gap-1 text-[12px] text-warning"
         >
-          <CircleHelp size={11} strokeWidth={2} aria-hidden />
+          <CircleHelp size={12} strokeWidth={2} aria-hidden />
           Unanswered
         </span>
         {props.onResolve && !hasOptions ? (
@@ -308,12 +307,13 @@ function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord
         ref={triggerRef}
         type="button"
         data-testid="chats-run-chip"
+        aria-label={`Details of run ${props.run.runId}`}
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-muted hover:text-ink"
+        className="rounded px-1 text-[11px] text-muted underline decoration-line underline-offset-2 hover:text-ink hover:decoration-ink"
       >
-        run {props.run.runId.slice(0, 7)}
+        Details
       </button>
       {open ? (
         <span
@@ -329,8 +329,8 @@ function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord
   );
 }
 
-// What ran for an agent's reply: its command, the product and model the
-// agent reported, when it started, how it ended, and its log.
+// What ran for an agent's reply: its command and id, the product and model
+// the agent reported, when it started, how it ended, and its log.
 export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
   const started = formatChatTime(props.run.startedAtMs);
   const product = reportedProduct(props.reported);
@@ -342,6 +342,15 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
         <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
           {props.run.command}
         </code>
+      </span>
+      <span className="grid gap-1">
+        <span className="text-[11px] text-muted">Run</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code data-testid="chats-run-id" className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {props.run.runId}
+          </code>
+          <CopyButton iconOnly testId="chats-run-copy-id" label="Copy run ID" pinName getText={() => props.run.runId} />
+        </span>
       </span>
       {product ? (
         <span className="grid gap-1">
@@ -534,9 +543,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingMessage = messages[0] ?? null;
   if (openingMessage === null) {
     return (
-      <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-        No messages yet.
-      </p>
+      <div className="pt-4">
+        <EmptyState icon={MessagesSquare} title="No messages yet." />
+      </div>
     );
   }
   const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));

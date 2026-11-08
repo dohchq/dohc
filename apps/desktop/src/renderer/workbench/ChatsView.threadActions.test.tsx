@@ -539,12 +539,19 @@ describe("ChatsView work and run links", () => {
 
     const runLine = screen.getByTestId("chats-run-line");
     expect(runLine.getAttribute("data-state")).toBe("done");
-    expect(runLine.textContent).toBe("Ran dohc · 1m 24srun run-123");
-    const runChip = screen.getByTestId("chats-run-chip");
-    expect(runChip.textContent).toBe("run run-123");
+    // The line says how the run went. Its id and command wait in Details,
+    // where an agent or a person can read and copy them.
+    expect(runLine.textContent).toBe("Finished in 1m 24sDetails");
+    const runChip = screen.getByRole("button", { name: "Details of run run-123456789" });
+    expect(runChip).toBe(screen.getByTestId("chats-run-chip"));
     await user.click(runChip);
     expect(screen.getByTestId("chats-run-command").textContent).toBe(
       "dohc agent run review",
+    );
+    expect(screen.getByTestId("chats-run-id").textContent).toBe("run-123456789");
+    await user.click(screen.getByTestId("chats-run-copy-id"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("run-123456789"),
     );
     expect(screen.getByTestId("chats-run-exit-code").textContent).toBe("0");
     expect(screen.getByTestId("chats-run-log-path").textContent).toBe(

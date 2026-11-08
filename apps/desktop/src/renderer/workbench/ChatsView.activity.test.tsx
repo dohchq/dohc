@@ -241,7 +241,7 @@ describe("ChatsView live activity refresh", () => {
 
     expect(await screen.findByText(agentReport.body)).toBeTruthy();
     expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
-    expect((await screen.findByTestId("chats-run-chip")).textContent).toBe("run run-liv");
+    expect((await screen.findByTestId("chats-run-chip")).textContent).toBe("Details");
     // The same view stayed mounted; activity caused fresh reads rather than a
     // back/forward navigation or optimistic local append.
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
@@ -306,7 +306,7 @@ describe("ChatsView live activity refresh", () => {
     expect(askedBy[0]!.getAttribute("title")).toBe("for Ice");
     // A person's own request adds nothing beside the run.
     expect(lines[1]!.querySelector("[data-testid='chats-run-asked-by']")).toBeNull();
-    expect(lines[1]!.querySelector("[data-testid='chats-run-chip']")?.textContent).toBe("run run-ask");
+    expect(lines[1]!.querySelector("[data-testid='chats-run-chip']")?.textContent).toBe("Details");
   });
 
   // The write lands in a chat the user does not have open, so the roll-up
