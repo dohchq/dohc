@@ -56,15 +56,15 @@ const message = (id: string, createdAtMs: number): ChatMessageRecord => ({
 // The second message starts a new day and is long enough to fill the pane.
 const messages = [message("m-0", start), message("m-1", start + 2 * day), message("m-2", start + 2 * day + 60_000)];
 
-function showTop(index: number) {
-  const item = messages[index]!;
+function showTop(index: number, list = messages) {
+  const item = list[index]!;
   act(() => reportViewable?.({
     viewableItems: [{ item, index, key: item.id, isViewable: true, containerId: 0 }],
     changed: [],
     start: index,
     end: index,
     startBuffered: 0,
-    endBuffered: messages.length - 1,
+    endBuffered: list.length - 1,
   }));
 }
 
@@ -119,6 +119,31 @@ describe("ChatMessageList pinned day", () => {
     observer.deliver(next, -1);
     showTop(1);
     expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(messages[1]!.createdAtMs));
+  });
+
+  it("pins the day again after a jump carries a risen mark below the pane", () => {
+    const days = [message("d-0", start), message("d-1", start + 60_000), message("d-2", start + 2 * day)];
+    render(<ChatMessageList testIdPrefix="list" messages={days} loading={false} emptyLabel="Empty" />);
+    const observer = FakeObserver.current!;
+    const dividers = screen.getAllByTestId("list-day");
+    const first = dividers.find(node => node.dataset.dayDivider === "d-0")!;
+    const nextMark = dividers.find(node => node.dataset.dayDivider === "d-2")!.querySelector<HTMLElement>("[data-day-mark]")!;
+
+    // The first day's divider is above the pane, and the next day's divider
+    // passes under the pinned copy, so the copy steps aside.
+    observer.deliver(first, -60);
+    showTop(1, days);
+    observer.deliver(nextMark, -1);
+    expect(screen.queryByTestId("list-sticky-day")).toBeNull();
+
+    // A jump toward older rows carries that row, still mounted, far below the
+    // pane. Its mark is outside the pane before and after, so the browser
+    // reports nothing until dohc observes it again.
+    observer.observe.mockClear();
+    showTop(0, days);
+    expect(observer.observe).toHaveBeenCalledWith(nextMark);
+    observer.deliver(nextMark, 291);
+    expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(days[0]!.createdAtMs));
   });
 
   it("shows the day for a top row whose day started further up", () => {

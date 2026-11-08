@@ -648,9 +648,10 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     const id = info.viewableItems[0]?.item.id ?? null;
     if (id === topMessageId.current) return;
     topMessageId.current = id;
-    // A jump can carry a divider from below the pane to above it with no
-    // threshold crossed, so the visible rows' dividers and marks are observed
-    // afresh. Each first entry says which side of the line it is on.
+    // A jump can carry a divider or its mark past the line with no threshold
+    // crossed, so the visible rows' dividers and marks are observed afresh, and
+    // so is every risen mark, wherever its row now is. Each first entry says
+    // which side of the line it is on.
     const observer = dividerObserver.current;
     if (observer) {
       for (const viewable of info.viewableItems) {
@@ -659,6 +660,12 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           observer.unobserve(edge);
           observer.observe(edge);
         }
+      }
+      for (const risen of risenMarks.current) {
+        const mark = marks.current.get(risen);
+        if (!mark) continue;
+        observer.unobserve(mark);
+        observer.observe(mark);
       }
     }
     updateTopDay();
