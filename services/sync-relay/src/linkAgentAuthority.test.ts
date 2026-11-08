@@ -260,8 +260,9 @@ describe("an agent reading its link", () => {
       expect(response.status, name).toBe(404);
       await expectRefused(response);
     }
-    // A relay with no exchange key configured serves no agent.
-    await expectRefused(await handler(f.storage, f.now, { ...RELEASED, relayExchangeKey: undefined })(agentRequest(agent, "/sync/link/share")));
+    // A relay with no exchange key configured serves no agent, and can't turn on the Edit release.
+    await expectRefused(await handler(f.storage, f.now, { relayExchangeKey: undefined })(agentRequest(agent, "/sync/link/share")));
+    expect(() => handler(f.storage, f.now, { ...RELEASED, relayExchangeKey: undefined })).toThrow(/relay exchange/);
     await ok(await f.h(agentRequest(agent, "/sync/link/share")));
     await ok(await f.h(agentRequest(otherAgent, "/sync/link/share")));
     await ok(await f.h(linkRequest(holder, "/sync/link/share")));
