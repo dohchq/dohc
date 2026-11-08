@@ -96,8 +96,8 @@ describe("folders a launch could not open", () => {
   it.each([
     [
       "a reserved workspace ID",
-      "ReservedWorkspaceIdError: Its workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.",
-      "dohc could not open Trips. Its workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.",
+      "ReservedWorkspaceIdError: This folder's workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.",
+      "dohc could not open Trips. This folder's workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.",
       true,
     ],
     [

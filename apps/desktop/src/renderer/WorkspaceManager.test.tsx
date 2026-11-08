@@ -590,24 +590,38 @@ describe("workspace manager", () => {
     expect(location()).toBe("/home/sam/projects/research/Personal");
   });
 
-  it.each(["link", "shares", "notices"])("shows the attach refusal for reserved id %s in a toast and Notices", async (workspaceId) => {
-    const body = `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`;
+  // A folder that can never be a workspace: the toast leads with why and
+  // offers another folder, not Try again. The folder is in Details.
+  it.each([
+    ["reserved id link", "ReservedWorkspaceIdError", "This folder's workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again."],
+    ["reserved id shares", "ReservedWorkspaceIdError", "This folder's workspace ID, shares, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again."],
+    ["reserved id notices", "ReservedWorkspaceIdError", "This folder's workspace ID, notices, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again."],
+    ["dohc's settings folder", "WorkspaceFolderRefusalError", "This folder holds dohc's own settings, so it cannot be a workspace."],
+  ])("shows the attach refusal for %s in a toast and Notices, with Choose another folder", async (_case, name, body) => {
     bridge.attachWorkspaceFolder.mockRejectedValueOnce(new Error(
-      `Error invoking remote method 'attachWorkspaceFolder': ReservedWorkspaceIdError: ${body}`,
+      `Error invoking remote method 'attachWorkspaceFolder': ${name}: ${body}`,
     ));
     const user = userEvent.setup();
     const onReady = vi.fn();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
     await user.click(await screen.findByRole("button", { name: "Open folder" }));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText("dohc can't open this folder")).toBeTruthy();
-    expect(within(toast).getByText(body)).toBeTruthy();
-    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(toast.textContent?.startsWith(body)).toBe(true);
+    expect(toast.textContent).not.toContain("/home/sam/projects/research");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(toast).queryByTestId("workspace-shell-error-copy")).toBeNull();
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
+    expect((await navigator.clipboard.readText()).split("\n")).toContain("Chosen folder: /home/sam/projects/research");
     expect(onReady).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = screen.getByTestId("notice-center");
-    expect(within(notices).getByText("dohc can't open this folder")).toBeTruthy();
-    expect(within(notices).getByText(body)).toBeTruthy();
+    const row = within(notices).getByText(body).closest("li")!;
+    expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await user.click(within(row).getByRole("button", { name: "Choose another folder" }));
+    await waitFor(() => expect(onReady).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-attached" })));
+    expect(bridge.pickWorkspaceRoot).toHaveBeenCalledTimes(2);
   });
   it("attaches an existing folder as a workspace", async () => {
     const user = userEvent.setup();

@@ -30,7 +30,7 @@ describe("manifest validation", () => {
     expect(checkManifest({ version: 1, workspaceId, kind: "personal", mode: "local-first" }))
       .toEqual({ status: "reserved-id", workspaceId });
     expect(() => createWorkspaceManifest({ workspaceId, kind: "personal" })).toThrow(
-      `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
     );
   });
 
