@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { expect, type Browser } from "@playwright/test";
 
 // An agent that signs in to a share link with the standard MCP sign-in, as
@@ -14,7 +14,7 @@ export type ShareWebHandle = (request: Request) => Promise<Response>;
 const CONSENT_HEADING = "Allow this agent to use the share link?";
 const CALLBACK_HEADING = "Back at the agent";
 
-type AgentCallbackAnswer = { headers: IncomingHttpHeaders; query: URLSearchParams };
+type AgentCallbackAnswer = { query: URLSearchParams };
 
 export type AgentCallback = {
   origin: string;
@@ -33,7 +33,7 @@ export async function startAgentCallback(): Promise<AgentCallback> {
   const received: AgentCallbackAnswer[] = [];
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/callback") received.push({ headers: request.headers, query: url.searchParams });
+    if (url.pathname === "/callback") received.push({ query: url.searchParams });
     request.resume();
     response.writeHead(200, {
       "content-type": "text/html; charset=utf-8",

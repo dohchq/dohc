@@ -56,7 +56,7 @@ function addDisconnectedAgent(current: ReadonlySet<string>, agent: DisconnectedL
 const NO_DISCONNECTED_AGENTS: ReadonlySet<string> = new Set();
 
 /**
- * The agents the owner disconnected while dohc ran, by disconnectedAgentKey.
+ * The agents the owner disconnected while this workspace stayed open, by disconnectedAgentKey.
  * The shell holds it so a Disconnect that Try again finishes in Notices
  * leaves any Share dialog open then, or opened later, without the agent. Only
  * the Share dialog reads it, so a Disconnect re-renders nothing else.

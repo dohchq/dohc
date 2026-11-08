@@ -45,7 +45,7 @@ type AgentDisconnect = { kind: "pending" } | { kind: "refused"; words: string } 
 const GONE: AgentDisconnect = { kind: "gone" };
 
 export type LinkAgentDisconnects = {
-  // What this dialog's Disconnect, or any since dohc started, did to the agent.
+  // What this dialog's Disconnect, or any while this workspace stayed open, did to the agent.
   stateOf(link: AgentLink, connectionId: string): AgentDisconnect | undefined;
   disconnect(link: AgentLink, agent: RelayShareLinkAgent): void;
 };

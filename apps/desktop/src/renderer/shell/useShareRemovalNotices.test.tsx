@@ -193,9 +193,14 @@ describe("useShareRemovalNotices", () => {
     expect(result.current.disconnected.has(disconnectedAgentKey(mine))).toBe(true);
     expect(result.current.disconnected.has(disconnectedAgentKey({ ...mine, connectionId: "c2" }))).toBe(false);
     expect(set.size).toBe(0);
-    // The notices keep one identity, so a Disconnect re-renders no other surface.
+    // The notices keep one identity while the set changes, so a Disconnect
+    // re-renders no other surface.
     const notices = result.current.notices;
-    act(() => result.current.notices.agentDisconnected(mine));
+    const before = result.current.disconnected;
+    const third = { ...mine, connectionId: "c3" };
+    act(() => result.current.notices.agentDisconnected(third));
+    expect(result.current.disconnected).not.toBe(before);
+    expect(result.current.disconnected.has(disconnectedAgentKey(third))).toBe(true);
     expect(result.current.notices).toBe(notices);
   });
 });
