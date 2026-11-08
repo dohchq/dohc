@@ -140,9 +140,39 @@ describe("links the OS hands dohc", () => {
     });
     const older = open(handed("older"));
     await vi.waitFor(() => expect(activate).toHaveBeenCalledWith(placeIn("a")));
-    await open(handed("newer"));
+    const newer = open(handed("newer"));
     switching.resolve("a");
-    await older;
+    await Promise.all([older, newer]);
+    expect(activate.mock.calls).toEqual([[placeIn("a")], [placeIn("b")]]);
+    expect(deliver).toHaveBeenCalledExactlyOnceWith("b", placeIn("b"));
+  });
+
+  // As main does with no workspace window open: the first switch creates a
+  // window and activates its workspace once the window loads; a later switch
+  // finds that window and activates at once.
+  it("leaves the window on the newer link's workspace when an older link's window is still loading", async () => {
+    const loaded = deferred<void>();
+    let window: { shows: string | null } | null = null;
+    const { open, deliver } = activations({
+      resolve: async (link) => placeIn(link.reference === "older" ? "a" : "b"),
+      activate: async (place) => {
+        if (window) {
+          window.shows = place.workspaceId;
+          return place.workspaceId;
+        }
+        const created: { shows: string | null } = { shows: null };
+        window = created;
+        await loaded.promise;
+        created.shows = place.workspaceId;
+        return place.workspaceId;
+      },
+    });
+    const older = open(handed("older"));
+    await vi.waitFor(() => expect(window).not.toBeNull());
+    const newer = open(handed("newer"));
+    loaded.resolve();
+    await Promise.all([older, newer]);
+    expect(window).toEqual({ shows: "b" });
     expect(deliver).toHaveBeenCalledExactlyOnceWith("b", placeIn("b"));
   });
 
