@@ -46,14 +46,24 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await waitForVisibleAnimations(page);
 }
 
-async function shoot(page: Page, dialog: Locator, name: string): Promise<void> {
-  await page.mouse.move(0, 0);
-  // The dialog fits the window; a long one scrolls inside it.
+// The dialog stays above the toasts and inside the window, so the backdrop
+// never scrolls; a long dialog scrolls its own body.
+async function expectFitsWindow(page: Page, dialog: Locator): Promise<void> {
   const box = await dialog.boundingBox();
-  const windowHeight = await page.evaluate(() => window.innerHeight);
+  const fit = await page.evaluate(() => {
+    const scrim = document.querySelector<HTMLElement>("[data-dohc-modal]")!;
+    const room = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dohc-toast-room")) || 0;
+    return { limit: window.innerHeight - room, scrimScrolls: scrim.scrollHeight > scrim.clientHeight };
+  });
   expect(box).not.toBeNull();
   expect(box!.y).toBeGreaterThanOrEqual(0);
-  expect(box!.y + box!.height).toBeLessThanOrEqual(windowHeight);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(fit.limit);
+  expect(fit.scrimScrolls).toBe(false);
+}
+
+async function shoot(page: Page, dialog: Locator, name: string): Promise<void> {
+  await page.mouse.move(0, 0);
+  await expectFitsWindow(page, dialog);
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
     await dialog.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`) });
@@ -142,7 +152,18 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await expect(agents).toContainText("Claude Code");
     await expect(agents).toContainText("Name reported by the agent");
     await expect(agents).toContainText("The agent reported no name");
+    // Two agents make the pane taller than the window: the body scrolls to
+    // them while the title and the backdrop stay put.
+    await expect(dialog).toHaveAttribute("data-scrolls", "");
     await agents.scrollIntoViewIfNeeded();
+    const body = dialog.getByTestId("share-dialog-body");
+    expect(await body.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    expect(await page.locator("[data-dohc-modal]").evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(dialog.getByRole("heading", { name: "Share" })).toBeInViewport();
+    // Toasts take room at the bottom, and the dialog gives it up.
+    await page.evaluate(() => document.documentElement.style.setProperty("--dohc-toast-room", "160px"));
+    await expectFitsWindow(page, dialog);
+    await page.evaluate(() => document.documentElement.style.removeProperty("--dohc-toast-room"));
     await shoot(page, dialog, "share-link-b-agents-two");
 
     // Disconnect ends the agent's connection: its next call is refused.
