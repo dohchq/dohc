@@ -177,8 +177,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let incoming: LayoutFrame | null = null;
   let generation = 0;
   let layoutSettled = true;
-  // With reduced motion, a new layout draws nothing until it has settled.
-  let awaitingLayout = false;
   let source = new Uint32Array(0);
   let target = new Uint32Array(0);
   let radius = new Float64Array(0);
@@ -240,7 +238,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       worker?.terminate();
       worker = null;
       layoutSettled = true;
-      awaitingLayout = false;
       wake();
     };
     send({ type: "reduced", reduced });
@@ -312,7 +309,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       canvas.style.cursor = "";
     }
     layoutSettled = !worker || count === 0;
-    awaitingLayout = !layoutSettled && reduced;
     send(
       { type: "model", generation, x: placed.x, y: placed.y, source: source.slice(), target: target.slice(), alpha: placed.alpha },
       [placed.x.buffer, placed.y.buffer],
@@ -406,12 +402,13 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   function step(now: number): void {
     frame = null;
     if (!visible) return;
-    if (incoming) {
+    // With reduced motion the starting places stay still until the settled
+    // picture replaces them. A picture that arrives during a drag waits for the drop.
+    if (incoming && !(reduced && held)) {
       // Hand the drawn buffer back; the worker fills it with the next tick.
       const drawn = positions;
       positions = incoming.positions;
       layoutSettled = incoming.settled;
-      awaitingLayout = false;
       incoming = null;
       send({ type: "frame", generation, positions: drawn }, [drawn.buffer]);
       if (held) {
@@ -420,7 +417,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       }
     }
     let easing = false;
-    if (followLayout && !awaitingLayout) {
+    if (followLayout) {
       const goal = fitTarget();
       ({ k, tx, ty } = reduced || snapCamera ? goal : followCamera({ k, tx, ty }, goal, !layoutSettled && !held));
       snapCamera = false;
@@ -434,7 +431,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       fading = t < 1;
       if (!fading && mixTo === 0) lit = -1;
     }
-    const labelsFading = !awaitingLayout && draw(now);
+    const labelsFading = draw(now);
     if (fading || easing || labelsFading) {
       frame = requestAnimationFrame(step);
     } else if (layoutSettled && canvas.dataset.settled !== "true") {
@@ -756,6 +753,11 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     canvas.style.cursor = hover >= 0 ? "pointer" : "";
     if (ended.kind === "pan") return;
     if (ended.moved) {
+      // A picture that waited for the drag keeps the node where it was dropped.
+      if (reduced && incoming && held) {
+        incoming.positions[held.index * 2] = held.x;
+        incoming.positions[held.index * 2 + 1] = held.y;
+      }
       held = null;
       send({ type: "release", index: ended.index });
       followLayout = options.local;
