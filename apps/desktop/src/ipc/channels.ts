@@ -312,6 +312,7 @@ export const CHANNELS = {
   detectAgentTools: "desktop:detect-agent-tools",
   setTitlebarTheme: "desktop:set-titlebar-theme",
   windowFullScreen: "desktop:window-full-screen",
+  windowFocused: "desktop:window-focused",
   stepWindowZoom: "desktop:step-window-zoom",
   agentColorChanged: "desktop:agent-color-changed",
   userSettingsChanged: "desktop:user-settings-changed",

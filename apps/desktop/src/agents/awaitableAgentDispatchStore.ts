@@ -26,7 +26,7 @@ export type AwaitableAgentDispatchStore = Omit<
 > & {
   resolveUncertainClaim?(
     workspaceId: Parameters<AgentDispatchStore["claimNextPending"]>[0],
-    options?: Parameters<AgentDispatchStore["claimNextPending"]>[1],
+    options: Parameters<AgentDispatchStore["claimNextPending"]>[1],
   ): ReturnType<AgentDispatchStore["claimNextPending"]> | Promise<
     ReturnType<AgentDispatchStore["claimNextPending"]>
   >;

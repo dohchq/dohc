@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import type { PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import {
@@ -431,6 +432,27 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
       "Should we ship on Friday?",
     );
     expect(onThreadStarted).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { when: "with no account", account: null, name: "Sam", initial: "S" },
+    { when: "when signed in", account: "Ada", name: "Ada", initial: "A" },
+  ])("puts $name's initial on the new post box $when", async ({ account, name, initial }) => {
+    const empty: PresenceSnapshot = { version: 1, peers: [] };
+    const transport: PresenceTransport = {
+      async publish() { return empty; },
+      async leave() {},
+      poll({ signal }) { return new Promise((resolve) => signal.addEventListener("abort", () => resolve(empty), { once: true })); },
+    };
+    renderView(vi.fn(), vi.fn(), {
+      // The name from Settings.
+      agentSetup: { workspaceId: "workspace-a", preferredName: "Sam", runnerConfigured: false, runnerEnabled: false, agentRunActive: false, agents: [] },
+      collaboration: account === null ? null : { transportForScope: () => transport, clientId: "me", displayName: account },
+    });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const box = (await screen.findByTestId("chats-new-thread-composer")).closest("form")!;
+    expect(within(box).getByTitle(name).textContent).toBe(initial);
   });
 
   it("can react to a newly started thread before any reload", async () => {

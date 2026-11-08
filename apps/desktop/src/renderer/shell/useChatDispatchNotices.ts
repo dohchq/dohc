@@ -108,7 +108,7 @@ export function useChatDispatchNotices(
     };
     const unsubscribe = bridge().onChatDispatchNotices(receive);
     void bridge().registerChatDispatchNotices({ workspaceId }).then(receive).catch((cause: unknown) => {
-      if (isCurrent()) report({ message: "dohc could not load dispatch notices. Open this workspace again to try again.", cause });
+      if (isCurrent()) report({ message: "dohc could not load notices about agent replies. Open this workspace again to try again.", cause });
     });
     return () => { active = false; unsubscribe(); };
   }, [workspaceId, ready, report, clear, clearIdentity]);

@@ -39,6 +39,7 @@ struct ChatDispatchEnqueueParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchClaimParams {
+    agent_id: String,
     run_id: String,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     command: Option<String>,
@@ -310,6 +311,7 @@ impl EngineService {
             "chats.dispatch.claimNextPending",
             open.actor.chat_dispatch_claim_next_pending(
                 open.workspace_id.clone(),
+                params.agent_id,
                 params.run_id,
                 params.command.unwrap_or_default(),
                 params.log_path,

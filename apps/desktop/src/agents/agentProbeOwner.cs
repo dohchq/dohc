@@ -1,8 +1,9 @@
-// Owns one agent probe on Windows. The relay and every process it starts run
-// in a kill-on-close job without breakaway. This owner exits only after the
-// relay has exited, its output has drained and a query reports the job empty.
+// Owns one agent probe or run on Windows. The relay and every process it
+// starts run in a kill-on-close job without breakaway. This owner exits only
+// after the relay has exited, its output has drained and a query reports the
+// job empty.
 // Arguments: <node.exe> <agentProbeRelay.mjs> <admission byte count>.
-// stdin: the admission, then end of input when the caller stops the probe or exits.
+// stdin: the admission, then end of input when the caller stops the probe or run, or exits.
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -51,6 +52,8 @@ static class AgentProbeOwner {
 
     // Returns, or throws, only after the relay has exited. Once the relay is in
     // the job, also only after its output has drained and the job is empty.
+    // The relay exits with its command, and the job then ends whatever the
+    // command left running, even a process that still holds the output.
     internal static int Own(string node, string relayPath, byte[] admission, Task callerClosed, IProbeJob job,
             Stream stdout, Stream stderr, Action<int> sleep, Action<string> report) {
         if (callerClosed.IsCompleted) throw new OperationCanceledException("The agent probe stopped before it started.");
@@ -86,9 +89,8 @@ static class AgentProbeOwner {
                 }
                 Close(relay.StandardInput);
                 Task exited = Task.Run(() => relay.WaitForExit());
-                Task.WaitAny(Task.WhenAll(output, exited), callerClosed);
+                Task.WaitAny(exited, callerClosed);
             } finally {
-                // Also ends processes that released their output but still run.
                 Drain(job, sleep, report);
                 relay.WaitForExit();
                 // Every writer has exited. A copy fails if the caller's pipe closed first.

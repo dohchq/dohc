@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -74,6 +74,17 @@ if (mode === "silent-fail") {
   process.exit(3);
 }
 
+// Starts a process that outlives its parent, as an agent's tools can, then
+// works on (hold-tree) or exits (leave-tree). It writes the pids of its parent,
+// itself and that process to the file named after the mode.
+if (mode === "hold-tree" || mode === "leave-tree") {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true, detached: true });
+  writeFileSync(process.argv[3], JSON.stringify({ parent: process.ppid, runner: process.pid, child: child.pid }));
+  if (mode === "leave-tree") process.exit(0);
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
+}
+
 // Do what the prompt asks, as an installed tool would. The shell resolves dohc
 // from the runner's PATH, as installed tools must do.
 function runCommand(command) {
@@ -107,7 +118,9 @@ function codexReplyServer(args) {
   const disabled = args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : []);
   const replyOnly = tomlStrings(config.get("mcp_servers.dohc.args") ?? "").includes("--tool");
   const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));
-  const tail = readOnly ? ["--ignore-rules", ...CODEX_TAIL] : CODEX_TAIL;
+  // Without --json, Codex repeats the prompt into the run log (startCodexOutput).
+  const codexTail = args.at(-2) === "--json" ? ["--skip-git-repo-check", "--ephemeral", "--json", "-"] : CODEX_TAIL;
+  const tail = readOnly ? ["--ignore-rules", ...codexTail] : codexTail;
   const sandbox = process.platform === "win32" && (readOnly || config.has("windows.sandbox")) ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])] : [];
   const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
   if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
@@ -153,6 +166,15 @@ function claudeReplyServer(args) {
     : null;
 }
 
+// What codex exec prints before its first turn (openai/codex rust-v0.166.0,
+// codex-rs/exec/src/event_processor_with_*_output.rs, print_config_summary):
+// with --json, one event naming the thread; otherwise a summary on stderr
+// that ends with the prompt.
+function startCodexOutput(args) {
+  if (args.includes("--json")) console.log(JSON.stringify({ type: "thread.started", thread_id: randomUUID() }));
+  else console.error(`OpenAI Codex v0.166.0\n--------\nworkdir: ${process.cwd()}\n--------\nuser\n${prompt}`);
+}
+
 // Reply as Claude Code and Codex do: start the dohc MCP server the launch
 // names, outside the runner's environment, and call the reply tool once.
 function replyThroughMcp(args, body) {
@@ -161,6 +183,7 @@ function replyThroughMcp(args, body) {
     console.error("Unexpected profile arguments", args);
     process.exit(2);
   }
+  if (profileTool === "codex") startCodexOutput(args);
   const server = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../packages/mcp/bin/dohc-mcp.js");
   const { DOHC_RUN_ID: _runId, DOHC_CHAT_THREAD: _thread, ...env } = process.env;
   const child = spawn(process.execPath, [server, ...launch.args], { cwd: launch.cwd, env, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });

@@ -6,7 +6,7 @@ import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
 import { ReactionStoreProvider } from "./reactionStore";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
-import type { SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
@@ -294,7 +294,7 @@ describe("ChatLane", () => {
       return { thread: thread(), message: message({ id: "ours", body: "Our first message" }), viewerAuthorId: "you" };
     });
     render(lane());
-    await screen.findByText("No messages in #general yet.");
+    await screen.findByText("No messages in #general yet. Start one below.");
     send("Our first message");
     await screen.findByText("Their first message");
     expect(screen.getByText("Our first message")).toBeTruthy();
@@ -526,7 +526,7 @@ describe("ChatLane", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
     bridgeMock.startChannelThread.mockResolvedValueOnce({ thread: thread(), message: message({ id: "poll", body: "Lunch?" }), viewerAuthorId: "you" });
     render(lane());
-    await screen.findByText("No messages in #general yet.");
+    await screen.findByText("No messages in #general yet. Start one below.");
     fireEvent.keyDown(draftPoll("Lunch?", ["Soup", "Salad"]), { key: "Enter" });
     expect(bridgeMock.startChannelThread).toHaveBeenCalledWith({
       workspaceId: "workspace-a", channelId: "channel-1", body: "Lunch?", needsDecision: true, options: ["Soup", "Salad"], lane: "chat",
@@ -601,22 +601,31 @@ describe("ChatLane", () => {
     expect(composer.value).toBe("");
     expect(bridgeMock.sendChatMessage.mock.calls.length).toBe(sends);
 
-    // Another agent's run with no @handle: its own chat. An agent a message
-    // won't wake: the step in Settings, which opens the Agents page.
-    for (const [nextStep, line] of [
-      [{ kind: "message", agentId: "fox", name: "\u{1F98A}" }, "Message \u{1F98A} in its own chat to ask again."],
-      [{ kind: "add-agent" }, "Add an agent in Settings to ask again."],
-      [{ kind: "turn-on", name: "Nova" }, "Turn Nova on in Settings to ask again."],
-      [{ kind: "set-up", name: "Nova" }, "Set up Nova in Settings to ask again."],
-    ] as const) {
+    // Another agent's run with no @handle: its own chat, in words, since no
+    // button can ready that message here.
+    const failedWith = async (nextStep: NonNullable<ChatDispatchFailedRun["nextStep"]>) => {
       bridgeMock.chatDispatchStateForThread.mockResolvedValue({
         ...idle,
         failedRun: { ...failedRun, words: "Nova didn't reply. Its run ended with an error.", nextStep, retryable: false },
       });
       await act(async () => activity({ workspaceId: "workspace-a" }));
-      await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent).toBe(line));
+    };
+    await failedWith({ kind: "message", agentId: "fox", name: "\u{1F98A}" });
+    await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent)
+      .toBe("Message \u{1F98A} in its own chat to ask again."));
+    expect(screen.queryByTestId("chats-lane-run-actions")).toBeNull();
+    // An agent a message won't wake: the step in Settings is a button that
+    // opens the Agents page, on the same line a message button takes.
+    for (const [nextStep, label] of [
+      [{ kind: "add-agent" }, "Add an agent in Settings"],
+      [{ kind: "turn-on", name: "Nova" }, "Turn Nova on in Settings"],
+      [{ kind: "set-up", name: "Nova" }, "Set up Nova in Settings"],
+    ] as const) {
+      await failedWith(nextStep);
+      await waitFor(() => expect(screen.getByTestId("chats-lane-run-open-settings").textContent).toBe(label));
+      expect(screen.queryByTestId("chats-lane-run-next-step")).toBeNull();
     }
-    fireEvent.click(screen.getByTestId("chats-lane-run-open-settings"));
+    fireEvent.click(screen.getByRole("button", { name: "Set up Nova in Settings" }));
     expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
   });
 

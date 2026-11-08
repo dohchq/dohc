@@ -3012,7 +3012,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
     for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
         assert!(
             chats
-                .claim_next_pending(WS, &invalid, "agent", None, 22, &NO_FAULTS)
+                .claim_next_pending(WS, "default", &invalid, "agent", None, 22, &NO_FAULTS)
                 .is_err(),
             "invalid run id must be refused"
         );
@@ -3024,7 +3024,15 @@ fn dispatch_claim_is_single_writer_idempotent() {
     for invalid_command in ["bad\0command".to_owned(), "x".repeat(16_385)] {
         assert_eq!(
             chats
-                .claim_next_pending(WS, "run-1", &invalid_command, None, 22, &NO_FAULTS)
+                .claim_next_pending(
+                    WS,
+                    "default",
+                    "run-1",
+                    &invalid_command,
+                    None,
+                    22,
+                    &NO_FAULTS,
+                )
                 .unwrap_err()
                 .code(),
             "invalid-input"
@@ -3033,7 +3041,15 @@ fn dispatch_claim_is_single_writer_idempotent() {
     for invalid_path in ["   ".to_owned(), "bad\0path".to_owned(), "x".repeat(16_385)] {
         assert_eq!(
             chats
-                .claim_next_pending(WS, "run-1", "agent", Some(&invalid_path), 22, &NO_FAULTS,)
+                .claim_next_pending(
+                    WS,
+                    "default",
+                    "run-1",
+                    "agent",
+                    Some(&invalid_path),
+                    22,
+                    &NO_FAULTS,
+                )
                 .unwrap_err()
                 .code(),
             "invalid-input"
@@ -3043,6 +3059,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
     let claim = chats
         .claim_next_pending(
             WS,
+            "default",
             "run-1",
             "  agent --run  ",
             Some("  logs/run-1.log  "),
@@ -3088,7 +3105,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
 
     // A second claim while run-1 is running returns None (single-writer).
     let second = chats
-        .claim_next_pending(WS, "run-2", "agent", None, 23, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-2", "agent", None, 23, &NO_FAULTS)
         .expect("second");
     assert!(second.is_none(), "no double-claim while a run is active");
 
@@ -3120,7 +3137,7 @@ fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
         .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
         .expect("enqueue");
     chats
-        .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "agent", None, 22, &NO_FAULTS)
         .expect("claim")
         .expect("some");
     for invalid in ["   ".to_owned(), "x".repeat(16_385)] {
@@ -3194,13 +3211,21 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .expect("enq B");
 
     let a = chats
-        .claim_next_pending(WS, "run-A", "agent", None, 24, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-A", "agent", None, 24, &NO_FAULTS)
         .expect("claim A")
         .expect("some A");
     assert_eq!(a.dispatch.trigger_message_id, "mA");
 
     let retry = chats
-        .claim_next_pending(WS, "run-A", "ignored retry command", None, 25, &NO_FAULTS)
+        .claim_next_pending(
+            WS,
+            "default",
+            "run-A",
+            "ignored retry command",
+            None,
+            25,
+            &NO_FAULTS,
+        )
         .expect("retry claim")
         .expect("same running claim");
     assert_eq!(retry, a);
@@ -3208,7 +3233,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
     // Before completion, B is not claimable (single-writer guard).
     assert!(
         chats
-            .claim_next_pending(WS, "run-B", "agent", None, 25, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-B", "agent", None, 25, &NO_FAULTS)
             .expect("blocked")
             .is_none()
     );
@@ -3218,7 +3243,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .complete_dispatch(WS, "run-A", 0, 26, &NO_FAULTS)
         .expect("complete A");
     let b = chats
-        .claim_next_pending(WS, "run-B", "agent", None, 27, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-B", "agent", None, 27, &NO_FAULTS)
         .expect("claim B")
         .expect("some B");
     assert_eq!(b.dispatch.trigger_message_id, "mB");
@@ -3277,7 +3302,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
             .enqueue_dispatch(WS, "mA", "default", "t1", 21, &NO_FAULTS)
             .expect("enqueue");
         chats
-            .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-1", "agent", None, 22, &NO_FAULTS)
             .expect("claim")
             .expect("some");
         // Simulated process death: the run never completes; store dropped.
@@ -3287,7 +3312,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
     let mut chats = LinkedChatStore::new(&mut store);
     assert!(
         chats
-            .claim_next_pending(WS, "run-2", "agent", None, 30, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-2", "agent", None, 30, &NO_FAULTS)
             .expect("still wedged")
             .is_none(),
         "a dead 'running' row blocks claims until reclaimed"
@@ -3299,7 +3324,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
     assert_eq!(requeued, vec!["mA".to_owned()]);
     // A fresh worker can now claim the reclaimed trigger.
     let fresh = chats
-        .claim_next_pending(WS, "run-3", "agent", None, 32, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-3", "agent", None, 32, &NO_FAULTS)
         .expect("fresh claim")
         .expect("some");
     assert_eq!(fresh.dispatch.trigger_message_id, "mA");
@@ -3863,7 +3888,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
 
     // ws-1 claims and finishes run-taken; reusing it in ws-1 refuses.
     chats
-        .claim_next_pending(WS, "run-taken", "agent", None, 22, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-taken", "agent", None, 22, &NO_FAULTS)
         .expect("claim")
         .expect("some");
     chats
@@ -3884,7 +3909,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
         .expect("enqueue y");
     assert_eq!(
         chats
-            .claim_next_pending(WS, "run-taken", "agent", None, 25, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-taken", "agent", None, 25, &NO_FAULTS)
             .expect_err("ended-run id reuse must refuse")
             .code(),
         "invalid-input"
@@ -3893,12 +3918,20 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     // ws-2 reusing ws-1's live id also refuses (instead of colliding with
     // the global unique index inside the claim transaction).
     chats
-        .claim_next_pending(WS, "run-fresh", "agent", None, 26, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-fresh", "agent", None, 26, &NO_FAULTS)
         .expect("fresh claim")
         .expect("some");
     assert_eq!(
         chats
-            .claim_next_pending(OTHER_WS, "run-fresh", "agent", None, 27, &NO_FAULTS)
+            .claim_next_pending(
+                OTHER_WS,
+                "default",
+                "run-fresh",
+                "agent",
+                None,
+                27,
+                &NO_FAULTS,
+            )
             .expect_err("cross-workspace id reuse must refuse")
             .code(),
         "invalid-input"

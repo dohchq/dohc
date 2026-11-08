@@ -101,7 +101,7 @@ describe("the delete confirmation states where the file goes", () => {
       "a share view's delete has no trash to restore from, so promising one is a durability claim dohc cannot keep",
     ).not.toContain("system trash");
     expect(text).not.toContain(".dohc/local/trash");
-    expect(text).not.toContain("restored from there");
+    expect(text).not.toContain("where you can restore");
     // And the irreversibility is stated, before the change runs. An
     // irreversible change the user is told about afterwards is the product
     // invariant this dialog exists to satisfy.

@@ -177,13 +177,13 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     await expect(skipped).toHaveCount(1);
     await page.getByTestId("sharing-skipped-dismiss").click();
     await expect(skipped).toHaveCount(0);
-    await row.hover();
+    await row.locator("[data-sharing-row-focus]").hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "Show skipped changes" }).click();
     await expect(skipped).toHaveCount(1);
 
     // Remove takes the share off this computer.
-    await row.hover();
+    await row.locator("[data-sharing-row-focus]").hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "Remove from workspace" }).click();
     await expect(row).toHaveCount(0);

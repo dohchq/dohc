@@ -62,6 +62,7 @@ import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collectio
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
+import { windowsProbeOwner } from "./agents/agentProbeProcess";
 import { claudeCodeVersion, detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
@@ -2138,9 +2139,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     await flushTypingCheckpoints(workspaceId);
     if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
     const answer = await showMessageBox({type: "warning", title: "Remove this workspace from the list?",
-      message: "This workspace has typing waiting to recover.", detail: "Removing it deletes its kept copies from dohc. The folder stays. This can't be undone.",
-      buttons: ["Go back", "Remove from list"], defaultId: 0, cancelId: 0});
-    return answer.response === 1;
+      message: "This workspace has typing waiting to recover.", detail: "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
+      buttons: ["Remove from list", "Cancel"], defaultId: 1, cancelId: 1});
+    return answer.response === 0;
   },
   removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
   onError: (workspaceId, error) => console.warn(`[desktop] Could not remove recovery records for workspace "${workspaceId}":`, error),
@@ -2482,7 +2483,7 @@ const typingQuitRecovery=createTypingQuitRecovery({
  hasWindows:()=>desktopWindows.workspaceWindows.allLive().length > 0,
  unresolved:hasUnresolvedTypingCheckpoints,flush:flushTypingCheckpoints,quit:()=>app.quit(),beforeQuit:event=>quitGuard.beforeQuit(event),
  confirmLoss:async()=>{const drawing=[...typingRecoveryFailures.values()].some(rows=>[...rows.values()].some(f=>f.reason === "drawing-unavailable"));
- const answer=await showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Go back","Quit anyway"],defaultId:0,cancelId:0});return answer.response === 1;},
+ const answer=await showMessageBox({type:"warning",title:drawing ? "Quit without your drawing changes?" : "Quit without your typing?",message:drawing ? "dohc could not keep your drawing changes on this computer." : "dohc could not keep your typing on this computer.",detail:drawing ? "Your drawing changes since the last saved copy are lost when dohc quits." : "Any typing dohc has not kept is lost when it quits.",buttons:["Quit anyway","Go back"],defaultId:1,cancelId:1});return answer.response === 0;},
 });
 function beforeQuitWithTypingRecovery(event:{preventDefault():void}):void {typingQuitRecovery.beforeQuit(event);}
 
@@ -2835,9 +2836,11 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedRunId(lease.state.activity),
     ),
-  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
-    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
-  ),
+  // A run dohc started keeps its workspace after it ends; any other run only
+  // while it holds a slot.
+  agentRunWorkspace: (runId: string) => chatDispatchService.runWorkspace(runId) ??
+    workspaceAuthorities.workspaceIds().find((workspaceId) =>
+      withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId)),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3587,6 +3590,7 @@ const chatDispatchService = createChatDispatchService({
   isPackaged: () => app.isPackaged,
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  agentOwner: () => windowsProbeOwner(resourcesBasePath()),
   queueSync: syncWorkspaceForDispatch,
   prepareRunWorkspace: async (workspace) => {
     const { registered, release } = await withWorkspaceAttachmentAsync(
@@ -6271,12 +6275,12 @@ const exitRounds = createExitRounds<BrowserWindow>({
       type: "warning",
       message: "dohc isn't responding.",
       detail: `${verb} now can lose unsaved recovery text. Wait, or ${kind === "quit" ? "quit" : "install"} anyway.`,
-      buttons: ["Wait", kind === "quit" ? "Quit anyway" : "Install anyway"],
-      defaultId: 0,
-      cancelId: 0,
+      buttons: [kind === "quit" ? "Quit anyway" : "Install anyway", "Wait"],
+      defaultId: 1,
+      cancelId: 1,
       noLink: true,
     });
-    return response === 1;
+    return response === 0;
   },
 });
 

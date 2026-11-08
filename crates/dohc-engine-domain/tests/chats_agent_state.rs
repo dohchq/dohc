@@ -383,9 +383,69 @@ fn claimed_run(store: &mut EngineStore, trigger: &str, thread: &str, run: &str, 
         .enqueue_dispatch(WS, trigger, "default", thread, at - 1, &NO_FAULTS)
         .expect("enqueue");
     chats
-        .claim_next_pending(WS, run, "agent", None, at, &NO_FAULTS)
+        .claim_next_pending(WS, "default", run, "agent", None, at, &NO_FAULTS)
         .expect("claim")
         .expect("some claim");
+}
+
+#[test]
+fn claim_takes_only_the_listed_agents_oldest_request() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    for (trigger, agent, at) in [
+        ("other-first", "other", 10),
+        ("listed-first", "default", 20),
+        ("listed-later", "default", 30),
+    ] {
+        chats
+            .enqueue_dispatch(WS, trigger, agent, "thread", at, &NO_FAULTS)
+            .expect("enqueue");
+    }
+    let claim = chats
+        .claim_next_pending(WS, "default", "run", "listed-cli", None, 40, &NO_FAULTS)
+        .expect("claim")
+        .expect("listed agent has a request");
+    assert_eq!(claim.dispatch.trigger_message_id, "listed-first");
+    assert_eq!(claim.dispatch.agent_id, "default");
+    assert_eq!(claim.run.agent_id, "default");
+    assert_eq!(claim.run.command, "listed-cli");
+    assert_eq!(claim.dispatch.attempt_count, 1);
+    chats
+        .complete_dispatch(WS, "run", 0, 50, &NO_FAULTS)
+        .expect("complete");
+    assert!(
+        chats
+            .claim_next_pending(
+                WS,
+                "default",
+                "run-empty",
+                "listed-cli",
+                None,
+                60,
+                &NO_FAULTS,
+            )
+            .expect("claim without a request for this agent")
+            .is_none()
+    );
+    let pending = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].trigger_message_id, "other-first");
+    assert_eq!(pending[0].agent_id, "other");
+    assert_eq!(pending[0].attempt_count, 0);
+}
+
+#[test]
+fn claim_rejects_invalid_agent_ids() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    for agent in ["", "Not an id", "bad\0id"] {
+        let error = chats
+            .claim_next_pending(WS, agent, "run", "command", None, 20, &NO_FAULTS)
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid-input");
+    }
 }
 
 #[test]
@@ -1189,7 +1249,7 @@ fn requeue_returns_the_interrupted_runs_covered_triggers_to_the_queue() {
             .expect("enqueue");
     }
     chats
-        .claim_next_pending(WS, "run", "agent", None, 20, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run", "agent", None, 20, &NO_FAULTS)
         .expect("claim")
         .expect("some claim");
     chats
@@ -1350,7 +1410,7 @@ fn latest_run_for_an_agent_skips_other_agents_runs_in_the_thread() {
         .enqueue_dispatch(WS, "trigger", "nova", "thread", 19, &NO_FAULTS)
         .expect("enqueue nova");
     chats
-        .claim_next_pending(WS, "run-nova", "agent", None, 30, &NO_FAULTS)
+        .claim_next_pending(WS, "nova", "run-nova", "agent", None, 30, &NO_FAULTS)
         .expect("claim nova")
         .expect("nova claim");
     let latest = |agent_id| {
@@ -1429,7 +1489,7 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
         "a second Try again must not queue the request again"
     );
     let claim = chats
-        .claim_next_pending(WS, "run-2", "agent", None, 42, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-2", "agent", None, 42, &NO_FAULTS)
         .expect("claim")
         .expect("the request runs again");
     assert_eq!(
@@ -1445,7 +1505,7 @@ fn try_again_runs_a_request_from_before_agent_ids_once() {
         .expect("complete");
     assert!(
         chats
-            .claim_next_pending(WS, "run-3", "agent", None, 51, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-3", "agent", None, 51, &NO_FAULTS)
             .expect("claim")
             .is_none(),
         "the request ran once"
@@ -1488,7 +1548,7 @@ fn claim_folds_pending_triggers_only_from_the_same_place() {
     let mut runs = Vec::new();
     for (run, at) in [("run-1", 20), ("run-2", 30), ("run-3", 40)] {
         let claim = chats
-            .claim_next_pending(WS, run, "agent", None, at, &NO_FAULTS)
+            .claim_next_pending(WS, "default", run, "agent", None, at, &NO_FAULTS)
             .expect("claim")
             .expect("some claim");
         runs.push(claim.dispatch.trigger_message_id);

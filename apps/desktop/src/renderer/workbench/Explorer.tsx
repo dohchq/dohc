@@ -21,6 +21,7 @@ import {
   Laptop,
   ListX,
   RefreshCw,
+  Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -2566,7 +2567,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
       {confirmDelete && props.shareView ? (
         <ConfirmDialog
-          {...deleteConfirmText(confirmDelete, props.shareView)}
+          {...deleteConfirmText(confirmDelete, props.shareView, fileByPath, isFolderPath)}
+          icon={Trash2}
           testId="delete-confirm"
           cancelTestId="cancel-delete"
           confirmTestId="confirm-delete"

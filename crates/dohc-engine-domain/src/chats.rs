@@ -685,6 +685,8 @@ pub struct ChannelOpeningMessage {
     pub automation: Option<ChatMessageAutomation>,
     pub link_author: Option<ChatMessageLinkAuthor>,
     pub author_reported: Option<ChatReportedAgent>,
+    /// The agent that wrote the message in one of its runs.
+    pub author_agent_id: Option<String>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
 }
@@ -3919,6 +3921,7 @@ impl<'a> LinkedChatStore<'a> {
                         automation: message.automation,
                         link_author: message.link_author,
                         author_reported: message.author_reported,
+                        author_agent_id: message.author_agent_id,
                     });
                 summaries.push(ChannelThreadSummary {
                     thread,

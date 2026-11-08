@@ -11,7 +11,8 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
-import { SmilePlus } from "lucide-react";
+import { MessagesSquare, SmilePlus } from "lucide-react";
+import { EmptyState } from "../ui/controls";
 import {
   memo,
   useCallback,
@@ -803,7 +804,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       {props.loading ? (
         <SkeletonRows label="Loading..." className="pt-1" />
       ) : (
-        <p className="m-0 pt-4 text-center text-[13px] text-subtle">{props.emptyLabel}</p>
+        <div className="py-4">
+          <EmptyState icon={MessagesSquare} title={props.emptyLabel} />
+        </div>
       )}
     </div>;
   }

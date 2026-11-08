@@ -66,8 +66,8 @@ type WorkspaceSearchErrorReporter = (
 // Owns the streamed-search lifecycle for one workspace: mints search ids,
 // folds validated batches into the pure model, and drops stale batches by
 // identity (applyBatch returns the same reference for a superseded search).
-// Lives in the SHELL (not the Search view) so results — and the activity-bar
-// count badge — survive switching views; the panel unmounts, the model stays.
+// Lives in the SHELL (not the Search view) so results survive switching
+// views; the panel unmounts, the model stays.
 // The criteria live here too, beside the results they describe: a reopened
 // input that had forgotten its query sat above results it no longer named.
 export function useWorkspaceSearch(

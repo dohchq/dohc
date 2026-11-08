@@ -155,6 +155,13 @@ Use `ConfirmDialog` for a dialog with one action: a title, at most one short sen
 The card's `p-6` and `gap-6` separate them, so add no dividers.
 A divider only separates a fixed header or footer from a list that scrolls.
 
+Every confirmation is the same card, 440px wide:
+
+- A 32px tile holds the action's 16px glyph at the card's left, `rounded-lg`. A danger confirmation tints it `bg-danger-tint text-danger`; any other uses `bg-panel-2 text-muted`.
+- The glyph names the action: `Trash2` for a delete, `Archive` for archive, `Eraser` for clear, `Layers` for a version.
+- The text starts 44px in, after the tile and a 12px gap. The title, the body, lists, escape steps and the buttons all start at that edge.
+- A confirmation that needs more than `ConfirmDialog`, such as a busy state or a dialog of its own, builds the same card from `ConfirmationCard`, `ConfirmationHead` and `ConfirmActions`, and passes `confirmPanel` to its `Overlay`. The panel takes focus as the dialog opens, so it carries the dialog's role, title and sentences, and the arrow and held-Enter keys.
+
 - The title names the action and its object: `Merge version-1 into Main`, `Delete 12 files from Research?`.
 - The body states the one fact the title and buttons leave out, such as what stays or what cannot come back. Most dialogs need none.
 - For an action that loses work, the body can say what the action reaches beyond the title, then how to get it back, as [Deletes](#deletes-and-other-actions-that-lose-work) asks.
@@ -164,11 +171,15 @@ A divider only separates a fixed header or footer from a list that scrolls.
 
 ### Buttons
 
-Put Cancel, then one primary, at the right.
-A secondary step that comes before the decision, such as `Save recovery file first`, sits at the left of the same row.
+Put Cancel, then one primary, at the right. Nothing else sits in that row.
+A step that saves something before the decision, such as `Save recovery file` or `Copy the record`, sits in the body beside the sentence that says what it keeps, as a row-size button (`ConfirmEscape`).
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
+A disabled button keeps its shape and drops its color. A primary or danger confirm takes the `bg-line` fill; every kind shows its label and icon in `text-subtle`, with no hover. A danger confirm turns red only when pressing it will act.
+An icon button has no label and its icon is already subtle at rest, so a disabled icon button dims to 40%.
 Never label a button `OK`, `Yes`, or `Confirm`.
+The safe choice reads **Cancel** when it cancels the action the person chose, such as Remove from list.
+It reads **Go back** only on a warning about leaving typing or drawing changes that dohc has not kept, because it returns the person to that work: `Quit without your typing?`.
 
 ### Focus and keys
 
@@ -199,6 +210,15 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 - Give the field `aria-invalid`, and point its `aria-describedby` at the error.
 - Do not disable the primary to show that a field is empty or wrong. Pressing it shows the errors and focuses the first one.
 - A disabled control says why, beside it or on its second line.
+
+### Message boxes from main
+
+Main asks some questions in the system's message box, such as before a quit loses typing.
+
+- Show it with `showMessageBox` from `window/messageBox.ts`. It titles the box `dohc` and gives it push buttons, where Windows would draw command links.
+- List the action first and the safe choice last: `Quit anyway`, `Go back`. Windows shows them in that order, and macOS reverses it.
+- When the action loses work, make the safe choice the default and Escape's answer.
+- Windows draws the box light in both themes. Leave it as the system draws it.
 
 ### Words in dialogs and explanations
 
@@ -310,6 +330,9 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-agent`, `text-agent` | The default agent color |
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
+| `bg-danger-fill`, `text-on-danger` | A danger confirm's fill and label. Dark has its own deeper fill, so never put `text-danger` text on it |
+| `bg-line` as a fill | A disabled primary or danger confirm |
+| `bg-danger-tint` | The tile behind a danger confirmation's glyph, and nothing else |
 
 A surface or list whose read failed, so it shows nothing, takes danger. When some of its sources didn't load beside others that did, what's missing takes warning. Work dohc is holding or has paused takes warning where it waits, such as History paused in History's pane. The notice that reports the failure behind it is an error, so it takes danger. What the person's own rules or a list's limit leave out, such as a file History no longer tracks, takes the plain mark. A list's limit goes in a `bg-panel-2` band above its rows, never in a row, and its whole sentence shows: how many the list includes, and how to see the rest. An item that is broken, such as an automation dohc can't read, takes danger wherever it sits.
 
@@ -391,6 +414,7 @@ Alignment:
 Position:
 
 - Anchor a page-like surface at a fixed top. Do not center it vertically, because content that loads later moves it.
+- Every dialog uses `OverlayFrame`'s top anchor, so a dialog that loads a list, opens Details or grows keeps its title in place. `appearance="warning"` only puts the dialog above other dialogs and focuses its panel.
 - Center only a short message that stands alone, such as an empty panel.
 
 | Part | Spacing |

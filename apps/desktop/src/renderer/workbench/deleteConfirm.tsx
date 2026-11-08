@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
-import { basenameOf } from "../path";
+import { Folder } from "lucide-react";
+import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import { basenameOf, dirnameOf } from "../path";
+import { FileGlyph, listedFileKind } from "../ui/KindGlyph";
 
 // What the delete dialog says for these paths. Only a share view asks before
 // a delete, because its delete has no trash behind it. Explorer opens it, and
@@ -7,6 +10,8 @@ import { basenameOf } from "../path";
 export function deleteConfirmText(
   paths: readonly string[],
   shareView: { granterEmail: string | null },
+  fileByPath?: ReadonlyMap<string, WorkspaceFileEntry>,
+  isFolderPath?: (path: string) => boolean,
 ): { title: string; confirmLabel: string; intent: "danger"; details: ReactNode; children: ReactNode } {
   return {
     title: `Delete ${paths.length === 1 ? basenameOf(paths[0]!) : `${paths.length} items`}?`,
@@ -14,16 +19,28 @@ export function deleteConfirmText(
     intent: "danger",
     details:
       paths.length > 1 ? (
-        <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+        // Seven rows show; the rest scroll.
+        <ul className="m-0 max-h-[204px] list-none overflow-auto rounded-lg border border-line bg-bg p-1">
           {paths.map((path) => (
-            <li key={path} className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0">
-              <span className="break-all">{path}</span>
+            <li key={path} title={path} className="flex h-7 items-center gap-2 rounded-md px-2">
+              {isFolderPath?.(path) ? (
+                <Folder size={14} aria-hidden className="shrink-0 text-subtle" />
+              ) : (
+                <FileGlyph
+                  kind={listedFileKind(path, fileByPath?.get(path)?.kind)}
+                  icon={fileByPath?.get(path)?.icon}
+                  size={14}
+                  className="text-subtle"
+                />
+              )}
+              <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{basenameOf(path)}</span>
+              <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{dirnameOf(path)}</span>
             </li>
           ))}
         </ul>
       ) : null,
     children: (
-      <p className="m-0 mt-2 text-[13px] text-muted">
+      <p>
         {`${paths.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
           paths.length === 1 ? "it" : "them"
         } from. ${

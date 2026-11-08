@@ -1,3 +1,5 @@
+import type { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
@@ -6,10 +8,12 @@ import { createTestScratch } from "../workspaces/testTemp";
 import {
   createChatRunnerProcess,
   readRunnerNodeAvailable,
-  tokenizeRunnerCommand,
   codexCheckWithTimeout,
+  RUNNER_KILL_GRACE_MS,
+  spawnOwnedRunner,
   type ChatRunnerProcessOptions,
   type RunDohcTools,
+  type RunnerProcess,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
 import type { AgentLaunchProfile } from "./agentToolCatalog";
@@ -32,7 +36,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
       resourcesPath: () => platform === "win32" ? join(root, "resources") : join(root, "resources").replace(/^[a-z]:/iu, "").replaceAll("\\", "/"),
       arch,
       platform,
-      codexConfigFiles: () => ({ requirements: [], config: [] }),
+      codexConfigFiles: () => ({ requirements: [], config: [], managedPreferences: [] }),
       runCodexCheck: async (command, args, options) => {
         checks.push({ command, args, cwd: options.cwd, env: options.env });
         return JSON.stringify([{ name: "dohc", enabled: true }]);
@@ -42,7 +46,6 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
         calls.push({ command, args, options });
         return {
           pid: 4_100,
-          writeStdin: () => undefined,
           hasExited: () => false,
           onExit: () => undefined,
           onError: () => undefined,
@@ -55,6 +58,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
+      agentName: "Nova",
       logPath: join(root, "logs", "run.log"),
       command,
       profile,
@@ -165,11 +169,11 @@ describe("chat runner process", () => {
       else expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{extends=':workspace',/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
       expect(args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : [])).toEqual(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...REPLY_ONLY_DISABLED_FEATURES] : []);
       expect(args.includes("web_search='disabled'")).toBe(readOnly);
-      expect(args.slice(-4)).toEqual([readOnly ? "--ignore-rules" : expect.anything(), "--skip-git-repo-check", "--ephemeral", "-"]);
+      expect(args.slice(-5)).toEqual([readOnly ? "--ignore-rules" : expect.anything(), "--skip-git-repo-check", "--ephemeral", "--json", "-"]);
       // A reply-only run asks Codex first which servers these same arguments
       // start. `codex mcp list` takes no --ignore-rules.
       expect(checks.map((check) => [check.command, check.args, check.cwd])).toEqual(readOnly
-        ? [[process.execPath, ["mcp", "list", "--json", ...args.slice(3, -4)], root]]
+        ? [[process.execPath, ["mcp", "list", "--json", ...args.slice(3, -5)], root]]
         : []);
       if (readOnly) expect(checks[0]!.env).toBe(calls[0]!.options.env);
     }
@@ -233,7 +237,7 @@ describe("chat runner process", () => {
   it("turns off each MCP server the person's Codex config names in a reply-only run, and none in an all-tools run", async () => {
     const home = await createTestScratch("dohc-codex-home-");
     writeFileSync(join(home, "config.toml"), "[mcp_servers.owner_a]\ncommand = 'a'\n[mcp_servers.owner-b]\ncommand = 'b'\n[mcp_servers.dohc]\ncommand = 'x'\n[mcp_servers.\"has.dot\"]\ncommand = 'c'\n");
-    const { calls, spawn } = await runnerFixture("linux", false, "x64", { codexConfigFiles: () => ({ requirements: [], config: [join(home, "config.toml")] }) });
+    const { calls, spawn } = await runnerFixture("linux", false, "x64", { codexConfigFiles: () => ({ requirements: [], config: [join(home, "config.toml")], managedPreferences: [] }) });
     await spawn("", () => undefined, { tool: "codex", executable: process.execPath }, "reply");
     await spawn("", () => undefined, { tool: "codex", executable: process.execPath }, "all");
     const [replyOnly, allTools] = calls.map((call) => call.args.filter((arg) => /^mcp_servers\.[^.]+\.enabled=/u.test(arg)));
@@ -318,13 +322,34 @@ describe("chat runner process", () => {
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
   });
 
-  it("tokenizes quoted runner arguments and rejects an unterminated command", () => {
-    expect(
-      tokenizeRunnerCommand('claude -p --allowedTools "Bash(dohc chat:*)" --label "two words"'),
-    ).toEqual(["claude", "-p", "--allowedTools", "Bash(dohc chat:*)", "--label", "two words"]);
-    expect(() => tokenizeRunnerCommand('claude -p "unterminated')).toThrow(
-      "Runner command has an unterminated double quote.",
-    );
+  it.each(["claude", "codex"] as const)("passes the person's own %s flags once, before dohc's reply server, only in the owner's run", async (tool) => {
+    const { calls, spawn } = await runnerFixture("linux");
+    const profile = { tool, executable: `/opt/bin/${tool}`, arguments: ["--model", "own-model"] };
+    await spawn("", () => undefined, profile, "all");
+    await spawn("", () => undefined, profile, "reply");
+    expect(calls).toHaveLength(2);
+    const [owner, replyOnly] = calls;
+    expect(owner!.command).toBe(`/opt/bin/${tool}`);
+    expect(owner!.args.slice(0, 3)).toEqual([tool === "claude" ? "-p" : "exec", "--model", "own-model"]);
+    expect(owner!.args.filter((arg) => arg === "own-model")).toHaveLength(1);
+    const replyServer = owner!.args.indexOf(tool === "claude" ? "--mcp-config" : "mcp_servers.dohc.required=true");
+    expect(replyServer).toBeGreaterThan(owner!.args.indexOf("own-model"));
+    expect(replyOnly!.args).not.toContain("own-model");
+  });
+
+  it("refuses own flags that saving refuses, in the owner's run and a reply-only run", async () => {
+    const { calls, spawn } = await runnerFixture("linux");
+    for (const [tool, flags, rule] of [
+      ["codex", ["resume", "--last"], "The first word after the program must be a flag, such as --model."],
+      ["codex", ["--model", "o3", "--"], "Its flags cannot include a bare --."],
+      ["claude", ["--model", "opus", "--settings"], "Its last flag needs a file or folder after it."],
+    ] as const) {
+      for (const dohcTools of ["all", "reply"] as const) {
+        await expect(spawn("", () => undefined, { tool, executable: `/opt/bin/${tool}`, arguments: [...flags] }, dohcTools))
+          .rejects.toThrow(`dohc did not start Nova. ${rule} Change the command in Settings › Agents.`);
+      }
+    }
+    expect(calls).toEqual([]);
   });
 
   it("keeps the workspace folder out of the runner's program search", async () => {
@@ -366,7 +391,7 @@ describe("chat runner process", () => {
   it.each(["all", "reply"] as const)("refuses a Windows Codex run with %s dohc tools only when it is reply-only and the requirements rule out its sandbox", async (dohcTools) => {
     const requirements = join(await createTestScratch("dohc-codex-requirements-"), "requirements.toml");
     writeFileSync(requirements, "[windows]\nrequire_mxc = true\n");
-    const { calls, checks, spawn } = await runnerFixture("win32", false, "x64", { codexConfigFiles: () => ({ requirements: [requirements], config: [] }) });
+    const { calls, checks, spawn } = await runnerFixture("win32", false, "x64", { codexConfigFiles: () => ({ requirements: [requirements], config: [], managedPreferences: [] }) });
     const started = spawn("", undefined, { tool: "codex", executable: process.execPath }, dohcTools);
     if (dohcTools === "all") {
       await started;
@@ -439,6 +464,7 @@ describe("chat runner process", () => {
       const child = await runner.spawnConfiguredRunner({
         rootPath: workspace,
         runId: "run-1",
+        agentName: "Nova",
         logPath: join(shims, "run.log"),
         command: `"${shim}"`,
         dohcTools: "reply",
@@ -459,13 +485,14 @@ describe("chat runner process", () => {
     const codex = join(root, "codex.cmd");
     writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
     const runner = createChatRunnerProcess(
-      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => ({ requirements: [], config: [] }),
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => ({ requirements: [], config: [], managedPreferences: [] }),
         runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]) },
       () => undefined,
     );
     const start = (rootPath: string) => runner.spawnConfiguredRunner({
       rootPath,
       runId: "run-1",
+      agentName: "Nova",
       logPath: join(root, "run.log"),
       command: "",
       profile: { tool: "codex", executable: codex },
@@ -502,16 +529,17 @@ describe("chat runner process", () => {
       appRoot: () => scratch,
       isPackaged: () => false,
       platform: "win32",
-      codexConfigFiles: () => ({ requirements: [], config: [config] }),
+      codexConfigFiles: () => ({ requirements: [], config: [config], managedPreferences: [] }),
       spawnRunner: (_command, args) => {
         started.push(args.join(" "));
-        return { pid: 4_100, writeStdin: () => undefined, hasExited: () => false, onExit: () => undefined, onError: () => undefined };
+        return { pid: 4_100, hasExited: () => false, onExit: () => undefined, onError: () => undefined };
       },
     }, () => undefined);
     for (const executable of ["codex.cmd", "codex.exe"]) {
       await runner.spawnConfiguredRunner({
         rootPath: workspace!,
         runId: "run-1",
+        agentName: "Nova",
         logPath: join(scratch, "run.log"),
         command: "",
         profile: { tool: "codex", executable: join(scratch, executable) },
@@ -525,5 +553,111 @@ describe("chat runner process", () => {
     expect(shim).not.toContain("o'brien");
     expect(direct).toContain(`'${plain}'='write'`);
     expect(direct).toContain(`${JSON.stringify(apostrophe)}='write'`);
+  });
+});
+
+describe("Windows run owner", () => {
+  const owner = {
+    root: "C:\\dohc\\resources\\agent-probe",
+    executable: "C:\\dohc\\resources\\agent-probe\\agentProbeOwner.exe",
+    relay: "C:\\dohc\\resources\\agent-probe\\agentProbeRelay.mjs",
+    node: "C:\\dohc\\resources\\app-compiler\\node.exe",
+  };
+
+  function fakeOwnerProcess() {
+    const stdin = { on: vi.fn(), write: vi.fn(), end: vi.fn(), destroy: vi.fn() };
+    stdin.on.mockReturnValue(stdin);
+    const child = Object.assign(new EventEmitter(), { pid: 77, exitCode: null, signalCode: null, stdin, kill: vi.fn() });
+    const spawnProcess = vi.fn(() => child);
+    return { child, stdin, spawnProcess: spawnProcess as unknown as typeof spawn, calls: spawnProcess.mock.calls as unknown[][] };
+  }
+
+  it("starts a run under the owner with its command, environment and prompt on stdin, and keeps stdin open", () => {
+    vi.stubEnv("SystemRoot", "C:\\Windows");
+    const { stdin, spawnProcess, calls } = fakeOwnerProcess();
+    const prompt = 'Plan day 2, "quoted"';
+    const options: RunnerSpawnOptions = {
+      cwd: "C:\\work", env: { PATH: "C:\\bin", OPENAI_API_KEY: "secret" }, detached: false,
+      stdio: ["pipe", 5, 5], windowsHide: true, windowsVerbatimArguments: true, input: prompt,
+    };
+    spawnOwnedRunner(owner, "C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", "codex.cmd"], options, spawnProcess);
+
+    expect(calls).toHaveLength(1);
+    const [executable, args, spawnOptions] = calls[0] as [string, string[], { cwd: string; env: NodeJS.ProcessEnv; stdio: unknown }];
+    expect(executable).toBe(owner.executable);
+    expect(args.slice(0, 2)).toEqual([owner.node, owner.relay]);
+    expect(args.join(" ")).not.toContain("Plan day 2");
+    expect(spawnOptions.cwd).toBe(owner.root);
+    expect(spawnOptions.stdio).toEqual(["pipe", 5, 5]);
+    expect(spawnOptions.env.SystemRoot).toBe("C:\\Windows");
+    expect(Object.keys(spawnOptions.env).every((name) => ["SystemRoot", "WINDIR", "TEMP", "TMP"].includes(name))).toBe(true);
+
+    expect(stdin.write).toHaveBeenCalledTimes(1);
+    const admission = stdin.write.mock.calls[0]![0] as Buffer;
+    expect(String(admission.byteLength)).toBe(args[2]);
+    expect(JSON.parse(admission.toString("utf8"))).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", "codex.cmd"], windowsVerbatimArguments: true,
+      cwd: "C:\\work", env: { PATH: "C:\\bin", OPENAI_API_KEY: "secret" }, input: prompt,
+    });
+    expect(stdin.end).not.toHaveBeenCalled();
+    expect(stdin.destroy).not.toHaveBeenCalled();
+  });
+
+  it("stops a run by ending the owner's input, and ends the owner only when forced", () => {
+    const { child, stdin, spawnProcess } = fakeOwnerProcess();
+    const run = spawnOwnedRunner(owner, "C:\\agent.exe", [], {
+      cwd: "C:\\work", env: {}, detached: false, stdio: ["pipe", 5, 5], windowsHide: true, input: "prompt",
+    }, spawnProcess);
+    run.stop?.("SIGTERM");
+    expect(stdin.destroy).toHaveBeenCalledTimes(1);
+    expect(child.kill).not.toHaveBeenCalled();
+    run.stop?.("SIGKILL");
+    expect(child.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a run whose input is too large for the owner", () => {
+    const { spawnProcess, calls } = fakeOwnerProcess();
+    expect(() => spawnOwnedRunner(owner, "C:\\agent.exe", [], {
+      cwd: "C:\\work", env: {}, detached: false, stdio: ["pipe", 5, 5], windowsHide: true, input: "x".repeat(16 * 1024 * 1024),
+    }, spawnProcess)).toThrow("This chat is too long to send to an agent. Start a new chat with the agent.");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("signals a Windows run through its owner, never its process group", () => {
+    vi.useFakeTimers();
+    try {
+      const stop = vi.fn();
+      const killProcessGroup = vi.fn();
+      const runner = createChatRunnerProcess({
+        stateDir: () => "C:\\state", appRoot: () => "C:\\dohc", isPackaged: () => false, platform: "win32", killProcessGroup,
+      }, () => undefined);
+      const run: RunnerProcess = { pid: 4_100, hasExited: () => false, onExit: () => undefined, onError: () => undefined, stop };
+      runner.terminateWithEscalation(run, null);
+      expect(stop.mock.calls).toEqual([["SIGTERM"]]);
+      vi.advanceTimersByTime(RUNNER_KILL_GRACE_MS);
+      expect(stop.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+      expect(killProcessGroup).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says to reinstall when the owner is missing, and starts nothing", async () => {
+    const root = await createTestScratch("dohc-chat-runner-owner-");
+    const missing = new Error("Agent detection is missing agentProbeOwner.exe.");
+    for (const agentOwner of [undefined, () => { throw missing; }]) {
+      const reportError = vi.fn();
+      const runner = createChatRunnerProcess({
+        stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, platform: "win32",
+        ...(agentOwner ? { agentOwner } : {}),
+      }, reportError);
+      const logPath = join(root, "logs", `run-${agentOwner ? "broken" : "none"}.log`);
+      await expect(runner.spawnConfiguredRunner({
+        rootPath: root, runId: "run-1", agentName: "Nova", logPath, command: `"${process.execPath}"`, dohcTools: "reply",
+        prompt: "", assertMayStart: () => undefined,
+      })).rejects.toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+      expect(readFileSync(logPath, "utf8")).toContain("Reinstall dohc");
+      expect(reportError.mock.calls).toEqual(agentOwner ? [[missing]] : []);
+    }
   });
 });

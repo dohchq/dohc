@@ -29,6 +29,7 @@ import type { SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
 import { showChat } from "../workbench/chatsOnScreen";
+import { tellWindowFocused } from "../../testing/windowFocus";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
   return {
@@ -833,39 +834,88 @@ describe("Try again on an agent run dohc's restart or quit stopped", () => {
   });
 });
 
-describe("an agent's reply notice", () => {
-  const replied = (target: NoticeRow["target"]) => notice({
-    store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
-    title: "Nova replied", target,
+describe("an agent run's notice while its chat is on screen", () => {
+  const ran = (target: NoticeRow["target"], overrides: Partial<NoticeRow> = {}) => notice({
+    store: "local", noticeId: "n1", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
+    title: "Nova replied", target, ...overrides,
+  });
+  const failed = () => ran({ thread: "thread-1", run: "run-1" }, {
+    noticeId: "agent-run:notes:run-1", title: "Nova didn't reply", body: "Its run ended with an error.",
+  });
+  let shown: HTMLElement;
+  let hide: () => void;
+  beforeEach(() => {
+    tellWindowFocused(true);
+    shown = document.createElement("div");
+    document.body.append(shown);
+    hide = showChat("thread-1", shown);
+  });
+  afterEach(() => {
+    hide();
+    shown.remove();
+    tellWindowFocused(false);
   });
 
-  it("skips the toast and the row while the chat with the reply is on screen", async () => {
-    const shown = document.createElement("div");
-    document.body.append(shown);
-    const hide = showChat("thread-1", shown);
-    const reply = replied({ thread: "thread-1", run: "run-1", message: "m-reply" });
+  it("skips the toast and the row of a reply the person can see", async () => {
+    const reply = ran({ thread: "thread-1", run: "run-1", message: "m-reply" });
     const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
     expect(result.current.sentNoticeToast).toBeNull();
     await waitFor(() => expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "local", noticeId: "n1" }));
     expect(sentNotices.hideToast).toHaveBeenCalledOnce();
-    hide();
-    shown.remove();
+    expect(sentNotices.read).not.toHaveBeenCalled();
   });
 
-  it("shows the notice when that chat isn't on screen, or the run didn't reply", () => {
-    const shown = document.createElement("div");
-    document.body.append(shown);
-    const hide = showChat("thread-1", shown);
-    for (const toast of [
-      replied({ thread: "thread-2", run: "run-1", message: "m-reply" }),
-      replied({ thread: "thread-1", run: "run-1" }),
-    ]) {
-      const { result, sentNotices, unmount } = setup([toast], [workspace("notes")], "notes", { toast });
-      expect(result.current.sentNoticeToast?.notice).toBe(toast);
-      expect(sentNotices.dismiss).not.toHaveBeenCalled();
-      unmount();
-    }
-    hide();
-    shown.remove();
+  it("skips a failed run's toast and keeps its row, read", async () => {
+    const failure = failed();
+    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", { toast: failure });
+    expect(result.current.sentNoticeToast).toBeNull();
+    await waitFor(() => expect(sentNotices.read).toHaveBeenCalledWith([{ store: "local", noticeId: "agent-run:notes:run-1" }]));
+    expect(sentNotices.hideToast).toHaveBeenCalledOnce();
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
+    expect(result.current.sentNotices.map((row) => row.notice)).toEqual([failure]);
+  });
+
+  it("keeps Try again on the row of a run dohc's quit stopped", async () => {
+    chatDispatchStateForThread.mockResolvedValueOnce({ ...IDLE, failedRun: {
+      runId: "run-1", triggerMessageId: "ask-run-1", words: "Nova didn't reply. dohc quit during its run.", retryable: true,
+    } });
+    const failure = { ...failed(), body: "dohc quit during its run." };
+    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", { toast: failure });
+    expect(result.current.sentNoticeToast).toBeNull();
+    await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
+    expect(sentNotices.read).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["the window isn't focused", () => tellWindowFocused(false)],
+    ["the chat's view is hidden", () => { shown.checkVisibility = () => false; }],
+    ["the chat's view is gone", () => hide()],
+    ["another chat is on screen", () => {
+      hide();
+      hide = showChat("thread-2", shown);
+    }],
+  ])("toasts a failed run while %s", (_case, leave) => {
+    leave();
+    const failure = failed();
+    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", { toast: failure });
+    expect(result.current.sentNoticeToast?.notice).toBe(failure);
+    expect(sentNotices.hideToast).not.toHaveBeenCalled();
+    expect(sentNotices.read).not.toHaveBeenCalled();
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("toasts a run that ended without a reply or a reason", () => {
+    const stopped = ran({ thread: "thread-1", run: "run-1" }, { title: "Stopped Nova's run" });
+    const { result, sentNotices } = setup([stopped], [workspace("notes")], "notes", { toast: stopped });
+    expect(result.current.sentNoticeToast?.notice).toBe(stopped);
+    expect(sentNotices.read).not.toHaveBeenCalled();
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("toasts a reply in a chat that isn't on screen", () => {
+    const reply = ran({ thread: "thread-2", run: "run-1", message: "m-reply" });
+    const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
+    expect(result.current.sentNoticeToast?.notice).toBe(reply);
+    expect(sentNotices.dismiss).not.toHaveBeenCalled();
   });
 });

@@ -134,6 +134,59 @@ it("says the runner command is in use until a tool is chosen", async () => {
   expect(screen.getByText("Conversation through stdin")).toBeTruthy();
 });
 
+it.each([
+  ["Claude Code", "claude", "C:\\Tools\\claude.exe", "dohc adds its reply tool. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds."],
+  ["Codex", "codex", "C:\\Tools\\codex.cmd", "dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds."],
+] as const)("keeps the %s profile when its Advanced command changes and changes back", async (name, tool, executable, hint) => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name }));
+  await userEvent.click(screen.getByText("Advanced"));
+  const input = screen.getByLabelText("Runner command") as HTMLInputElement;
+  expect(input.value).toBe(executable);
+  expect(screen.getByText(hint)).toBeTruthy();
+  fireEvent.change(input, { target: { value: `${executable}x` } });
+  expect(screen.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  fireEvent.change(input, { target: { value: executable } });
+  expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("true");
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({ launch: { tool, executable } }) } }), f.props.settings));
+});
+
+it.each([
+  ["Claude Code", "claude", "C:\\Tools\\claude.exe"],
+  ["Codex", "codex", "C:\\Tools\\codex.cmd"],
+] as const)("adds your own flags to the %s profile", async (name, tool, executable) => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name }));
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: `${executable} --model "my model"` } });
+  expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByText("dohc adds its own server for replies.")).toBeTruthy();
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
+    launch: { tool, executable, arguments: ["--model", "my model"] },
+  }) } }), f.props.settings));
+});
+
+it("saves a command that starts another program as typed, even when it has the tool's name", async () => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: "C:\\work\\codex.cmd --model o3" } });
+  expect(screen.getByRole("button", { name: "Codex" }).getAttribute("aria-pressed")).toBe("false");
+  expect(screen.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
+    launch: { command: "C:\\work\\codex.cmd --model o3" },
+  }) } }), f.props.settings));
+});
+
 it("ignores detection and checks that finish after a workspace switch", async () => {
   const pending = deferred<AgentToolsResult>();
   const f = fixture(vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue({ workingDirectory: "/workspace-b", tools: [] }));

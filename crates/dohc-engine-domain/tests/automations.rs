@@ -2089,6 +2089,7 @@ fn ask_agent(
     chats
         .claim_next_pending(
             WS,
+            "default",
             &format!("run-{message_id}"),
             "agent",
             None,
@@ -2251,7 +2252,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
             .expect("queue");
     }
     let claim = chats
-        .claim_next_pending(WS, "run-1", "agent", None, 15, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "agent", None, 15, &NO_FAULTS)
         .expect("claim")
         .expect("a run");
     assert_eq!(claim.run.trigger_message_id, "m-first");
@@ -2304,7 +2305,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
         )
         .expect("a person's request");
     let again = chats
-        .claim_next_pending(WS, "run-2", "agent", None, 18, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-2", "agent", None, 18, &NO_FAULTS)
         .expect("claim again")
         .expect("the requeued run");
     assert_eq!(again.run.trigger_message_id, "m-first");

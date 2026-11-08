@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, FileCode2, History as HistoryIcon, X } from "lucide-react";
+import { AlertTriangle, Clock, FileCode2, History as HistoryIcon, Save, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ListCollectionAutomationsResult, SwitchCollectionAutomationResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -323,6 +323,7 @@ export function SharedAutomationsPanel(props: {
       </div>
       {reformat && !props.readOnly ? (
         <ConfirmDialog
+          icon={Save}
           title={`Save ${AUTOMATIONS_FILE} in dohc's layout?`}
           confirmLabel="Save"
           testId="automations-reformat"
@@ -335,7 +336,7 @@ export function SharedAutomationsPanel(props: {
             agreed();
           }}
         >
-          <p className="m-0 mt-2 text-[13px] text-muted">
+          <p>
             dohc rewrites the whole file when it saves, so you lose its comments and hand formatting.
           </p>
         </ConfirmDialog>

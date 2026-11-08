@@ -364,7 +364,7 @@ struct DecisionWire<'a> {
     resolved_by_message_id: Option<&'a str>,
 }
 
-fn decision_json(decision: &ChatDecision) -> Value {
+pub(super) fn decision_json(decision: &ChatDecision) -> Value {
     json!(DecisionWire {
         thread_id: &decision.thread_id,
         message_id: &decision.message_id,
