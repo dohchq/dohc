@@ -2193,6 +2193,18 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* The group a keyboard close leaves empty takes focus, and its ring
+          shows on all four edges above its tab strip. It sits above the
+          editor's menus, whose layers took its tab name's subpixel smoothing
+          among the other parts. */}
+      <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
+        <Specimen label="split: the focused active group, empty, then one with tabs">
+          <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
+            <EditorGroupsSpecimen activeHasTabs={false} />
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
           <ul className={KIND_NAMES}>
@@ -2435,16 +2447,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="third option active; the list scrolls">
           <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>
             <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
-          </div>
-        </Specimen>
-      </Section>
-
-      {/* The group a keyboard close leaves empty takes focus, and its ring
-          shows on all four edges above its tab strip. */}
-      <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
-        <Specimen label="split: the focused active group, empty, then one with tabs">
-          <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
-            <EditorGroupsSpecimen activeHasTabs={false} />
           </div>
         </Specimen>
       </Section>
