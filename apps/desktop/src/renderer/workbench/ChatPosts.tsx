@@ -39,6 +39,7 @@ import type { ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
 import { AS_REPORTED, reportedProduct } from "./reportedAgent";
+import { CopyMessageLink } from "./messageLinks";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -764,6 +765,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                     <Reply size={14} strokeWidth={1.9} aria-hidden />
                   </button>
                 ) : null}
+                <CopyMessageLink messageId={comment.id} testId="chats-comment-copy-link" />
                 <BookmarkAction
                   active={Boolean(commentBookmark)}
                   busy={bookmarkBusy.has(commentBookmarkKey)}
@@ -938,29 +940,32 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             controls={reactionControls}
             hoverToolbar
             toolbarActions={
-              <SaveAsFileActions
-                testIdPrefix="chats-message-bookmark"
-                bookmark={openingBookmark}
-                busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-                onToggle={
-                  threadLocked
-                    ? undefined
-                    : (mode) =>
-                        void toggleBookmark({
-                          target: {
-                            kind: "message",
-                            threadId: nav.thread.id,
-                            messageId: openingMessage.id,
-                          },
-                          mode,
-                        })
-                }
-                onOpen={
-                  openingBookmark && props.onOpenPath
-                    ? () => props.onOpenPath?.(openingBookmark.destinationPath)
-                    : undefined
-                }
-              />
+              <>
+                <CopyMessageLink messageId={openingMessage.id} testId="chats-message-copy-link" />
+                <SaveAsFileActions
+                  testIdPrefix="chats-message-bookmark"
+                  bookmark={openingBookmark}
+                  busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+                  onToggle={
+                    threadLocked
+                      ? undefined
+                      : (mode) =>
+                          void toggleBookmark({
+                            target: {
+                              kind: "message",
+                              threadId: nav.thread.id,
+                              messageId: openingMessage.id,
+                            },
+                            mode,
+                          })
+                  }
+                  onOpen={
+                    openingBookmark && props.onOpenPath
+                      ? () => props.onOpenPath?.(openingBookmark.destinationPath)
+                      : undefined
+                  }
+                />
+              </>
             }
           />
         </div>

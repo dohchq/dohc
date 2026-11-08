@@ -107,6 +107,10 @@ A relay-derived identity for one source workspace within a recipient namespace. 
 **Received object token**:
 A relay-derived file identity within the same recipient namespace. It survives source renames and never exposes the source object id.
 
+**Work link**:
+A web link to one message, `<server origin>/l/<reference>`, on the server the workspace syncs with. It carries no credential and grants nothing. dohc opens it in the workspace on this computer that holds the message. In a browser, the server's page shows only an Open in dohc button. Messages are the only work that has one so far.
+_Avoid_: share link (that is the URL grant), message URL
+
 ### Chat
 
 **ActorKey**:

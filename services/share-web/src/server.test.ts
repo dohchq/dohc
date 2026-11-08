@@ -128,6 +128,42 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("work link page", () => {
+  const reference = "aB_9-".repeat(8) + "aB_";
+  const other = Buffer.alloc(32, 41).toString("base64url").slice(0, 43);
+
+  it("answers every well-formed reference with the same page, which offers only Open in dohc", async () => {
+    const fetchRelay = vi.fn();
+    const handler = createShareWebHandler({ relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay });
+    const first = await handler(request(`/l/${reference}`));
+    const second = await handler(request(`/l/${other}`));
+
+    expect(first.status).toBe(200);
+    expect(first.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(first.headers.get("content-security-policy")).not.toContain("script");
+    expect(first.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(first.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
+    expect(first.headers.get("cache-control")).toBe("private, no-store");
+    const page = await first.text();
+    expect(page).toContain(`<a href="dohc://l/${reference}?server=https%3A%2F%2F${HOST}">Open in dohc</a>`);
+    expect(page).not.toContain("<script");
+    expect((await second.text()).replace(other, reference)).toBe(page);
+    expect(fetchRelay).not.toHaveBeenCalled();
+  });
+
+  it.each(["/l", "/l/", `/l/${reference.slice(1)}`, `/l/${reference}a`, `/l/${reference}/`, `/l/${reference}/x`])("answers %s as not found", async path => {
+    const handler = createShareWebHandler({ relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay: vi.fn() });
+    const response = await handler(request(path));
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe(shareWebRefusalBody);
+  });
+
+  it("answers a write to a work link as not found", async () => {
+    const handler = createShareWebHandler({ relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay: vi.fn() });
+    expect((await handler(request(`/l/${reference}`, { method: "POST" }))).status).toBe(404);
+  });
+});
+
 describe("share-web sessions", () => {
   it("keeps valid and garbage viewer entries uniformly unindexable", async () => {
     const viewerAssetsDir = await mkdtemp(join(tmpdir(), "dohc-share-web-unfurl-"));

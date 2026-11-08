@@ -1,3 +1,5 @@
+import type { WorkspaceActivatedMessage } from "../../ipc/bridgeContract";
+
 // Where a Notices row opens, as plain data. The shell's openNoticeTarget is
 // the one place that turns it into navigation, so it alone holds the
 // workspace guard, and an agent-readable list can carry the same value.
@@ -6,7 +8,8 @@ export type NoticeTarget =
   // A folder in Files, such as a share mounted in shared-with-me.
   | { to: "folder"; path: string }
   // A conversation, at a message or at a run's last message when one is named.
-  | { to: "chat"; thread: string; message?: string; run?: string }
+  // `channel` is the Group or DM that holds the thread, when the opener knows it.
+  | { to: "chat"; thread: string; channel?: string; message?: string; run?: string }
   // Chats at a Group invitation or message request. `inputs` is the input
   // count when Open was chosen, so a later input keeps the person's focus.
   | { to: "chats-invitation"; shareId: string; inputs: number }
@@ -33,6 +36,16 @@ export const AUTOMATION_NOT_HERE_NOTE = "dohc cannot find this automation's Coll
 // Said through the shell's errors, with Try again, when a lookup fails.
 export const AUTOMATION_LOOKUP_FAILED_NOTE = "dohc could not open this automation.";
 export const RUN_THREAD_LOOKUP_FAILED_NOTE = "dohc could not open this run's thread.";
+
+// A work link's message, which main found with the chat that holds it.
+export function workLinkTarget(message: WorkspaceActivatedMessage): Extract<NoticeTarget, { to: "chat" }> {
+  return {
+    to: "chat",
+    thread: message.threadId,
+    ...(message.channelId === null ? {} : { channel: message.channelId }),
+    message: message.messageId,
+  };
+}
 
 // Only a chat or an automation is looked up, so only they can fail this way.
 export function targetLookupFailedNote(target: NoticeTarget): string {

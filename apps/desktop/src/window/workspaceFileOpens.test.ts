@@ -52,4 +52,17 @@ describe("createWorkspaceFileOpens", () => {
     h.opens.shown(window, "ws-notes");
     expect(h.send).not.toHaveBeenCalled();
   });
+
+  it("holds a message from a work link the same way", () => {
+    const send = vi.fn();
+    const opens = createWorkspaceFileOpens<object, typeof notes, { threadId: string; messageId: string }>({
+      shownWorkspaceId: () => undefined,
+      send,
+    });
+    const window = {};
+    const message = { threadId: "t1", messageId: "m1" };
+    opens.request(window, trip, message);
+    opens.shown(window, "ws-trip");
+    expect(send.mock.calls).toEqual([[window, trip, message]]);
+  });
 });

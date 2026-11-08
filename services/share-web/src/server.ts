@@ -29,6 +29,7 @@ import {createAgentChatClient} from "./agentChatClient";
 import {MCP_CORS_HEADERS, MCP_PATH_PREFIX, type SignInPagePolicy, createMcpSignIn, isMcpCorsPath, mcpChallenge, mcpLinkSecret, signInPagePolicy} from "./mcpSignIn";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
 import { viewerPage } from "../viewer/src/pages";
+import { serveWorkLinkPage } from "./workLinkPage";
 import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
@@ -1511,6 +1512,8 @@ export function createShareWebApplication({
       if (!pathname.startsWith("/s/assets/")) viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
       return viewer;
     }
+
+    if (pathname === "/l" || pathname.startsWith("/l/")) return serveWorkLinkPage(request, pathname, agentOrigin);
 
     if (pathname === "/api/exchange" && request.method === "POST") {
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";

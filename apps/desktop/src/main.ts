@@ -15,7 +15,9 @@ import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
-import { appViewOperations, liveDraftRecoveryOperations } from "./ipc/bridgeContract";
+import { appViewOperations, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
+import { createWorkLinks } from "./workspaces/workLinks";
+import { parseWorkLinkUrl, type WorkLink } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
 import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
@@ -5912,6 +5914,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     slot: shareHandoffIntentSlot,
     pendingCodeChanged: () => shareHandoffRedemption.pendingCodeChanged(),
   },
+  workLinks: {
+    open: (link) => openWorkLink(link).catch((error: unknown) => {
+      console.error("[desktop] could not open a work link:", error);
+    }),
+  },
   windows: {
     create: () => trackWorkspaceWindow(
       createMainWindow({
@@ -6115,6 +6122,40 @@ const workspaceFileOpens = createWorkspaceFileOpens<WebContents, WorkspaceSummar
     if (!contents.isDestroyed()) contents.send(CHANNELS.workspaceActivated, { ...workspace, file });
   },
 });
+
+// A work link's message goes to its window the same way, once the renderer
+// there shows the message's workspace.
+const workLinkOpens = createWorkspaceFileOpens<WebContents, WorkspaceSummary, WorkspaceActivatedMessage>({
+  shownWorkspaceId: (contents) => rendererWorkspaceSessions.current(contents)?.workspaceId,
+  send: (contents, workspace, message) => {
+    if (!contents.isDestroyed()) contents.send(CHANNELS.workspaceActivated, { ...workspace, message });
+  },
+});
+
+const workLinks = createWorkLinks<RegistryEntry>({
+  workspaces: listWorkspaces,
+  summaryOf: workspaceSummaryFor,
+  resolveReference: (entry, reference) =>
+    withEngineAdapter(entry, (adapter) => adapter.resolveWorkReference({ workspaceId: entry.workspaceId, reference })),
+});
+
+// A work link the OS handed dohc opens its message in the workspace on this
+// computer that holds it. dohc still opens for a link none holds, and shows
+// nothing about it.
+async function openWorkLink(link: WorkLink): Promise<void> {
+  const shown = liveWorkspaceWindow();
+  const currentWorkspaceId = shown ? rendererWorkspaceSessions.current(shown.webContents)?.workspaceId : undefined;
+  const place = await workLinks.resolve(link, currentWorkspaceId);
+  const entry = place && findWorkspace(place.workspaceId);
+  if (!place || !entry) {
+    await showOrCreateMainWindow();
+    return;
+  }
+  const workspace = workspaceSummaryFor(entry);
+  const window = await sendWorkspaceActivated(shown, workspace);
+  workLinkOpens.request(window.webContents, workspace, { channelId: place.channelId, threadId: place.threadId, messageId: place.messageId });
+  refreshNativeWorkspaceSurfaces();
+}
 
 const oldWindows = createOldWindows<WebContents, BrowserWindow>({
   windows: () => desktopWindows.workspaceWindows.allLive(),
@@ -7448,6 +7489,20 @@ function registerIpcHandlers(): void {
     goToWorkspaceWindow: (_input, { event }) => oldWindows.goTo(event.sender),
   });
 
+  registerOperations(operationBoundary, workLinkOperations, {
+    makeMessageLink: async ({ workspaceId, messageId }, { operation }) => {
+      const entry = findWorkspace(workspaceId);
+      if (!entry) return null;
+      const url = await workLinks.messageLink(entry, () => withEngineAdapter(operation.workspace, async (adapter) =>
+        (await adapter.makeWorkReference({ workspaceId, target: { kind: "message", messageId }, signal: operation.signal })).reference));
+      return url === null ? null : { url };
+    },
+    resolveWorkLink: async ({ url }, { event }) => {
+      const link = parseWorkLinkUrl(url);
+      return link ? await workLinks.resolve(link, rendererWorkspaceSessions.current(event.sender)?.workspaceId) : null;
+    },
+  });
+
   registerOperations(operationBoundary, workspaceTrustOperations, workspaceTrustHandlers<IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     trust: workspaceTrust,
     identify: folderIdentity,
@@ -7482,6 +7537,7 @@ function registerIpcHandlers(): void {
     markWorkspaceOpened,
     workspaceShown: (workspaceId, sender) => {
       workspaceFileOpens.shown(sender, workspaceId);
+      workLinkOpens.shown(sender, workspaceId);
       oldWindows.notify();
     },
     syncStatusWithOwnedProjection,

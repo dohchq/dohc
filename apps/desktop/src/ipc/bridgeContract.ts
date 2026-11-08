@@ -372,9 +372,17 @@ export const WorkspaceSummary = z.object({
 });
 export type WorkspaceSummary = z.infer<typeof WorkspaceSummary>;
 
-// A workspace main activates in a window, and the workspace-relative file to
-// open there once it is ready, as when the OS opens a file with dohc.
-export const WorkspaceActivated = WorkspaceSummary.extend({ file: PATH_STRING.optional() });
+// A workspace main activates in a window, and what to open there once it is
+// ready: a workspace-relative file, as when the OS opens a file with dohc, or
+// a message, as when the OS opens a work link with dohc. A message's chat is
+// the Group or DM its thread is in, or null for a file's conversation.
+export const WorkspaceActivatedMessage = z.object({
+  channelId: OPAQUE_ID.nullable(),
+  threadId: OPAQUE_ID,
+  messageId: OPAQUE_ID,
+}).strict();
+export type WorkspaceActivatedMessage = z.infer<typeof WorkspaceActivatedMessage>;
+export const WorkspaceActivated = WorkspaceSummary.extend({ file: PATH_STRING.optional(), message: WorkspaceActivatedMessage.optional() });
 
 export const WorkspaceRegistryResult = z.object({
   workspaces: z.array(WorkspaceSummary),
@@ -6633,6 +6641,39 @@ export const oldWindowOperations = {
   },
 } as const satisfies OperationTable;
 
+// Work links: <server origin>/l/<work reference>. The renderer names only the
+// message; main finds the workspace's server and mints the reference. A
+// workspace that does not sync has no server and gives no link.
+export const MakeMessageLinkPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  messageId: OPAQUE_ID,
+}).strict();
+export type MakeMessageLinkPayload = z.infer<typeof MakeMessageLinkPayload>;
+export const MakeMessageLinkResult = z.object({ url: z.string().min(1).max(2_048) }).strict().nullable();
+export type MakeMessageLinkResult = z.infer<typeof MakeMessageLinkResult>;
+export const ResolveWorkLinkPayload = z.object({ url: z.string().min(1).max(2_048) }).strict();
+export type ResolveWorkLinkPayload = z.infer<typeof ResolveWorkLinkPayload>;
+// The message a work link names, in a workspace on this computer. Null when no
+// workspace on this computer that syncs with the link's server holds it.
+export const WorkLinkPlace = WorkspaceActivatedMessage.extend({ workspaceId: WORKSPACE_ID }).strict();
+export type WorkLinkPlace = z.infer<typeof WorkLinkPlace>;
+export const workLinkOperations = {
+  makeMessageLink: {
+    capabilityId: "chat.message.link",
+    scope: "workspace",
+    channel: "desktop:make-message-link",
+    payload: MakeMessageLinkPayload, result: MakeMessageLinkResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  resolveWorkLink: {
+    capabilityId: "work.link.resolve",
+    scope: "device",
+    channel: "desktop:resolve-work-link",
+    payload: ResolveWorkLinkPayload, result: WorkLinkPlace.nullable(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 // Reports and diagnostics. Only main sends usage and error reports, and
 // only when this build names a report service and the person's switches in
 // Privacy allow it. Diagnostics stay on this computer unless the person
@@ -7549,6 +7590,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof collectionCopiesLeftOperations>,
     OperationBridge<typeof workspaceTrustOperations>,
     OperationBridge<typeof oldWindowOperations>,
+    OperationBridge<typeof workLinkOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
@@ -7835,9 +7877,9 @@ export interface DohcDesktopBridge
   // before they reach renderer code. Returns an unsubscribe function.
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;
   // Native Open Recent / OS "Open with dohc" activation. Main sends a full
-  // workspace summary, with the file to open once this window shows that
-  // workspace. The preload strips and validates both.
-  onWorkspaceActivated(listener: (workspace: WorkspaceSummary, file?: string) => void): () => void;
+  // workspace summary, with the file or the work link's message to open once
+  // this window shows that workspace. The preload strips and validates them.
+  onWorkspaceActivated(listener: (workspace: WorkspaceSummary, file?: string, message?: WorkspaceActivatedMessage) => void): () => void;
   // A folder failure is waiting: take it with takeWorkspacePathOpenFailures.
   onWorkspacePathOpenFailed(listener: () => void): () => void;
   // This window's old window state may have changed: read it with readOldWindowState.

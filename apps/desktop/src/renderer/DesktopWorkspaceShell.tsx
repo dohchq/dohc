@@ -150,6 +150,8 @@ import { useSnapshotLane } from "./snapshotLane";
 import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
+import { installWorkLinkOpener } from "./workLinkOpener";
+import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
   isCommandAvailable,
@@ -230,7 +232,7 @@ import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCente
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
-import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, type NoticeTarget } from "./shell/noticeTarget";
+import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "./shell/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
@@ -3186,12 +3188,46 @@ export function DesktopWorkspaceShell(props: {
     openOnReady.current = undefined;
     setPendingOpen(open);
   }, [workbenchRestored]);
-  // Files the OS opened with dohc. Main sends each once this window has opened
-  // this workspace, and they open in order when the workspace is ready.
+  // Files and work links the OS opened with dohc. Main sends each once this
+  // window has opened this workspace. Files open in order when the workspace
+  // is ready; a link's message opens once the saved layout applies.
   const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
-  useEffect(() => bridge().onWorkspaceActivated((next, file) => {
-    if (file !== undefined && next.workspaceId === workspaceId) setOpenedFromOs((files) => [...files, file]);
+  const [openedFromLink, setOpenedFromLink] = useState<NoticeTarget | null>(null);
+  useEffect(() => bridge().onWorkspaceActivated((next, file, message) => {
+    if (next.workspaceId !== workspaceId) return;
+    if (file !== undefined) setOpenedFromOs((files) => [...files, file]);
+    if (message !== undefined) setOpenedFromLink(workLinkTarget(message));
   }), [workspaceId]);
+  useEffect(() => {
+    if (!workbenchRestored || openedFromLink === null) return;
+    setOpenedFromLink(null);
+    setPendingOpen(openedFromLink);
+  }, [openedFromLink, workbenchRestored]);
+  const makeMessageLink = useMessageLinkMaker(props.workspace);
+  // A work link clicked in a chat or a document opens its message here, or
+  // in the workspace on this computer that holds it. A link none holds goes
+  // to the browser. An answer after this window left the workspace opens
+  // nothing.
+  const workLinkPlaces = useRef({ workspaces: props.workspaces, onSwitchWorkspace: props.onSwitchWorkspace });
+  workLinkPlaces.current = { workspaces: props.workspaces, onSwitchWorkspace: props.onSwitchWorkspace };
+  useEffect(() => {
+    const owner = workspaceId;
+    return installWorkLinkOpener(async (url) => {
+      const place = await bridge().resolveWorkLink({ url });
+      if (workspaceIdRef.current !== owner) return true;
+      if (place === null) return false;
+      const target = workLinkTarget(place);
+      if (place.workspaceId === owner) {
+        setPendingOpen(target);
+        return true;
+      }
+      const { workspaces, onSwitchWorkspace } = workLinkPlaces.current;
+      const next = workspaces.find((candidate) => candidate.workspaceId === place.workspaceId);
+      if (!next) return false;
+      onSwitchWorkspace(next, target);
+      return true;
+    });
+  }, [workspaceId]);
   useEffect(() => {
     if (!workspaceIsReady || openedFromOs.length === 0) return;
     setOpenedFromOs([]);
@@ -5482,10 +5518,12 @@ export function DesktopWorkspaceShell(props: {
           showPathInExplorer(target.path, true);
           return null;
         case "chat": {
-          const nav = await findNoticeChat(owner, target);
+          const place = await findNoticeChat(owner, target);
           if (signal.aborted || workspaceIdRef.current !== owner) return null;
-          if (nav === null) return CHAT_NOT_FOUND_NOTE;
-          openChatsNavInTab(nav);
+          if (place === null) return CHAT_NOT_FOUND_NOTE;
+          if (place.open === "file") openFileChatInPanel(place.thread, place.focusMessageId);
+          else if (place.open === "dm") void openCanonicalDmInTab(place.locator);
+          else openChatsNavInTab(place.nav);
           return null;
         }
         case "chats-invitation":
@@ -5525,8 +5563,8 @@ export function DesktopWorkspaceShell(props: {
       }
     },
     [
-      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openCaptureRecovery, openChatsInvitation, openChatsNavInTab, openCloud, openFile,
-      openHistoryView, openLiveDocuments, openSettings, openSharingDeclined, privacySettingsAction, showPathInExplorer, workspaceId,
+      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openCanonicalDmInTab, openCaptureRecovery, openChatsInvitation, openChatsNavInTab, openCloud,
+      openFile, openFileChatInPanel, openHistoryView, openLiveDocuments, openSettings, openSharingDeclined, privacySettingsAction, showPathInExplorer, workspaceId,
     ],
   );
   // A row's open whose lookup failed says so with Try again, which opens
@@ -6229,6 +6267,7 @@ export function DesktopWorkspaceShell(props: {
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
+    <MessageLinks.Provider value={makeMessageLink}>
     <div
       data-testid="workspace-shell"
       ref={focusRoot}
@@ -7773,6 +7812,7 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
       {retainedCopiesDialog}
     </div>
+    </MessageLinks.Provider>
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>
     </CustomizeContext.Provider>

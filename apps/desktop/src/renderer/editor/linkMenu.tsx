@@ -29,7 +29,7 @@ import { ExternalLink, Link as LinkIcon, Trash2 } from "lucide-react";
 import {
   activateReadOnlyLinkHref,
   normalizeLinkUrl,
-  openLinkExternally,
+  openLink,
   type WorkspaceLinkTarget,
 } from "../linkActivation";
 import {
@@ -246,7 +246,7 @@ export function makeLinkMenuPlugin({
         if (isMacContextClick(event, platform)) return false;
         if (hasPrimaryModifier(event, platform)) {
           event.preventDefault();
-          void openLinkExternally(anchor.getAttribute("href") ?? "");
+          void openLink(anchor.getAttribute("href") ?? "");
           return true;
         }
 
@@ -398,7 +398,7 @@ export function LinkMenu({
           aria-label="Open link"
           title="Open"
           disabled={!normalizedPreview}
-          onClick={() => void openLinkExternally(value)}
+          onClick={() => void openLink(value)}
         >
           <ExternalLink size={13} aria-hidden />
         </button>

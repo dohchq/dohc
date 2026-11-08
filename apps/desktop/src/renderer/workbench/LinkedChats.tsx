@@ -31,6 +31,7 @@ import {
   type ChatMessageListHandle,
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
+import { CopyMessageLink } from "./messageLinks";
 
 // The About rail for a file: who has it, its comments, what changed and what
 // links to it. A focused chat tab gets AboutConversationPanel instead.
@@ -484,6 +485,7 @@ export function LinkedChatsPanel(props: {
           listRef={listRef}
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
+          rowActions={(message) => <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />}
         />
         {readOnly ? (
           <ReadOnlyNotice />
