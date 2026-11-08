@@ -42,7 +42,7 @@ it("enrolls a fresh authenticated editor without a comment and persists server-d
   const f = setup();
   const resolver = createLinkLiveBrowserResolver({publicEditRelease:{version:1}, storage: f.storage, linkKey: key });
   const request = new Request(`${audience}/private`, { method: "POST", headers: {
-    authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile,
+    authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile,
   }, body: JSON.stringify({ principalId: "forged", workspaceId: "other" }) });
   expect(await resolver.resolve(request, "abcdefghijkl")).toEqual(f.scope);
   expect(request.bodyUsed).toBe(false);

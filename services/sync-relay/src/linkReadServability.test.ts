@@ -49,7 +49,7 @@ it.each(["view","comment","edit","read-only","read-write"] as const)("rechecks %
     const input={storage:f.storage,capabilityToken:f.capabilityToken,linkKey:LINK_KEY,nowMs:2000,publicEditRelease:undefined};
     expect(validateLinkCapability(Object.assign({},input,{publicEditRelease:{version:1 as const}}))).not.toBeNull();
     expect.soft(validateLinkCapability(input) === null).toBe(status === 404);
-    const liveRequest=new Request("https://relay.test",{headers:{authorization:`Bearer ${f.capabilityToken}`,"x-dohc-link-profile-secret":"p".repeat(43)}});
+    const liveRequest=new Request("https://relay.test",{headers:{authorization:`LinkCapability ${f.capabilityToken}`,"x-dohc-link-profile-secret":"p".repeat(43)}});
     expect.soft(await createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY,publicEditRelease:undefined}).resolve(liveRequest,"abcdefghijkl","read") === null).toBe(status === 404);
     expect(await createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY,publicEditRelease:{version:1}}).resolve(liveRequest,"abcdefghijkl","read")).not.toBeNull();
   } finally {closed.dispose();f.dispose();}

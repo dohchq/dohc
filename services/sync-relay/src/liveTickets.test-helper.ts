@@ -9,6 +9,7 @@ import type { SetServiceHostEnrollmentEnabledInput } from "./storage/serviceHost
 import type { StorageContext } from "./storage/context.js";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
 import { hashAgentCredential } from "./linkSecurity.js";
+import { createLinkAuthorityResolver } from "./linkAuthority.js";
 
 export const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 export const scope = { kind: "named" as const, workspaceId: "workspace-1", shareId: "share-1", grantId: "edit-1", userId: "reader-1" };
@@ -70,6 +71,17 @@ export function seedLinkAgent(raw: {prepare(sql: string): {run(...params: unknow
     headers: {authorization: `DohcAgent ${accessToken}`, "x-dohc-agent-resource": resource} as Record<string, string>,
     actor: {kind: "link" as const, workspaceId: input.workspaceId, grantId: input.grantId, agentConnectionId: input.connectionId,
       accessTokenHash, resourceHash}};
+}
+/**
+ * The link resolver the live routes take, for tests whose callers are link
+ * holders. A holder's capability resolves in the live resolver itself, so
+ * the holder checks here throw if reached.
+ */
+export function holderLinkAuthority(storage: Parameters<typeof createLinkAuthorityResolver>[0]["storage"], linkKey: string | Uint8Array, exchangeKey: string) {
+  const holderOnly = () => { throw new Error("A link holder never reaches the agent resolver."); };
+  return createLinkAuthorityResolver({storage, linkKey, publicEditRelease: {version: 1}, relayExchangeKeyConfigured: true,
+    hasValidRelayExchangeKey: request => request.headers.get("x-dohc-relay-exchange-key") === exchangeKey, nowMs: () => Date.now(),
+    requireLinkCapability: holderOnly, requireFreshLinkRead: holderOnly});
 }
 export const table = "sync_relay_live_session_tickets";
 export const marker = "live-session-tickets-v2";

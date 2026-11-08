@@ -257,11 +257,11 @@ describe("share-web sessions", () => {
     const versionRefused = () => Response.json({ ok: false, code, error: "relay text" }, { status: 400 });
     const expected = {ok: false, error: "not found"};
 
-    it.each(["/api/exchange", "/api/mcp/exchange"])("answers %s with an opaque refusal", async (path) => {
+    it("answers an exchange with an opaque refusal", async () => {
       const handler = createShareWebHandler({
         relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay: async () => versionRefused(),
       });
-      const response = await handler(request(path, exchange(SECRET_ALPHA)));
+      const response = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
       expect(response.status).toBe(404);
       expect(await response.json()).toEqual(expected);
     });
@@ -269,7 +269,7 @@ describe("share-web sessions", () => {
     it("answers a session route and an agent's MCP call with an opaque refusal", async () => {
       let refuse = false;
       const handler = createShareWebHandler({
-        relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+        relayUrl: "http://relay.test", publicHosts: new Set([HOST]), relayExchangeKey: "share-web-to-relay-test-exchange-key",
         fetchRelay: async () => refuse
           ? versionRefused()
           : Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 }),
@@ -278,7 +278,6 @@ describe("share-web sessions", () => {
       });
       const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
       const { session } = (await exchanged.json()) as { session: string };
-      const agent = (await (await handler(request("/api/mcp/exchange", exchange(SECRET_ALPHA)))).json()) as { bearer: string };
       refuse = true;
 
       const meta = await handler(request("/api/view/meta", {
@@ -287,9 +286,9 @@ describe("share-web sessions", () => {
       expect(meta.status).toBe(404);
       expect(await meta.json()).toEqual(expected);
 
-      const mcp = await handler(request("/mcp", {
+      const mcp = await handler(request(`/mcp/s/${SECRET_ALPHA}`, {
         method: "POST",
-        headers: { authorization: `Bearer ${agent.bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        headers: { authorization: `Bearer ${"C".repeat(43)}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       }));
       expect(mcp.status).toBe(404);
@@ -327,7 +326,8 @@ describe("share-web sessions", () => {
     expect(versions).toEqual([String(RELAY_API_VERSION)]);
   });
 
-  it.each(["/api/exchange", "/api/mcp/exchange"])("cancels a stalled relay exchange at the configured timeout for %s", async path => {
+  it("cancels a stalled relay exchange at the configured timeout", async () => {
+    const path = "/api/exchange";
     vi.useFakeTimers();
     const browserAbort = new AbortController();
     try {
@@ -1167,18 +1167,18 @@ describe("share-web sessions", () => {
     expect(relayCalls).toBe(1);
   });
 
-  it.each(["/api/exchange", "/api/mcp/exchange"])("preserves relay exchange admission for %s without exposing relay details", async path => {
+  it("preserves relay exchange admission without exposing relay details", async () => {
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
       fetchRelay: async () => new Response("private relay details", {status: 429}),
     });
-    const response = await handler(request(path, exchange(SECRET_ALPHA)));
+    const response = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
     expect(response.status).toBe(429);
     expect(await response.text()).toBe(shareWebRefusalBody);
     expectSecurityHeaders(response);
   });
 
-  it("admits valid browser and agent exchanges behind one network while bounding malformed requests", async () => {
+  it("admits valid exchanges behind one network while bounding malformed requests", async () => {
     let relayCalls = 0;
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test", publicHosts: new Set([HOST]), nowMs: () => 1_000,
@@ -1189,7 +1189,7 @@ describe("share-web sessions", () => {
     });
     const headers = {"content-type":"application/json","x-dohc-share-web-client-ip":"192.0.2.10"};
     for(let index=0;index<100;index++) {
-      expect((await handler(request(index%2?"/api/exchange":"/api/mcp/exchange",{
+      expect((await handler(request("/api/exchange",{
         method:"POST",headers,body:JSON.stringify({secret:SECRET_ALPHA})}))).status).toBe(200);
     }
     for(let index=0;index<12;index++) {

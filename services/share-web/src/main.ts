@@ -17,8 +17,9 @@ import {
   createShareWebApplication,
   SHARE_WEB_SECURITY_HEADERS,
   shareWebRefusalBody,
+  streamsRequestBody,
 } from "./server";
-import { COLLECTION_WRITES_PATH } from "./collectionWrites";
+import { isMcpCorsPath, MCP_CORS_HEADERS } from "./mcpSignIn";
 
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
@@ -58,13 +59,15 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => ["/oauth/register", "/oauth/token", "/oauth/authorize/decision"].includes(url.pathname) ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
-  // These authenticate before they read, then bound the body and its deadline:
-  // an agent request and a Collection write can carry megabytes.
-  streamBody: url => url.pathname === "/mcp" || url.pathname === COLLECTION_WRITES_PATH,
+  streamBody: streamsRequestBody,
   oversized: url => url.pathname === "/api/named-chat/messages"
-    ? Response.json({ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: {"cache-control": "private, no-store"}}) : refusal(),
+    ? Response.json({ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: {"cache-control": "private, no-store"}})
+    // A browser MCP client reads this refusal too.
+    : isMcpCorsPath(url.pathname) ? Response.json({error: "invalid_request", error_description: "The request is too large."},
+      {status: 413, headers: {...SHARE_WEB_SECURITY_HEADERS, ...MCP_CORS_HEADERS}})
+    : refusal(),
   failure: refusal,
   prepareHeaders: (headers, incoming) => {
     headers.set(

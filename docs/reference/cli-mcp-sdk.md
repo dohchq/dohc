@@ -9,7 +9,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 - **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
-- **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
+- **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. Its address is `/mcp/s/<secret>` on the share's server, where `<secret>` is the text after `#` in the link. Add that address to an MCP client that supports MCP sign-in. The client opens a consent page, and a person selects **Allow**. The [share-web README](../../services/share-web/README.md) describes each step.
 
 ## Versions and changes
 

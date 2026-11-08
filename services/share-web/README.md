@@ -24,17 +24,30 @@ Production operators must set five values:
 
 ## Remote MCP for shared links
 
-Agents can use `/mcp` over Streamable HTTP. It supports current per-request MCP and older stateless clients.
-The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes authentication.
+Each share link has its own MCP address, `/mcp/s/<secret>`, where `<secret>` is the text after `#` in the share URL.
+The address uses Streamable HTTP. It supports current per-request MCP and older stateless clients.
+The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
 
-1. Take the secret after `#` in the share URL.
-2. POST `{"secret":"<secret>"}` as JSON to `/api/mcp/exchange` on the same origin.
-3. Connect the MCP client to `/mcp` with `Authorization: Bearer <bearer>` from the exchange response.
-4. Keep and reuse the bearer for that agent. Each exchange creates a separate link identity.
+An agent signs in with the standard MCP authorization (MCP 2025-06-18):
+
+1. The MCP client connects without a token. share-web answers 401, and its `WWW-Authenticate` header names `/.well-known/oauth-protected-resource/mcp/s/<secret>`.
+2. The client reads that document and `/.well-known/oauth-authorization-server`, then registers at `/oauth/register`.
+3. The client opens `/oauth/authorize` in a browser with an S256 PKCE challenge. Its `resource` is the full MCP address.
+4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, and the host the browser returns to.
+5. The client trades the code for tokens at `/oauth/token`. It sends `Authorization: Bearer <access token>` on each MCP request.
+
+An access token lasts 1 hour. The client gets a new one with its refresh token.
+Each refresh token works once. If a used one comes back, the relay ends that agent's connection.
+A token works only at the MCP address it was issued for.
+The relay keeps every client, sign-in request, connection, and token, and checks the token on every call. Restarting share-web does not sign an agent out.
+Resetting, widening, or revoking the link, or deleting its share, ends its agent connections. Each agent must then sign in again.
+
+Browser MCP clients can call the MCP address, both metadata documents, `/oauth/register`, and `/oauth/token` from any origin. These answers allow no credentials.
+The consent page and its decision accept only this origin. The decision also needs the cookie that the same browser received with the page.
 
 The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
 On a Group share that is the Group's channel, read with `dohc_read_channel`.
-A read-write link also gets `dohc_post_channel`, which posts there as its link holder; the owner sees the post marked as from a link holder.
+A read-write link also gets `dohc_post_channel`. It posts there under the name the agent reported when it signed in, and the owner sees the post marked as from an agent on the link.
 On any other share it is the share discussion, which Comment and Edit links can also post to.
 The relay checks the grant again for every action, and a refusal arrives as a sentence the agent can act on.
 If a post's answer is lost, the tool says the post may have landed. Send it again with the same `idempotencyKey`; it posts once.
@@ -52,13 +65,12 @@ It needs the Public Edit release, not the document host. The relay names the lin
 `accepted` means the relay recorded the change in the owner's history. The owner's computer applies it at its next sync.
 An MCP request that carries a write may be up to 9 MiB, room for 4 MiB of text that JSON escapes in two bytes. A file can go as base64 instead of text, as the viewer sends it in a request of up to 7 MiB.
 A write goes in an MCP request of its own, never in a batch.
-Share-web holds one such body per link and four in all, across both. Other MCP requests stay at 32 KiB.
+share-web holds one such body for a link's browsers, one for its agents, and four in all. Other MCP requests stay at 32 KiB.
 Settled file reads can lag live documents. File reads are limited to 256 KiB; other tool results are limited to 1 MiB.
 
-The bearer uses the same bounded, in-memory session store as browser links.
-Restarting share-web or evicting the session invalidates it. Re-exchange the link to start a new agent identity.
-Browser cookies cannot authenticate MCP requests. The bearer never contains the relay workload key or a browser account credential.
-Do not log `Authorization` headers, exchange bodies, or bearer responses.
+share-web keeps no agent token. Browser cookies cannot authenticate MCP requests, and share-web refuses a token in the query string.
+A token never contains the relay workload key or a browser account credential.
+Do not log `Authorization` headers, `/oauth/token` request or response bodies, consent form fields, or consent cookies.
 
 Each edit opens a fresh live connection and adds a Yjs client clock to the document.
 This implementation is for bounded edits, not high-frequency automated rewriting.
@@ -324,7 +336,7 @@ Waiter capacity receives 429. Response size overflow receives 413; request a sma
 The configured named session request and response byte limits also apply.
 Share-web refuses malformed, oversized, redirected, or non-JSON relay responses.
 Link holders cannot use these endpoints or create chat link grants.
-A link on a Group share reads and posts in the Group's channel through the viewer and `/mcp` instead.
+A link on a Group share reads and posts in the Group's channel through the viewer and `/mcp/s/<secret>` instead.
 
 The corresponding trusted relay endpoints use `/sync/named-chat/channels` and `/sync/named-chat/messages`.
 They require the recipient account cookie, configured public Origin, and relay exchange key.

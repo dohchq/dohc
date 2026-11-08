@@ -8,6 +8,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy } from "./helpers/selfHostOnboarding";
+import { signInAgent, type SignedInAgent } from "../../../services/share-web/src/mcpSignIn.test-helper";
 import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -53,11 +54,11 @@ async function ownerLog(relay: SyncRelayHandle): Promise<LogOp[]> {
   return (JSON.parse(read.body) as { ops: LogOp[] }).ops;
 }
 
-/** One MCP tool call, as an agent sends it with only the link's bearer. */
-async function callTool(handle: (request: Request) => Promise<Response>, bearer: string, name: string, args: Record<string, unknown>) {
-  const response = await handle(new Request(`${sharedDatasetViewerOrigin}/mcp`, {
+/** One MCP tool call, as a signed-in agent sends it to the link's MCP address. */
+async function callTool(handle: (request: Request) => Promise<Response>, agent: SignedInAgent, name: string, args: Record<string, unknown>) {
+  const response = await handle(new Request(agent.resource, {
     method: "POST",
-    headers: { host: new URL(sharedDatasetViewerOrigin).host, authorization: `Bearer ${bearer}`,
+    headers: { host: new URL(sharedDatasetViewerOrigin).host, authorization: `Bearer ${agent.accessToken}`,
       "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
   }));
@@ -143,12 +144,11 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
     await page.getByRole("button", { name: "Save" }).click();
     await expect(page.getByText("Saved to the owner's workspace.")).toBeVisible();
 
-    // --- An agent given the same link replaces the automations --------------
-    const exchanged = await shared.handle(new Request(`${sharedDatasetViewerOrigin}/api/mcp/exchange`, {
-      method: "POST", headers: { host: new URL(sharedDatasetViewerOrigin).host, "content-type": "application/json" }, body: JSON.stringify({ secret }),
-    }));
-    const { bearer } = await exchanged.json() as { bearer: string };
-    expect(await callTool(shared.handle, bearer, "dohc_write_collection_files", {
+    // --- An agent given the same link signs in and replaces the automations --
+    const viewer = shared;
+    const agent = await signInAgent((path, init = {}) => viewer.handle(new Request(sharedDatasetViewerOrigin + path,
+      { ...init, headers: { host: new URL(sharedDatasetViewerOrigin).host, ...init.headers } })), sharedDatasetViewerOrigin, secret);
+    expect(await callTool(shared.handle, agent, "dohc_write_collection_files", {
       submitId: "agent-automations", files: [{ path: AUTOMATIONS_PATH, basedOnBlobSha256: sha256(AUTOMATIONS), text: AUTOMATIONS_AGENT }],
     })).toEqual({ status: 200, result: { ok: true, outcome: "accepted", submitId: "agent-automations" } });
 
@@ -213,9 +213,10 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
           afterPath: path, afterContentKind: "text", afterContentBase64: btoa(text), recordedAtMs: Date.now() }] }) });
       return response.status;
     }, { path: SCHEMA_PATH, base: sha256(SCHEMA_BROWSER), text: SCHEMA })).toBe(404);
-    expect(await callTool(shared.handle, bearer, "dohc_write_collection_files", {
+    // Ending the link retires the agent's connection, so its token stops working.
+    expect(await callTool(shared.handle, agent, "dohc_write_collection_files", {
       submitId: "agent-after-stop", files: [{ path: AUTOMATIONS_PATH, basedOnBlobSha256: sha256(AUTOMATIONS_AGENT), text: AUTOMATIONS }],
-    })).toEqual({ status: 404, result: null });
+    })).toEqual({ status: 401, result: null });
     const ledger = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${WORKSPACE_ID}/collection-writes/${link.grantId}`);
     expect((JSON.parse(ledger.body) as { writes: unknown[] }).writes).toHaveLength(2);
   } finally {

@@ -14,7 +14,8 @@ export function createLinkLiveBrowserResolver(options: { storage: SyncRelayStora
   return {
     async resolve(request: Request, discriminator: string, access: "read" | "edit" = "edit"): Promise<LinkLiveBrowserContext | null> {
       if (request.signal.aborted || !/^[A-Za-z0-9_-]{12}$/.test(discriminator)) return null;
-      const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")?.[1];
+      // The same scheme as every other link route, so a capability is never read as another credential.
+      const bearer = /^LinkCapability ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")?.[1];
       const profile = request.headers.get("x-dohc-link-profile-secret");
       if (!bearer || !profile || !LINK_SECRET_PATTERN.test(profile)) return null;
       const current = validateLinkCapability({ storage, capabilityToken: bearer, linkKey, nowMs: Date.now(), publicEditRelease: options.publicEditRelease });

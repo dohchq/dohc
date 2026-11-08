@@ -1,7 +1,7 @@
 import {createNamedLiveProvider, type NamedLiveProviderState} from "@dohc/ydoc-projection/named-live-provider";
 import {yDocToMarkdown} from "@dohc/ydoc-projection";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
-import type {createLinkLiveClient} from "./linkLiveClient";
+import type {LinkLiveAgentAccess} from "./linkLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
 import {LIVE_UPDATE_REFUSAL_VALUES, parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {parseLiveTicketToken} from "@dohc/live-session-contract/live-ticket";
@@ -34,11 +34,8 @@ function waitFor(provider: Provider, predicate: (state: NamedLiveProviderState) 
 }
 
 export async function remoteLiveDocument(options: {
-  client: ReturnType<typeof createLinkLiveClient>;
+  live: LinkLiveAgentAccess;
   limits: NamedLiveBrowserLimits;
-  discriminator: string;
-  cookie: string;
-  request(path: string, init?: RequestInit): Promise<Response>;
   signal: AbortSignal;
 }, path: string, edit?: {find: string; replacement: string}) {
   const lifetime = new AbortController();
@@ -47,10 +44,10 @@ export async function remoteLiveDocument(options: {
   let route: ReturnType<Provider["connect"]> | undefined;
   let changed = false;
   try {
-    const document = await options.request("/api/live/link-document", {method: "POST", body: JSON.stringify({discriminator: options.discriminator, path}), signal});
+    const document = await options.live.document(path, signal);
     if (!document.ok) throw await refusalError(document, signal);
     const {objectId} = await document.json() as {objectId: string};
-    const ticket = await options.request("/api/live/link-ticket", {method: "POST", body: JSON.stringify({discriminator: options.discriminator, objectId}), signal});
+    const ticket = await options.live.ticket(objectId, signal);
     if (!ticket.ok) throw await refusalError(ticket, signal);
     const ticketValue: unknown = await readBoundedJson(ticket, options.limits.maxHttpResponseBytes, signal);
     if (!ticketValue || typeof ticketValue !== "object" || Array.isArray(ticketValue) || Object.keys(ticketValue).sort().join() !== "expiresAtMs,publicPrincipalId,token") throw new Error("Invalid link ticket.");
@@ -59,7 +56,7 @@ export async function remoteLiveDocument(options: {
     const principal = parseLiveUpdateIdentifier(publicPrincipalId);
     if (typeof expiresAtMs !== "number" || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= Date.now()) throw new Error("Invalid link ticket.");
     const frames = options.limits.provider.frames;
-    const host = await options.client.openMaterialRoute(options.discriminator, options.cookie, token as string, signal, {
+    const host = await options.live.open(token as string, signal, {
       maxPayload: frames.receive.maxFrameBytes, maxFragments: 64, maxBufferedChunks: 64,
       closeTimeout: options.limits.sendTimeoutMs, perMessageDeflate: false, autoPong: false,
     });

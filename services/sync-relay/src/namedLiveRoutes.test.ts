@@ -319,7 +319,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, person || 2).toString("base64url");
   const currentScope = link ? { kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key) } : scope;
-  const holderHeaders: Record<string, string> = link ? { authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile } : {};
+  const holderHeaders: Record<string, string> = link ? { authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile } : {};
   let linkHeaders = holderHeaders;
   if (link) {
     vi.spyOn(Date, "now").mockReturnValue(1000);
@@ -431,7 +431,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   async function peer(person: number, document: number) {
     const grantId = link ? scope.grantId : "edit-" + person, cookie = "account=reader-" + person;
     const profile = Buffer.alloc(32, person).toString("base64url"), bearer = Buffer.alloc(32, person).toString("base64url");
-    const headers: Record<string, string> = link ? {authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile} : {};
+    const headers: Record<string, string> = link ? {authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile} : {};
     const bootstrap = link ? Response.json({discriminator}) : await post("/sync/live/named-sessions", {grantId}, cookie);
     expect(bootstrap.status).toBe(200);
     const session = (await bootstrap.json() as {discriminator: string}).discriminator;

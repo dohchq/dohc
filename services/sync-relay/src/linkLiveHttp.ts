@@ -1,7 +1,7 @@
 import type {BinaryLike} from "node:crypto";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import {readBoundedJson} from "@dohc/service-http";
-import {createLinkLiveBrowserResolver, createLinkLiveResolver} from "./linkLiveBrowserAuth";
+import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
 import type {LinkAuthorityResolver} from "./linkAuthority";
 import {createAccountlessPathProjection} from "./accountlessPathProjection";
 import {authorizeLinkShareAction} from "./shareAuthorization";
@@ -15,14 +15,12 @@ export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey:
   hosts: ReadonlySet<string>; publicOrigin: string; exchangeKey: string; limits: NamedLiveRouteLimits;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
   sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
-  /** Lets a connected agent find a document; without it only a link holder can. */
-  linkAuthority?: Pick<LinkAuthorityResolver, "resolve">}) {
+  /** Authenticates a connected agent, as the link's other routes do. */
+  linkAuthority: Pick<LinkAuthorityResolver, "resolve">}) {
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
   const origin = new URL(options.publicOrigin);
   if (origin.protocol !== "https:" || origin.origin !== options.publicOrigin || options.exchangeKey.length < 32 || !hosts.size) throw new TypeError("Invalid link live metadata configuration.");
-  const {linkAuthority} = options;
-  const exchangeHash = hashRelayExchangeKey(options.exchangeKey),
-    resolver = linkAuthority ? createLinkLiveResolver({...options, linkAuthority}) : createLinkLiveBrowserResolver(options);
+  const exchangeHash = hashRelayExchangeKey(options.exchangeKey), resolver = createLinkLiveResolver(options);
   const refused = opaqueLinkRefusal;
   let pending = 0;
   return async (request: Request): Promise<Response> => {

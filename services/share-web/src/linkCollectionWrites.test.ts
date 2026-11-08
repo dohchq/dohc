@@ -7,6 +7,7 @@ import { createSyncRelayHandler } from "@dohc/sync-relay";
 import { openSyncRelayStorage, type SyncRelayStorage } from "@dohc/sync-relay/storage";
 import { afterEach, expect, it } from "vitest";
 import { collectionWriteBody, COLLECTION_WRITES_PATH, parseCollectionWriteOutcome, type CollectionFileWrite } from "./collectionWrites";
+import { signInAgent } from "./mcpSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 
 // An Edit share link changes a Collection's own files through the real
@@ -132,14 +133,13 @@ async function browser(s: Stack) {
   return { session, cookies, post, write };
 }
 
-/** An agent given only the link. */
+/** An agent given only the link, signed in and allowed by a person. */
 async function agent(s: Stack): Promise<Client> {
-  const exchanged = await s.send("/api/mcp/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret: s.secret }) });
-  const { bearer } = await exchanged.json() as { bearer: string };
+  const { resource, accessToken } = await signInAgent(s.send, ORIGIN, s.secret, "Packer");
   const client = new Client({ name: "link-agent", version: "1" });
   clients.push(client);
-  await client.connect(new StreamableHTTPClientTransport(new URL(ORIGIN + "/mcp"), {
-    requestInit: { headers: { authorization: `Bearer ${bearer}` } },
+  await client.connect(new StreamableHTTPClientTransport(new URL(resource), {
+    requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
     fetch: (input, init) => {
       const request = new Request(input, init);
       request.headers.set("host", HOST);
@@ -188,12 +188,17 @@ it("lets a browser and an agent holding only an Edit link change a Collection, e
   expect(moments[0]!.payload.authors?.[0]!.principalId).not.toBe(moments[1]!.payload.authors?.[0]!.principalId);
   expect(moments[1]!.payload.authors?.[0]!.principalId).toBe(moments[2]!.payload.authors?.[0]!.principalId);
   expect(JSON.stringify(moments)).not.toContain(s.secret);
-  // Share-web forwards the capability and the profile, and nothing of the browser's own.
+  // Share-web forwards the browser's capability and profile, and the agent's
+  // token and address, and nothing of the browser's own.
   const writes = s.relayCalls.filter((call) => new URL(call.url).pathname === "/sync/link/collection-writes");
-  expect(writes).toHaveLength(3);
+  expect(writes.map((call) => /^(\w+) [A-Za-z0-9_-]{43}$/u.exec(call.headers.get("authorization") ?? "")?.[1]))
+    .toEqual(["LinkCapability", "DohcAgent", "DohcAgent"]);
+  expect(writes[0]!.headers.get("x-dohc-link-profile-secret")).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  for (const call of writes.slice(1)) {
+    expect(call.headers.get("x-dohc-agent-resource")).toBe(`${ORIGIN}/mcp/s/${s.secret}`);
+    expect(call.headers.has("x-dohc-link-profile-secret")).toBe(false);
+  }
   for (const call of writes) {
-    expect(call.headers.get("authorization")).toMatch(/^LinkCapability [A-Za-z0-9_-]{43}$/u);
-    expect(call.headers.get("x-dohc-link-profile-secret")).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(call.headers.has("cookie")).toBe(false);
     expect(call.headers.has("origin")).toBe(false);
   }
@@ -243,13 +248,19 @@ it("takes a write only from the viewer page or this server's agent tools, never 
     b.post(JSON.stringify({ ...JSON.parse(body) as object, author: { kind: "named", userId: "owner" } })),
     s.send(COLLECTION_WRITES_PATH, { headers: { origin: ORIGIN, "x-dohc-link-session": b.session, cookie: b.cookies.join("; ") } }),
   ];
-  // An agent's bearer, sent as a browser's cookie with a profile the caller chose.
-  const exchanged = await s.send("/api/mcp/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret: s.secret }) });
-  const [discriminator, token] = ((await exchanged.json()) as { bearer: string }).bearer.split(".") as [string, string];
-  refusedRequests.push(s.send(COLLECTION_WRITES_PATH, { method: "POST", body, headers: {
-    origin: ORIGIN, "content-type": "application/json", "x-dohc-link-session": discriminator,
-    cookie: `dohc_share_${discriminator}=${token}; dohc_share_profile_${discriminator}=${"P".repeat(43)}`,
-  } }));
+  // An agent's access token, sent as a browser's cookie with a profile the
+  // caller chose, or straight to the route instead of through the MCP tools.
+  const { accessToken } = await signInAgent(s.send, ORIGIN, s.secret);
+  const discriminator = "abcdefghijkl";
+  refusedRequests.push(
+    s.send(COLLECTION_WRITES_PATH, { method: "POST", body, headers: {
+      origin: ORIGIN, "content-type": "application/json", "x-dohc-link-session": discriminator,
+      cookie: `dohc_share_${discriminator}=${accessToken}; dohc_share_profile_${discriminator}=${"P".repeat(43)}`,
+    } }),
+    s.send(COLLECTION_WRITES_PATH, { method: "POST", body, headers: {
+      origin: ORIGIN, "content-type": "application/json", authorization: `Bearer ${accessToken}`,
+    } }),
+  );
   for (const response of await Promise.all(refusedRequests)) {
     expect(response.status).toBe(404);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -304,12 +315,12 @@ it("carries an agent's write larger than an ordinary MCP request, one such body 
     { path: "trip/long/list.md", basedOnBlobSha256: null, text: record },
   ] } })).structuredContent).toEqual({ ok: true, outcome: "accepted", submitId: "large" });
 
-  const exchanged = await s.send("/api/mcp/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret: s.secret }) });
-  const { bearer } = await exchanged.json() as { bearer: string };
-  const headers = { authorization: `Bearer ${bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+  const second = await signInAgent(s.send, ORIGIN, s.secret);
+  const mcpPath = new URL(second.resource).pathname;
+  const headers = { authorization: `Bearer ${second.accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
   let finish!: () => void;
-  // A body past an ordinary request's size takes the link's one large slot while it arrives.
-  const held = s.send("/mcp", { method: "POST", headers, duplex: "half", body: new ReadableStream<Uint8Array>({
+  // A body past an ordinary request's size takes the one large slot of the link's agents while it arrives.
+  const held = s.send(mcpPath, { method: "POST", headers, duplex: "half", body: new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(new TextEncoder().encode(`{"params":{"padding":"${"x".repeat(40 * 1024)}"},`));
       finish = () => {
@@ -319,11 +330,16 @@ it("carries an agent's write larger than an ordinary MCP request, one such body 
     },
   }) } as RequestInit);
   const large = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { padding: "x".repeat(40 * 1024) } });
-  await expect.poll(async () => (await s.send("/mcp", { method: "POST", headers, body: large })).status).toBe(429);
-  // So does the browser's write for the same link: large bodies share one pool.
+  await expect.poll(async () => (await s.send(mcpPath, { method: "POST", headers, body: large })).status).toBe(429);
+  // Another agent of the link waits too: its agents share the slot by the link's MCP address.
+  const other = await signInAgent(s.send, ORIGIN, s.secret);
+  expect((await s.send(mcpPath, { method: "POST", headers: { ...headers, authorization: `Bearer ${other.accessToken}` }, body: large })).status)
+    .toBe(429);
+  // share-web knows an agent's link only by that address, so the browsers'
+  // slot, keyed by the grant, is separate. The relay limits the link's writes either way.
   const b = await browser(s);
   expect(await b.write("browser-while-held", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }]))
-    .toEqual({ ok: false, outcome: "rate-limited" });
+    .toEqual({ ok: true, outcome: "accepted", submitId: "browser-while-held" });
   // An ordinary request still goes through meanwhile.
   expect((await mcp.listTools()).tools.length).toBeGreaterThan(0);
   finish();
@@ -362,12 +378,11 @@ it("takes an agent's file as base64, and a write only in an MCP request of its o
     { path: "trip/bell/huge.md", basedOnBlobSha256: null, base64: "A".repeat(5_600_000) },
   ] } })).isError).toBe(true);
 
-  const exchanged = await s.send("/api/mcp/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret: s.secret }) });
-  const { bearer } = await exchanged.json() as { bearer: string };
+  const { resource, accessToken } = await signInAgent(s.send, ORIGIN, s.secret);
   const call = (id: number, submitId: string) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "dohc_write_collection_files",
     arguments: { submitId, files: [{ path: AUTOMATIONS_PATH, basedOnBlobSha256: sha256(AUTOMATIONS), text: AUTOMATIONS_TWO }] } } });
-  const batch = await s.send("/mcp", { method: "POST", body: JSON.stringify([call(1, "batch-1"), call(2, "batch-2")]),
-    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" } });
+  const batch = await s.send(new URL(resource).pathname, { method: "POST", body: JSON.stringify([call(1, "batch-1"), call(2, "batch-2")]),
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" } });
   expect(await batch.json()).toMatchObject({ error: { code: -32600 } });
   expect((await directMoments(s)).map((moment) => moment.payload.path)).toEqual(["trip/bell/collection.yaml", "trip/bell/bell.md"]);
 });

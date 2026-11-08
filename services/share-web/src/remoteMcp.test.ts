@@ -1,5 +1,5 @@
 import {afterEach, expect, it} from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
 import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
@@ -7,6 +7,9 @@ import {asRecord} from "@dohc/workspace-core/records";
 
 const origin = "https://share.example.test";
 const secret = "A".repeat(43);
+// The link's MCP address. The sign-in itself, against the real relay, is in mcpSignIn.test.ts.
+const mcpPath = `/mcp/s/${secret}`, resource = origin + mcpPath;
+const challenge = `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp/s/${secret}"`;
 const clients: Client[] = [];
 let servedLog: unknown;
 afterEach(async () => {servedLog = logPage; await Promise.all(clients.splice(0).map(client => client.close()));});
@@ -24,37 +27,45 @@ const logPage = {ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, ops
 servedLog = logPage;
 
 it.each(["view", "comment"] as const)("current-only %s agents cannot enumerate History", async access => {
-  const f = fixture(access), client = await f.connect(await f.exchange());
+  const f = fixture(access), client = await f.connect(f.token());
   expect((await client.listTools()).tools.map(tool => tool.name)).not.toContain("dohc_list_changes");
   await expect(client.callTool({name:"dohc_list_changes",arguments:{since:0}})).rejects.toThrow("not found");
   expect(f.calls.some(call=>new URL(call.url).pathname === "/sync/link/log")).toBe(false);
   expect((await client.callTool({name:"dohc_share_status",arguments:{}})).structuredContent).toMatchObject({summary:expect.stringContaining("History is unavailable")});
 });
 
-it("returns identical opaque MCP refusals before and after evicting a revoked session", async () => {
+it("sends a client to sign in, and asks the relay again for each request with a revoked token", async () => {
   const f = fixture();
-  const bearer = await f.exchange();
+  const token = f.token();
+  expect((await (await f.connect(token)).listTools()).tools.length).toBeGreaterThan(0);
   f.revoke();
-  const snapshot = async (token?: string) => {
-    const response = await f.send("/mcp", {method: "POST",
-      headers: {"content-type": "application/json", ...(token ? {authorization: `Bearer ${token}`} : {})},
+  const snapshot = async (authorization?: string) => {
+    const response = await f.send(mcpPath, {method: "POST",
+      headers: {"content-type": "application/json", ...(authorization ? {authorization} : {})},
       body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
-    return {status: response.status, body: await response.text(), headers: [...response.headers]};
+    return {status: response.status, body: await response.text(), headers: Object.fromEntries(response.headers)};
   };
   const missing = await snapshot();
-  const first = await snapshot(bearer);
-  const calls = f.calls.length;
-  const later = await snapshot(bearer);
-  expect(first).toEqual(missing);
+  expect(missing).toMatchObject({status: 401, body: "", headers: {"www-authenticate": challenge, "access-control-allow-origin": "*"}});
+  // A malformed credential names no token, so it is invalid without asking the relay.
+  const before = f.calls.length;
+  expect((await snapshot("Bearer short")).headers["www-authenticate"]).toBe(`${challenge}, error="invalid_token"`);
+  expect(f.calls).toHaveLength(before);
+  const first = await snapshot(`Bearer ${token}`);
+  const between = f.calls.length;
+  const later = await snapshot(`Bearer ${token}`);
+  expect(first).toMatchObject({status: 401, body: "", headers: {"www-authenticate": `${challenge}, error="invalid_token"`,
+    "access-control-expose-headers": "WWW-Authenticate, Mcp-Session-Id"}});
   expect(later).toEqual(first);
-  expect(first.status).toBe(404);
-  expect(first.body).toBe(JSON.stringify({ok: false, error: "not found"}));
-  expect(first.headers).toContainEqual(["cross-origin-resource-policy", "same-origin"]);
-  expect(f.calls).toHaveLength(calls);
+  // share-web keeps no token, so the relay decides each time.
+  expect(between).toBeGreaterThan(before);
+  expect(f.calls.length - between).toBe(between - before);
 });
 
 function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text", paths: string[] = [], automationText?: string) {
   const calls: Request[] = [];
+  // The access tokens the relay has issued for this link's address.
+  const tokens = new Set<string>();
   let revoked = false;
   let rateLimited: string | undefined;
   let refusalCode: "link_read_rate_limited" | "link_unavailable" = "link_read_rate_limited";
@@ -76,7 +87,11 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
         throw new TypeError("connection reset");
       }
       if (path === "/sync/link-exchange") return Response.json({ok: true, grantId: "grant-a", capabilityToken: "B".repeat(43), capabilityExpiresAtMs: Date.now() + 900_000, access});
-      if (revoked) return new Response(null, {status: 404});
+      // The relay's check: an issued token, sent to the address it was issued for, and no holder credential.
+      const agent = /^DohcAgent (.+)$/u.exec(request.headers.get("authorization") ?? "")?.[1];
+      if (revoked || !agent || !tokens.has(agent) || request.headers.get("x-dohc-agent-resource") !== resource ||
+        request.headers.has("x-dohc-link-profile-secret") || request.headers.has("cookie") ||
+        request.headers.get("x-dohc-relay-exchange-key") !== "exchange-key-at-least-thirty-two-bytes") return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
       if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
       if (path === "/sync/link/current") return Response.json({ok: true, files: automationText !== undefined
@@ -96,17 +111,17 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       throw new Error(`Unexpected route: ${path}`);
     }});
   const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host: "share.example.test", ...init.headers}}));
-  async function exchange() {
-    const response = await send("/api/mcp/exchange", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({secret})});
-    expect(response.headers.has("set-cookie")).toBe(false);
-    expect(response.headers.get("cache-control")).toBe("private, no-store");
-    return (await response.json() as {bearer: string}).bearer;
+  // An access token as the relay issues it at the end of the sign-in.
+  function token() {
+    const value = randomBytes(32).toString("base64url");
+    tokens.add(value);
+    return value;
   }
-  async function connect(bearer: string, mode: "legacy" | "auto" = "auto") {
+  async function connect(bearer: string, mode: "legacy" | "auto" = "auto", headers: Record<string, string> = {}) {
     const client = new Client({name: "test-agent", version: "1"}, {versionNegotiation: {mode}});
     clients.push(client);
-    await client.connect(new StreamableHTTPClientTransport(new URL(origin + "/mcp"), {
-      requestInit: {headers: {authorization: `Bearer ${bearer}`}},
+    await client.connect(new StreamableHTTPClientTransport(new URL(resource), {
+      requestInit: {headers: {...headers, authorization: `Bearer ${bearer}`}},
       fetch: async (input, init) => {
         const request = new Request(input, init); request.headers.set("host", "share.example.test");
         const result = await app.handle(request);
@@ -117,12 +132,12 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
     }));
     return client;
   }
-  return {calls, send, exchange, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;},
+  return {calls, send, token, connect, revoke() {revoked = true;}, limit(path: string, code: typeof refusalCode = "link_read_rate_limited") {rateLimited = path;refusalCode = code;},
     lose(path: string) {lost = path;}};
 }
 
 it("tells an agent to try again when a files, changes, file or discussion answer is lost", async () => {
-  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(f.token());
   const again = {isError: true, content: [{type: "text", text: LINK_REFUSALS.link_unavailable.error}]};
   for (const [path, name, args] of [
     ["/sync/link/current", "dohc_list_files", {}],
@@ -142,7 +157,7 @@ it("tells an agent to try again when a files, changes, file or discussion answer
 });
 
 it("refuses an out-of-scope blob before requesting rate-limited inventory", async () => {
-  const f = fixture(); const client = await f.connect(await f.exchange());
+  const f = fixture(); const client = await f.connect(f.token());
   f.limit("/sync/link/current");
   const before = f.calls.length;
   const result = await client.callTool({name: "dohc_read_file", arguments: {blobSha256: withdrawn}});
@@ -151,10 +166,10 @@ it("refuses an out-of-scope blob before requesting rate-limited inventory", asyn
 });
 
 it.each(["link_read_rate_limited", "link_unavailable"] as const)("returns the same %s metadata refusal for every MCP method", async code => {
-  const f = fixture(); const bearer = await f.exchange();
+  const f = fixture(); const bearer = f.token();
   f.limit("/sync/link/share", code);
   for (const method of ["initialize", "tools/list", "tools/call", "resources/list"]) {
-    const response = await f.send("/mcp", {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+    const response = await f.send(mcpPath, {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
       body: JSON.stringify({jsonrpc: "2.0", id: 1, method, ...(method === "tools/call" ? {params: {name: "dohc_read_file", arguments: {blobSha256: withdrawn}}} : {})})});
     expect(response.status).toBe(code === "link_read_rate_limited" ? 429 : 503);
     expect(await response.json()).toEqual(linkRefusalBody(code));
@@ -162,27 +177,33 @@ it.each(["link_read_rate_limited", "link_unavailable"] as const)("returns the sa
 });
 
 it.each(["legacy", "auto"] as const)("serves a real %s MCP client without transport sessions", async mode => {
-  const f = fixture(); const client = await f.connect(await f.exchange(), mode);
+  const f = fixture(); const client = await f.connect(f.token(), mode);
   expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(expect.arrayContaining(["dohc_list_files", "dohc_post_discussion"]));
   expect((await client.listTools()).tools.some(tool => tool.name === "dohc_edit_document")).toBe(false);
   const result = await client.callTool({name: "dohc_list_files", arguments: {}});
   expect(result.structuredContent).toMatchObject({ok: true, files: [{path: "doc.md"}]});
 });
 
-it("assigns independent agent profiles and rejects revoked bearers", async () => {
-  const f = fixture(); const first = await f.connect(await f.exchange()), second = await f.connect(await f.exchange());
+it("sends each agent's own token and address to the relay, with no profile, and refuses a revoked one", async () => {
+  const f = fixture(); const [a, b] = [f.token(), f.token()];
+  const first = await f.connect(a), second = await f.connect(b);
   const tool = {name: "dohc_post_discussion", arguments: {body: "hello", idempotencyKey: "same-key"}};
-  await first.callTool(tool); await first.callTool(tool); await second.callTool(tool);
-  const profiles = f.calls.filter(call => new URL(call.url).pathname === "/sync/link/discussion").map(call => call.headers.get("x-dohc-link-profile-secret"));
-  expect(profiles[0]).toBe(profiles[1]); expect(profiles[2]).not.toBe(profiles[0]);
+  await first.callTool(tool); await second.callTool(tool);
+  const posts = f.calls.filter(call => new URL(call.url).pathname === "/sync/link/discussion" && call.method === "POST");
+  expect(posts.map(call => call.headers.get("authorization"))).toEqual([`DohcAgent ${a}`, `DohcAgent ${b}`]);
+  expect(posts.map(call => [call.headers.get("x-dohc-agent-resource"), call.headers.has("x-dohc-link-profile-secret")]))
+    .toEqual([[resource, false], [resource, false]]);
   f.revoke(); await expect(first.listTools()).rejects.toThrow();
 });
 
-it("rejects browser cookies, foreign origins, and query credentials", async () => {
-  const f = fixture(); const bearer = await f.exchange();
-  expect((await f.send("/mcp", {headers: {cookie: "dohc_share_any=token"}})).status).toBe(404);
-  expect((await f.send("/mcp?bearer=" + bearer, {headers: {authorization: `Bearer ${bearer}`}})).status).toBe(404);
-  expect((await f.send("/mcp", {headers: {authorization: `Bearer ${bearer}`, origin: "https://evil.test"}})).status).toBe(404);
+it("takes the token only from the Authorization header, from any origin", async () => {
+  const f = fixture(); const bearer = f.token();
+  const cookie = await f.send(mcpPath, {headers: {cookie: "dohc_share_any=token"}});
+  expect([cookie.status, cookie.headers.get("www-authenticate")]).toEqual([401, challenge]);
+  expect((await f.send(`${mcpPath}?access_token=${bearer}`, {headers: {authorization: `Bearer ${bearer}`}})).status).toBe(404);
+  // A browser MCP client calls from its own origin, with the token as its only credential.
+  const client = await f.connect(bearer, "auto", {origin: "https://inspector.example.test"});
+  expect((await client.callTool({name: "dohc_list_files", arguments: {}})).structuredContent).toMatchObject({ok: true});
 });
 
 it.each([
@@ -191,7 +212,7 @@ it.each([
   ["edit", true, null, true, true],
   ["edit", true, "pinned", true, false],
 ] as const)("advertises only the granted tools for %s with live=%s and version=%s", async (access, live, version, comment, edit) => {
-  const f = fixture(access, live, version); const client = await f.connect(await f.exchange());
+  const f = fixture(access, live, version); const client = await f.connect(f.token());
   const names = (await client.listTools()).tools.map(tool => tool.name);
   expect(names.includes("dohc_post_discussion")).toBe(comment);
   expect(names.includes("dohc_edit_document")).toBe(edit);
@@ -204,7 +225,7 @@ it.each([
 it("remote agents read and switch through the same definition serializer and link route", async () => {
   const source = "version: 1\nautomations:\n  - id: stamp\n    name: Stamp\n    when: record-added\n    do:\n      - set:\n          Title: Ready\n        operation: records.edit\n";
   const f = fixture("edit", true, null, "text", ["Tasks"], source);
-  const client = await f.connect(await f.exchange());
+  const client = await f.connect(f.token());
   const hash = createHash("sha256").update(source).digest("hex");
   expect((await client.callTool({ name: "dohc_list_automations", arguments: { collectionPath: "Tasks" } })).structuredContent)
     .toMatchObject({ definitions: { canSwitch: true, contentHash: hash, file: { status: "read" } } });
@@ -213,19 +234,12 @@ it("remote agents read and switch through the same definition serializer and lin
   expect((await client.callTool({ name: "dohc_switch_automation", arguments: { collectionPath: "Tasks", automation: "stamp", enabled: false, expectedContentHash: hash, reformat: true, submitId: "switch-1" } })).structuredContent)
     .toMatchObject({ result: { status: "written", sync: "accepted" } });
   const request = f.calls.find(call => new URL(call.url).pathname === "/sync/link/collection-writes");
-  expect(request).toBeDefined();
-  expect(request?.headers.has("x-dohc-link-profile-secret")).toBe(true);
-});
-
-it("keeps Public Edit disabled without the release marker", async () => {
-  const f = fixture("edit");
-  const result = await f.send("/api/mcp/exchange", {method: "POST", body: JSON.stringify({secret})});
-  expect(result.status).toBe(404);
+  expect([request?.headers.get("x-dohc-agent-resource"), request?.headers.has("x-dohc-link-profile-secret")]).toEqual([resource, false]);
 });
 
 it("an Edit-link agent creates one record through the same collection file operation", async () => {
   const f = fixture("edit", true, null, "text", ["Tasks"]);
-  const client = await f.connect(await f.exchange());
+  const client = await f.connect(f.token());
   const tools = await client.listTools();
   expect(tools.tools.find(tool => tool.name === "dohc_write_collection_files")?.description).toContain("one Markdown record");
   const args = { submitId: "create-record-1", files: [{ path: "Tasks/One.md", basedOnBlobSha256: null,
@@ -233,8 +247,8 @@ it("an Edit-link agent creates one record through the same collection file opera
   expect((await client.callTool({ name: "dohc_write_collection_files", arguments: args })).structuredContent)
     .toEqual({ ok: true, outcome: "accepted", submitId: args.submitId });
   const request = f.calls.find(call => new URL(call.url).pathname === "/sync/link/collection-writes");
-  expect(request?.headers.get("x-dohc-link-profile-secret")).toBeTruthy();
-  expect(request?.headers.get("authorization")).toMatch(/^LinkCapability /);
+  expect(request?.headers.has("x-dohc-link-profile-secret")).toBe(false);
+  expect(request?.headers.get("authorization")).toMatch(/^DohcAgent /);
 });
 
 it("does not turn a browser session token into an agent bearer", async () => {
@@ -243,60 +257,63 @@ it("does not turn a browser session token into an agent bearer", async () => {
   const {session} = await browser.json() as {session: string};
   const cookie = browser.headers.getSetCookie().find(value => value.startsWith(`dohc_share_${session}=`))!;
   const token = cookie.split(";", 1)[0]!.split("=")[1]!;
-  expect((await f.send("/mcp", {headers: {authorization: `Bearer ${session}.${token}`}})).status).toBe(404);
+  for (const authorization of [`Bearer ${session}.${token}`, `Bearer ${token}`]) {
+    const response = await f.send(mcpPath, {method: "POST", headers: {authorization, "content-type": "application/json"},
+      body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
+    expect([response.status, response.headers.get("www-authenticate")]).toEqual([401, `${challenge}, error="invalid_token"`]);
+  }
 });
 
 it("rejects oversized and malformed MCP bodies without tool side effects", async () => {
-  const f = fixture(); const bearer = await f.exchange();
-  for (const body of ["{", JSON.stringify({data: "x".repeat(33 * 1024)})]) {
-    expect((await f.send("/mcp", {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"}, body})).status).toBe(404);
-  }
+  const f = fixture(); const bearer = f.token();
+  const send = (body: string) => f.send(mcpPath, {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"}, body});
+  for (const body of ["{", JSON.stringify({data: "x".repeat(33 * 1024)})]) expect((await send(body)).status).toBe(404);
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/discussion")).toBe(false);
+  expect((await (await f.connect(bearer)).listTools()).tools.length).toBeGreaterThan(0);
 });
 
 it("refuses subscriptions immediately and does not create legacy GET sessions", async () => {
-  const f = fixture(); const bearer = await f.exchange();
+  const f = fixture(); const bearer = f.token();
   const headers = {authorization: `Bearer ${bearer}`, "content-type": "application/json"};
-  expect(await (await f.send("/mcp", {method: "POST", headers, body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "subscriptions/listen"})})).json()).toMatchObject({error: {code: -32601}});
-  expect((await f.send("/mcp", {headers})).status).toBe(405);
+  expect(await (await f.send(mcpPath, {method: "POST", headers, body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "subscriptions/listen"})})).json()).toMatchObject({error: {code: -32601}});
+  expect((await f.send(mcpPath, {headers})).status).toBe(405);
 });
 
 it("caps discussion pages at the relay limit before sending a request", async () => {
-  const f = fixture(); const client = await f.connect(await f.exchange());
+  const f = fixture(); const client = await f.connect(f.token());
   expect(await client.callTool({name: "dohc_read_discussion", arguments: {limit: 101}})).toMatchObject({isError: true});
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/discussion")).toBe(false);
   expect(await client.callTool({name: "dohc_read_discussion", arguments: {limit: 100}})).toMatchObject({structuredContent: {ok: true, limit: "100"}});
 });
 
 it("validates discussion inputs before forwarding invalid writes", async () => {
-  const f = fixture(); const client = await f.connect(await f.exchange());
+  const f = fixture(); const client = await f.connect(f.token());
   for (const args of [
     {body: "x".repeat(2001)},
     {body: "😀".repeat(2001)},
     {body: "\0"},
-    {claimedName: "n".repeat(41)},
-    {claimedName: "😀".repeat(41)},
-    {claimedName: " "},
     {idempotencyKey: "k".repeat(65)},
     {idempotencyKey: "bad\nkey"},
-    {body: "\u0001".repeat(2000), claimedName: "\u0001".repeat(2000) + "Name"},
+    {body: "\u0001".repeat(2000)},
   ]) {
     expect(await client.callTool({name: "dohc_post_discussion", arguments: {body: "hello", idempotencyKey: "key", ...args}})).toMatchObject({isError: true});
   }
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/discussion")).toBe(false);
-  const body = "😀".repeat(2000), claimedName = "😀".repeat(40);
-  expect(await client.callTool({name: "dohc_post_discussion", arguments: {body, claimedName, idempotencyKey: "k".repeat(64)}})).toMatchObject({structuredContent: {ok: true, body: {body, claimedName}}});
+  // The post carries no name: the relay shows the name the client reported when it signed in.
+  const body = "😀".repeat(2000), idempotencyKey = "k".repeat(64);
+  const posted = await client.callTool({name: "dohc_post_discussion", arguments: {body, idempotencyKey}});
+  expect(asRecord(posted.structuredContent)?.body).toEqual({body, idempotencyKey});
 });
 
 it.each(["text", "binary"] as const)("uses authoritative %s metadata for UTF-8-compatible file bytes", async contentKind => {
-  const f = fixture("view", false, null, contentKind); const client = await f.connect(await f.exchange());
+  const f = fixture("view", false, null, contentKind); const client = await f.connect(f.token());
   expect(await client.callTool({name: "dohc_read_file", arguments: {blobSha256: "a".repeat(64)}})).toMatchObject({
     structuredContent: {ok: true, encoding: contentKind === "binary" ? "base64" : "utf8", content: contentKind === "binary" ? Buffer.from("hello").toString("base64") : "hello"},
   });
 });
 
 it("lists the link log as changes through the browser's log route", async () => {
-  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(f.token());
   expect((await client.callTool({name: "dohc_list_changes", arguments: {since: 7, limit: 50}})).structuredContent).toEqual({ok: true, nextCursor: 12, hasMore: false, epochLogFloor: 3, changes: [
     {recordedAtMs: 8000, operation: "write", path: "doc.md", afterBlobSha256: first, contentKind: "text"},
     {recordedAtMs: 9000, operation: "write", path: "doc.md", afterBlobSha256: second, contentKind: "text", beforeBlobSha256: first},
@@ -316,7 +333,7 @@ it("lists the link log as changes through the browser's log route", async () => 
 it("shows a pinned version's fork snapshot as one version change", async () => {
   servedLog = {ok: true, nextCursor: 5, hasMore: false, epochLogFloor: 0, ops: [{relaySeq: 5, originSeq: 5, opKind: "version.create", recordedAtMs: 5000,
     payload: {versionId: "v1", forkSnapshots: [{path: "doc.md", blobSha256: first}, {path: "cat.png", blobSha256: second, contentKind: "binary"}, {path: "empty.md"}]}}]};
-  const f = fixture("edit", true, "v1"); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true, "v1"); const client = await f.connect(f.token());
   expect((await client.callTool({name: "dohc_list_changes", arguments: {}})).structuredContent).toEqual({ok: true, nextCursor: 5, hasMore: false, epochLogFloor: 0, changes: [
     {recordedAtMs: 5000, operation: "version", versionId: "v1", files: [
       {path: "doc.md", blobSha256: first, contentKind: "text"}, {path: "cat.png", blobSha256: second, contentKind: "binary"}, {path: "empty.md", contentKind: "text"},
@@ -326,14 +343,14 @@ it("shows a pinned version's fork snapshot as one version change", async () => {
 
 it("returns an error and no changes for a malformed log page", async () => {
   servedLog = {...logPage, ops: [...logPage.ops, moment(13, {operation: "write", payloadAfterPath: "doc.md", payloadAfterBlobSha256: "not-a-hash"})]};
-  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(f.token());
   const result = await client.callTool({name: "dohc_list_changes", arguments: {}});
   expect(result).toMatchObject({isError: true});
   expect(result.structuredContent).toBeUndefined();
 });
 
 it("refuses the log after the link is revoked", async () => {
-  const f = fixture("edit", true); const client = await f.connect(await f.exchange());
+  const f = fixture("edit", true); const client = await f.connect(f.token());
   f.revoke();
   await expect(client.callTool({name: "dohc_list_changes", arguments: {}})).rejects.toThrow();
   expect(f.calls.some(call => new URL(call.url).pathname === "/sync/link/log")).toBe(false);
@@ -346,7 +363,7 @@ it.each([
   ["edit", true, "pinned"],
 ] as const)("summarizes link status for %s, live=%s, version=%s without losing metadata", async (access, live, versionId) => {
   const f = fixture(access, live, versionId, "text", ["docs", "plan.md"]);
-  const client = await f.connect(await f.exchange());
+  const client = await f.connect(f.token());
   const result = await client.callTool({name: "dohc_share_status", arguments: {}});
   expect(result.structuredContent).toMatchObject({ok: true, access,
     effectiveSelector: {versionId, paths: ["docs", "plan.md"], access}, lastSettledKnown: true, lastSettledAtMs: 123});
@@ -368,11 +385,11 @@ it.each([
     expect(summary).toContain("You can change a Collection's collection.yaml and automations.yaml here.");
   }
   expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
-  expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share", "/sync/link/chat/channels"].includes(new URL(call.url).pathname))).toBe(true);
+  expect(f.calls.every(call => ["/sync/link/share", "/sync/link/chat/channels"].includes(new URL(call.url).pathname))).toBe(true);
 });
 
 it("describes an unfiltered link without claiming access to private workspace data", async () => {
-  const f = fixture("view"); const client = await f.connect(await f.exchange());
+  const f = fixture("view"); const client = await f.connect(f.token());
   const result = await client.callTool({name: "dohc_share_status", arguments: {}});
   expect(asRecord(result.structuredContent)?.summary).toContain("Included: shareable workspace files and this share's comments.");
 });
