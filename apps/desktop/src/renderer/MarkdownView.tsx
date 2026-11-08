@@ -2127,7 +2127,7 @@ export function MarkdownView(props: {
         path={props.path}
         message={engine.permanentFailureWhileEditing
           ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
-          : "This document became read-only. Copy your text to keep it."}
+          : "This document became read-only. Copy your edits to keep them."}
         messageDraftId={engine.permanentFailureWhileEditing ? engine.permanentFailureDraftId : readOnlyDraftId.current}
         replacedDraftIds={engine.replacedDraftIds}
       />

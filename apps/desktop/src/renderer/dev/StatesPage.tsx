@@ -621,18 +621,45 @@ function UnsavedTabStrip(props: { testId: string; dirty: boolean; recovered: boo
 }
 
 const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
+const RELAY_REPORT = `Error: ${RELAY_ERROR}\nWorkspace: Research\nPlatform: win32\nTime: 2026-11-07T09:00:00.000Z`;
 const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
   return {
     id: tone,
     message: tone === "success" ? "Moved 4 files to Archived" : RELAY_ERROR,
-    details: `Error: ${RELAY_ERROR}`,
     atMs: 0,
     canRetry: tone === "danger",
     seen: false,
-    ...(tone === "success" ? { tone } : {}),
+    ...(tone === "success" ? { tone } : { copy: { report: RELAY_REPORT } }),
   };
+}
+
+// A report long enough that the open Details block scrolls.
+const LONG_REPORT = [
+  "Error: dohc could not sync 24 files.",
+  ...Array.from({ length: 24 }, (_, index) => `File: trip/days/day-${String(index + 1).padStart(2, "0")}.md`),
+  "Workspace: Trip planning",
+  "dohc: 0.0.0-nightly",
+  "Platform: win32",
+  "Time: 2026-11-07T09:00:00.000Z",
+].join("\n");
+const LONG_REPORT_TOAST = {
+  id: "sync-files",
+  message: "dohc could not sync 24 files.",
+  copy: { report: LONG_REPORT },
+  atMs: 0,
+  canRetry: true,
+  seen: false,
+};
+
+// Opens the Details inside it, as a click on Details would.
+function DetailsOpen(props: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    ref.current?.querySelector<HTMLButtonElement>("button[aria-controls][aria-expanded='false']")?.click();
+  }, []);
+  return <div ref={ref}>{props.children}</div>;
 }
 
 const PARSER_TEXT = "visibility.toml: TOML parse error at line 3, column 9";
@@ -649,7 +676,7 @@ const REFUSED_RESTORE_TOAST = {
   id: "refused-restore",
   title: "dohc could not restore notes/plan.md",
   message: readError(REFUSED_RESTORE).words ?? "",
-  details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
+  copy: { report: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}` },
   atMs: 0,
   canRetry: true,
   seen: false,
@@ -665,7 +692,7 @@ const RECOVERY_TOAST = {
   tone: "warning" as const,
   title: CAPTURE_RECOVERY_TITLE,
   message: captureRecoveryMessage(RECOVERY_PATH, false),
-  details: RECOVERY_DETAILS,
+  copy: { report: RECOVERY_DETAILS },
   atMs: 0,
   canRetry: false,
   actionLabel: "Open History",
@@ -679,8 +706,7 @@ function recoveryNotice(id: string, shared: boolean) {
     body: captureRecoveryMessage(RECOVERY_PATH, shared),
     Icon: AlertTriangle,
     actions: [{ label: "Open History", onClick: noop }],
-    copyText: RECOVERY_DETAILS,
-    copyLabel: "Copy notice details",
+    copy: { report: RECOVERY_DETAILS },
     onDismiss: noop,
   };
 }
@@ -1369,7 +1395,7 @@ function notice(id: string, tone: "danger" | "success") {
     title: tone === "success" ? "Moved 4 files to Archived" : "Sync stopped",
     body: tone === "success" ? "The files are in Archived." : RELAY_ERROR,
     Icon: tone === "success" ? CheckCircle2 : AlertTriangle,
-    ...(tone === "danger" ? { actions: [{ label: "Try again", onClick: noop }], copyText: RELAY_ERROR } : {}),
+    ...(tone === "danger" ? { actions: [{ label: "Try again", onClick: noop }], copy: { report: RELAY_REPORT } } : {}),
     onDismiss: noop,
   };
 }
@@ -1377,7 +1403,7 @@ function notice(id: string, tone: "danger" | "success") {
 // A failure whose text runs past three lines: the row clips it and offers Show more.
 const SELF_TEST_TITLE = "Nova didn't reply to the check.";
 const SELF_TEST_BODY =
-  "Nova's runner stopped at step 3 of 5, before its tools started, so the check never reached Nova. dohc kept the runner's log and the step that stopped with this notice, and Copy puts both on your clipboard. Fix what the log names, then run the check again.";
+  "Nova's runner stopped at step 3 of 5, before its tools started, so the check never reached Nova. dohc kept the runner's log and the step that stopped with this notice, and Copy details puts both on your clipboard. Fix what the log names, then run the check again.";
 const LONG_NOTICE = {
   id: "self-test",
   tone: "danger" as const,
@@ -1385,13 +1411,15 @@ const LONG_NOTICE = {
   body: SELF_TEST_BODY,
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
-  // The body promises that Copy gives the log and the step that stopped.
-  copyText: [
-    SELF_TEST_TITLE,
-    SELF_TEST_BODY,
-    "Log: C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log",
-    "Step that stopped: 3 of 5",
-  ].join("\n"),
+  // The body promises that Copy details gives the log and the step that stopped.
+  copy: {
+    report: [
+      SELF_TEST_TITLE,
+      SELF_TEST_BODY,
+      "Log: C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log",
+      "Step that stopped: 3 of 5",
+    ].join("\n"),
+  },
   onDismiss: noop,
 };
 
@@ -1403,8 +1431,8 @@ const COLLECTIONS_WAITING_NOTICE = {
   body: "",
   Icon: AlertTriangle,
   actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
-  copyText: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
-  copyLabel: "Copy notice details",
+  // It copies only what it shows, so it has a Copy icon, not Details.
+  copy: { report: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings." },
   onDismiss: noop,
 };
 
@@ -1416,7 +1444,7 @@ const MERGE_BLOCKED_TOAST = {
   id: "merge-blocked",
   title: "dohc could not merge Draft into Main",
   message: "Try again in a moment.",
-  details: "Error: Rust engine daemon exited.",
+  copy: { report: "Error: Rust engine daemon exited." },
   atMs: 0,
   canRetry: true,
   retryBlocked: MERGE_RETRY_AFTER_CLOSE,
@@ -1429,7 +1457,7 @@ const MERGE_BLOCKED_NOTICE = {
   body: "",
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop, disabled: true, reason: MERGE_RETRY_AFTER_CLOSE }],
-  copyText: MERGE_BLOCKED_TOAST.details,
+  copy: MERGE_BLOCKED_TOAST.copy,
   onDismiss: noop,
 };
 
@@ -2093,6 +2121,40 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
           <WorkspaceErrorToast error={toast("success")} onHide={noop} />
           <WorkspaceErrorToast error={MERGE_BLOCKED_TOAST} onRetry={noop} onHide={noop} />
+        </div>
+      </Section>
+
+      {/* Details closed, open, and open with a report long enough to scroll. */}
+      <Section part="notice-details" title="Notice details">
+        <div className={`flex w-full flex-wrap items-start gap-x-6 gap-y-4 ${SHADOW_ROOM}`}>
+          <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
+          <DetailsOpen>
+            <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
+          </DetailsOpen>
+          <DetailsOpen>
+            <WorkspaceErrorToast error={LONG_REPORT_TOAST} onRetry={noop} onHide={noop} />
+          </DetailsOpen>
+        </div>
+        <div className="flex w-full flex-wrap items-start gap-x-6 gap-y-4">
+          {[false, true].map((open) => {
+            const rows = (
+              <ul className="m-0 list-none p-0">
+                <LocalNoticeRow notice={notice(`details-${open}`, "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              </ul>
+            );
+            return (
+              <div key={String(open)} className="w-[420px] rounded-lg border border-line bg-panel text-xs text-ink">
+                {open ? <DetailsOpen>{rows}</DetailsOpen> : rows}
+              </div>
+            );
+          })}
+          <div className="w-[420px] rounded-lg border border-line bg-panel text-xs text-ink">
+            <DetailsOpen>
+              <ul className="m-0 list-none p-0">
+                <LocalNoticeRow notice={{ ...notice("details-long", "danger"), title: LONG_REPORT_TOAST.message, body: "", copy: { report: LONG_REPORT } }} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              </ul>
+            </DetailsOpen>
+          </div>
         </div>
       </Section>
 

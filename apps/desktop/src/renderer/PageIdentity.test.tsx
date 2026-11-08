@@ -299,7 +299,7 @@ describe("PageIdentity", () => {
             onOpenConflicts={ignore}
             onRefreshShareView={ignore}
             onRebuildEngineStore={ignore}
-            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: !toastShown }]}
+            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", atMs: 1, canRetry: true, seen: !toastShown }]}
             onRetryWorkspaceError={ignore}
             onHideWorkspaceError={ignore}
           />
@@ -341,7 +341,7 @@ describe("PageIdentity", () => {
             onOpenConflicts={ignore}
             onRefreshShareView={ignore}
             onRebuildEngineStore={ignore}
-            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: true }]}
+            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", atMs: 1, canRetry: true, seen: true }]}
             onRetryWorkspaceError={ignore}
             onHideWorkspaceError={ignore}
           />

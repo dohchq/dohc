@@ -44,6 +44,8 @@ import {
   livePageTitle,
   namedList,
   isSharedLiveFileRefusal,
+  SHARED_LIVE_RESTORE_BODY,
+  sharedLiveRestoreDetail,
   isWorkspaceUpdatingError,
   isHistoryCatchingUp,
   liveEditingStoppedPaths,
@@ -436,6 +438,14 @@ describe("error words", () => {
     expect(isMergeStoppedPartway(received)).toBe(true);
     expect(readError(received)).toEqual({ words: null, mapped: false, cause: "Error: disk full" });
     expect(isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version"))).toBe(false);
+  });
+
+  it("keeps a shared live file's restore words within 500 characters, with what to do", () => {
+    expect(sharedLiveRestoreDetail("notes/plan.md").split("\n")).toEqual(
+      ["dohc can't restore \"notes/plan.md\" because it has been shared live", SHARED_LIVE_RESTORE_BODY]);
+    const detail = sharedLiveRestoreDetail(`${`${"a".repeat(199)}/`.repeat(10)}a.md`);
+    expect(detail).toHaveLength(500);
+    expect(detail.split("\n")).toEqual([expect.stringMatching(/^dohc can't restore "…[a/]+\/a\.md" because it has been shared live$/), SHARED_LIVE_RESTORE_BODY]);
   });
 
   it("reads a refused folder move across IPC as its title and body", () => {

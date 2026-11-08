@@ -35,7 +35,7 @@ function Shell(props: { workspaceId: string; children: ReactNode }) {
           id: error.id,
           ...(error.title ? { title: error.title } : {}),
           message: error.message,
-          details: errorDetails(error.details ?? []),
+          copy: { report: errorDetails(error.details ?? []) },
           atMs: error.atMs,
           canRetry: error.retry !== null,
           seen: error.seen,

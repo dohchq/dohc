@@ -340,7 +340,7 @@ export function remapOrphanedDraftPaths(
     // Merge, never overwrite: the target path may hold drafts of its own, and
     // `byCaptureOrder` is what keeps this run's reading and the next launch's
     // reading the same — appending would read one way here and the other way
-    // after a restart, reordering the Copy buttons under the user.
+    // after a restart, reordering the Copy edits buttons under the user.
     drafts.set(
       nextKey,
       [...(drafts.get(nextKey) ?? EMPTY), ...kept].sort(byCaptureOrder),

@@ -583,7 +583,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   );
   // History stopped recording for this workspace. Its identity names the
   // workspace, so a later report replaces the row and a healthy status
-  // clears it; null clears it. `reasons` are extra Copy error details lines,
+  // clears it; null clears it. `reasons` are extra Copy details lines,
   // such as the path a failure names. A report repeated unchanged keeps its
   // toast closed unless `toast` asks for it again. `stillPaused` reports a
   // Try again that failed: "catching-up" while History still takes in

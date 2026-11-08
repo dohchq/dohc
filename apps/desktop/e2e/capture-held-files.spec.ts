@@ -74,11 +74,14 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
     const row = page.locator("[data-notice-row]").filter({ hasText: "Outside edit not recorded" });
     await expect(row).toHaveCount(1);
     await expect(page.locator("[data-notice-row]")).toHaveCount(1);
-    await expect(row.getByRole("button", { name: /Copy/ })).toBeVisible();
+    await expect(row.getByRole("button", { name: "Details" })).toBeVisible();
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
       await page.screenshot({ path: test.info().outputPath(`held-notices-${theme}.png`) });
     }
+    // Details opens the row's report with its Copy details button.
+    await row.getByRole("button", { name: "Details" }).click();
+    await expect(row.getByRole("button", { name: "Copy details" })).toBeVisible();
     await writeFile(join(temp.rootPath, "held.md"), "Repaired outside dohc.\n");
     await expect(row).toHaveCount(0);
     await expect(toast).toHaveCount(0);

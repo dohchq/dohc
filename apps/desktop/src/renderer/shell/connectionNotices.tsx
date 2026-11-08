@@ -81,13 +81,13 @@ export function useConnectionNotices() {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.command ? { command: error.command } : {}),
-        details: errorDetails([
+        copy: { report: errorDetails([
           ["Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ["Platform", bridge().platform],
           ["Time", new Date(error.atMs).toISOString()],
-        ]),
+        ]) },
         atMs: error.atMs,
         canRetry: error.retry !== null,
         seen: error.seen,

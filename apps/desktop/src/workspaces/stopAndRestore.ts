@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import { durableBatch, DURABLE_BATCH_ITEMS } from "@dohc/automation-executor/durable-batch";
 import { restoreReceiptOf } from "./restoreWriteIdentity";
+import { sharedLiveRestoreDetail } from "../ipc/errorWords";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -78,7 +79,8 @@ export interface StopAndRestoreDependencies {
     | { kind: "restored"; receipt: RestoreReceipt }
     | { kind: "changed" }
     | { kind: "folder-in-use" }
-    | { kind: "refused"; detail: string; refusal?: "synced-deletion" }
+    // "shared-live": a shared live file, which the review names in History's words.
+    | { kind: "refused"; detail: string; refusal?: "synced-deletion" | "shared-live" }
     // History's rules could not be read; `unreadable` names what to fix.
     | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
@@ -416,7 +418,9 @@ export async function restoreDirectWrites(
         }
         if (result.kind === "refused") {
           // History refuses some files, such as a shared live document.
-          review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500), refusal: result.refusal });
+          review.set(entry.last.path, result.refusal === "shared-live"
+            ? { path: entry.last.path, reason: "restore-refused", detail: sharedLiveRestoreDetail(entry.last.path) }
+            : { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500), refusal: result.refusal });
           continue;
         }
         if (result.kind === "rules-unreadable") {

@@ -109,7 +109,7 @@ describe("text kept in History", () => {
     expect(toast.textContent).toContain(
       'The file "notes/plan.md" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.',
     );
-    expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
     expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
 
@@ -164,7 +164,7 @@ describe("text kept in History", () => {
     await screen.findByTestId(NOTICE_TOAST);
     const [row] = await noticeRows(user);
     expect(row!.textContent).toContain(CAPTURE_RECOVERY_TITLE);
-    expect(within(row!).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(within(row!).getByRole("button", { name: "Details" })).toBeTruthy();
     await user.click(within(row!).getByRole("button", { name: "Dismiss notice" }));
     await waitFor(() => expect(bridge.clearCaptureRecovery).toHaveBeenCalledExactlyOnceWith({
       workspaceId: WORKSPACE.workspaceId, momentId: RECOVERY.momentId,

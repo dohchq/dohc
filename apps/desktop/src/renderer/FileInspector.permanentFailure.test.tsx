@@ -54,7 +54,7 @@ it("says dohc could not save an edit it refused for good", async () => {
       DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
     ),
   );
-  expect(DOCUMENT_NOT_SAVED_DRAFT_NOTICE).toBe("dohc could not save this document. Copy your text to keep it.");
+  expect(DOCUMENT_NOT_SAVED_DRAFT_NOTICE).toBe("dohc could not save this document. Copy your edits to keep them.");
 });
 
 it("leaves the reason to the row while it shows: no strip sentence, and no tooltip rather than the raw error", async () => {

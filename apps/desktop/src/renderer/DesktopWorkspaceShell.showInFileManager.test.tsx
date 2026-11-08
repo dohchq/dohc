@@ -68,10 +68,10 @@ describe("Show in File Explorer", () => {
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(WORDS);
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = (await within(await screen.findByTestId("notice-center")).findByText(WORDS)).closest("li")!;
-    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
     await nextTurn();
     expect(unhandled).toEqual([]);
 
