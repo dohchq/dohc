@@ -129,7 +129,7 @@ const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
 const TILE_LINE = "mt-0.5 text-[12px]";
 const BUTTON_ICON = "inline-flex shrink-0 items-center gap-1.5";
 // Holds the place of a control the row does not have, so every row's controls line up.
-const switchSpace = <span aria-hidden className="h-5 w-[66px] shrink-0" />;
+const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
 const menuSpace = <span aria-hidden className="size-6 shrink-0" />;
 
 function AgentNameField(props: {
@@ -218,17 +218,6 @@ function AutomationChip(props: { hue: AgentHue | undefined }) {
   );
 }
 
-// An agent's switch says On or Off beside it, so it never reads as part of
-// Check. The switch keeps its own name; the word is for the eye.
-function AgentSwitch(props: Parameters<typeof SwitchControl>[0]) {
-  return (
-    <span className="flex shrink-0 items-center gap-1.5">
-      <span aria-hidden data-testid="agent-switch-word" className="w-6 text-right text-[12px] text-muted">{props.checked ? "On" : "Off"}</span>
-      <SwitchControl {...props} />
-    </span>
-  );
-}
-
 function AgentRow(props: {
   agent: Agent;
   agents: DesktopUserSettings["agents"];
@@ -256,21 +245,21 @@ function AgentRow(props: {
   // Only a switch turns an agent off, so only a row with one dims.
   const off = launched && !agent.enabled;
   // Under the name: what starts the agent, then where it stands. An agent
-  // that is off says only its tool; the switch beside it says Off.
+  // that is off says only its tool, and its switch shows it off.
   const launch = agent.launch;
   const toolId = launch && "tool" in launch ? launch.tool : null;
   const tool = !launch ? null : toolId ? AGENT_TOOLS.find((entry) => entry.id === toolId)!.name : "Your command";
   const status = !launched ? (
     <span className="inline-flex items-center gap-1 text-muted"><Plug size={12} aria-hidden />Through MCP</span>
-  ) : props.checking ? (
+  ) : off ? null : props.checking ? (
     <span className="inline-flex items-center gap-1 text-muted"><LoaderCircle size={12} aria-hidden className="animate-spin" />Checking</span>
-  ) : props.paused && agent.enabled ? (
+  ) : props.paused ? (
     <span className="inline-flex items-center gap-1 text-muted"><Pause size={12} aria-hidden />Paused</span>
   ) : props.check?.status === "replied" ? (
     <span className="inline-flex items-center gap-1 text-success"><Check size={12} aria-hidden />{`Replied in ${props.check.seconds} s`}</span>
   ) : props.check?.status === "failed" ? (
     <span className="inline-flex items-center gap-1 text-danger"><CircleAlert size={12} aria-hidden />Didn't reply.</span>
-  ) : off ? null : (
+  ) : (
     <span className="text-muted">Not checked</span>
   );
   const state = (
@@ -316,7 +305,7 @@ function AgentRow(props: {
             </SecondaryButton>
           ) : null}
           {launched ? (
-            <AgentSwitch label={agent.name} labelledBy={nameId}
+            <SwitchControl label={agent.name} labelledBy={nameId}
               tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`}
               description={agent.enabled ? "Turn off" : "Turn on"} checked={agent.enabled}
               onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
@@ -402,7 +391,7 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
         <SecondaryButton onClick={props.onOpenSettingsFile} className={BUTTON_ICON}>
           <FilePenLine size={14} aria-hidden />Open settings file
         </SecondaryButton>
-        <AgentSwitch label={name} checked={false} disabled onChange={() => undefined} />
+        <SwitchControl label={name} checked={false} disabled onChange={() => undefined} />
         {menuSpace}
       </div>
     </div>

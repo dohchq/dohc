@@ -85,7 +85,8 @@ describe.each(composers)("the send control in $name", ({ render: composer }) => 
   });
 
   it("looks ready with something to send and unavailable with nothing", () => {
-    const view = render(composer(false, ""));
+    // Blank, not empty, so a new post stays open and draws its Post button.
+    const view = render(composer(false, " "));
     expect((send() as HTMLButtonElement).disabled).toBe(true);
     expect(look()).toBe("off");
     view.rerender(composer(false, "Hello"));
