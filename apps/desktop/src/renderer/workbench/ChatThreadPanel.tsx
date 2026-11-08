@@ -1,5 +1,5 @@
-import { AtSign, ChevronLeft, LoaderCircle, MessageSquare, RotateCw, Square, TriangleAlert, X } from "lucide-react";
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { AtSign, ChevronLeft, LoaderCircle, MessageSquare, RotateCw, Settings, Square, TriangleAlert, X } from "lucide-react";
+import { Children, useEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { ActorPresentation, ChatDispatchFailedRun, ChatMessageRecord, ChatRunRecord } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { formatClock, formatShortTime, sameChatDay } from "../time";
@@ -178,11 +178,12 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
   );
 }
 
-// Under the message an agent didn't answer: why, in its notice's words, and
-// Try again while its request can run once more. Where a message would ask
-// again and a composer is at hand, a button readies that message; nothing
-// sends. Any other next step takes its own line, behind a hidden copy of the
-// icon so it starts under the words.
+// Under the message an agent didn't answer, one shape whatever the cause:
+// why, in its notice's words, then the next step on a line of its own that
+// starts under the words. The step is a control where one is at hand: Try
+// again while the request can run once more, a button that readies a
+// message to the agent (nothing sends), or one that opens the Agents page.
+// Without one, the same line says it in words.
 export function FailedRunLine(props: {
   testIdPrefix: string;
   failed: ChatDispatchFailedRun;
@@ -200,62 +201,78 @@ export function FailedRunLine(props: {
   const step = props.failed.nextStep;
   const ownChat = step?.kind === "message" && step.agentId === props.chatAgentId;
   const askAgain = step?.kind === "message" && props.onAskAgain && (ownChat || step.handle) ? step : null;
+  const inSettings = step && step.kind !== "message" && props.onOpenAgentSettings ? step : null;
+  const sentence = step && !askAgain && !inSettings ? step : null;
+  const actions = props.onRetry || askAgain || inSettings || Children.toArray(props.children).length > 0;
   return (
     <div
       data-testid={`${props.testIdPrefix}-run-failed`}
-      className={`flex min-h-7 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted ${props.className ?? ""}`}
+      className={`flex flex-col gap-1 text-[13px] text-muted ${props.className ?? ""}`}
     >
-      <TriangleAlert size={14} aria-hidden className="shrink-0 text-danger" />
-      <span role="status" className="min-w-0">{props.failed.words}</span>
-      {props.onRetry ? (
-        <SecondaryButton
-          size="row"
-          data-testid={`${props.testIdPrefix}-run-try-again`}
-          aria-disabled={props.busy || undefined}
-          aria-busy={props.busy || undefined}
-          onClick={props.busy ? undefined : props.onRetry}
-        >
-          {props.busy
-            ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
-            : <RotateCw size={12} aria-hidden />}
-          Try again
-        </SecondaryButton>
+      <span className="flex min-h-7 items-center gap-2">
+        <TriangleAlert size={14} aria-hidden className="shrink-0 text-danger" />
+        <span role="status" className="min-w-0">{props.failed.words}</span>
+      </span>
+      {sentence ? (
+        <span data-testid={`${props.testIdPrefix}-run-next-step`} role="status" className="min-w-0 pl-[22px] wrap-anywhere">
+          <FailedRunNextStep step={sentence} chatAgentId={props.chatAgentId} />
+        </span>
       ) : null}
-      {askAgain ? (
-        <SecondaryButton
-          size="row"
-          data-testid={`${props.testIdPrefix}-run-ask-again`}
-          onClick={() => props.onAskAgain?.(askAgain.agentId, !ownChat)}
-        >
-          {ownChat ? <MessageSquare size={12} aria-hidden /> : <AtSign size={12} aria-hidden />}
-          {ownChat ? `Message ${askAgain.name}` : `Mention @${askAgain.handle}`}
-        </SecondaryButton>
-      ) : null}
-      {props.children}
-      {props.failed.nextStep && !askAgain ? (
-        <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
-          <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
-          <span role="status" className="min-w-0 wrap-anywhere">
-            <FailedRunNextStep
-              step={props.failed.nextStep}
-              testIdPrefix={props.testIdPrefix}
-              onOpenAgentSettings={props.onOpenAgentSettings}
-              chatAgentId={props.chatAgentId}
-            />
-          </span>
+      {actions ? (
+        <span data-testid={`${props.testIdPrefix}-run-actions`} className="flex flex-wrap items-center gap-2 pl-[22px]">
+          {props.onRetry ? (
+            <SecondaryButton
+              size="row"
+              data-testid={`${props.testIdPrefix}-run-try-again`}
+              aria-disabled={props.busy || undefined}
+              aria-busy={props.busy || undefined}
+              onClick={props.busy ? undefined : props.onRetry}
+            >
+              {props.busy
+                ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
+                : <RotateCw size={12} aria-hidden />}
+              Try again
+            </SecondaryButton>
+          ) : null}
+          {askAgain ? (
+            <SecondaryButton
+              size="row"
+              data-testid={`${props.testIdPrefix}-run-ask-again`}
+              onClick={() => props.onAskAgain?.(askAgain.agentId, !ownChat)}
+            >
+              {ownChat ? <MessageSquare size={12} aria-hidden /> : <AtSign size={12} aria-hidden />}
+              {ownChat ? `Message ${askAgain.name}` : `Mention @${askAgain.handle}`}
+            </SecondaryButton>
+          ) : null}
+          {inSettings ? (
+            <SecondaryButton
+              size="row"
+              data-testid={`${props.testIdPrefix}-run-open-settings`}
+              onClick={props.onOpenAgentSettings}
+            >
+              <Settings size={12} aria-hidden />
+              {`${settingsStep(inSettings)} in Settings`}
+            </SecondaryButton>
+          ) : null}
+          {props.children}
         </span>
       ) : null}
     </div>
   );
 }
 
-// What to do instead of Try again: message the agent, in its own chat or by
-// its @handle elsewhere, or, when a message won't wake it, a step in
-// Settings, which opens the Agents page.
+// What a step in Settings asks for, as the start of its button or sentence.
+function settingsStep(step: Exclude<NonNullable<ChatDispatchFailedRun["nextStep"]>, { kind: "message" }>): string {
+  return step.kind === "add-agent" ? "Add an agent"
+    : step.kind === "turn-on" ? `Turn ${step.name} on`
+    : `Set up ${step.name}`;
+}
+
+// The next step in words, where no control is at hand: message the agent,
+// in its own chat or by its @handle elsewhere, or, when a message won't wake
+// it, a step in Settings.
 function FailedRunNextStep(props: {
   step: NonNullable<ChatDispatchFailedRun["nextStep"]>;
-  testIdPrefix: string;
-  onOpenAgentSettings?: () => void;
   chatAgentId?: string;
 }) {
   const { step } = props;
@@ -264,20 +281,7 @@ function FailedRunNextStep(props: {
       : step.handle ? `Mention @${step.handle} to ask again.`
       : `Message ${step.name} in its own chat to ask again.`}</>;
   }
-  const action = step.kind === "add-agent" ? "Add an agent"
-    : step.kind === "turn-on" ? `Turn ${step.name} on`
-    : `Set up ${step.name}`;
-  const settings = props.onOpenAgentSettings ? (
-    <button
-      type="button"
-      data-testid={`${props.testIdPrefix}-run-open-settings`}
-      onClick={props.onOpenAgentSettings}
-      className="rounded-sm text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
-    >
-      Settings
-    </button>
-  ) : "Settings";
-  return <>{action} in {settings} to ask again.</>;
+  return <>{settingsStep(step)} in Settings to ask again.</>;
 }
 
 // Where a failed run's line goes: under its last post, by when it was

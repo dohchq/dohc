@@ -133,9 +133,11 @@ test("picking the agent in a group's post says it runs when you send, and the of
     await expect(page.getByTestId("composer-agent-offer")).toHaveCount(0);
 
     const runChip = page.getByTestId("chats-message").filter({ hasText: REPORT }).getByTestId("chats-run-chip");
+    await expect(runChip).toHaveText("Details");
     await runChip.click();
     await expect(page.getByTestId("chats-run-popover")).toBeVisible();
     await expect(page.getByTestId("chats-run-command")).toHaveText(command);
+    await expect(page.getByTestId("chats-run-id")).not.toBeEmpty();
     await expect(page.getByTestId("chats-run-exit-code")).toHaveText("0");
     // The command and log path wrap inside the popover, Copy included.
     expect(await page.getByTestId("chats-run-popover").evaluate((popover) => popover.scrollWidth <= popover.clientWidth)).toBe(true);
