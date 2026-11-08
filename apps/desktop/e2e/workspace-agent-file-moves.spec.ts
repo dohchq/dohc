@@ -60,7 +60,7 @@ test("an MCP move and delete each show one History row under the agent", async (
     }
     await moved.click();
     await expect(page.getByTestId("engine-diff-source")).toHaveText("Mover agent");
-    expect(await undoOperation(ctx, { operationId: move.operationId })).toEqual({ ok: false, reason: "Undo for a folder move isn't available yet. Move it back yourself." });
+    expect(await undoOperation(ctx, { operationId: move.operationId })).toEqual({ ok: false, reason: "Undo for a folder move isn't available yet. Move it back yourself.", refusal: { code: "unexplained" } });
     const fileMove = await moveWorkspacePath(ctx, { fromPath: "archive/plans/notes.txt", toPath: "archive/plans/renamed.txt" }, "Mover agent");
     expect(fileMove).toMatchObject({ ok: true, undo: { available: true } });
     if (!fileMove.ok) throw new Error(fileMove.reason);
