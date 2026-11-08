@@ -5,14 +5,13 @@ import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
 import { ReactionStoreProvider } from "./reactionStore";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
-import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { ask, asked, id, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
 
-vi.mock("./chatFileMentions", { spy: true });
+vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
 let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();

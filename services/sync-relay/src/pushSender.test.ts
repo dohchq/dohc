@@ -159,10 +159,11 @@ it("records one delivery for overlapping mention, DM, and prior participation; r
   expect(rows(f.storage)).toHaveLength(1);
 });
 
-it("selects a later thread reply, ignores code mentions, self posts, unrelated chats, and supplied recipient lists", async () => {
+it("selects a later thread reply, ignores code mentions, names inside file links, self posts, unrelated chats, and supplied recipient lists", async () => {
   const f = await fixture();
   f.append([chatMessageAppend("listed", threadId, "hello", {authorUserId: "owner", recipients: ["alice"]})]);
   f.message("`@Alice` recipients: alice", "code");
+  f.message("see @[trip @Alice notes.md]", "link");
   expect(rows(f.storage)).toHaveLength(0);
   f.append([chatMessageAppend("mine", threadId, "@Alice", {authorUserId: "alice"})], "alice");
   expect(rows(f.storage)).toHaveLength(0);

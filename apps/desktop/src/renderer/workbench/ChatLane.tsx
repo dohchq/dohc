@@ -7,12 +7,11 @@ import type {
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
 } from "../../ipc/bridgeContract";
-import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { withErrorWords } from "../../ipc/errorWords";
-import { extractChatFileReferences } from "./chatFileMentions";
 import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages";
 import { FailedRunLine, failedRunEnd, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";

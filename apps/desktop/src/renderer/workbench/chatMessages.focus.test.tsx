@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LegendListProps } from "@legendapp/list/react";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { ChatMessageList } from "./chatMessages";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { extractChatFileReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 
-vi.mock("./chatFileMentions", { spy: true });
+vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 vi.mock("@legendapp/list/react", () => ({
   LegendList: function LegendList(props: LegendListProps<ChatMessageRecord>) {
     // Reuse unchanged row renders so this test isolates focus-neighbor work.

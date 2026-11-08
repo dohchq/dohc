@@ -384,12 +384,14 @@ describe("an agent waiting for messages", () => {
     const held = wait(f, reader);
     await parks.next(0);
 
-    // Its own post, an unrelated message, a mention inside code, and a private channel's mention.
+    // Its own post, an unrelated message, a mention inside code, its name inside a file link, and a private
+    // channel's mention.
     const posted = (await ok(await post(f, reader, { threadId: "thread-team" }))).message as Record<string, unknown>;
     await parks.next(1);
     appendOwnerOps(f.storage, [
       chatMessageAppend("owner-other", "thread-other", "elsewhere", { authorUserId: OWNER }),
       chatMessageAppend("owner-code", "thread-other", "see `@Helper`", { authorUserId: OWNER }),
+      chatMessageAppend("file-link", "thread-other", "see @[notes @Helper draft.md]", { authorUserId: OWNER }),
       chatMessageAppend("private", "thread-private", "SENTINEL @Helper", { authorUserId: OWNER }),
     ]);
     f.activity.wakeLog(workspaceId);

@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DmRecord } from "../../ipc/bridgeContract";
 import { keepIfUnchanged } from "./ChatsView";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { extractChatFileReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import {
   ChatsView,
   NOW,
@@ -20,7 +20,7 @@ import {
 
 // Real implementations, spied: every message-body render runs the file-token
 // scan, so its call count is the render-cost probe for the memo boundaries.
-vi.mock("./chatFileMentions", { spy: true });
+vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
 // The perf contract for chat surfaces: composer drafts live in ChatsView, so
 // a keystroke re-renders the view — but it must not reconcile the message

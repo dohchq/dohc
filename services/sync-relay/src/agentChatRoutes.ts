@@ -1,5 +1,5 @@
 import { jsonResponse, readBoundedJson } from "@dohc/service-http";
-import { handleForName, normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentionTokens, handleForName, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound, RelayError, relayError } from "./errors";
 import { agentAccessCheck } from "./linkAuthority";
@@ -63,7 +63,7 @@ export function agentMention(reportedName: string | null): string {
 
 function mentions(body: string | null, mention: string): boolean {
   const handle = normalizeHandle(mention.slice(1));
-  return body !== null && scanMentionTokens(body, { ignoreCode: true }).some(token => normalizeHandle(token.handle) === handle);
+  return body !== null && chatMentionTokens(body).some(token => normalizeHandle(token.handle) === handle);
 }
 
 export interface AgentChatWaitBody {

@@ -1,5 +1,5 @@
 import { nameSlug as slug } from "@dohc/workspace-contracts/names";
-import { scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentionTokens, scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
@@ -572,7 +572,7 @@ function personalFeedMessages(
 }
 
 function mentionHandles(body: string): string[] {
-  return [...new Set(scanMentionTokens(body, { ignoreCode: true }).map(token => normalizeHandle(token.handle)))];
+  return [...new Set(chatMentionTokens(body).map(token => normalizeHandle(token.handle)))];
 }
 
 const EMOJI_ATOM =

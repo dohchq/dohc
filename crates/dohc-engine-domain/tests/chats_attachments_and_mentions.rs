@@ -596,7 +596,7 @@ fn mention_parser_ignores_inline_and_fenced_code() {
 
 #[test]
 fn mention_parser_skips_names_inside_file_links() {
-    // The expected handles are what the desktop's chatMentionTokens reads.
+    // The expected handles are what chatMentionTokens in workspace-contracts reads.
     let cases: [(&str, &[&str]); 12] = [
         ("see @[trip @Nova notes.md]", &[]),
         ("see @[notes @Nova.md#Day 1]", &[]),
