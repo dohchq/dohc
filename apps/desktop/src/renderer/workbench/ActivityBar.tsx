@@ -19,14 +19,10 @@ function RailGlyph(props: { Icon: LucideIcon }) {
 
 function RailButton(props: {
   label: string;
-  // The button's name when it says more than its label, such as a count.
-  name?: string;
   testId: string;
   active?: boolean;
   // Badge dot seam (conflicts, running agent — more arrive in later phases).
   badge?: "danger" | "success";
-  // Numeric badge seam (Phase E5.0: search results count while showing).
-  count?: number;
   onClick?: () => void;
   onContextMenu?: () => void;
   // A node, not a component: dohc's views draw a lucide glyph and a pinned
@@ -51,19 +47,6 @@ function RailButton(props: {
           }`}
         />
       ) : null}
-      {/* Notices' count, 1px further out up and right: at Notices' place
-          "9+" touches the magnifier's ring. 1px in from both edges, it clears
-          the ring and stays inside the button's rounded corner. The button's
-          name carries the exact number. */}
-      {typeof props.count === "number" ? (
-        <span
-          data-testid={`${props.testId}-count`}
-          aria-hidden
-          className="absolute right-px top-px h-3 min-w-3 rounded-full bg-ink px-0.5 text-center text-[8px] font-semibold leading-3 text-bg"
-        >
-          {props.count > 9 ? "9+" : props.count}
-        </span>
-      ) : null}
     </>
   );
   // The active bar sits on the rail's left edge, outside the tile, so it
@@ -81,7 +64,7 @@ function RailButton(props: {
           type="button"
           data-testid={props.testId}
           title={props.label}
-          aria-label={props.name ?? props.label}
+          aria-label={props.label}
           aria-current={props.active ? "page" : undefined}
           onClick={props.onClick}
           onContextMenu={
@@ -111,8 +94,6 @@ export function ActivityBar(props: {
   activeView: ActivityViewId;
   sidebarVisible: boolean;
   hasConflict: boolean;
-  // Content-search results count; undefined = no badge.
-  searchResultCount?: number;
   // Apps pinned in this workspace, after dohc's own views.
   pinnedApps?: readonly PinnedApp[];
   onPinnedAppMenu?: (appRoot: string) => void;
@@ -130,8 +111,8 @@ export function ActivityBar(props: {
     >
       {/* The view list scrolls, so enough pinned apps never push the
           Sharing and Settings buttons off the rail. It spans the rail and pads
-          its ends, so the clip keeps the active bar, a tile's count, and the
-          focus ring, and never scrolls sideways. */}
+          its ends, so the clip keeps the active bar and the focus ring, and
+          never scrolls sideways. */}
       <div inert={props.viewsDisabled || undefined} className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1">
         {props.views.map((view) => (
           <RailButton
@@ -141,10 +122,6 @@ export function ActivityBar(props: {
             // The rail reflects a collapsed panel: no active mark while hidden.
             active={props.sidebarVisible && props.activeView === view}
             badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
-            count={view === "search" ? props.searchResultCount : undefined}
-            name={view === "search" && props.searchResultCount
-              ? `${VIEW_IDENTITY.search.label}, ${props.searchResultCount} result${props.searchResultCount === 1 ? "" : "s"}`
-              : undefined}
             onClick={() => props.onSelectView(view)}
             icon={<RailGlyph Icon={VIEW_IDENTITY[view].Icon} />}
           />

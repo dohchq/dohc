@@ -820,7 +820,9 @@ describe("content search", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("clears the activity badge as soon as the query is cleared", async () => {
+  // The rail's badge means something waits for you; a search's results
+  // don't. The panel's header counts them.
+  it("shows no count on the Search button while results exist", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -859,14 +861,15 @@ describe("content search", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByTestId("activity-search-count").textContent).toBe("2"),
+      expect(screen.getByTestId("search-summary").textContent).toBe("2 results in 2 files"),
     );
+    const searchButton = screen.getByTestId("activity-search");
+    expect(searchButton.getAttribute("aria-label")).toBe("Search");
+    expect(searchButton.textContent).toBe("");
 
-    await user.clear(input);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId("activity-search-count")).toBeNull();
-    });
+    await user.click(screen.getByTestId("activity-explorer"));
+    expect(screen.getByTestId("activity-search").getAttribute("aria-label")).toBe("Search");
+    expect(screen.getByTestId("activity-search").textContent).toBe("");
   });
 
   // The results outlive the panel, so the criteria that produced them
