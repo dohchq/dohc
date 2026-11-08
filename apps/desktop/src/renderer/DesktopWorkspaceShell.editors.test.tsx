@@ -31,6 +31,15 @@ function checkRefusalCopy(text: string, cause?: string) {
   expect(lines.filter(line => line.startsWith("Cause:")), "Copy keeps only the filesystem cause").toEqual(cause ? [`Cause: ${cause}`] : []);
 }
 
+// Opens a notice's Details unless it is open, then copies its report. A
+// plain click moves no pointer, so copying a row doesn't read it and close
+// its toast.
+async function copyDetails(notice: HTMLElement) {
+  const closed = within(notice).queryByRole("button", { name: "Details" });
+  if (closed) await act(async () => { fireEvent.click(closed); });
+  await act(async () => { fireEvent.click(within(notice).getByRole("button", { name: "Copy details" })); });
+}
+
 // One share's durable skip record, as the registry holds it.
 const SKIPPED_RECORD = {
   ops: [
@@ -1834,7 +1843,8 @@ describe("ui-state merge-on-load", () => {
   });
 
   it.each(["no file open", "docs/shared.md open"])("copies one plain Apps listing refusal with %s", async openFile => {
-    const user = userEvent.setup();
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(openFile === "no file open" ? [] : ["docs/shared.md"])));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
       files: [{ path: "docs/shared.md", kind: "file" }], folders: ["docs"] });
@@ -1860,7 +1870,7 @@ describe("ui-state merge-on-load", () => {
       expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(within(toast).getByRole("button", { name: "Dismiss workspace error" })).toBeTruthy();
       await navigator.clipboard.writeText("");
-      await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+      await copyDetails(toast);
       const toastCopy = await navigator.clipboard.readText();
       checkRefusalCopy(toastCopy, cause);
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -1869,9 +1879,8 @@ describe("ui-state merge-on-load", () => {
       const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
       expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
-      expect(within(row).queryByRole("button", { name: "Details" })).toBeNull();
       await navigator.clipboard.writeText("");
-      await act(async () => { fireEvent.click(within(row).getByRole("button", { name: /Copy/ })); });
+      await copyDetails(row);
       const rowCopy = await navigator.clipboard.readText();
       checkRefusalCopy(rowCopy, cause);
       expect(rowCopy).toBe(toastCopy);
@@ -1896,7 +1905,8 @@ describe("ui-state merge-on-load", () => {
   });
 
   it("retries a refused reveal from a mounted share in an ordinary workspace", async () => {
-    const user = userEvent.setup();
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
     const path = "shared-with-me/sam/shared.md";
     const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs([]), expandedFolders: ["shared-with-me", "shared-with-me/sam"] }));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
@@ -1916,14 +1926,14 @@ describe("ui-state merge-on-load", () => {
     fireEvent.click(await screen.findByTestId("explorer-menu-item-open-externally"));
     const toast = await screen.findByTestId("workspace-shell-error");
     await navigator.clipboard.writeText("");
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    await copyDetails(toast);
     checkRefusalCopy(await navigator.clipboard.readText());
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).getByRole("button", { name: "Dismiss notice" }), "An ordinary workspace can dismiss the refusal").toBeTruthy();
     await navigator.clipboard.writeText("");
-    await user.click(within(row).getByRole("button", { name: /Copy/ }));
+    await copyDetails(row);
     checkRefusalCopy(await navigator.clipboard.readText());
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.revealExplorerPath, "Try again repeats the reveal").toHaveBeenCalledTimes(2));
@@ -1960,7 +1970,8 @@ describe("ui-state merge-on-load", () => {
       .mockReturnValueOnce(retried.promise)
       .mockReturnValueOnce(retriedAgain.promise);
     bridge.refreshSharedView = refresh;
-    const user = userEvent.setup();
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
       shareView: {
@@ -1974,7 +1985,7 @@ describe("ui-state merge-on-load", () => {
     expect(toast.textContent).toContain(words);
     expect(toast.textContent).not.toContain("Couldn't refresh the shared view.");
     await navigator.clipboard.writeText("");
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await copyDetails(toast);
     checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
     // The record still keeps the person's own files apart, so its row has no ×.
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -1982,7 +1993,7 @@ describe("ui-state merge-on-load", () => {
     const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
     await navigator.clipboard.writeText("");
-    await user.click(within(row).getByRole("button", { name: /Copy/ }));
+    await copyDetails(row);
     checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
 
     // Try again closes Notices and runs the refresh. The row stays while it runs.

@@ -56,7 +56,7 @@ function Shell(props: { workspaceId?: string; children: (shell: ReturnType<typeo
           id: error.id,
           ...(error.tone ? { tone: error.tone } : {}),
           message: error.message,
-          details: errorDetails(error.details ?? []),
+          copy: { report: errorDetails(error.details ?? []) },
           atMs: error.atMs,
           canRetry: error.retry !== null,
           ...(error.action ? { actionLabel: error.action.label } : {}),

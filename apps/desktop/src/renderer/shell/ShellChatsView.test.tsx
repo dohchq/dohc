@@ -82,7 +82,7 @@ describe("Chats in the left side panel", () => {
     expect(within(toast).getByText("dohc couldn't create #launch")).toBeTruthy();
     expect(within(toast).getByText(taken.message)).toBeTruthy();
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
 
     let notice = toast;
     if (surface === "Notices") {
@@ -91,7 +91,7 @@ describe("Chats in the left side panel", () => {
       notice = within(screen.getByTestId("notice-center")).getByText(taken.message).closest("li")!;
       expect(within(notice).getByText("dohc couldn't create #launch")).toBeTruthy();
       expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
-      expect(within(notice).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+      expect(within(notice).getByRole("button", { name: "Details" })).toBeTruthy();
     }
     await user.click(within(notice).getByRole("button", { name: "Open" }));
     expect((await screen.findByTestId("tab-dohc://chats/channel/channel-9")).dataset.active).toBe("true");

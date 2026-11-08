@@ -122,7 +122,7 @@ export function RecoveryList(props: {
             ) : null}
           </span>
           <div className="flex shrink-0 items-center gap-2">
-            <CopyButton testId="recovery-list-copy" getText={() => restoreRecoveryDraftText(row.draft.text)} />
+            <CopyButton testId="recovery-list-copy" label="Copy edits" getText={() => restoreRecoveryDraftText(row.draft.text)} />
             <DismissDraftControls
               onDismiss={() =>
                 dismissOrphanedDraft(row.workspaceId, row.path, row.draft.id)

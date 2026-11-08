@@ -91,13 +91,16 @@ it("files one held-file toast and one Notices row with adjacent copy and Try aga
   expect(toast.textContent).toContain(message);
   expect(screen.getAllByTestId("workspace-shell-notice")).toHaveLength(1);
   expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-  expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
+  await user.click(within(toast).getByRole("button", { name: "Details" }));
+  expect(within(toast).getByRole("button", { name: "Copy details" })).toBeTruthy();
   act(() => f.bridge.emitWorkspaceActivity());
   await waitFor(() => expect(f.bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(1));
   await user.click(screen.getByTestId("notice-center-toggle"));
   const rows = screen.getAllByRole("listitem").filter(row => row.hasAttribute("data-notice-row"));
   expect(rows.filter(row => row.textContent?.includes(message))).toHaveLength(1);
-  expect(within(rows.find(row => row.textContent?.includes(message))!).getByRole("button", { name: /Copy/ })).toBeTruthy();
+  const row = rows.find(row => row.textContent?.includes(message))!;
+  await user.click(within(row).getByRole("button", { name: "Details" }));
+  expect(within(row).getByRole("button", { name: "Copy details" })).toBeTruthy();
 });
 
 it("Try again retries this path and removes the notice when the hold clears", async () => {

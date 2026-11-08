@@ -66,7 +66,7 @@ describe("CloudLogin", () => {
     expect(screen.queryByTestId("cloud-server-url")).toBeNull();
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc could not check this connection.");
-    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
+    expect(screen.getByTestId("workspace-shell-error-details")).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
 
@@ -95,7 +95,8 @@ describe("CloudLogin", () => {
     const row = await screen.findByTestId("notice-shell-error-1");
     expect(row.textContent).toContain("dohc could not check this connection.");
 
-    fireEvent.click(screen.getByTestId("notice-shell-error-1-copy"));
+    fireEvent.click(screen.getByTestId("notice-shell-error-1-details"));
+    fireEvent.click(screen.getByTestId("notice-shell-error-1-details-copy"));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
         expect.stringContaining("Error: dohc could not check this connection."),

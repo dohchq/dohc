@@ -24,8 +24,9 @@ describe("history page", () => {
     const message = "dohc could not read file changes for this workspace.";
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(message);
-    expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
     expect(toast.textContent).not.toContain("Restart");
+    await userEvent.click(within(toast).getByRole("button", { name: "Details" }));
+    expect(within(toast).getByRole("button", { name: "Copy details" })).toBeTruthy();
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByRole("dialog", { name: "Notices" }).textContent).toContain(message);
     await userEvent.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));

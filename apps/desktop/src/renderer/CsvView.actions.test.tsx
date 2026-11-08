@@ -54,7 +54,7 @@ function Shell(props: { children: (onError: ReturnType<typeof useShellError>["re
         notices={shell.shellErrors.map((error) => ({
           id: error.id,
           message: error.message,
-          details: errorDetails(error.details ?? []),
+          copy: { report: errorDetails(error.details ?? []) },
           atMs: error.atMs,
           canRetry: error.retry !== null,
           seen: error.seen,

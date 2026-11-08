@@ -179,7 +179,8 @@ it("copies the readable half when the recovery snapshot cannot be decoded", asyn
   const user = userEvent.setup();
   render(<RecoveryList rows={[rowFor(text)]} />);
 
-  await user.click(screen.getByTestId("recovery-list-copy"));
+  // It copies the person's own edits, so its name says so.
+  await user.click(screen.getByRole("button", { name: "Copy edits" }));
   await waitFor(async () =>
     expect(await navigator.clipboard.readText()).toBe("Crude fallback text"),
   );

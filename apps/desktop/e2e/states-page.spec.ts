@@ -46,7 +46,7 @@ const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "collections-rows", "menu", "document-menu",
   "explorer-menu-file", "explorer-menu-folder", "explorer-menu-mount",
-  "empty", "loading", "toasts", "undo-toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-first-version", "menu-overflow", "menu-danger",
+  "empty", "loading", "toasts", "undo-toasts", "notice-details", "notices", "dialog", "menu-radio", "menu-field", "menu-first-version", "menu-overflow", "menu-danger",
   "editor-groups", "editor-groups-empty", "editor-group-focus",
   "kind-glyph",
   "block-menu", "table-menu",

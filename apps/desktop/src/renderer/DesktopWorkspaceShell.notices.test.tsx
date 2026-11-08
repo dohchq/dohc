@@ -33,7 +33,7 @@ it("keeps a failed document Stop in Notices with Try again and Copy details",asy
   await user.click(await screen.findByTestId("notice-center-toggle"));
   const notices=await screen.findByTestId("notice-center");
   const row=(await within(notices).findByText('dohc could not stop live editing for "a.md".')).closest("li")!;
-  expect(within(row).getByRole("button",{name:"Copy error details"})).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
   await user.click(within(row).getByRole("button",{name:"Try again"}));
   await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,path:"a.md",objectId:"object-a"}));
   expect(within(notices).queryByText("corrupt")).toBeNull();
@@ -54,7 +54,7 @@ it("says History paused with Try again, restarts capture from the row, and keeps
   const toast = await screen.findByTestId("workspace-shell-error");
   expect(toast.textContent).toContain("History paused");
   expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-  expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+  expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
 
   await user.click(await screen.findByTestId("notice-center-toggle"));
   const notices = await screen.findByTestId("notice-center");
@@ -74,6 +74,37 @@ it("says History paused with Try again, restarts capture from the row, and keeps
     await restart.promise.catch(() => undefined);
   });
   expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
+});
+
+// An open report keeps its text while other notices arrive: its Time is when
+// the notice was raised, not when the list last drew.
+it("keeps an open Details report's text when another notice arrives later", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(Date.parse("2026-11-07T09:00:00Z"));
+    const bridge = makeBridge(Promise.resolve(null));
+    let status: SyncStatusResult = { ...SYNC_STATUS, historyCaptureFailed: true, engineStoreRefused: null };
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = await within(notices).findByTestId("notice-history-capture-failed");
+    await user.click(within(row).getByRole("button", { name: "Details" }));
+    const report = () => row.querySelector("pre")?.textContent;
+    const before = report();
+    expect(before).toContain("Time: 2026-11-07T09:00:");
+
+    vi.setSystemTime(Date.parse("2026-11-07T10:00:00Z"));
+    status = { ...status, ownerLiveStopFailures: [{ objectId: "object-a", path: "a.md", detail: "corrupt" }] };
+    act(() => bridge.emitWorkspaceActivity());
+    await within(notices).findByText('dohc could not stop live editing for "a.md".');
+    expect(within(row).getByRole("button", { name: "Hide details" })).toBeTruthy();
+    expect(report()).toBe(before);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 describe("History paused words", () => {
@@ -124,14 +155,15 @@ describe("History paused words", () => {
     expect(row).toContain(body);
   });
 
-  it("counts the pages whose live editing stopped, and lists each in Copy error details", async () => {
+  it("counts the pages whose live editing stopped, and lists each in its Details", async () => {
     const paths = ["notes/a, b.md", "notes/12:30 \"call\".md", "notes/plan.md"];
     const { toast, row, user } = await failedRetryWords(acrossIpc(new HistoryStillPausedError(paths)));
     const body = "History is still paused because live editing stopped on 3 pages. Restart dohc to try again.";
     expect(toast).toContain(body);
     expect(row).toContain(body);
     const notice = within(screen.getByTestId("notice-center")).getByTestId("notice-history-capture-failed");
-    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(notice).getByRole("button", { name: "Details" }));
+    await user.click(within(notice).getByRole("button", { name: "Copy details" }));
     const copied = (await navigator.clipboard.readText()).split("\n");
     expect(copied.filter(line => line.startsWith("File: "))).toEqual(paths.map(path => `File: ${path}`));
   });
@@ -213,7 +245,7 @@ describe("edits the server refused", () => {
     expect(within(toast).getByText(BODY)).toBeTruthy();
     // The server named no version, so the notice claims none.
     expect(toast.textContent).not.toMatch(/version|incompatib|update dohc/i);
-    expect(within(toast).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Open Live documents"})).toBeTruthy();
     // The same incident read again adds nothing.
@@ -229,7 +261,7 @@ describe("edits the server refused", () => {
     expect(within(notices).getAllByText(TITLE)).toHaveLength(1);
     const row = within(notices).getByText(TITLE).closest("li")!;
     expect(within(row).getByText(BODY)).toBeTruthy();
-    expect(within(row).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
     // Not the workspace's moved-or-removed notice.
     expect(within(notices).queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
@@ -391,11 +423,11 @@ describe("edits the server refused", () => {
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
     const MESSAGE = "dohc could not save a recovery copy of notes/plan.md. Ask the server administrator to free disk space, then try again.";
     const toast = (await screen.findByText(MESSAGE)).closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
-    expect(within(toast).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = within(await screen.findByTestId("notice-center")).getByText(MESSAGE).closest("li")!;
-    expect(within(row).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
     await user.click(within(row).getByRole("button", {name: "Try again"}));
     expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. The server may now release your kept edits.")).toBeTruthy();
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledTimes(2);
@@ -555,7 +587,7 @@ describe("edits the server refused", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     const row = (await within(notices).findByText(TITLE)).closest("li")!;
-    expect(within(row).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
     await user.click(within(row).getByRole("button", {name: "Try again"}));
     expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, objectId: "object-1", incident: "unreadable:outbox"});
     const FAILED = "dohc could not read the edits it kept for notes/plan.md.";
@@ -674,7 +706,7 @@ it("reports an edit refusal once through Notices, without an ineffective retry",
   const notices = await screen.findByTestId("notice-center");
   expect(within(notices).getAllByText(message)).toHaveLength(1);
   expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
-  expect(within(notices).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+  expect(within(notices).getByRole("button", { name: "Details" })).toBeTruthy();
   act(() => {
     for (const listener of listeners) listener({ ...event,
       editRefusal: { ...event.editRefusal!, workspaceId: OTHER_WORKSPACE.workspaceId,
@@ -697,7 +729,7 @@ it("shows unsent draft failures through the existing toast and Notices reporter 
   await userEvent.setup().click(await screen.findByTestId("notice-center-toggle"));
   const notices = await screen.findByTestId("notice-center");
   expect(within(notices).getAllByText(message)).toHaveLength(1);
-  expect(within(notices).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+  expect(within(notices).getByRole("button", { name: "Details" })).toBeTruthy();
   act(() => {for (const listener of listeners) listener({...event, editRefusal: {...event.editRefusal!, workspaceId: OTHER_WORKSPACE.workspaceId, message: "Wrong workspace draft."}});});
   expect(screen.queryByText("Wrong workspace draft.")).toBeNull();
 });
@@ -1332,7 +1364,8 @@ describe("engine store recovery", () => {
     );
     expect(toast.textContent).not.toContain("EACCES");
     // Copy keeps the error as it arrived, on its own line.
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     const copied = await navigator.clipboard.readText();
     expect(copied.split("\n").slice(0, 2)).toEqual([
       "Error: dohc could not move this workspace's data store. dohc does not have permission to use this file or folder.",
@@ -1360,7 +1393,8 @@ describe("engine store recovery", () => {
       .spyOn(navigator.clipboard, "writeText")
       .mockRejectedValueOnce(new Error("Document is not focused."));
 
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell-error").textContent).toContain(COPY_FAILURE),
     );
@@ -1603,13 +1637,14 @@ describe("workspace shell errors", () => {
     fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc could not open System Settings. Failed to open URL");
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(await navigator.clipboard.readText()).toContain("dohc could not open System Settings.");
     await user.click(await screen.findByTestId("notice-center-toggle"));
     const row = (await within(await screen.findByTestId("notice-center"))
       .findByText("dohc could not open System Settings. Failed to open URL")).closest("li")!;
     expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
 
     await user.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.openSystemPrivacySettings).toHaveBeenCalledTimes(2));
@@ -1693,7 +1728,7 @@ describe("crash report notice", () => {
     text: "dohc crash report\n\nTime: 1970-01-01T00:00:05.000Z\nProcess: workspace engine",
   };
 
-  it("offers Copy report and no Send report when this build has no report server", async () => {
+  it("offers Details and no Send report when this build has no report server", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
     bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
@@ -1702,12 +1737,13 @@ describe("crash report notice", () => {
     const toast = await screen.findByTestId("crash-report-toast");
     expect(toast.textContent).toContain("The workspace engine failed");
     expect(screen.queryByTestId("crash-report-toast-send")).toBeNull();
-    expect(screen.getByTestId("crash-report-toast-copy").getAttribute("aria-label")).toBe("Copy report");
+    expect(screen.getByTestId("crash-report-toast-details").textContent).toBe("Details");
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = await screen.findByTestId("notice-crash-report");
     expect(row.textContent).not.toContain("Send report");
-    expect(screen.getByTestId("notice-crash-report-copy").getAttribute("aria-label")).toBe("Copy report");
+    expect(screen.getByTestId("notice-crash-report-details").textContent).toBe("Details");
+    expect(screen.queryByTestId("notice-crash-report-copy")).toBeNull();
     expect(bridge.sendCrashReport).not.toHaveBeenCalled();
   });
 
@@ -1807,7 +1843,7 @@ describe("offline copies a previous account left", () => {
     const message = `${removeFailure} They are still in Trip and Fundraiser.`;
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
     const row = await rowOf(user, message);
-    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
     // Try again that still leaves one says which, and one that removes them all ends the row.
     bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, workspaces: ["/Users/ana/Trip"] });
     await user.click(within(row).getByRole("button", { name: "Try again" }));
@@ -2504,7 +2540,8 @@ describe("file transfers", () => {
     expect(toast.textContent).toBe(
       "2 files weren't imported" +
       "CON.md has a name Windows can't use. Rename it, then import it.\n" +
-      "key.txt is a link. Drop the file it leads to.",
+      "key.txt is a link. Drop the file it leads to." +
+      "Details",
     );
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
 
@@ -2531,7 +2568,8 @@ describe("file transfers", () => {
     expect(toast.textContent).toBe(
       "Imported 3 files. 2 weren't imported." +
       ".DS_Store is a file the system makes.\n" +
-      "notes.md couldn't be read. Check that you can open it, then import it again.",
+      "notes.md couldn't be read. Check that you can open it, then import it again." +
+      "Details",
     );
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
   });
@@ -2556,7 +2594,8 @@ describe("file transfers", () => {
     // The count sits after the whole list.
     within(toast).getByText(`${250 - lines.length} more weren't imported.`);
 
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     const text = await navigator.clipboard.readText();
     expect(text).toContain("Skipped: Trip/photos/key-99.txt is a link. Drop the file it leads to.");
     expect(text).toContain("Skipped: 150 more");
@@ -2824,7 +2863,8 @@ describe("file transfers", () => {
       "Imported one.md before the import stopped. dohc isn't allowed to read two.md or write to this folder. Import only the files that are still missing.",
     );
     expect(toast.textContent).not.toContain("EACCES");
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     expect(await navigator.clipboard.readText()).toContain(
       "Cause: EACCES: permission denied, copyfile 'C:/source/two.md' -> 'C:/workspace/notes/two.md'",
     );
@@ -2854,7 +2894,8 @@ describe("file transfers", () => {
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toMatch(/Imported one-n+…? and 2 more before the import stopped\./);
     expect(toast.textContent).toContain("or write to this folder. Import only the files that are still missing.");
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     const copied = await navigator.clipboard.readText();
     for (const path of imported) expect(copied).toContain(`Imported: ${path}`);
   });
@@ -2879,7 +2920,8 @@ describe("file transfers", () => {
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("a symbolic link to a missing file. Restore that file, then import it instead.");
     expect(toast.textContent).toContain(" Import only the files that are still missing.");
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     expect(await navigator.clipboard.readText()).toContain(`Imported: ${deep}\n`);
   });
 
@@ -2898,7 +2940,8 @@ describe("file transfers", () => {
     await user.click(await screen.findByText("Import files"));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("Could not import files (2 skipped). The disk is full.");
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     const copied = await navigator.clipboard.readText();
     expect(copied).toContain("Skipped: key.txt is a link. Drop the file it leads to.");
     expect(copied).toContain("Skipped: .DS_Store is a file the system makes.");
@@ -2959,7 +3002,8 @@ describe("file transfers", () => {
     expect(toast.textContent).toContain("Could not import files. The disk is full.");
     expect(toast.textContent).not.toContain("ENOSPC");
     expect(within(toast).getByTestId("workspace-shell-error-retry")).toBeTruthy();
-    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-details-copy"));
     expect(await navigator.clipboard.readText()).toContain("Cause: ENOSPC: no space left on device");
   });
 
@@ -3037,14 +3081,14 @@ describe("owner live documents", () => {
     expect(within(toast).getByText(title)).toBeTruthy();
     expect(within(toast).getByText("The server hasn't finished applying edits to this document. Try again in a moment.")).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
-    expect(within(toast).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     if (surface === "toast") {
       await user.click(within(toast).getByRole("button", {name: "Try again"}));
     } else {
       await user.click(screen.getByTestId("notice-center-toggle"));
       const notice = within(await screen.findByTestId("notice-center")).getByText(title).closest("li")!;
       expect(within(notice).getByText("The server hasn't finished applying edits to this document. Try again in a moment.")).toBeTruthy();
-      expect(within(notice).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+      expect(within(notice).getByRole("button", { name: "Details" })).toBeTruthy();
       await user.click(within(notice).getByRole("button", {name: "Try again"}));
     }
     await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledTimes(2));
@@ -3072,7 +3116,8 @@ describe("owner live documents", () => {
     await within(toast).findByText(words.slice("Live editing didn't stop. ".length));
     if (control === "none") expect(within(toast).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
     else expect(within(toast).getByRole("button", {name: control === "resume" ? "Resume live editing" : "Try again"})).toBeTruthy();
-    await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     const copy = await navigator.clipboard.readText();
     expect(copy).toContain(`Server: ${sessionHost}`);
     expect(copy).not.toContain("LiveStopRefusal");
@@ -3136,12 +3181,14 @@ describe("owner live documents", () => {
     if (control === "none") expect(within(toast).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
     else expect(within(toast).getByRole("button", {name: resume ? "Resume live editing" : "Try again"})).toBeTruthy();
     expect(toast.textContent).not.toContain("Server:");
-    await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(await navigator.clipboard.readText()).toContain(`Server: ${sessionHost}`);
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = within(await screen.findByTestId("notice-center")).getByText(title).closest("li")!;
     expect(within(notice).getByText(body)).toBeTruthy();
-    await user.click(within(notice).getByRole("button", {name: "Copy error details"}));
+    await user.click(within(notice).getByRole("button", { name: "Details" }));
+    await user.click(within(notice).getByRole("button", { name: "Copy details" }));
     expect(await navigator.clipboard.readText()).toContain(`Server: ${sessionHost}`);
     if (control === "none") {
       expect(within(notice).queryByRole("button", {name: /Resume|Try again/})).toBeNull();
@@ -3299,14 +3346,15 @@ describe("owner live documents", () => {
     expect(within(toast).queryByText(/conflict|Recent edits|dohc could not finish/)).toBeNull();
     expect(within(toast).queryByRole("button", {name: /Try again|Resume/})).toBeNull();
     expect(within(toast).getByRole("button", {name: "Open Live documents"})).toBeTruthy();
-    await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(await navigator.clipboard.readText()).toContain(title);
     let actionSurface = toast;
     if (surface === "Notices") {
       await user.click(screen.getByTestId("notice-center-toggle"));
       actionSurface = within(await screen.findByTestId("notice-center")).getByText(title).closest("li")!;
       expect(within(actionSurface).queryByRole("button", {name: /Try again|Resume/})).toBeNull();
-      expect(within(actionSurface).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+      expect(within(actionSurface).getByRole("button", { name: "Details" })).toBeTruthy();
     }
     await user.click(within(actionSurface).getByRole("button", {name: "Open Live documents"}));
     expect(await screen.findByTestId("live-documents-dialog")).toBeTruthy();
@@ -3332,7 +3380,7 @@ describe("owner live documents", () => {
     const notice = within(await screen.findByTestId("notice-center")).getByText(title).closest("li")!;
     expect(within(notice).getByText(body)).toBeTruthy();
     expect(within(notice).getByRole("button", {name: "Try again"})).toBeTruthy();
-    expect(within(notice).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Details" })).toBeTruthy();
   });
   it.each(["not-written", "stopping"] as const)("keeps the %s quarantine's Save row when Stop again refuses", async recovery => {
     const bridge = makeBridge(Promise.resolve(null)), stopping = deferred<StopOwnerLiveDocumentResult>();
@@ -3702,7 +3750,8 @@ describe("owner live documents", () => {
     expect(within(toast).getByText(LIVE_STOP_SERVER_NOT_READY)).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
     expect(toast.textContent).not.toContain(relay);
-    await user.click(within(toast).getByRole("button", {name: "Copy error details"}));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(await navigator.clipboard.readText()).toContain(`Cause: ${relay}`);
 
     // The second Stop runs, and the row stays.
@@ -3868,7 +3917,7 @@ describe("owner live documents", () => {
     expect(toast.textContent).toContain(
       "dohc could not reach the server.",
     );
-    expect(screen.getByTestId("workspace-shell-error-copy")).toBeTruthy();
+    expect(screen.getByTestId("workspace-shell-error-details")).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     await waitFor(() =>
       expect(screen.getByTestId("notice-center").textContent).toContain(
@@ -5057,7 +5106,8 @@ describe("a refused delete of a page this computer owns live", () => {
     expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
     // Copy details names every refused page, however many the title shows.
-    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(notice).getByRole("button", { name: "Details" }));
+    await user.click(within(notice).getByRole("button", { name: "Copy details" }));
     expect((await navigator.clipboard.readText()).split("\n")).toEqual(expect.arrayContaining(["File: a.md", "File: c.md"]));
   });
 

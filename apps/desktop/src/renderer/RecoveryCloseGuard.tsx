@@ -690,7 +690,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // It is scoped to THIS LIST too: the user
                   // approved losing the drafts the dialog just showed, and a
                   // reopen queued behind this click can still set one more
-                  // aside. That draft keeps its notice and its Copy button,
+                  // aside. That draft keeps its notice and its Copy edits button,
                   // and the gates below refuse to exit over it.
                   approvedDraftIds.current = new Set(
                     liveDrafts.map((row) => row.draft.id),

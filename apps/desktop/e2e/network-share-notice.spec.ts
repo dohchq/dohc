@@ -30,10 +30,10 @@ test("@network-share-notice a workspace on a network share warns once on this co
       await toast.screenshot({ path: test.info().outputPath(`network-share-toast-${theme.toLowerCase()}.png`) });
     }
 
-    // The toast's controls take the keyboard: copy, then dismiss.
-    const copy = toast.getByRole("button", { name: "Copy notice details" });
-    await copy.focus();
-    await expect(copy).toBeFocused();
+    // The toast's controls take the keyboard: Details, then dismiss.
+    const details = toast.getByRole("button", { name: "Details" });
+    await details.focus();
+    await expect(details).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(toast.getByRole("button", { name: "Dismiss workspace notice" })).toBeFocused();
     await page.keyboard.press("Enter");

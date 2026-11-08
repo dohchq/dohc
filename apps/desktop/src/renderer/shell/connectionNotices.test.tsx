@@ -23,7 +23,7 @@ afterEach(() => {
 const notice = {
   id: "connect",
   message: "dohc could not reach this server.",
-  details: "Error: dohc could not reach this server.",
+  copy: { report: "Error: dohc could not reach this server." },
   atMs: 1_000,
   canRetry: true,
   seen: false,
@@ -46,7 +46,8 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
     />,
   );
 
-  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy error details" }));
+  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Details" }));
+  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy details" }));
   expect(reportFailure).toHaveBeenCalledWith({
     message: `${COPY_FAILURE} Document is not focused.`,
     cause: refusal,

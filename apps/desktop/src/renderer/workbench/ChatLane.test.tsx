@@ -294,7 +294,7 @@ describe("ChatLane", () => {
       return { thread: thread(), message: message({ id: "ours", body: "Our first message" }), viewerAuthorId: "you" };
     });
     render(lane());
-    await screen.findByText("No messages in #general yet. Start one below.");
+    await screen.findByText("No messages in #general yet.");
     send("Our first message");
     await screen.findByText("Their first message");
     expect(screen.getByText("Our first message")).toBeTruthy();
@@ -526,7 +526,7 @@ describe("ChatLane", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
     bridgeMock.startChannelThread.mockResolvedValueOnce({ thread: thread(), message: message({ id: "poll", body: "Lunch?" }), viewerAuthorId: "you" });
     render(lane());
-    await screen.findByText("No messages in #general yet. Start one below.");
+    await screen.findByText("No messages in #general yet.");
     fireEvent.keyDown(draftPoll("Lunch?", ["Soup", "Salad"]), { key: "Enter" });
     expect(bridgeMock.startChannelThread).toHaveBeenCalledWith({
       workspaceId: "workspace-a", channelId: "channel-1", body: "Lunch?", needsDecision: true, options: ["Soup", "Salad"], lane: "chat",

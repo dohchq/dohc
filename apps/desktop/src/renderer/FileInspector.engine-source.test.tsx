@@ -655,7 +655,7 @@ describe("engine markdown source view", () => {
 
     // The row keeps the text but does not say why.
     expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
-      "This document became read-only. Copy your text to keep it.",
+      "This document became read-only. Copy your edits to keep them.",
     );
     await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(CONNECTION_LOST_REASON));
     await user.click(screen.getByTestId("markdown-source-toggle"));
@@ -747,7 +747,7 @@ describe("engine markdown source view", () => {
     act(() => pushSaveState("read-only", 1));
 
     expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
-      "This document became read-only. Copy your text to keep it.",
+      "This document became read-only. Copy your edits to keep them.",
     );
     await waitFor(() =>
       expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"),
@@ -867,8 +867,8 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("recovery");
     const notices = screen.getAllByTestId("orphaned-draft-notice");
     expect(notices.map((notice) => notice.querySelector("span")?.textContent)).toEqual([
-      "This document reopened before your last edit saved. Copy your text to keep it.",
-      "This document became read-only. Copy your text to keep it.",
+      "This document reopened before your last edit saved. Copy your edits to keep them.",
+      "This document became read-only. Copy your edits to keep them.",
     ]);
     await user.click(within(notices[1]!).getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
@@ -911,7 +911,7 @@ describe("engine markdown source view", () => {
       "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
     );
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
-      "This document reopened before your last edit saved. Copy your text to keep it.",
+      "This document reopened before your last edit saved. Copy your edits to keep them.",
     );
   });
 
@@ -932,7 +932,7 @@ describe("engine markdown source view", () => {
       "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
     );
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
-      "This document reopened before your last edit saved. Copy your text to keep it.",
+      "This document reopened before your last edit saved. Copy your edits to keep them.",
     );
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
 

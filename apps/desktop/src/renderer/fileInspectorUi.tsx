@@ -477,9 +477,9 @@ export function OpenExternallyButton(props: { workspaceId: string; path: string;
 export const REPLACED_HISTORY_DRAFT_NOTICE =
   "This document changed while you were editing. Your earlier edits are set aside here.";
 // So does the notice for a save refused because the file is gone.
-export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your text to keep it.";
+export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your edits to keep them.";
 // The row for an edit dohc refused to save for good, in either editor.
-export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE = "dohc could not save this document. Copy your text to keep it.";
+export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE = "dohc could not save this document. Copy your edits to keep them.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
@@ -505,7 +505,7 @@ export function OrphanedDraftNotices(props: {
               // Until storage keeps the draft, a copy is still the way to keep it.
               : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
                 ? REPLACED_HISTORY_DRAFT_NOTICE
-                : "This document reopened before your last edit saved. Copy your text to keep it.")
+                : "This document reopened before your last edit saved. Copy your edits to keep them.")
           }
           // Same rule as the recovery list's Copy: a draft the projection
           // never refined carries the document inside an encoded comment,
@@ -518,7 +518,7 @@ export function OrphanedDraftNotices(props: {
   );
 }
 
-// One set-aside edit above the page, with its Copy and Dismiss.
+// One set-aside edit above the page, with its Copy edits and Dismiss.
 export function SetAsideEditRow(props: {
   message: string;
   getText: ComponentProps<typeof CopyButton>["getText"];
@@ -531,7 +531,7 @@ export function SetAsideEditRow(props: {
     >
       <span className="text-danger">{props.message}</span>
       <div className="flex items-center gap-2">
-        <CopyButton testId="orphaned-draft-copy" getText={props.getText} />
+        <CopyButton testId="orphaned-draft-copy" label="Copy edits" getText={props.getText} />
         {/* Deleting the only copy needs the explicit confirm step (#579
             review, r6) — the same control the recovery list uses. */}
         <DismissDraftControls onDismiss={props.onDismiss} />
