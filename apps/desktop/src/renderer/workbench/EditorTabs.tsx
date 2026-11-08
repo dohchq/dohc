@@ -98,7 +98,8 @@ const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-activ
 
 // An edge the strip can still scroll past fades over this width. A revealed
 // tab stops clear of the fade, its joins included, where the strip has room
-// for both.
+// for both. A tab that can't clear both fades starts at the strip's start,
+// where the left fade gives way to it.
 const EDGE_FADE = 40;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
 // The fade is the strip's own fill drawn over the tab names, w-10 being
@@ -144,24 +145,33 @@ function revealTab(strip: HTMLElement, tab: HTMLElement, behavior: ScrollBehavio
   let target: number;
   if (earliest <= latest) {
     target = nearest(earliest, latest);
-  } else if (end - start > view) {
-    // A tab wider than the strip shows its start, clear of the fade where
-    // the strip has room. A strip narrower than two margins gives the margin
-    // up, so the tab's start always shows.
-    const margin = Math.min(REVEAL_MARGIN, Math.max(0, view - REVEAL_MARGIN));
-    target = Math.min(max, Math.max(0, start - margin));
-  } else {
-    // The tab and its margins do not fit, so the whole tab shows: at an edge
-    // the strip reaches, where it shows there, or else as clear of both
-    // fades as the room allows.
+  } else if (view - (end - start) >= 2 * EDGE_FADE) {
+    // The tab clears both fades but not their joins, so the whole tab shows:
+    // at an edge the strip reaches, where it shows there, or else clear of
+    // both fades.
     const edges = [0, max].filter((edge) => edge >= end - view && edge <= start);
-    const inset = Math.min(EDGE_FADE, (view - end + start) / 2);
     target =
       edges.length > 0
         ? edges.reduce((best, edge) => (Math.abs(edge - now) < Math.abs(best - now) ? edge : best))
-        : nearest(end + inset - view, start - inset);
+        : nearest(end + EDGE_FADE - view, start - EDGE_FADE);
+  } else {
+    // The tab can't clear both fades, so it starts at the strip's start,
+    // where the left fade gives way to it (coversStart), and keeps all the
+    // room for its name. A strip that can't scroll that far shows it at its
+    // end, which doesn't fade.
+    target = Math.min(max, start);
   }
   if (Math.abs(target - now) >= 1) strip.scrollTo({ left: target, behavior });
+}
+
+// Whether the active tab covers the strip's start. The left fade gives way
+// there: the tab draws over it, and a revealed tab that can't clear both
+// fades starts there.
+function coversStart(strip: HTMLElement): boolean {
+  const tab = strip.querySelector<HTMLElement>('[role="tab"][data-active]');
+  if (!tab) return false;
+  const edge = strip.scrollLeft + 1;
+  return tab.offsetLeft <= edge && tab.offsetLeft + tab.offsetWidth > edge;
 }
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
@@ -925,7 +935,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
       // The strip fades an edge it can still scroll past (styles.css), by
       // more than the pixel that rounding scrollWidth can add. Written here,
       // not rendered: scrolling must not re-render the strip.
-      strip.toggleAttribute("data-overflow-left", strip.scrollLeft > 1);
+      strip.toggleAttribute("data-overflow-left", strip.scrollLeft > 1 && !coversStart(strip));
       strip.toggleAttribute("data-overflow-right", maxScroll - strip.scrollLeft > 1);
       if (maxScroll <= 0) {
         thumb.style.display = "none";

@@ -37,7 +37,10 @@ import {
   isLivePageOwnedRefusal,
   isMergeStoppedPartway,
   livePageBody,
+  livePagesBody,
+  livePagesTitle,
   livePageTitle,
+  namedList,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   isHistoryCatchingUp,
@@ -440,6 +443,12 @@ describe("error words", () => {
       `dohc can't rename "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then rename it again.",
     ]);
+    expect([livePagesTitle(["a.md", "b.md"], "delete"), livePagesBody("delete")]).toEqual([
+      `dohc can't delete "a.md" and "b.md" while they have live editing on`,
+      "In Live documents, stop live editing for these pages, then delete them again.",
+    ]);
+    expect(namedList(["a", "b", "c"])).toBe(`"a", "b" and "c"`);
+    expect(namedList(["a", "b", "c", "d", "e"])).toBe(`"a", "b", "c" and 2 more`);
     expect([livePageTitle("docs/a.md", "replace"), livePageBody("replace")]).toEqual([
       `dohc can't replace "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then try again.",

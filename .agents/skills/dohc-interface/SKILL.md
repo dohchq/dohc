@@ -58,7 +58,7 @@ Most strings do one of four jobs:
 | Ready: something new became usable | `Agent result, ready to review` |
 | Next: what the person can do | `Choose which copy to keep` |
 
-Every error and empty state needs a Next. A toast usually reports a Change. A status bar shows a State.
+Every error needs a Next, and so does an empty state when the person can act there. A toast usually reports a Change. A status bar shows a State.
 
 - Follow the instruction rules in `dohc-writing`: one instruction per sentence, 20 words or fewer.
 - Use the active voice and name who acted. Leave dohc out when the surface makes it obvious: `Saved`.
@@ -89,13 +89,13 @@ The sync strings show the standard: `A file changed on two machines`, `This mach
 
 ### Empty states
 
-Use `EmptyState`, with one line that says what is missing and what to do.
+Use `EmptyState`, with one line that says what is missing, and what to do when the person can act there.
 Check that the action exists on that surface before you name it.
 
 | Instead of | Write |
 | --- | --- |
-| `No results` | `No files match "budget". Try a shorter search.` |
-| `Nothing here yet` | `This folder is empty. Add a file to start.` |
+| `No results` | `No files match "budget".` |
+| `Nothing here yet` | `This folder is empty.` |
 
 A Home section with nothing in it keeps its header and shows one muted line under it, not `EmptyState`: `No pages yet.`
 The header's + is that line's Next, so the line names a Next only when the header has none, as Apps does.
@@ -410,7 +410,7 @@ Position:
 | Settings page | `px-12 pt-10`, as wide as the page column. The page title is 24 px over the first section. |
 | Settings section | `SettingsSection`: a heading in the panel title role, 8 px over a card. Sections sit 32 px apart. A page with one group has one card and no heading. |
 | Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size; in a narrow pane they wrap under the name and start at its left edge. Reset appears left of them only when the value differs from its default. A row that can reset keeps Reset's place, so the controls never move or wrap when it appears. When they wrap, Reset's place stays at the end of the name's line. When the control is a list, its name and Reset sit beside the list's first row (`top`). |
-| Empty state | `EmptyState`: `gap-4 px-6`. Do not build your own. |
+| Empty state | `EmptyState`: `px-6`, then the picture, 12 px, one line, 16 px, at most one action. Do not build your own. |
 | Toast and Notices row | `px-3 py-2`, `gap-2` |
 
 ### Recipes
@@ -447,14 +447,14 @@ While closing would discard hand-written work, as with open merge conflicts, onl
 A press outside a dialog does nothing, so a stray click cannot discard what a person typed.
 Pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
 Settings closes on a press outside too, because each field saves when the person leaves it. A field that can't save yet sets `data-unsaved` and says why beside it. The press then keeps Settings open and focuses that field.
-A press closes one surface, as Escape does. A press that closes a menu leaves its dialog open, and a press that starts inside the panel never closes it.
+A press closes one surface, as Escape does, and an edit in place takes the first Escape. A press that closes a menu leaves its dialog open, and a press that starts inside the panel never closes it.
 Pass `closeOnBackdrop` to `Overlay` only for these.
 
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 
 Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
-Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
+Empty state: when a panel or page has nothing yet, `EmptyState` shows a picture of what it holds once it has items, one `text-[13px] text-muted` line, and at most one compact action. Use `PrimaryButton` only when making the thing is the surface's job. A failure keeps its warning glyph and Try again, never a picture. An empty section inside a surface with other content stays one muted line.
 
 `Pill` changes meaning through its `tone`, which swaps the text color and keeps the fill.
 
@@ -493,7 +493,7 @@ A question's status is words and an icon, never a pill. An open question without
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
    Loading: the header shows at once. The skeleton under it stays blank for its first 150 ms, so a fast read never flashes, then stays until the answer comes, with no deadline. Only an error answer shows Try again.
 4. Is every visible string as short as it can be, with further detail behind a hover or a click?
-5. Does each string do one job, and does every error and empty state give a Next?
+5. Does each string do one job, does every error give a Next, and does every empty state give one when the person can act there?
 6. Does every noun match the surrounding UI?
 7. Read each string as someone whose sync just failed. Does it help them?
 8. Would Notion or Linear ship it? If not, it is not done.

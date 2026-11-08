@@ -17,7 +17,8 @@ import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages
 import { FailedRunLine, failedRunEnd, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
-import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
+import { MentionComposer, type FileMentionCandidate, type MentionComposerHandle } from "./MentionComposer";
+import { agentMentionId } from "../../settings/userSettings";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
@@ -539,7 +540,13 @@ export function ChatLane(props: {
   // choice answers at once. Answer starts a reply in the question's thread.
   // Where a change card's reply posts, as a reply that fails to post names it.
   const replyPlace = agentDm ? `your chat with ${props.agentName ?? "your agent"}` : `#${props.channel.name}`;
-  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void) => {
+  // A failed run's ask-again readies this composer; it never sends.
+  const composerHandle = useRef<MentionComposerHandle>(null);
+  const askAgain = useCallback((agentId: string, mention: boolean) => {
+    if (mention) composerHandle.current?.mention(agentMentionId(agentId));
+    else composerHandle.current?.focus();
+  }, []);
+  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void, place: "stream" | "thread") => {
     const decision = decisionsByMessage.get(message.id);
     const asked = decision ? changeFileOf(message) : undefined;
     const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
@@ -579,9 +586,10 @@ export function ChatLane(props: {
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
         {...(props.onOpenAgentSettings ? { onOpenAgentSettings: props.onOpenAgentSettings } : {})}
         {...(chatAgentId ? { chatAgentId } : {})}
+        {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (
@@ -629,6 +637,7 @@ export function ChatLane(props: {
           rosterScope={agentOffer.scope}
           agentOffer={agentOffer.offer}
           inset={inset}
+          handle={composerHandle}
         />
       )}
       replyNotice={props.locked ? (

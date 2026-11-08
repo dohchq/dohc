@@ -17,3 +17,17 @@ it("draws faces from disclosed slots, with readable theme classes", () => {
   expect(container.querySelectorAll("span")[0]?.className).toContain("bg-hue-rust/15");
   delete document.documentElement.dataset.theme;
 });
+
+it("draws an agent's mark and a person's initial side by side, then how many more", () => {
+  const peer = (id: string, displayName: string, agent = false): PresencePeer => ({ faceToken: id, sessionToken: id, isSelf: false,
+    displayName, paletteSlot: 1, state: agent ? { agent: true } : null, updatedAtMs: 0 });
+  const { container } = render(<PresenceFaces others={[peer("sam", "Sam Rivera"), peer("nova", "Nova", true), peer("kim", "Kim"), peer("lee", "Lee")]} />);
+  const faces = [...container.querySelectorAll(".dohc-presence-faces > span")];
+  expect(faces.map((face) => face.textContent)).toEqual(["S", "", "K", "+1"]);
+  expect(faces[1]?.getAttribute("title")).toBe("Nova");
+  expect(faces[1]?.querySelector("svg")).not.toBeNull();
+  expect(faces[1]?.className).not.toContain("rounded-full");
+  expect(container.querySelector(".dohc-presence-faces")?.className).toContain("gap-1");
+  for (const face of faces) expect(face.className).not.toMatch(/-ml-/u);
+  expect(screen.getByRole("status").getAttribute("aria-label")).toBe("4 people here");
+});

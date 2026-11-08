@@ -373,6 +373,64 @@ describe("SettingsDialog", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  describe("an edit in place", () => {
+    const renderAgents = (onClose: () => void) => {
+      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      render(
+        <Overlay onClose={onClose}>
+          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={onClose} />
+        </Overlay>,
+      );
+    };
+    const editCommand = async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+      await user.click(screen.getByRole("menuitem", { name: "Details" }));
+      await user.click(screen.getByRole("button", { name: "Change the command that starts Nova" }));
+      return screen.getByRole("textbox", { name: "Command that starts Nova" });
+    };
+
+    it("takes the first Escape in an agent's command, keeping the old one, and Settings closes on the next", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderAgents(onClose);
+      const command = await editCommand(user);
+      await user.type(command, " --verbose");
+      bridge.setUserSettings.mockClear();
+      await user.keyboard("{Escape}");
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.queryByRole("textbox", { name: "Command that starts Nova" })).toBeNull();
+      expect(screen.getByText("node agent.mjs")).toBeTruthy();
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it("closes nothing on an Escape that ends an input method's composition", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderAgents(onClose);
+      const command = await editCommand(user);
+      fireEvent.keyDown(command, { key: "Escape", isComposing: true });
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByRole("textbox", { name: "Command that starts Nova" })).toBe(command);
+    });
+
+    it("takes the first Escape in an agent's name, keeping the old one, and Settings closes on the next", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      renderAgents(onClose);
+      await user.click(await screen.findByRole("button", { name: "Rename Nova" }));
+      await user.type(screen.getByRole("textbox", { name: "Name of Nova" }), "Vega");
+      bridge.setUserSettings.mockClear();
+      await user.keyboard("{Escape}");
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.queryByRole("textbox", { name: "Name of Nova" })).toBeNull();
+      expect(bridge.setUserSettings).not.toHaveBeenCalled();
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+  });
+
   describe("a press outside Settings", () => {
     const backdrop = () => document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
     const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
@@ -1128,16 +1186,18 @@ describe("SettingsDialog", () => {
     );
   });
 
-  it("cancels a preferred-name edit without saving or closing settings", async () => {
+  it("cancels a preferred-name edit without saving or closing settings, and closes on the next Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(
-      <SettingsDialog workspaceIsReady
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="general"
-        onClose={onClose}
-      />,
+      <Overlay onClose={onClose}>
+        <SettingsDialog workspaceIsReady
+          workspaceId="ws-1"
+          workspacePath="/x"
+          initialSection="general"
+          onClose={onClose}
+        />
+      </Overlay>,
     );
 
     const input = await screen.findByTestId("general-preferred-name-input");
@@ -1149,6 +1209,9 @@ describe("SettingsDialog", () => {
     expect(bridge.setUserSettings).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+    // With nothing left to put back, the field leaves Escape to Settings.
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("reports a failed save with the error it came from, so Copy keeps the path", async () => {

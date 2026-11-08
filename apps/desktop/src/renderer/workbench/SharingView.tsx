@@ -9,7 +9,7 @@ import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
-import { DangerButton, Pill, RetryRow, SecondaryButton } from "../ui/controls";
+import { DangerButton, EmptyState, Pill, RetryRow, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { KindGlyph } from "../ui/KindGlyph";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
@@ -18,7 +18,6 @@ import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   ABOUT_ROW,
-  AboutNote,
   AccessChecked,
   AccessUnknown,
   LEVELS,
@@ -29,6 +28,7 @@ import {
   type AccessView,
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
+import { EMPTY_ART } from "./EmptyArt";
 import { shareSubject } from "./shareSubject";
 
 // The Sharing view: the shares this workspace granted, and the shares sent
@@ -53,7 +53,7 @@ const LANE = {
     label: "Shared by me",
     // What each list covers, stated beside when it was checked.
     scope: "for this workspace",
-    empty: "No shares from this workspace. Right-click a file and choose Share… to share it.",
+    empty: "Nothing shared from this workspace yet.",
     unexplained: "Access information is unavailable for this workspace. This does not mean that nothing is shared.",
     signedOut: SIGNED_OUT_ACCESS,
     failed: "dohc could not check the shares from this workspace.",
@@ -63,7 +63,7 @@ const LANE = {
   received: {
     label: "Shared with me",
     scope: "for your account",
-    empty: "No shares to your account.",
+    empty: "Nothing shared with you yet.",
     unexplained: "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
     signedOut: "Connect a server to get what others share with you.",
     failed: "dohc could not check the shares to your account.",
@@ -612,7 +612,9 @@ function Section(props: {
               <>
                 <AccessChecked testId={`sharing-${lane}-freshness`} answer={view.answer} scope={words.scope} />
                 {view.answer.rows.length === 0 && local.length === 0 ? (
-                  <AboutNote testId={`sharing-${lane}-empty`}>{words.empty}</AboutNote>
+                  <div className="flex py-4">
+                    <EmptyState data-testid={`sharing-${lane}-empty`} picture={EMPTY_ART.shares} title={words.empty} />
+                  </div>
                 ) : (
                   <ul className="m-0 list-none p-0">{props.children(view.answer)}{local}</ul>
                 )}

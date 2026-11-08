@@ -54,8 +54,9 @@ import {
   type JoinedLaneOrder,
   type ShareListing,
 } from "./chatShareLanes";
-import { SectionLabel } from "../ui/controls";
+import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { EMPTY_ART } from "./EmptyArt";
 import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
@@ -67,7 +68,6 @@ import {
   Hash,
   House,
   MessageSquare,
-  MessagesSquare,
   Plus,
   Settings,
   Square,
@@ -110,11 +110,11 @@ import {
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
-import { MentionComposer } from "./MentionComposer";
+import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { agentMentionId, listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -781,6 +781,12 @@ export function ChatsView(props: {
   // when the activated pill was the viewer's only row and unmounts.
   const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
   const threadComposerRef = useRef<HTMLDivElement | null>(null);
+  // A failed run's ask-again readies the comment box; it never sends.
+  const commentComposer = useRef<MentionComposerHandle>(null);
+  const askAgainInComment = useCallback((agentId: string, mention: boolean) => {
+    if (mention) commentComposer.current?.mention(agentMentionId(agentId));
+    else commentComposer.current?.focus();
+  }, []);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
   // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
@@ -3906,21 +3912,19 @@ export function ChatsView(props: {
           items={personalFeed}
           itemKey={(item) => item.message.id}
           columnClassName={pageColumn}
-          header={<>
-            {personalFeed.length === 0 && !personalFeedLoading ? (
-              <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
-                <p className="m-0">No posts in your groups yet.</p>
-                <button
-                  type="button"
+          empty={personalFeedLoading ? undefined : (
+            <div className="flex flex-1 py-12">
+              <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
+                <SecondaryButton
                   data-testid="chats-feed-empty-groups"
+                  size="compact"
                   onClick={variant === "page" ? props.onOpenNavigator : goBack}
-                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-ink"
                 >
                   Open Groups
-                </button>
-              </div>
-            ) : null}
-          </>}
+                </SecondaryButton>
+              </EmptyState>
+            </div>
+          )}
           footer={<>
             {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
             {personalFeedNextCursor && !personalFeedLoading ? (
@@ -4492,6 +4496,7 @@ export function ChatsView(props: {
               retryBusy={dispatchActionBusy}
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
+              onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4553,6 +4558,7 @@ export function ChatsView(props: {
                 </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
+                handle={commentComposer}
                 value={composer}
                 sending={sending}
                 allowEmptySend={resolveTargetMessageId !== null}
@@ -4921,17 +4927,12 @@ export function ChatsView(props: {
           empty={threadsLoading ? (
               <SkeletonRows label="Loading..." className="pt-4" />
             ) : (
-              <div
-                data-testid="chats-channel-empty"
-                className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
-              >
-                <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-[13px] text-subtle">
-                  {agentDm
-                    ? "No posts."
-                    : `No posts in #${nav.channel.name} yet.`}
-                  {channelLocked || agentDm ? "" : " Start one above."}
-                </span>
+              <div className="flex flex-1 py-12">
+                <EmptyState
+                  data-testid="chats-channel-empty"
+                  picture={EMPTY_ART.posts}
+                  title={agentDm ? "No posts." : `No posts in #${nav.channel.name} yet.`}
+                />
               </div>
             )}
           renderItem={(thread) => {

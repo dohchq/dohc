@@ -4865,6 +4865,37 @@ describe("a refused folder move", () => {
   });
 });
 
+describe("a folder refused in a delete of several rows", () => {
+  const TITLE = `dohc can't delete "box" while a page in it has live editing on`;
+  const BODY = "In Live documents, stop live editing for every page in this folder, then delete the folder again.";
+  it("keeps its own notice and Open Live documents after another row failed first", async () => {
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "archive") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+      if (relativePath === "box") throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LiveFolderError: ${TITLE}\n${BODY}`);
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), { deleteWorkspacePath });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "box/page.md", kind: "file" as const }], folders: ["archive", "box"] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await row("archive"));
+    await user.keyboard("{Shift>}");
+    await user.click(await row("box"));
+    await user.keyboard("{/Shift}{Delete}");
+    // Only the newest failure is a toast, so the folder's notice waits in Notices.
+    await screen.findByTestId("workspace-shell-error");
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["archive", "box"]);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const notice = (await within(notices).findByText(TITLE)).closest("li")!;
+    expect(notice.textContent).toContain(BODY);
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
+    expect(notices.textContent).toContain("The disk is full.");
+  });
+});
+
 describe("a refused rename of a page this computer owns live", () => {
   const TITLE = `dohc can't rename "a.md" while it has live editing on`;
   const BODY = "In Live documents, stop live editing for this page, then rename it again.";
@@ -4996,6 +5027,69 @@ describe("a refused delete of a page this computer owns live", () => {
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(2));
     expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "a.md" }));
     await waitFor(() => expect(screen.queryByText(TITLE)).toBeNull());
+  });
+
+  it("deletes the rest of a selection and names every refused page in one notice", async () => {
+    const SEVERAL = `dohc can't delete "a.md" and "c.md" while they have live editing on`;
+    const SEVERAL_BODY = "In Live documents, stop live editing for these pages, then delete them again.";
+    const refusal = (path: string) => new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${path}" while it has live editing on\n${BODY}`);
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath !== "b.md") throw refusal(relativePath);
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), { deleteWorkspacePath });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map(path => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await row("a.md"));
+    await user.keyboard("{Shift>}");
+    await user.click(await row("c.md"));
+    await user.keyboard("{/Shift}{Delete}");
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["a.md", "b.md", "c.md"]);
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(SEVERAL);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe(SEVERAL_BODY);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getAllByText(SEVERAL)).toHaveLength(1);
+    const notice = within(notices).getByText(SEVERAL).closest("li")!;
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
+    // Copy details names every refused page, however many the title shows.
+    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    expect((await navigator.clipboard.readText()).split("\n")).toEqual(expect.arrayContaining(["File: a.md", "File: c.md"]));
+  });
+
+  it("takes a selection's notice back once one of its pages is deleted, after the sidebar was hidden", async () => {
+    const SEVERAL = `dohc can't delete "a.md" and "c.md" while they have live editing on`;
+    const refusal = (path: string) => new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${path}" while it has live editing on\n${BODY}`);
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath !== "b.md") throw refusal(relativePath);
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), { deleteWorkspacePath });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map(path => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = async (path: string) => (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === path)!;
+    await user.click(await row("a.md"));
+    await user.keyboard("{Shift>}");
+    await user.click(await row("c.md"));
+    await user.keyboard("{/Shift}{Delete}");
+    await screen.findByText(SEVERAL);
+    // Hiding the sidebar unmounts Explorer, and its notice stays in Notices.
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await waitFor(() => expect(screen.queryByTestId("side-panel")).toBeNull());
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await screen.findByTestId("side-panel");
+    deleteWorkspacePath.mockResolvedValue(undefined);
+    await user.click(await row("a.md"));
+    await user.keyboard("{Delete}");
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ relativePath: "a.md" })));
+    await waitFor(() => expect(screen.queryByText(SEVERAL)).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(SEVERAL)).toBeNull();
   });
 });
 

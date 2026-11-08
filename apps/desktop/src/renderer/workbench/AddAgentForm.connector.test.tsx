@@ -35,9 +35,10 @@ it("requires an agent name and saves it alongside the selected tool and owner", 
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   const codex = screen.getByRole("button", { name: "Codex" });
   expect(codex.getAttribute("aria-pressed")).toBe("true");
-  expect(codex.querySelector("svg.lucide-check")).toBeTruthy();
+  // The accent check marks the chosen tool; a signed-in tool's green check is its readiness.
+  expect(codex.querySelector("svg.lucide-check.text-accent")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Claude Code" }).getAttribute("aria-pressed")).toBe("false");
-  expect(document.querySelectorAll("svg.lucide-check")).toHaveLength(1);
+  expect(document.querySelectorAll("svg.lucide-check.text-accent")).toHaveLength(1);
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
@@ -117,6 +118,20 @@ it("editing the Advanced command removes the profile and its permission claim", 
   expect(screen.queryByText("Workspace-write sandbox. Runs without approval prompts.")).toBeNull();
   await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
   await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({ launch: { command: "node custom.mjs" } }) } }), f.props.settings));
+});
+
+it("says the runner command is in use until a tool is chosen", async () => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await screen.findByRole("button", { name: "Codex" });
+  expect(screen.queryByText("Using your runner command.")).toBeNull();
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: "node custom.mjs" } });
+  expect(screen.getByText("Using your runner command.")).toBeTruthy();
+  for (const name of ["Claude Code", "Codex"]) expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("false");
+  await userEvent.click(screen.getByRole("button", { name: "Codex" }));
+  expect(screen.queryByText("Using your runner command.")).toBeNull();
+  expect(screen.getByText("Conversation through stdin")).toBeTruthy();
 });
 
 it("ignores detection and checks that finish after a workspace switch", async () => {

@@ -4,7 +4,7 @@ import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 import { useRequestSequence } from "../useRequestSequence";
-import { SecondaryButton, SectionLabel } from "../ui/controls";
+import { IconButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { deleteConfirmText } from "./deleteConfirm";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
@@ -52,6 +52,7 @@ import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
   pendingTreeChangeSettled,
+  sourcePath,
   type AnsweredTreeChange,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
@@ -78,7 +79,7 @@ import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { fileManagerName } from "../../workspaces/explorerMenu";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, namedList, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -93,8 +94,11 @@ export type TreeChangeOperation = {
   release: () => void;
 };
 
-// An "undo" refusal brings its own words.
-export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" | "undo" };
+export type LivePageRefused =
+  // An "undo" refusal brings its own words.
+  | { path: string; action: "move" | "rename" | "delete" | "replace" | "undo" }
+  // Several pages one move or delete could not change.
+  | { paths: string[]; action: "move" | "delete" };
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -205,9 +209,10 @@ export interface ExplorerProps {
   // Failed tree operations go to the shell's error toast and Notices row,
   // with Try again when asking again can succeed. `change` is the tree
   // change that failed, so the shell can take its row back once that change
-  // happens. `livePage` names a page whose change was refused because it
-  // has live editing on.
-  onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => void;
+  // happens. A notice for several failed changes gets all of them, and goes
+  // once one of them happens. `livePage` names the pages whose change was
+  // refused because they have live editing on.
+  onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange | PendingTreeChange[], livePage?: LivePageRefused) => void;
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
   onNotice: (message: string, undo?: () => void) => void;
@@ -252,6 +257,19 @@ function glyphTone(marked: boolean): string {
   return marked ? "text-ink" : "text-subtle";
 }
 
+// The paths with no ancestor folder among them, in order. Deleting or moving
+// a folder carries its contents, so a selected child of a selected folder is
+// left out.
+function topLevelPaths(paths: Iterable<string>): string[] {
+  const all = new Set(paths);
+  return [...all].filter((path) => {
+    for (let at = path.lastIndexOf("/"); at > 0; at = path.lastIndexOf("/", at - 1)) {
+      if (all.has(path.slice(0, at))) return false;
+    }
+    return true;
+  });
+}
+
 // Disclosure chevrons and the section toolbars take the secondary voice in
 // dark, where the hint voice reads too dim on the panel. Light keeps it.
 const CHEVRON_TONE = "text-subtle dark:text-muted";
@@ -276,6 +294,17 @@ function ancestorsOf(path: string): string[] {
   }
   return out;
 }
+
+// The rows from one key to another, both included, in `order`'s order.
+export function rangeBetween(order: readonly string[], from: string, to: string): string[] | null {
+  const a = order.indexOf(from);
+  const b = order.indexOf(to);
+  if (a === -1 || b === -1) return null;
+  return order.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+
+// Shift with these keys extends the selection to the row they reach.
+export const RANGE_KEYS: ReadonlySet<string> = new Set(["ArrowUp", "ArrowDown", "Home", "End"]);
 
 function externalDragHasFiles(event: DragEvent): boolean {
   return Array.from(event.dataTransfer.types).includes("Files");
@@ -519,12 +548,14 @@ function nextChangeId(): string {
 }
 
 // The context menu that is open: what was right-clicked, where, whether a
-// key opened it, and the entries main returned for it.
+// key opened it, and the entries main returned for it. `many` is the
+// selection it acts on, when the row is one of two or more selected rows.
 type OpenMenu = {
   id: number;
   workspaceId: string;
   kind: "file" | "folder" | "root";
   path?: string;
+  many?: string[];
   at: { x: number; y: number };
   keyboard: boolean;
   entries: ExplorerMenuEntry[];
@@ -922,6 +953,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [folderPathSet],
   );
 
+  // A path another person, agent or device removes leaves the selection, so
+  // the count and Delete name only rows that are still there.
+  useEffect(() => {
+    setSelection((current) => {
+      const kept = [...current].filter((path) => fileByPath.has(path) || folderPathSet.has(path));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }, [fileByPath, folderPathSet]);
+
   const registerRef = useCallback((path: string, el: HTMLButtonElement | null) => {
     if (el) rowRefs.current.set(path, el);
     else rowRefs.current.delete(path);
@@ -1053,6 +1093,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         change.kind === "delete-file" && liveDocumentKindForPath(change.path) !== null;
       try {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
+        // The rest still go when some fail, and the failures report once.
+        const failed: Array<{ change: PendingTreeChange; cause: unknown; livePage?: LivePageRefused; again?: () => void }> = [];
         for (const change of changes) {
           try {
             const result = await run(change);
@@ -1078,8 +1120,35 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             const rerun = () =>
               void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered, action });
             const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && isMove ? rerun : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, change, livePage);
+            failed.push({ change, cause, ...(livePage ? { livePage } : {}), ...(again ? { again } : {}) });
           }
+        }
+        // Pages live editing refused report together, with the way to Live
+        // documents. Each folder it refused reports alone, so its notice keeps
+        // that way too. Any other failures report together apart from them.
+        const live = failed.filter(({ livePage }) => livePage?.action === "delete" || livePage?.action === "move");
+        const folders = failed.filter((entry) => !live.includes(entry) && isLiveFolderRefusal(entry.cause));
+        const rest = failed.filter((entry) => !live.includes(entry) && !folders.includes(entry));
+        for (const group of [live, ...folders.map((entry) => [entry]), rest]) {
+          const [first] = group;
+          if (!first) continue;
+          if (group.length === 1) {
+            onError(ipcErrorMessage(first.cause, "dohc could not change these files."), first.cause, first.again, first.change, first.livePage);
+            continue;
+          }
+          const verb = group.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder") ? "delete" : "move";
+          const names = group.map(({ change, livePage }) => (livePage && "path" in livePage ? livePage.path : sourcePath(change)));
+          const retried = group.filter((entry) => entry.again).map(({ change }) => ({ ...change, id: nextChangeId() }));
+          // The reason, when every failure gives the same one.
+          const reasons = new Set(group.map(({ cause }) => ipcErrorMessage(cause, "")));
+          const reason = reasons.size === 1 ? [...reasons][0]! : "";
+          onError(
+            [`dohc could not ${verb} ${namedList(names)}.`, reason].filter(Boolean).join(" "),
+            first.cause,
+            retried.length > 0 ? () => void runChangesOnce(retried, run, { answered: options.answered, action }) : undefined,
+            group.map(({ change }) => change),
+            group === live ? { paths: names, action: verb } : undefined,
+          );
         }
         const changedExistingPath = succeeded.some(
           ({ change }) => change.kind !== "create-file" && change.kind !== "create-folder",
@@ -1264,11 +1333,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const performDeletes = useCallback(
     (paths: string[]) => {
-      // A selected child inside a selected folder is covered by the folder.
-      const tops = paths.filter(
-        (path) => !paths.some((other) => other !== path && path.startsWith(`${other}/`)),
-      );
-      const changes: PendingTreeChange[] = tops.map((path) => ({
+      const changes: PendingTreeChange[] = paths.map((path) => ({
         id: nextChangeId(),
         kind: isFolderPath(path) ? "delete-folder" : "delete-file",
         path,
@@ -1285,12 +1350,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   // A delete goes to the trash with a recovery record, so it runs at once
-  // and its notice offers Undo. A share view's delete has no trash and no
-  // Undo; it still asks first and names how the change can be taken back.
+  // and its notice offers Undo, one for every row it deleted. A share view's
+  // delete has no trash and no Undo; it still asks first and names how the
+  // change can be taken back. A selected folder carries its selected
+  // contents, so neither the delete nor the dialog names them.
   const requestDelete = useCallback(
     (paths: string[]) => {
-      if (props.shareView) setConfirmDelete(paths);
-      else performDeletes(paths);
+      const tops = topLevelPaths(paths);
+      if (props.shareView) setConfirmDelete(tops);
+      else performDeletes(tops);
     },
     [performDeletes, props.shareView],
   );
@@ -1395,16 +1463,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         return;
       }
       const anchor = anchorPathRef.current;
-      if (event.shiftKey && anchor) {
-        const order = rowList.map((row) => row.fullPath);
-        const from = order.indexOf(anchor);
-        const to = order.indexOf(path);
-        if (from !== -1 && to !== -1) {
-          const [lo, hi] = from < to ? [from, to] : [to, from];
-          setSelection(new Set(order.slice(lo, hi + 1)));
-          setFocusedPath(path);
-          return;
-        }
+      const range = event.shiftKey && anchor ? rangeBetween(rowList.map((row) => row.fullPath), anchor, path) : null;
+      if (range) {
+        setSelection(new Set(range));
+        setFocusedPath(path);
+        return;
       }
       selectSingle(path);
       if (!isFolder) {
@@ -1466,15 +1529,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   // Asks main what it offers here, then opens at `at`. Nothing is drawn
-  // until main answers, and a menu main leaves empty does not open.
+  // until main answers, and a menu main leaves empty does not open. A row's
+  // menu acts on the row, or on the whole selection when the row is one of
+  // two or more selected rows; main then offers only what acts on all of
+  // them.
   const openMenu = useCallback(
     (
       kind: OpenMenu["kind"],
       path: string | undefined,
-      pinnedRow: boolean,
       at: OpenMenu["at"],
       keyboard: boolean,
     ) => {
+      const selected = selectionRef.current;
+      const many = path !== undefined && selected.size > 1 && selected.has(path) ? [...selected] : undefined;
+      const pinnedRow = many ? many.every(isPinned) : path !== undefined && isPinned(path);
       const request = menuRequests.next();
       // Escape or a press anywhere before main answers retires this open, as
       // either would close the menu once drawn.
@@ -1492,12 +1560,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ...(path !== undefined ? { path } : {}),
           kind,
           pinned: pinnedRow,
+          ...(many ? { count: many.length } : {}),
         })
         .finally(() => waiting.abort())
         .then(
           (entries) => {
             if (!menuRequests.isCurrent(request) || entries.length === 0) return;
-            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), at, keyboard, entries });
+            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), ...(many ? { many } : {}), at, keyboard, entries });
           },
           (cause) => {
             if (menuRequests.isCurrent(request)) {
@@ -1506,7 +1575,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           },
         );
     },
-    [menuRequests, onError, workspaceId],
+    [isPinned, menuRequests, onError, workspaceId],
   );
 
   const closeMenu = useCallback(() => {
@@ -1518,6 +1587,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (
       kind: OpenMenu["kind"],
       path: string | undefined,
+      many: string[] | undefined,
       command: ExplorerMenuCommand,
     ) => {
       const targetDir =
@@ -1538,14 +1608,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           if (path) beginRename(path, kind === "folder");
           break;
         case "delete":
-          if (path) {
-            const selected = selectionRef.current;
-            requestDelete(selected.has(path) ? [...selected] : [path]);
-          }
+          if (path) requestDelete(many ?? [path]);
           break;
         case "pin":
         case "unpin":
-          if (path) onTogglePin(path);
+          for (const target of many ?? (path ? [path] : [])) {
+            if (isPinned(target) !== (command === "pin")) onTogglePin(target);
+          }
           break;
         case "export-zip":
           exportZip(kind === "root" ? undefined : path);
@@ -1572,6 +1641,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       beginCreateFolder,
       beginRename,
       requestDelete,
+      isPinned,
       onModeChange,
       onTogglePin,
       exportZip,
@@ -1592,19 +1662,19 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (fromMenuKey(keyboardMenu)) return;
       if (!selectionRef.current.has(path)) selectSingle(path);
       rowRefs.current.get(path)?.focus({ preventScroll: true });
-      openMenu(isFolderPath(path) ? "folder" : "file", path, isPinned(path), {
+      openMenu(isFolderPath(path) ? "folder" : "file", path, {
         x: event.clientX,
         y: event.clientY,
       }, false);
     },
-    [selectSingle, isFolderPath, openMenu, isPinned],
+    [selectSingle, isFolderPath, openMenu],
   );
 
   const onContainerContextMenu = useCallback(
     (event: MouseEvent) => {
       event.preventDefault();
       if (fromMenuKey(keyboardMenu)) return;
-      openMenu("root", undefined, false, { x: event.clientX, y: event.clientY }, false);
+      openMenu("root", undefined, { x: event.clientX, y: event.clientY }, false);
     },
     [openMenu],
   );
@@ -1633,13 +1703,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         const homeKind = row.dataset.menuKind;
         if (homeKind === undefined && !selectionRef.current.has(path)) selectSingle(path);
         const kind = homeKind === "file" || homeKind === "folder" ? homeKind : isFolderPath(path) ? "folder" : "file";
-        openMenu(kind, path, isPinned(path), { x: box.left, y: box.bottom }, true);
+        openMenu(kind, path, { x: box.left, y: box.bottom }, true);
         return;
       }
       const box = fileTreeRef.current?.getBoundingClientRect();
-      openMenu("root", undefined, false, { x: box?.left ?? 0, y: box?.top ?? 0 }, true);
+      openMenu("root", undefined, { x: box?.left ?? 0, y: box?.top ?? 0 }, true);
     },
-    [selectSingle, isFolderPath, openMenu, isPinned],
+    [selectSingle, isFolderPath, openMenu],
   );
 
   // ---- drag and drop ----
@@ -1647,7 +1717,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const onRowDragStart = useCallback(
     (path: string, event: DragEvent) => {
       const selected = selectionRef.current;
-      const paths = selected.has(path) ? [...selected] : [path];
+      const paths = selected.has(path) ? topLevelPaths(selected) : [path];
       dragSources.current = paths.map((p) => ({
         path: p,
         kind: isFolderPath(p) ? "folder" : "file",
@@ -1798,9 +1868,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const onHomeMenu = useCallback(
     (kind: "file" | "folder", path: string, at: OpenMenu["at"]) => {
       if (fromMenuKey(keyboardMenu)) return;
-      openMenu(kind, path, isPinned(path), at, false);
+      openMenu(kind, path, at, false);
     },
-    [isPinned, openMenu],
+    [openMenu],
   );
 
   const onContainerDragOver = useCallback(
@@ -1852,6 +1922,23 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       ) {
         return;
       }
+      if (event.key === "Escape" && selection.size > 1) {
+        event.preventDefault();
+        event.stopPropagation();
+        setSelection(new Set());
+        return;
+      }
+      if (
+        event.key.toLowerCase() === "a" &&
+        hasPrimaryModifier(event, window.dohcDesktop?.platform) &&
+        !event.shiftKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        setSelection(new Set(rows.map((row) => row.fullPath)));
+        if (anchorPathRef.current === null) setAnchorPath(focusedPath ?? rows[0]?.fullPath ?? null);
+        return;
+      }
       if (event.key === "F2") {
         event.preventDefault();
         const target = focusedPath ?? [...selection][0];
@@ -1860,7 +1947,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
       if (isDeleteKey(event)) {
         event.preventDefault();
-        const targets = selection.size > 0 ? [...selection] : focusedPath ? [focusedPath] : [];
+        // The selection, or the focused row alone when it is outside the
+        // selection, as a row's menu acts.
+        const targets = focusedPath !== null && !selection.has(focusedPath) ? [focusedPath] : [...selection];
         if (targets.length > 0) requestDelete(targets);
         return;
       }
@@ -1869,6 +1958,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       event.preventDefault();
       switch (action.kind) {
         case "focus":
+          if (event.shiftKey && RANGE_KEYS.has(event.key)) {
+            const order = rows.map((row) => row.fullPath);
+            const kept = anchorPathRef.current;
+            const anchor = kept !== null && order.includes(kept) ? kept : (focusedPath ?? action.path);
+            setAnchorPath(anchor);
+            setSelection(new Set(rangeBetween(order, anchor, action.path) ?? [action.path]));
+          }
           focusRow(action.path);
           break;
         case "expand":
@@ -2018,6 +2114,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
   }
 
+  // Two or more selected rows take the selection's tint and the count bar.
+  const multi = selection.size > 1;
   const rootDropPreview = dropPreview?.targetPath === null ? dropPreview : null;
   const dropPreviewFor = (path: string): RowDropPreview | null => {
     if (!dropPreview || dropPreview.targetPath === null) return null;
@@ -2355,6 +2453,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             aboveLayout={openEditorsLayout}
             editingPath={editing?.mode === "rename" ? editing.path : null}
             renderEditRow={editRow}
+            selection={selection}
+            onSelect={setSelection}
             onMenu={onHomeMenu}
             onRename={beginRename}
             onDelete={requestDelete}
@@ -2441,10 +2541,23 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onOpenChange={(open) => {
             if (!open) closeMenu();
           }}
-          items={explorerMenuItems(menu.entries, (id) => runMenuCommand(menu.kind, menu.path, id))}
+          items={explorerMenuItems(menu.entries, (id) => runMenuCommand(menu.kind, menu.path, menu.many, id))}
           width={EXPLORER_MENU_WIDTH}
           menuTestId="explorer-menu"
         />
+      ) : null}
+
+      {/* Below the scroller, so the rows stay where they were. */}
+      {multi ? (
+        <div
+          data-testid="explorer-selection-bar"
+          className="flex h-8 shrink-0 items-center gap-2 border-t border-line px-3 text-[12px] text-muted"
+        >
+          <span className="min-w-0 flex-1 truncate tabular-nums">{selection.size} selected</span>
+          <IconButton aria-label="Clear selection" title="Clear selection" onClick={() => setSelection(new Set())}>
+            <X size={13} aria-hidden />
+          </IconButton>
+        </div>
       ) : null}
 
       {confirmDelete && props.shareView ? (

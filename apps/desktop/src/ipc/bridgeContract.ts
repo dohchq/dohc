@@ -987,7 +987,12 @@ export const ReadExplorerMenuPayload = z.object({
   // Absent for the root (container background) menu.
   path: PATH_STRING.optional(),
   kind: z.enum(["file", "folder", "root"]),
+  // Whether the row is pinned. For a selection, whether every row in it is.
   pinned: z.boolean(),
+  // How many rows the menu acts on, when the row is in a selection of two
+  // or more. The menu then offers only what acts on every row, and says how
+  // many.
+  count: z.number().int().min(2).optional(),
 });
 export type ReadExplorerMenuPayload = z.infer<typeof ReadExplorerMenuPayload>;
 

@@ -33,6 +33,7 @@ export function createExplorerMenuIpc<
       return explorerMenuEntries({
         kind: input.kind,
         pinned: input.pinned,
+        ...(input.count !== undefined && input.kind !== "root" ? { count: input.count } : {}),
         isMountPath,
         hasMountRecord,
         // Sharing onward is offered nowhere in a share view or a mount:

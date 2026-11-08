@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, CheckCircle2, Diff, Folder, Globe2, Merge, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Folder, Globe2, Merge, MoreHorizontal, Plus, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -97,6 +97,7 @@ import { CollectionsElsewhereRow, CollectionsRefusalRow, EXPLORER_MENU_WIDTH, Ex
 import { explorerMenuEntries, type ExplorerMenuScope } from "../../workspaces/explorerMenu";
 import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice, signInExpiredNotice } from "../workbench/NoticeCenter";
 import { undoRefusedNotice } from "../workbench/explorerOperationNotices";
+import { EMPTY_ART, type EmptyArtKind } from "../workbench/EmptyArt";
 import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
@@ -193,7 +194,7 @@ function Specimen(props: { label: string; children: ReactNode; className?: strin
 
 // A side panel's width, as Search, Apps and Chats give their empty states.
 function EmptyPanel(props: { children: ReactNode }) {
-  return <div className="flex h-44 w-64 flex-col rounded-lg border border-line bg-panel">{props.children}</div>;
+  return <div className="flex h-60 w-64 flex-col rounded-lg border border-line bg-panel">{props.children}</div>;
 }
 
 function Swatch(props: { label: string; className: string }) {
@@ -846,11 +847,11 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   freshness: "unknown",
 };
 
-// About for the drawing's #general: Sam and Nova here, and the Group's grants.
-const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
-  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
+// About for the drawing's #general: Sam and the agent Nova here, and the Group's grants.
+const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number, agent = false): PresencePeer => ({
+  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: agent ? { agent: true } : null, updatedAtMs: 0,
 });
-const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4, true)];
 const ABOUT_GROUP: AboutConversation = {
   kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
 };
@@ -1009,6 +1010,7 @@ function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFa
         retryBusy={props.busy ?? false}
         onRetryFailedRun={noop}
         onOpenAgentSettings={noop}
+        onAskAgain={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -2114,10 +2116,13 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="empty" title="Empty">
-        <Specimen label="glyph, line, action in focus">
+        <Specimen label="picture, line, action in focus">
           <EmptyPanel>
-            <EmptyState icon={SearchX} title='No files or chats match "budget".'>
-              <SecondaryButton data-force-state="focus-visible">Clear filters</SecondaryButton>
+            <EmptyState picture={EMPTY_ART.search} title='No files or chats match "budget".'>
+              <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" data-force-state="focus-visible">
+                <X size={12} aria-hidden />
+                Clear filters
+              </SecondaryButton>
             </EmptyState>
           </EmptyPanel>
         </Specimen>
@@ -2128,12 +2133,9 @@ function Pane(props: { theme: "light" | "dark" }) {
             </EmptyState>
           </EmptyPanel>
         </Specimen>
-        <Specimen label="mark, line, hint">
+        <Specimen label="mark, line">
           <EmptyPanel>
-            <EmptyState
-              title="No live documents in this workspace."
-              hint="Reload after a document starts live editing."
-            />
+            <EmptyState title="No live documents in this workspace. Reload after a document starts live editing." />
           </EmptyPanel>
         </Specimen>
         <Specimen label="failed">
@@ -2152,8 +2154,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="a long query wraps">
           <EmptyPanel>
-            <EmptyState icon={SearchX} title='No files or chats match "quarterly-revenue-forecast-final-v3".' />
+            <EmptyState picture={EMPTY_ART.search} title='No files or chats match "quarterly-revenue-forecast-final-v3".' />
           </EmptyPanel>
+        </Specimen>
+        <Specimen label="every picture">
+          <div className="grid grid-cols-3 gap-2">
+            {(Object.keys(EMPTY_ART) as EmptyArtKind[]).map((kind) => (
+              <div key={kind} className="flex h-36 w-44 flex-col rounded-lg border border-line bg-panel">
+                <EmptyState picture={EMPTY_ART[kind]} title={kind} />
+              </div>
+            ))}
+          </div>
         </Specimen>
       </Section>
 
@@ -2309,6 +2320,18 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* The group a keyboard close leaves empty takes focus, and its ring
+          shows on all four edges above its tab strip. It sits above the
+          editor's menus, whose layers took its tab name's subpixel smoothing
+          among the other parts. */}
+      <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
+        <Specimen label="split: the focused active group, empty, then one with tabs">
+          <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
+            <EditorGroupsSpecimen activeHasTabs={false} />
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
           <ul className={KIND_NAMES}>
@@ -2414,6 +2437,11 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="flex h-[240px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={[TIMELINE_FILE]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               omittedSources={14} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="no changes yet">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop} />
           </div>
         </Specimen>
         <Specimen label="one Collection, unavailable">
@@ -2551,16 +2579,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="third option active; the list scrolls">
           <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>
             <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
-          </div>
-        </Specimen>
-      </Section>
-
-      {/* The group a keyboard close leaves empty takes focus, and its ring
-          shows on all four edges above its tab strip. */}
-      <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
-        <Specimen label="split: the focused active group, empty, then one with tabs">
-          <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
-            <EditorGroupsSpecimen activeHasTabs={false} />
           </div>
         </Specimen>
       </Section>

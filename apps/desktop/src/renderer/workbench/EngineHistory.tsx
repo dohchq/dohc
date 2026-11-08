@@ -1,7 +1,8 @@
 import { formatChatDay, formatChatTime, formatClock, formatDayClock } from "../time";
 import { basenameOf, dirnameOf } from "../path";
-import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, FilePen, History, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, FilePen, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { EmptyState, SecondaryButton } from "../ui/controls";
+import { EMPTY_ART } from "./EmptyArt";
 import { NameLine } from "../ui/NameLine";
 import { useCallback, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react";
@@ -1085,7 +1086,7 @@ export function EngineHistoryView(props: {
   const partial = words.unavailable !== null || words.omitted !== null;
 
   // A known page with no rows. The caller renders this view only when it
-  // has a page: "No changes yet" states something about the workspace,
+  // has a page: "No changes yet." states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   // Neither may a page that is missing Collections, or one read while
   // History is paused: their changes are unknown, not absent.
@@ -1101,8 +1102,12 @@ export function EngineHistoryView(props: {
           data-testid="history-collections-unavailable"
           icon={words.unavailable ? TriangleAlert : Info}
           tone={words.unavailable ? "danger" : "ghost"}
-          title={words.unavailable ?? words.omitted}
-          hint={words.unavailable ? words.omitted ?? undefined : undefined}
+          title={words.unavailable ? (
+            <>
+              {words.unavailable}
+              {words.omitted ? <span className="mt-1 block text-[11px] text-subtle">{words.omitted}</span> : null}
+            </>
+          ) : words.omitted}
         >
           {props.paused ? <HistoryPaused testId="history-paused" /> : null}
           {words.unavailable ? (
@@ -1120,7 +1125,7 @@ export function EngineHistoryView(props: {
         </div>
       );
     }
-    return <EmptyState icon={History} title="No changes yet" />;
+    return <EmptyState picture={EMPTY_ART.history} title="No changes yet." />;
   }
 
   return (

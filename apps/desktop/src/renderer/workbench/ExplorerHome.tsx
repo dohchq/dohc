@@ -15,12 +15,13 @@ import {
   type RefObject,
 } from "react";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { RetryRow } from "../ui/controls";
 import { isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { AppMarks } from "./AppsSection";
-import { CollectionsElsewhereRow, CollectionsRefusalRow, type ExplorerProps, type RowDropPreview } from "./Explorer";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, RANGE_KEYS, rangeBetween, type ExplorerProps, type RowDropPreview } from "./Explorer";
 import {
   classifyFiles,
   collectionRows,
@@ -40,7 +41,9 @@ import { parseTab, siteTabPath } from "./workbenchState";
 // Home: the workspace by kind, as one keyboard list. Arrows move through
 // every section, Left and Right fold a section or a folder, and Enter opens.
 // Each row's menu is the Files menu for the same file or folder, so a
-// rename, move or delete here is the same change Files makes.
+// rename, move or delete here is the same change Files makes. Rows select as
+// Files' rows do, by their workspace path, so a page pinned and in Pages is
+// one selected path.
 
 const ROW_HEIGHT = 28;
 const GLYPH_SIZE = 14;
@@ -61,6 +64,9 @@ export interface ExplorerHomeProps {
   // The file or folder the Explorer is renaming, and its name field.
   editingPath: string | null;
   renderEditRow: (depth: number) => ReactNode;
+  // The Explorer's selection: workspace paths.
+  selection: ReadonlySet<string>;
+  onSelect: (paths: ReadonlySet<string>) => void;
   // Opens the row's menu at the pointer.
   onMenu: (kind: "file" | "folder", path: string, at: { x: number; y: number }) => void;
   onRename: (path: string, isFolder: boolean) => void;
@@ -310,7 +316,19 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned, pages, collections, appRows, others, collapsed, sectionsKey]);
 
+  // The workspace path of the row the active editor shows. An app or a
+  // Collection opens a tab under another path, so Home looks its row up.
+  const openRowPath = useMemo(() => {
+    if (activePath === null) return null;
+    for (const section of sections) {
+      for (const row of section.rows) if (row.open === activePath && row.menu) return row.menu.path;
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinned, pages, collections, appRows, others, sectionsKey, activePath]);
+
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
+  const selectedNoteId = useId();
   const tabbableKey = focusedKey && nav.items.has(focusedKey) ? focusedKey : (nav.rows[0]?.fullPath ?? null);
   const rowRefs = useRef(new Map<string, HTMLElement>());
   const pendingFocus = useRef<string | null>(null);
@@ -390,10 +408,29 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     });
   }, []);
 
+  // Where a Shift-click or Shift+arrow range starts: a row's key.
+  const anchorKey = useRef<string | null>(null);
+  // The workspace paths of the rows from one key to another, in order.
+  const pathsBetween = (from: string, to: string): Set<string> => {
+    const keys = rangeBetween(nav.rows.map((row) => row.fullPath), from, to) ?? [to];
+    return new Set(keys.flatMap((key) => nav.items.get(key)?.row?.menu?.path ?? []));
+  };
+
   // Rows keep one callback each across renders; they read the current props
   // through this ref.
-  const live = useRef({ props, focusKey });
-  live.current = { props, focusKey };
+  const live = useRef({ props, focusKey, pathsBetween });
+  live.current = { props, focusKey, pathsBetween };
+
+  // As in Files, a selection that is only the open row goes when another
+  // editor becomes active. Files clears a file's own path; this also clears
+  // the folder of an app or a Collection opened from its row.
+  const shownOpenRow = useRef(openRowPath);
+  useLayoutEffect(() => {
+    const was = shownOpenRow.current;
+    shownOpenRow.current = openRowPath;
+    const { selection, onSelect } = live.current.props;
+    if (was !== null && was !== openRowPath && selection.size === 1 && selection.has(was)) onSelect(new Set());
+  }, [openRowPath]);
 
   const openRow = useCallback((row: HomeRowModel) => {
     const { explorer: current, onShowInFiles } = live.current.props;
@@ -415,9 +452,26 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   }, []);
 
   const onRowClick = useCallback(
-    (row: HomeRowModel) => {
+    // With no event, as from a fix row's Show in Files, it is a plain click.
+    (row: HomeRowModel, event?: MouseEvent) => {
       pendingFocus.current = null;
       setFocusedKey(row.key);
+      const { props: current, pathsBetween: between } = live.current;
+      const path = row.menu?.path;
+      if (path !== undefined && event !== undefined && hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
+        const next = new Set(current.selection);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        current.onSelect(next);
+        anchorKey.current = row.key;
+        return;
+      }
+      if (path !== undefined && event?.shiftKey && anchorKey.current !== null) {
+        current.onSelect(between(anchorKey.current, row.key));
+        return;
+      }
+      current.onSelect(new Set(path !== undefined ? [path] : []));
+      anchorKey.current = row.key;
       openRow(row);
     },
     [openRow],
@@ -433,7 +487,13 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     setFocusedKey(row.key);
     if (!row.menu) return;
     rowRefs.current.get(row.key)?.focus({ preventScroll: true });
-    live.current.props.onMenu(row.menu.kind, row.menu.path, { x: event.clientX, y: event.clientY });
+    const current = live.current.props;
+    // A row outside the selection is the selection while its menu acts.
+    if (!current.selection.has(row.menu.path)) {
+      current.onSelect(new Set([row.menu.path]));
+      anchorKey.current = row.key;
+    }
+    current.onMenu(row.menu.kind, row.menu.path, { x: event.clientX, y: event.clientY });
   }, []);
   // A rename shows its name field in the row it started from, or else the
   // first row for that path.
@@ -453,14 +513,32 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     if (!(event.target as HTMLElement).closest("[data-home-key]")) return;
     const item = focusedKey ? nav.items.get(focusedKey) : undefined;
     const menu = item?.row?.menu;
+    if (event.key === "Escape" && props.selection.size > 1) {
+      event.preventDefault();
+      event.stopPropagation();
+      props.onSelect(new Set());
+      return;
+    }
+    if (
+      event.key.toLowerCase() === "a" &&
+      hasPrimaryModifier(event, window.dohcDesktop?.platform) &&
+      !event.shiftKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      props.onSelect(new Set([...nav.items.values()].flatMap((entry) => entry.row?.menu?.path ?? [])));
+      return;
+    }
     if (menu && event.key === "F2") {
       event.preventDefault();
       props.onRename(menu.path, menu.kind === "folder");
       return;
     }
-    if (menu && isDeleteKey(event)) {
+    // The selection, or the focused row alone when it is outside the
+    // selection. From a heading, the selection.
+    if (isDeleteKey(event) && (menu || props.selection.size > 0)) {
       event.preventDefault();
-      props.onDelete([menu.path]);
+      props.onDelete(menu && !props.selection.has(menu.path) ? [menu.path] : [...props.selection]);
       return;
     }
     const action = navigateTree(nav.rows, focusedKey, event.key);
@@ -471,6 +549,12 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     const heading = !acted.row && !acted.more;
     switch (action.kind) {
       case "focus":
+        if (event.shiftKey && RANGE_KEYS.has(event.key)) {
+          const kept = anchorKey.current;
+          const from = kept !== null && nav.items.has(kept) ? kept : (focusedKey ?? action.path);
+          anchorKey.current = from;
+          props.onSelect(pathsBetween(from, action.path));
+        }
         focusKey(action.path);
         break;
       case "expand":
@@ -512,10 +596,15 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files..." />;
   }
 
+  // As in Files, the rows of a selection that is not just the open row take
+  // the picked fill.
+  const selectionIsOpenRow = openRowPath !== null && props.selection.size === 1 && props.selection.has(openRowPath);
   const renderRow = (row: HomeRowModel): ReactNode => {
     if (editKey === row.key) return props.renderEditRow(row.depth - 1);
     const common = {
       row,
+      picked: !selectionIsOpenRow && row.menu !== null && props.selection.has(row.menu.path),
+      selectedNoteId,
       active: row.open !== null && row.open === activePath,
       tabbable: tabbableKey === row.key,
       registerRef,
@@ -663,6 +752,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
           </section>
         );
       })}
+      {/* Describes a selected row, whose fill alone shows it to the eye. */}
+      <span id={selectedNoteId} hidden>
+        Selected
+      </span>
     </div>
   );
 }
@@ -681,6 +774,10 @@ function HomeGlyph({ row, tone }: { row: HomeRowModel; tone: string }) {
 // or focus, which keeps a long Home's first paint to the rows themselves.
 const HomeRow = memo(function HomeRow(props: {
   row: HomeRowModel;
+  // In a selection an action would act on that is not just the open row.
+  picked: boolean;
+  // The hidden "Selected" that describes a picked row.
+  selectedNoteId: string;
   active: boolean;
   tabbable: boolean;
   testId?: string;
@@ -694,11 +791,11 @@ const HomeRow = memo(function HomeRow(props: {
   drag?: ExplorerHomeProps["drag"];
   registerRef: (key: string, element: HTMLElement | null) => void;
   onFocus: (key: string) => void;
-  onClick: (row: HomeRowModel) => void;
+  onClick: (row: HomeRowModel, event?: MouseEvent) => void;
   onChevronClick: (row: HomeRowModel, event: MouseEvent) => void;
   onContextMenu: (row: HomeRowModel, event: MouseEvent) => void;
 }) {
-  const { row, active, app, drag } = props;
+  const { row, active, picked, app, drag } = props;
   const path = row.menu?.path;
   const onSetPinned = app ? props.onSetPinned : undefined;
   const pinned = props.pinned ?? false;
@@ -709,14 +806,16 @@ const HomeRow = memo(function HomeRow(props: {
       : props.dropRole === "target"
         ? "bg-success/16 text-ink"
         : "bg-line/35 text-ink"
-    : active
-      ? "bg-selected font-medium text-ink"
-      : "text-muted hover:bg-hover hover:text-ink";
+    : picked
+      ? `bg-(--dohc-selection) text-ink${active ? " font-medium" : ""}`
+      : active
+        ? "bg-selected font-medium text-ink"
+        : "text-muted hover:bg-hover hover:text-ink";
   // An allowed drop target's glyph takes the success color.
   const glyphTone =
     props.dropKind && props.dropKind !== "blocked" && props.dropRole === "target"
       ? "text-success"
-      : active
+      : active || picked
         ? "text-ink"
         : "text-subtle";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
@@ -736,6 +835,14 @@ const HomeRow = memo(function HomeRow(props: {
         onPointerEnter={reached ? undefined : () => setReached(true)}
         className={`group relative flex items-center rounded-md transition-colors duration-75 ${cause ? "" : "h-7"} ${fill}`}
       >
+        {/* As in Files, the open row in a picked selection gains a 2px ink edge. */}
+        {!props.dropKind && picked && active ? (
+          <span
+            aria-hidden
+            data-testid="home-row-open-edge"
+            className="absolute bottom-1.5 left-0.5 top-1.5 w-0.5 rounded-full bg-ink"
+          />
+        ) : null}
         <button
           type="button"
           ref={(element) => {
@@ -751,6 +858,7 @@ const HomeRow = memo(function HomeRow(props: {
           data-root={app?.root}
           data-section={row.section}
           aria-current={active ? "page" : undefined}
+          aria-describedby={picked ? props.selectedNoteId : undefined}
           {...(row.folder ? { "aria-expanded": row.expanded } : {})}
           title={row.unavailable ?? (app ? app.root : path)}
           aria-disabled={row.unavailable && !row.fix ? true : undefined}
@@ -760,7 +868,7 @@ const HomeRow = memo(function HomeRow(props: {
             setReached(true);
             props.onFocus(row.key);
           }}
-          onClick={() => props.onClick(row)}
+          onClick={(event) => props.onClick(row, event)}
           onKeyDown={row.fix ? (event) => {
             if (!isContextMenuKey(event)) return;
             event.preventDefault();
@@ -784,7 +892,7 @@ const HomeRow = memo(function HomeRow(props: {
             cause
               ? `grid grid-rows-[28px_auto] gap-x-2 pb-1 ${props.chevronSlot ? "grid-cols-[auto_auto_minmax(0,1fr)]" : "grid-cols-[auto_minmax(0,1fr)]"}`
               : "flex h-full gap-2"
-          } ${active ? "bg-transparent" : ""}`}
+          } ${active || picked ? "bg-transparent" : ""}`}
         >
           {props.chevronSlot ? (
             row.folder ? (

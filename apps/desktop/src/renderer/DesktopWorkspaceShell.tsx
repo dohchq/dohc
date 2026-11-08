@@ -58,7 +58,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -216,7 +216,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, sourcePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -346,6 +346,15 @@ function isMountedSharePath(path: string | null): boolean {
 // A move that failed, and whether its destination was already taken.
 type FailedMove = { move: PendingTreeMove; destinationTaken: boolean };
 
+const isTreeMove = (change: PendingTreeChange): change is PendingTreeMove => change.kind === "file" || change.kind === "folder";
+
+// One Explorer notice for several failed moves or deletes, named by each
+// change's ends, as moveFailureIdentity names one move.
+function batchFailureIdentity(workspaceId: string, changes: readonly PendingTreeChange[]): string {
+  const ends = changes.map((change) => JSON.stringify(isTreeMove(change) ? [change.fromPath, change.toPath] : [sourcePath(change)]));
+  return `batch:${JSON.stringify([workspaceId, ends.sort()])}`;
+}
+
 // What a listing says of a failed move: made, or its destination taken.
 function failedMoveNow(
   failed: FailedMove,
@@ -361,13 +370,15 @@ function failedMoveNow(
 
 // Whether a listing shows any failed move made, or its destination's state changed.
 function failedMovesChanged(
-  failed: Iterable<FailedMove>,
+  notices: Iterable<readonly FailedMove[]>,
   files: Parameters<typeof listedMoveEnds>[1],
   folders: Parameters<typeof listedMoveEnds>[2],
 ) {
-  for (const one of failed) {
-    const now = failedMoveNow(one, files, folders);
-    if (now.made || now.taken !== one.destinationTaken) return true;
+  for (const failed of notices) {
+    for (const one of failed) {
+      const now = failedMoveNow(one, files, folders);
+      if (now.made || now.taken !== one.destinationTaken) return true;
+    }
   }
   return false;
 }
@@ -1062,11 +1073,18 @@ export function DesktopWorkspaceShell(props: {
   // listing is checked against the answer after, and a change there asks again.
   // A destination listed beside the source was taken, and counts only after
   // an answer shows it gone, since a deleted source would look the same.
+  // Each notice's failed moves, by its identity: one move, or a batch's
+  // moves, whose notice goes once any of them is made.
   const listing = useRef({ files, folders });
   listing.current = { files, folders };
-  const failedMoves = useRef(new Map<string, FailedMove>());
+  const failedMoves = useRef(new Map<string, FailedMove[]>());
+  // Each Explorer notice for several failed changes, by its identity, with
+  // the paths those changes start from. The shell keeps them with Notices,
+  // which outlive a hidden sidebar.
+  const refusedBatchesRef = useRef(new Map<string, ReadonlySet<string>>());
   const clearFailedMove = useCallback((identity: string) => {
     failedMoves.current.delete(identity);
+    refusedBatchesRef.current.delete(identity);
     clearIdentity(identity);
   }, [clearIdentity]);
   const confirming = useRef<"idle" | "asking" | "again">("idle");
@@ -1082,9 +1100,9 @@ export function DesktopWorkspaceShell(props: {
       if (!answer || workspaceIdRef.current !== id) continue;
       for (const [identity, failed] of asked) {
         if (failedMoves.current.get(identity) !== failed) continue;
-        const now = failedMoveNow(failed, answer.files, answer.folders ?? []);
-        if (now.made) clearFailedMove(identity);
-        else failed.destinationTaken = now.taken;
+        const now = failed.map((one) => failedMoveNow(one, answer.files, answer.folders ?? []));
+        if (now.some((one) => one.made)) clearFailedMove(identity);
+        else failed.forEach((one, index) => { one.destinationTaken = now[index]!.taken; });
       }
     } while (
       askedAgain() &&
@@ -1101,22 +1119,33 @@ export function DesktopWorkspaceShell(props: {
   // documents, at the page's row for a page, whose words name the action that
   // ran. A refused Undo keeps the Explorer's words.
   const reportExplorerError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => {
-      const move = change && (change.kind === "file" || change.kind === "folder") ? change : undefined;
-      const deleted = change && (change.kind === "delete-file" || change.kind === "delete-folder") ? change : undefined;
-      const identity = move ? moveFailureIdentity(workspaceId, move)
+    (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange | PendingTreeChange[], livePage?: LivePageRefused) => {
+      const batch = Array.isArray(change) ? change : undefined;
+      const one = Array.isArray(change) ? undefined : change;
+      const move = one && isTreeMove(one) ? one : undefined;
+      const deleted = one && (one.kind === "delete-file" || one.kind === "delete-folder") ? one : undefined;
+      const identity = batch ? batchFailureIdentity(workspaceId, batch)
+        : move ? moveFailureIdentity(workspaceId, move)
         : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
-      // A Try again keeps what the first failure knew of the destination.
-      if (move && identity) {
-        const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
-        const destinationTaken = failedMoves.current.get(identity)?.destinationTaken === true || (ends.from && ends.to);
-        failedMoves.current.set(identity, { move, destinationTaken });
+      // A notice for several changes goes once one of them happens.
+      if (batch && identity !== undefined) refusedBatchesRef.current.set(identity, new Set(batch.map(sourcePath)));
+      // A Try again keeps what the first failure knew of each destination.
+      const moves = batch ? batch.filter(isTreeMove) : move ? [move] : [];
+      if (identity !== undefined && moves.length > 0) {
+        const before = failedMoves.current.get(identity) ?? [];
+        failedMoves.current.set(identity, moves.map((each) => {
+          const ends = listedMoveEnds(each, listing.current.files, listing.current.folders);
+          const known = before.find((failed) => failed.move.fromPath === each.fromPath && failed.move.toPath === each.toPath);
+          return { move: each, destinationTaken: known?.destinationTaken === true || (ends.from && ends.to) };
+        }));
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
-      const id = workspaceId, reveal = livePage?.path ?? null;
+      const id = workspaceId, reveal = livePage && "path" in livePage ? livePage.path : null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
-        ...(livePage && livePage.action !== "undo"
-          ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
+        ...(!livePage || livePage.action === "undo" ? { message }
+          : "path" in livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) }
+          : { title: livePagesTitle(livePage.paths, livePage.action), message: livePagesBody(livePage.action),
+            details: livePage.paths.map((path) => ["File", path, path.length] as const) }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } },
         target: { to: "live-documents", ...(reveal === null ? {} : { reveal }) } });
     },
@@ -3273,7 +3302,7 @@ export function DesktopWorkspaceShell(props: {
     const current = () => workspaceIdRef.current === owner;
     const whileCurrent = (run?: () => void) => run && (() => { if (current()) run(); });
     return {
-      onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => {
+      onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange | PendingTreeChange[], livePage?: LivePageRefused) => {
         if (current()) reportExplorerError(message, cause, whileCurrent(retry), change, livePage);
       },
       onNotice: (message: string, undo?: () => void) => {
@@ -4167,16 +4196,22 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
-      // A move that succeeds from the tree takes back every failed move of
-      // the same path, whatever its destination, since their Try again would
-      // now fail.
+      // A move that succeeds from the tree takes back every notice that names
+      // a failed move of the same path, whatever its destination, since its
+      // Try again would now fail.
       for (const change of changes) {
-        if (change.kind === "folder" || change.kind === "file") {
+        if (isTreeMove(change)) {
           for (const [identity, failed] of failedMoves.current) {
-            if (failed.move.fromPath === change.fromPath) clearFailedMove(identity);
+            if (failed.some((one) => one.move.fromPath === change.fromPath)) clearFailedMove(identity);
           }
         }
         if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
+      }
+      // A notice naming several refused paths goes once one of them changes.
+      for (const [batch, paths] of refusedBatchesRef.current) {
+        if (!changes.some((change) => paths.has(sourcePath(change)))) continue;
+        refusedBatchesRef.current.delete(batch);
+        clearIdentity(batch);
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
