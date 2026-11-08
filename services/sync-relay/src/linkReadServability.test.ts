@@ -55,6 +55,16 @@ it.each(["view","comment","edit","read-only","read-write"] as const)("rechecks %
   } finally {closed.dispose();f.dispose();}
 });
 
+it("refuses a holder's live request that also names an agent's address",async()=>{
+  const f=await fixture("edit");
+  try {
+    const resolver=createLinkLiveBrowserResolver({storage:f.storage,linkKey:LINK_KEY,publicEditRelease:{version:1}});
+    const headers={authorization:`LinkCapability ${f.capabilityToken}`,"x-dohc-link-profile-secret":"p".repeat(43)};
+    expect(await resolver.resolve(new Request("https://relay.test",{headers:{...headers,"x-dohc-agent-resource":"https://share.example.test/mcp/s/x"}}),"abcdefghijkl")).toBeNull();
+    expect(await resolver.resolve(new Request("https://relay.test",{headers}),"abcdefghijkl")).not.toBeNull();
+  } finally {f.dispose();}
+});
+
 it.each([
   ["edit","/sync/link/discussion"],
   ["read-write","/sync/link/chat/channels"],

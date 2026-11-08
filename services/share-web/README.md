@@ -33,7 +33,7 @@ An agent signs in with the standard MCP authorization (MCP 2025-06-18):
 1. The MCP client connects without a token. share-web answers 401, and its `WWW-Authenticate` header names `/.well-known/oauth-protected-resource/mcp/s/<secret>`.
 2. The client reads that document and `/.well-known/oauth-authorization-server`, then registers at `/oauth/register`.
 3. The client opens `/oauth/authorize` in a browser with an S256 PKCE challenge. Its `resource` is the full MCP address.
-4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, and the host the browser returns to.
+4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, and the host the browser returns to. Anyone who has the MCP address can do this step, because the address holds the link secret.
 5. The client trades the code for tokens at `/oauth/token`. It sends `Authorization: Bearer <access token>` on each MCP request.
 
 An access token lasts 1 hour. The client gets a new one with its refresh token.
@@ -44,6 +44,7 @@ Resetting, widening, or revoking the link, or deleting its share, ends its agent
 
 Browser MCP clients can call the MCP address, both metadata documents, `/oauth/register`, and `/oauth/token` from any origin. These answers allow no credentials.
 The consent page and its decision accept only this origin. The decision also needs the cookie that the same browser received with the page.
+These checks stop another site from allowing an agent through a person's browser. They do not protect the link. The MCP address gives the link's full access, so share it only as you share the link.
 
 The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
 On a Group share that is the Group's channel, read with `dohc_read_channel`.
@@ -65,12 +66,13 @@ It needs the Public Edit release, not the document host. The relay names the lin
 `accepted` means the relay recorded the change in the owner's history. The owner's computer applies it at its next sync.
 An MCP request that carries a write may be up to 9 MiB, room for 4 MiB of text that JSON escapes in two bytes. A file can go as base64 instead of text, as the viewer sends it in a request of up to 7 MiB.
 A write goes in an MCP request of its own, never in a batch.
-share-web holds one such body for a link's browsers, one for its agents, and four in all. Other MCP requests stay at 32 KiB.
+share-web holds one such body per link, for its browsers and agents together, and four in all. Other MCP requests stay at 32 KiB.
 Settled file reads can lag live documents. File reads are limited to 256 KiB; other tool results are limited to 1 MiB.
 
 share-web keeps no agent token. Browser cookies cannot authenticate MCP requests, and share-web refuses a token in the query string.
 A token never contains the relay workload key or a browser account credential.
-Do not log `Authorization` headers, `/oauth/token` request or response bodies, consent form fields, or consent cookies.
+Each refused bearer spends one from its client address's allowance of 30, which refills one every two seconds. When the allowance is spent, every MCP request from that address gets 429 until it refills. A valid bearer never spends from it.
+Do not log `Authorization` headers, `/oauth/token` request or response bodies, consent form fields, or consent cookies. Do not log MCP paths or the `/oauth/authorize` query, which hold the link secret. [Public origin and proxy](#public-origin-and-proxy) lists each one.
 
 Each edit opens a fresh live connection and adds a Yjs client clock to the document.
 This implementation is for bounded edits, not high-frequency automated rewriting.
@@ -162,10 +164,14 @@ The relay still performs a bounded credential lookup to distinguish a valid
 secret after the per-IP allowance is exhausted; the global budget bounds this
 work. Request bodies and relay responses have size limits and ten-second deadlines.
 
-Link secrets reach the server only in a POST body or cookie; URL fragments stay
-in the browser. Strip query strings from proxy access logs. Do not log request
-bodies, `Cookie`, `Set-Cookie`, or the internal client-IP header. Disable body
-capture in traces and error reports. `share-web` already sends
+A link secret reaches the server in a POST body, a cookie, an MCP path, or the
+`/oauth/authorize` query. URL fragments stay in the browser. Never log the path
+of a request under `/mcp/s/` or `/.well-known/oauth-protected-resource/mcp/s/`;
+removing the query string does not remove the secret there. Never log the query
+of `/oauth/authorize`, or the `Referer` header, which carries that query on the
+consent decision. Do not log request bodies, `Authorization`, `Cookie`,
+`Set-Cookie`, or the internal client-IP header. Disable body capture in traces
+and error reports. `share-web` already sends
 `private, no-store`; the proxy must not override or cache that response.
 
 If the relay is unavailable or sends an invalid response to an authenticated

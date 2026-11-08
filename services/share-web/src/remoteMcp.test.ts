@@ -1,7 +1,7 @@
-import {afterEach, expect, it} from "vitest";
+import {afterEach, expect, it, onTestFinished, vi} from "vitest";
 import { createHash, randomBytes } from "node:crypto";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
-import {createShareWebApplication} from "./server";
+import {MCP_FAILED_SIGN_IN_CAPACITY, createShareWebApplication} from "./server";
 import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {asRecord} from "@dohc/workspace-core/records";
 
@@ -93,7 +93,8 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
         request.headers.has("x-dohc-link-profile-secret") || request.headers.has("cookie") ||
         request.headers.get("x-dohc-relay-exchange-key") !== "exchange-key-at-least-thirty-two-bytes") return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
-      if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
+      // As the relay does for an agent, the share answer names the link's grant.
+      if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123, grantId: "grant-a"});
       if (path === "/sync/link/current") return Response.json({ok: true, files: automationText !== undefined
         ? [{ path: "Tasks/automations.yaml", blobSha256: createHash("sha256").update(automationText).digest("hex"), contentKind, automationSwitchable: true }]
         : [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
@@ -264,6 +265,27 @@ it("does not turn a browser session token into an agent bearer", async () => {
   }
 });
 
+it("limits refused bearers by client address, and never spends for a valid one", async () => {
+  // A stopped clock: the address's budget cannot refill while the test runs.
+  vi.useFakeTimers({toFake: ["Date"]});
+  onTestFinished(() => { vi.useRealTimers(); });
+  const f = fixture(); const bearer = f.token();
+  const send = (address: string, authorization: string) => f.send(mcpPath, {method: "POST", body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"}),
+    headers: {authorization, "content-type": "application/json", accept: "application/json, text/event-stream", "x-dohc-share-web-client-ip": address}});
+  // A valid bearer never spends from its address.
+  for (let i = 0; i <= MCP_FAILED_SIGN_IN_CAPACITY; i++) expect((await send("192.0.2.1", `Bearer ${bearer}`)).status).toBe(200);
+  // An unknown token and a malformed header each spend one, until the address waits.
+  for (let i = 0; i < MCP_FAILED_SIGN_IN_CAPACITY; i++) {
+    expect((await send("192.0.2.2", i % 2 ? "Bearer short" : `Bearer ${"D".repeat(43)}`)).status).toBe(401);
+  }
+  const relayCalls = f.calls.length;
+  expect((await send("192.0.2.2", `Bearer ${"D".repeat(43)}`)).status).toBe(429);
+  expect((await send("192.0.2.2", `Bearer ${bearer}`)).status).toBe(429);
+  expect(f.calls.length).toBe(relayCalls);
+  // Another address is not affected, and the scheme's case does not matter.
+  expect((await send("192.0.2.3", `bearer ${bearer}`)).status).toBe(200);
+});
+
 it("rejects oversized and malformed MCP bodies without tool side effects", async () => {
   const f = fixture(); const bearer = f.token();
   const send = (body: string) => f.send(mcpPath, {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"}, body});
@@ -371,6 +393,8 @@ it.each([
   expect(summary).toEqual(expect.any(String));
   expect(summary).toContain("Trip");
   expect(asRecord(result.structuredContent)).not.toHaveProperty("sharerName");
+  // share-web keeps the grant the relay named for its own limits.
+  expect(asRecord(result.structuredContent)).not.toHaveProperty("grantId");
   expect(summary).toContain(access === "view" ? "You can read files and comments." :
     access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
   expect(summary).toContain("Included paths: docs, plan.md.");

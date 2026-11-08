@@ -29,10 +29,18 @@ keeps no client, code, token, or authority, so a restart signs no agent out.
 The relay starts a sign-in only for `<share-web origin>/mcp/s/<secret>` of a
 link it can serve. The consent decision must come from share-web's own
 `Origin` and carry a `__Host-` cookie, set for that one request, that matches
-the form's secret. A page on another origin can neither read the form nor set
-the cookie, so it cannot allow an agent. The metadata, registration, token,
-and MCP answers allow any origin but no credentials. The consent page and its
-decision send no CORS headers.
+the form's secret. These checks stop a page on another site from allowing an
+agent through a person's browser. They do not limit who can sign in. The MCP
+address holds the link secret, so anyone who has it can open the consent page,
+allow their own agent, and get the link's full access. Treat the MCP address
+as the link itself.
+
+The consent page sends a `same-origin` referrer policy, so its form's post
+carries the `Origin` the decision checks. Its CSP lets the form post only to
+share-web and follow the redirect to the origin of the redirect URI the relay
+accepted. The sign-in error pages allow no form. The metadata, registration,
+token, and MCP answers allow any origin but no credentials. The consent page
+and its decision send no CORS headers.
 
 Share-web calls the relay's link routes for an agent with
 `Authorization: DohcAgent <access token>`, the MCP address in

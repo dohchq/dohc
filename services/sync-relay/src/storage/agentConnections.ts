@@ -1,4 +1,5 @@
 import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
+import { AGENT_REDIRECT_URI_LIMIT, AGENT_URI_CHAR_LIMIT } from "@dohc/security-contract/wire-patterns";
 import type { StorageContext } from "./context";
 import type { SqliteDb, SyncRelayLinkPrincipalRow } from "./types";
 import { currentShareGrantSql } from "./currentShareGrant";
@@ -27,8 +28,6 @@ export const AGENT_CLIENT_LIMIT = 50_000;
 export const AGENT_UNUSED_CLIENT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export const AGENT_CONNECTION_PAGE_SIZE = 50;
 export const AGENT_CLIENT_NAME_LIMIT = 100;
-export const AGENT_REDIRECT_URI_LIMIT = 10;
-export const AGENT_URI_CHAR_LIMIT = 2_048;
 export const AGENT_STATE_CHAR_LIMIT = 512;
 
 export function initializeAgentConnectionSchema(db: SqliteDb): void {

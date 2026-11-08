@@ -17,7 +17,8 @@ export function createLinkLiveBrowserResolver(options: { storage: SyncRelayStora
       // The same scheme as every other link route, so a capability is never read as another credential.
       const bearer = /^LinkCapability ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "")?.[1];
       const profile = request.headers.get("x-dohc-link-profile-secret");
-      if (!bearer || !profile || !LINK_SECRET_PATTERN.test(profile)) return null;
+      // A holder never names an agent's address.
+      if (!bearer || !profile || !LINK_SECRET_PATTERN.test(profile) || request.headers.has("x-dohc-agent-resource")) return null;
       const current = validateLinkCapability({ storage, capabilityToken: bearer, linkKey, nowMs: Date.now(), publicEditRelease: options.publicEditRelease });
       if (!current || (access === "edit" && current.access !== "edit")) return null;
       const share = storage.getShare(current.shareId);

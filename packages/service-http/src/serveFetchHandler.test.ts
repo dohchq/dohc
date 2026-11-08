@@ -55,7 +55,8 @@ describe("serveFetchHandler", () => {
 
   it("bounds ordinary body receipt after headers when streaming is configured", async () => {
     const handler = vi.fn(async () => new Response("ok"));
-    const {port, server} = await serve({streamBody: url => url.pathname === "/import", handler});
+    const {port, server} = await serve({streamBody: url => url.pathname === "/import", handler,
+      timedOut: url => new Response(null, {status: 408, headers: {"x-path": url.pathname}})});
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const arrived = new Promise<void>(resolve => server.once("request", () => resolve()));
     const response = new Promise<IncomingMessage>((resolve, reject) => {
@@ -69,6 +70,7 @@ describe("serveFetchHandler", () => {
     const refused = await response;
     expect(refused.statusCode).toBe(408);
     expect(refused.headers.connection).toBe("close");
+    expect(refused.headers["x-path"]).toBe("/ordinary");
     refused.resume();
     expect(handler).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
@@ -342,15 +344,16 @@ describe("serveFetchHandler", () => {
     expect(handled).toBe(false);
   });
 
-  it("answers a throwing handler with the failure response", async () => {
+  it("answers a throwing handler with the failure response for its URL", async () => {
     const { port } = await serve({
       handler: async () => {
         throw new Error("boom");
       },
+      failure: (url) => Response.json({ ok: false, error: "failed", path: url.pathname }, { status: 500 }),
     });
     const response = await fetch(`http://127.0.0.1:${port}/x`);
     expect(response.status).toBe(500);
-    expect(await response.text()).toBe('{"ok":false,"error":"failed"}');
+    expect(await response.text()).toBe('{"ok":false,"error":"failed","path":"/x"}');
   });
 
   it("forwards every set-cookie header separately and lets prepareHeaders stamp the client", async () => {

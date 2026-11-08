@@ -104,6 +104,9 @@ export function createLinkReadRoutes(
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
         ...linkChannel(fresh.grantId),
         ...freshness,
+        // share-web learns a holder's grant at exchange. It learns an agent's
+        // here, to count the agent with the link's holders, and keeps it to itself.
+        ...(fresh.credential.kind === "agent" ? { grantId: fresh.grantId } : {}),
       }, request.signal);
     }
 

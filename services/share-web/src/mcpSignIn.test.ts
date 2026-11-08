@@ -5,7 +5,7 @@ import {
   RELAY_EXCHANGE_KEY, request, testHandler, testStorage,
 } from "../../sync-relay/src/testing";
 import { COLLECTION_WRITES_PATH } from "./collectionWrites";
-import { CONSENT_PAGE_CSP, MCP_CORS_HEADERS } from "./mcpSignIn";
+import { MCP_CORS_HEADERS, signInPageCsp } from "./mcpSignIn";
 import {
   authorizePath, consentForm, decide, LOOPBACK_REDIRECT, pkce, register, registeredClient, signInAgent, tokenRequest,
   type ShareWebSend,
@@ -38,11 +38,12 @@ function expectNoStore(response: Response) {
   expect(response.headers.get("pragma")).toBe("no-cache");
 }
 
-// A page that cannot go back to the agent: no redirect, no CORS.
+// A page that cannot go back to the agent: no form, no redirect, no CORS.
 async function expectErrorPage(response: Response, status: number) {
   expect(response.status).toBe(status);
   expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
-  expect(response.headers.get("content-security-policy")).toBe(CONSENT_PAGE_CSP);
+  expect(response.headers.get("content-security-policy")).toBe(signInPageCsp("'none'"));
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   expect(response.headers.has("location")).toBe(false);
   expect(response.headers.has("access-control-allow-origin")).toBe(false);
   expect(await response.text()).toContain("dohc could not connect this agent");
@@ -168,8 +169,10 @@ it("registers a public client, and refuses metadata it cannot use", async () => 
   });
   const refusals: Array<[Record<string, unknown>, string]> = [
     [{ redirect_uris: [] }, "invalid_redirect_uri"],
-    [{ redirect_uris: ["http://agent.example.test/callback"] }, "invalid_client_metadata"],
-    [{ redirect_uris: [`${LOOPBACK_REDIRECT}#fragment`] }, "invalid_client_metadata"],
+    [{ redirect_uris: ["http://agent.example.test/callback"] }, "invalid_redirect_uri"],
+    [{ redirect_uris: [`${LOOPBACK_REDIRECT}#fragment`] }, "invalid_redirect_uri"],
+    [{ redirect_uris: [LOOPBACK_REDIRECT, "https://user:pass@agent.example.test/callback"] }, "invalid_redirect_uri"],
+    [{ redirect_uris: [LOOPBACK_REDIRECT], client_name: "Planner\u0007" }, "invalid_client_metadata"],
     [{ redirect_uris: [LOOPBACK_REDIRECT], token_endpoint_auth_method: "client_secret_basic" }, "invalid_client_metadata"],
     [{ redirect_uris: [LOOPBACK_REDIRECT], grant_types: ["client_credentials"] }, "invalid_client_metadata"],
     [{ redirect_uris: [LOOPBACK_REDIRECT], response_types: ["token"] }, "invalid_client_metadata"],
@@ -225,8 +228,11 @@ it("serves the consent page with its own headers and a cookie for this request o
   const page = await s.send(authorizePath({ clientId, resource: resourceOf(s.secret), challenge: pkce().challenge }));
   expect(page.status).toBe(200);
   expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
-  expect(page.headers.get("content-security-policy")).toBe(CONSENT_PAGE_CSP);
-  expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+  // The form posts here and follows its 303 to the agent's redirect URI. A
+  // same-origin referrer makes the post carry an Origin the decision accepts.
+  expect(page.headers.get("content-security-policy")).toBe(signInPageCsp("'self' http://127.0.0.1:33418"));
+  expect(page.headers.get("content-security-policy")).toContain("form-action 'self' http://127.0.0.1:33418;");
+  expect(page.headers.get("referrer-policy")).toBe("same-origin");
   expect(page.headers.get("x-content-type-options")).toBe("nosniff");
   expect(page.headers.get("cache-control")).toBe("private, no-store");
   expect(page.headers.has("access-control-allow-origin")).toBe(false);
@@ -235,7 +241,8 @@ it("serves the consent page with its own headers and a cookie for this request o
     .toMatch(/^__Host-dohc_consent_[A-Za-z0-9_-]{16}=[A-Za-z0-9_-]{43}; Path=\/; Max-Age=600; Secure; HttpOnly; SameSite=Strict$/u);
   const form = await consentForm(page);
   expect(form.cookie.split("=")[1]).toBe(form.secret);
-  expect(form.html).toContain("Planner &#60;script&#62;<span class=\"note\">Name reported by the agent</span>");
+  expect(form.html).toContain('<meta name="referrer" content="same-origin">');
+  expect(form.html).toContain("<bdi>Planner &#60;script&#62;</bdi><span class=\"note\">Name reported by the agent</span>");
   expect(form.html).not.toContain("<script>");
   expect(form.html).toContain("Can view");
   expect(form.html).toContain("127.0.0.1:33418");

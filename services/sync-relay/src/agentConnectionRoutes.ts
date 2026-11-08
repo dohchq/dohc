@@ -1,6 +1,8 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { PublicEditRelease } from "@dohc/security-contract";
-import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
+import {
+  AGENT_REDIRECT_URI_LIMIT, AGENT_URI_CHAR_LIMIT, isAgentRedirectUri, LINK_SECRET_PATTERN,
+} from "@dohc/security-contract/wire-patterns";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound, relayError, RelayError, RELAY_ERRORS } from "./errors";
@@ -19,9 +21,7 @@ import type { SyncRelayStorage } from "./storage";
 import {
   AGENT_ACCESS_TOKEN_TTL_MS,
   AGENT_CLIENT_NAME_LIMIT,
-  AGENT_REDIRECT_URI_LIMIT,
   AGENT_STATE_CHAR_LIMIT,
-  AGENT_URI_CHAR_LIMIT,
   type AgentConnectionCursor,
   type AgentConnectionRow,
 } from "./storage/agentConnections";
@@ -77,21 +77,10 @@ function fields(input: Record<string, unknown>, required: readonly string[], opt
   }
 }
 
-// RFC 8252 and OAuth 2.1: HTTPS, or HTTP to a loopback address for a native client.
+// share-web checks the same rule first, to answer invalid_redirect_uri.
 function redirectUri(value: unknown): string {
-  const uri = text(value, AGENT_URI_CHAR_LIMIT);
-  let parsed: URL;
-  try {
-    parsed = new URL(uri);
-  } catch {
-    throw new Refused();
-  }
-  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "localhost";
-  if (parsed.hash || parsed.username || parsed.password ||
-      !(parsed.protocol === "https:" || (parsed.protocol === "http:" && loopback))) {
-    throw new Refused();
-  }
-  return uri;
+  if (!isAgentRedirectUri(value)) throw new Refused();
+  return value;
 }
 
 function toAgent(connection: AgentConnectionRow) {

@@ -319,7 +319,7 @@ it("carries an agent's write larger than an ordinary MCP request, one such body 
   const mcpPath = new URL(second.resource).pathname;
   const headers = { authorization: `Bearer ${second.accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
   let finish!: () => void;
-  // A body past an ordinary request's size takes the one large slot of the link's agents while it arrives.
+  // A body past an ordinary request's size takes the link's one large slot while it arrives.
   const held = s.send(mcpPath, { method: "POST", headers, duplex: "half", body: new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(new TextEncoder().encode(`{"params":{"padding":"${"x".repeat(40 * 1024)}"},`));
@@ -331,19 +331,19 @@ it("carries an agent's write larger than an ordinary MCP request, one such body 
   }) } as RequestInit);
   const large = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { padding: "x".repeat(40 * 1024) } });
   await expect.poll(async () => (await s.send(mcpPath, { method: "POST", headers, body: large })).status).toBe(429);
-  // Another agent of the link waits too: its agents share the slot by the link's MCP address.
+  // Another agent of the link waits too, and so does the link's browser: one slot per link.
   const other = await signInAgent(s.send, ORIGIN, s.secret);
   expect((await s.send(mcpPath, { method: "POST", headers: { ...headers, authorization: `Bearer ${other.accessToken}` }, body: large })).status)
     .toBe(429);
-  // share-web knows an agent's link only by that address, so the browsers'
-  // slot, keyed by the grant, is separate. The relay limits the link's writes either way.
   const b = await browser(s);
-  expect(await b.write("browser-while-held", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }]))
-    .toEqual({ ok: true, outcome: "accepted", submitId: "browser-while-held" });
+  const browserWrite = () => b.write("browser-after-held", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }]);
+  expect(await browserWrite()).toEqual({ ok: false, outcome: "rate-limited" });
   // An ordinary request still goes through meanwhile.
   expect((await mcp.listTools()).tools.length).toBeGreaterThan(0);
   finish();
   expect((await held).status).toBe(200);
+  // The slot is free again, and the browser's write goes through.
+  expect(await browserWrite()).toEqual({ ok: true, outcome: "accepted", submitId: "browser-after-held" });
 });
 
 it("carries an agent's text whose JSON escapes double it, as far as the browser's base64 carries it", async () => {

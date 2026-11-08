@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readBoundedJson } from "@dohc/service-http";
-import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
+import { AGENT_REDIRECT_URI_LIMIT, isAgentRedirectUri, LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { asRecord } from "@dohc/workspace-core";
 
 // The standard MCP sign-in for a share link (MCP 2025-06-18 authorization):
@@ -69,9 +69,33 @@ button[value=allow]{background:var(--accent);border-color:var(--accent);color:va
 button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 `;
 const CONSENT_STYLE_HASH = createHash("sha256").update(CONSENT_STYLE).digest("base64");
-/** The consent page's own policy: its style block, and a form that posts only here. */
-export const CONSENT_PAGE_CSP = `default-src 'none'; style-src 'sha256-${CONSENT_STYLE_HASH}'; base-uri 'none'; ` +
-  "form-action 'self'; frame-ancestors 'none'";
+
+/** A sign-in page's own headers, which share-web sends in place of its defaults. */
+export interface SignInPagePolicy {
+  contentSecurityPolicy: string;
+  referrerPolicy: "same-origin" | "no-referrer";
+}
+
+const pagePolicies = new WeakMap<Response, SignInPagePolicy>();
+/** The policy of a page this module made, or null for any other answer. */
+export function signInPagePolicy(answer: Response): SignInPagePolicy | null {
+  return pagePolicies.get(answer) ?? null;
+}
+
+/** A page's style block, and where its form may post: `'none'` for a page with no form. */
+export function signInPageCsp(formAction: string): string {
+  return `default-src 'none'; style-src 'sha256-${CONSENT_STYLE_HASH}'; base-uri 'none'; form-action ${formAction}; frame-ancestors 'none'`;
+}
+
+/**
+ * The consent form posts here, and the browser follows its 303 to the
+ * redirect URI the relay accepted, so both are form targets. CSP cannot name
+ * an IPv6 address, so a redirect to `[::1]` allows its scheme.
+ */
+function consentFormAction(redirectUri: string): string {
+  const target = new URL(redirectUri);
+  return `'self' ${target.hostname.startsWith("[") ? target.protocol : target.origin}`;
+}
 
 const ACCESS_LABELS: Readonly<Record<string, string>> = {view: "Can view", comment: "Can comment", edit: "Can edit"};
 
@@ -79,20 +103,23 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/gu, (character) => `&#${character.charCodeAt(0)};`);
 }
 
-function page(title: string, content: string, status = 200, headers: HeadersInit = {}): Response {
+function page(title: string, content: string, policy: SignInPagePolicy, status = 200, headers: HeadersInit = {}): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    `<meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title><style>${CONSENT_STYLE}</style></head>` +
+    `<meta name="referrer" content="${policy.referrerPolicy}"><title>${escapeHtml(title)}</title><style>${CONSENT_STYLE}</style></head>` +
     `<body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`;
   const result = new Response(html, {status, headers});
   result.headers.set("content-type", "text/html; charset=utf-8");
-  result.headers.set("content-security-policy", CONSENT_PAGE_CSP);
+  result.headers.set("content-security-policy", policy.contentSecurityPolicy);
+  result.headers.set("referrer-policy", policy.referrerPolicy);
+  pagePolicies.set(result, policy);
   return result;
 }
 
 // A sign-in that cannot go back to the agent: before the relay accepted the
 // redirect URI, a redirect could send the browser anywhere.
 function errorPage(message: string, status = 400): Response {
-  return page("dohc could not connect this agent", `<p class="error">${escapeHtml(message)}</p>`, status);
+  return page("dohc could not connect this agent", `<p class="error">${escapeHtml(message)}</p>`,
+    {contentSecurityPolicy: signInPageCsp("'none'"), referrerPolicy: "no-referrer"}, status);
 }
 
 const START_AGAIN = "Start the sign-in again from your agent.";
@@ -213,9 +240,13 @@ export function createMcpSignIn(options: {
       return invalid("Send the client metadata as JSON, at most 8 KiB.");
     }
     if (!metadata) return invalid("Send the client metadata as a JSON object.");
+    // RFC 7591 section 3.2.2: a bad redirect URI has its own error.
     const redirectUris = metadata.redirect_uris;
-    if (!Array.isArray(redirectUris) || redirectUris.length === 0 || !redirectUris.every((uri) => typeof uri === "string")) {
-      return oauthError(400, "invalid_redirect_uri", "Send redirect_uris as a list of one or more URIs.");
+    if (!Array.isArray(redirectUris) || redirectUris.length === 0 || redirectUris.length > AGENT_REDIRECT_URI_LIMIT) {
+      return oauthError(400, "invalid_redirect_uri", `Send redirect_uris as a list of 1 to ${AGENT_REDIRECT_URI_LIMIT} URIs.`);
+    }
+    if (!redirectUris.every(isAgentRedirectUri)) {
+      return oauthError(400, "invalid_redirect_uri", "Each redirect URI must use HTTPS, or HTTP to a loopback address, with no fragment or user name.");
     }
     if (metadata.token_endpoint_auth_method !== undefined && metadata.token_endpoint_auth_method !== "none") {
       return invalid("token_endpoint_auth_method must be none.");
@@ -234,10 +265,8 @@ export function createMcpSignIn(options: {
     const answer = await relay("/sync/link/agent-clients", {
       registration: "registered", redirectUris, ...(clientName ? {clientName} : {}),
     }, request);
-    if (answer.status === 404) {
-      return oauthError(400, "invalid_client_metadata",
-        "Each redirect URI must use HTTPS, or HTTP to a loopback address, with no fragment. client_name must be 1 to 100 characters without control characters.");
-    }
+    // The redirect URIs passed the relay's own rule above, so its refusal is the name.
+    if (answer.status === 404) return invalid("client_name must be 1 to 100 characters without control characters.");
     if (!answer.value || typeof answer.value.clientId !== "string") return oauthError(503, "temporarily_unavailable");
     return Response.json({
       client_id: answer.value.clientId,
@@ -293,7 +322,7 @@ export function createMcpSignIn(options: {
       `<dt>Share</dt><dd>${escapeHtml(typeof value.subjectName === "string" ? value.subjectName : "Untitled share")}</dd>` +
       `<dt>Access</dt><dd>${escapeHtml(ACCESS_LABELS[value.access] ?? value.access)}</dd>` +
       `<dt>Agent</dt><dd>${agentName === null ? "Agent<span class=\"note\">The agent reported no name</span>"
-        : `${escapeHtml(agentName)}<span class="note">Name reported by the agent</span>`}</dd>` +
+        : `<bdi>${escapeHtml(agentName)}</bdi><span class="note">Name reported by the agent</span>`}</dd>` +
       `<dt>Returns to</dt><dd>${escapeHtml(new URL(redirectUri).host)}</dd>` +
       "</dl>" +
       `<form method="post" action="${DECISION}">` +
@@ -302,7 +331,10 @@ export function createMcpSignIn(options: {
       "<button type=\"submit\" name=\"decision\" value=\"cancel\">Cancel</button>" +
       "<button type=\"submit\" name=\"decision\" value=\"allow\">Allow</button>" +
       "</form>";
-    return page("Allow this agent to use the share link?", content, 200, {
+    // A same-origin referrer makes the form's post carry this origin, which
+    // the decision requires. The cross-origin redirect still carries none.
+    return page("Allow this agent to use the share link?", content,
+      {contentSecurityPolicy: signInPageCsp(consentFormAction(redirectUri)), referrerPolicy: "same-origin"}, 200, {
       "set-cookie": `${consentCookieName(requestId)}=${secret}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Strict`,
     });
   }

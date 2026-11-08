@@ -1,11 +1,12 @@
 import type { TokenBucketLimiter } from "@dohc/service-http";
 import type { PublicEditRelease } from "@dohc/security-contract";
+import { AGENT_URI_CHAR_LIMIT } from "@dohc/security-contract/wire-patterns";
 import { invalidLinkCapability, relayError } from "./errors";
 import { hashAgentCredential, servableFiles, type ValidatedLinkCapability } from "./linkSecurity";
 import { authorizeLinkShareAction } from "./shareAuthorization";
 import type { ShareSelector } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
-import { AGENT_URI_CHAR_LIMIT, type AgentAccessCheck, type AgentConnectionRow } from "./storage/agentConnections";
+import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnections";
 
 // One authority for a link route, from either credential share-web sends:
 //

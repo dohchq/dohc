@@ -221,8 +221,10 @@ describe("an agent reading its link", () => {
     for (const path of ["/sync/link/share", "/sync/link/current", "/sync/link/log?current=true&since=0&limit=100"]) {
       const asAgent = await ok(await f.h(agentRequest(agent, path)));
       const asHolder = await ok(await f.h(linkRequest(holder, path)));
-      expect(asAgent).toEqual(asHolder);
+      // Only the agent's share answer names its grant, for share-web's per-link limits.
+      expect(asAgent).toEqual(path === "/sync/link/share" ? { ...asHolder, grantId: link.grantId } : asHolder);
     }
+    expect(await ok(await f.h(linkRequest(holder, "/sync/link/share")))).not.toHaveProperty("grantId");
     expect((await ok(await f.h(agentRequest(agent, "/sync/link/current")))).files)
       .toEqual([expect.objectContaining({ path: "docs/shared.md", blobSha256: sha256(SHARED) })]);
     const blob = await f.h(agentRequest(agent, `/sync/link/blobs/${sha256(SHARED)}`));
