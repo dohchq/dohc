@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import type { RefreshShareMountsResult } from "../ipc/bridgeContract";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
 import { createAutomationButtons } from "./collections/useAutomationButtons";
@@ -228,6 +229,131 @@ describe("workspace share handoff placement", () => {
     expect(onDismissShareHandoff).toHaveBeenCalledOnce();
     expect(bridge.mountShare).not.toHaveBeenCalled();
     expect(bridge.openSharedView).not.toHaveBeenCalled();
+  });
+});
+
+describe("refreshing shares added to this workspace", () => {
+  // The record keeps the person's own files apart while dohc can't read it,
+  // so the row has no × and ends when that share's refresh completes.
+  it("keeps a share whose collision record dohc can't read in Notices until it refreshes", async () => {
+    const words =
+      "dohc did not update alex because it could not read " +
+      "shared-with-me/alex/.dohc/local/share-refresh/share-collision-record.json. " +
+      "It keeps a refresh from replacing your own files.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const retried = deferred<RefreshShareMountsResult>();
+    const responses: Promise<RefreshShareMountsResult>[] = [
+      Promise.resolve({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }] }),
+      retried.promise,
+    ];
+    const refresh = vi.fn(() =>
+      responses.shift() ?? Promise.resolve<RefreshShareMountsResult>({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] }),
+    );
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    // The polled refresh files the row, and a new row toasts.
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(words);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+
+    // Try again closes Notices and runs the refresh. The row stays while it runs.
+    const refusalRow = () =>
+      within(screen.getByTestId("notice-center")).queryByText(words, { exact: false })?.closest<HTMLElement>("[data-notice-row]") ?? null;
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(refusalRow()).not.toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    // A refresh that fails for another reason has not refreshed that share, so the row stays.
+    await act(async () => {
+      retried.resolve({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0 }] });
+    });
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => expect(screen.getByTestId("notice-center").textContent).toContain("dohc could not refresh 1 share."));
+    const keptRow = refusalRow();
+    expect(keptRow).not.toBeNull();
+
+    // The refresh that completes ends the row.
+    fireEvent.click(within(keptRow!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => {
+      const reopened = screen.getByTestId("notice-center");
+      expect(reopened.textContent).toContain("Shares refreshed — 0 files updated.");
+      expect(within(reopened).queryByText(words, { exact: false })).toBeNull();
+    });
+  });
+
+  // The refused share's row is the toast, so no summary repeats it.
+  it("answers a refresh the person starts with the refused share's row alone", async () => {
+    const words =
+      "dohc did not update alex because it could not read " +
+      "shared-with-me/alex/.dohc/local/share-refresh/share-collision-record.json. " +
+      "It keeps a refresh from replacing your own files.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const refresh = vi.fn(() => Promise.resolve<RefreshShareMountsResult>({
+      results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }],
+    }));
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(words);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(await screen.findByTestId("notice-center")).getByText(words, { exact: false })
+      .closest<HTMLElement>("[data-notice-row]")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(words);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getAllByText(words, { exact: false })).toHaveLength(1);
+    expect(notices.textContent).not.toContain("could not refresh");
+  });
+
+  it("says a share's record was set aside when its refresh stops because the session expired", async () => {
+    const setAside =
+      "dohc could not read its record of your files with the same path as a file in alex. " +
+      "dohc keeps these files apart.";
+    const expired = "Your server session expired. Sign in again, then refresh shares.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const refresh = vi.fn<() => Promise<RefreshShareMountsResult>>()
+      .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }] })
+      .mockResolvedValue({
+        results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }],
+        abortMessage: expired,
+      });
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    // The person starts a refresh with Try again on the share's row.
+    await screen.findByTestId("workspace-shell-error");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText("dohc did not update alex", { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => {
+      const reopened = screen.getByTestId("notice-center");
+      expect(within(reopened).getByText(`Couldn't refresh shares. ${expired}`)).toBeTruthy();
+      expect(within(reopened).getByText(setAside)).toBeTruthy();
+    });
   });
 });
 

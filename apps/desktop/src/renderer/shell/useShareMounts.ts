@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  RefreshShareMountsResult,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
+import { shareNoticePaths, shareUnjournalableNotice } from "../shareUnjournalableNotice";
 import { bridge } from "../bridge";
 import type { ShellErrorKind } from "./useShellError";
 import type { PendingTreeChange } from "../workbench/file-tree-optimistic";
@@ -8,6 +12,20 @@ import {
   shareRefreshSummary,
   shareUnmountProjection,
 } from "./shareProjection";
+
+// A mount keeps its refresh records where every shared view does, in its own
+// .dohc/local/share-refresh, so the person finds this one under its label.
+const collisionRecordPath = (label: string) =>
+  `shared-with-me/${label}/.dohc/local/share-refresh/share-collision-record.json`;
+const collisionRecordRefusal = (shareId: string) =>
+  `share-mount-collision-record:${shareId}`;
+const keptPathsNotice = (shareId: string) =>
+  `share-mount-kept-paths:${shareId}`;
+const collisionRecordSetAside = (shareId: string) =>
+  `share-mount-collision-record-set-aside:${shareId}`;
+// A share whose refresh files its own refusal row.
+const refusedOnItsRow = (row: RefreshShareMountsResult["results"][number]) =>
+  row.status === "failed" && row.errorKind === "collision-record";
 
 export function useShareMounts(
   workspaceId: string,
@@ -22,6 +40,19 @@ export function useShareMounts(
     kind?: ShellErrorKind,
   ) => void,
   showSuccessNotice: (message: string, undo?: () => void, kind?: ShellErrorKind) => void,
+  reportShellFailure: (failure: {
+    message: string;
+    tone?: "success" | "warning";
+    paths?: readonly string[];
+    retry?: (() => void) | null;
+    noDismiss?: boolean;
+    kind?: ShellErrorKind;
+    identity?: string;
+    repeat?: boolean;
+    quiet?: boolean;
+  }) => void,
+  clearIdentity: (identity: string) => void,
+  clearKind: (...kinds: ShellErrorKind[]) => void,
 ) {
   // Share mounts: the registry is loaded once at boot, so the shell owns a
   // live copy of this workspace's mounts — reloaded after every mount /
@@ -54,9 +85,16 @@ export function useShareMounts(
         foldersLeftBehind: foldersLeftBehind.current,
       });
       if (gone.length > 0) onExplorerPathsChanged(gone);
+      // A removed share has no refresh left to end its refusal row.
+      for (const mount of shareMountsRef.current) {
+        if (!next.some((candidate) => candidate.shareId === mount.shareId)) {
+          clearIdentity(collisionRecordRefusal(mount.shareId));
+          clearIdentity(keptPathsNotice(mount.shareId));
+        }
+      }
       setShareMounts(next);
     },
-    [onExplorerPathsChanged],
+    [clearIdentity, onExplorerPathsChanged],
   );
   const reloadShareMounts = useCallback(async () => {
     const token = ++shareMountsToken.current;
@@ -78,21 +116,85 @@ export function useShareMounts(
   // Announced refreshes share one Notices row, so only the newest may write
   // it: an older one that finishes late must not replace a newer failure.
   const announcedRefreshToken = useRef(0);
+  // Every refresh, polled or not, may file or end a share's refusal row, so
+  // only the newest one to start writes it.
+  const rowsRefreshToken = useRef(0);
+  const refreshShareMountsRef = useRef<(announce?: boolean) => Promise<void>>(
+    async () => undefined,
+  );
+  // A refusal's row is its share's toast. A refresh the person starts toasts
+  // it every time; a polled refresh toasts it only when its row is new. The
+  // other rows of a refresh the person starts go into Notices unread, beside
+  // its summary. Every refresh reports its completed rebuilds, even if a
+  // later refresh has already finished.
+  const reportCollisionRecords = useCallback(
+    (results: RefreshShareMountsResult["results"], announce: boolean, newest: boolean) => {
+      for (const row of results) {
+        if (newest && refusedOnItsRow(row)) {
+          // The record keeps the person's own files apart while dohc can't
+          // read it, so its row has no ×.
+          reportShellFailure({
+            message:
+              `dohc did not update ${row.label} because it could not read ${collisionRecordPath(row.label)}. ` +
+              "It keeps a refresh from replacing your own files.",
+            retry: () => void refreshShareMountsRef.current(true),
+            noDismiss: true,
+            kind: "share-collision-record",
+            identity: collisionRecordRefusal(row.shareId),
+            ...(announce ? {} : { repeat: true }),
+          });
+        } else if (newest && row.status !== "failed" && row.status !== "damaged") {
+          clearIdentity(collisionRecordRefusal(row.shareId));
+        }
+        if (newest && (row.status === "updated" || row.status === "unchanged" || row.status === "ended")) {
+          const paths = row.status === "ended" ? [] : row.unjournalablePaths ?? [];
+          if (paths.length === 0) {
+            clearIdentity(keptPathsNotice(row.shareId));
+          } else {
+            reportShellFailure({
+              message: shareUnjournalableNotice(paths.map(entry => ({
+                ...entry,
+                path: `shared-with-me/${row.label}/${entry.path}`,
+                ...(entry.owner === undefined ? {} : { owner: `shared-with-me/${row.label}/${entry.owner}` }),
+              }))),
+              identity: keptPathsNotice(row.shareId),
+              tone: "warning",
+              retry: () => void refreshShareMountsRef.current(true),
+              paths: shareNoticePaths(paths).map(path => `shared-with-me/${row.label}/${path}`),
+              noDismiss: true,
+              ...(announce ? { quiet: true } : { repeat: true }),
+            });
+          }
+        }
+        if (row.collisionRecordQuarantined) {
+          reportShellFailure({
+            message:
+              `dohc could not read its record of your files with the same path as a file in ${row.label}. ` +
+              "dohc keeps these files apart.",
+            identity: collisionRecordSetAside(row.shareId),
+            tone: "warning",
+            ...(announce ? { quiet: true } : {}),
+          });
+        }
+      }
+    },
+    [clearIdentity, reportShellFailure],
+  );
   const refreshShareMounts = useCallback(
     async (announce = false) => {
       const token = announce ? ++announcedRefreshToken.current : null;
       const newest = () => token !== null && token === announcedRefreshToken.current;
-      let results: Array<{
-        label: string;
-        status: "updated" | "unchanged" | "ended" | "damaged";
-        changedPaths: number;
-      }>;
+      const rowsToken = ++rowsRefreshToken.current;
+      let results: RefreshShareMountsResult["results"];
+      let abortMessage: RefreshShareMountsResult["abortMessage"];
       try {
-        results = (await bridge().refreshShareMounts({ workspaceId })).results;
+        ({ results, abortMessage } = await bridge().refreshShareMounts({ workspaceId }));
       } catch (error) {
         if (newest()) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
         return;
       }
+      const wroteRows = rowsToken === rowsRefreshToken.current;
+      reportCollisionRecords(results, announce, wroteRows);
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
       if (changed > 0) {
         setMountContentEpoch((epoch) => epoch + 1);
@@ -100,18 +202,30 @@ export function useShareMounts(
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
       if (!newest()) return;
-      // A share dohc cannot read is a failure the person has to act on. Each
-      // refresh's summary replaces the last one's row, so a clean refresh
-      // clears an earlier failure.
+      if (abortMessage !== undefined) {
+        reportShellError("Couldn't refresh shares.", new Error(abortMessage), null, "share-refresh");
+        return;
+      }
+      // A share dohc cannot read or did not refresh is a failure the person
+      // has to see. Each refresh's summary replaces the last one's row, so a
+      // clean refresh clears an earlier failure. When every share refused on
+      // its own row, those rows answer, and no summary repeats them.
+      if (wroteRows && results.length > 0 && results.every(refusedOnItsRow)) {
+        clearKind("share-refresh");
+        return;
+      }
       const summary = shareRefreshSummary(results);
-      if (results.some((row) => row.status === "damaged")) {
+      if (results.some((row) => row.status === "failed")) {
+        reportShellError(summary, null, () => void refreshShareMountsRef.current(true), "share-refresh");
+      } else if (results.some((row) => row.status === "damaged")) {
         reportShellError(summary, null, null, "share-refresh");
       } else {
         showSuccessNotice(summary, undefined, "share-refresh");
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts],
+    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts, reportCollisionRecords, clearKind],
   );
+  refreshShareMountsRef.current = refreshShareMounts;
 
   // DesktopRoot owns the live registry snapshot above this keyed shell. A
   // switch consumes that snapshot without another full-registry IPC; registry

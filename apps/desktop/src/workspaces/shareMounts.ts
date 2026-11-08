@@ -558,8 +558,11 @@ export function mountStoreWorkspaceIdFor(
 export function shareMountResultRow(input: {
   shareId: unknown;
   label: unknown;
-  status: "updated" | "unchanged" | "ended" | "damaged";
+  status: ShareMountStatusRow["status"];
   changedPaths: number;
+  errorKind?: ShareMountStatusRow["errorKind"];
+  collisionRecordQuarantined?: true;
+  unjournalablePaths?: ShareMountStatusRow["unjournalablePaths"];
 }): ShareMountStatusRow | null {
   // A count that is not a number claims the minimum rather than carrying a
   // value the schema refuses — NaN and Infinity both survive `Math.trunc`
@@ -572,6 +575,9 @@ export function shareMountResultRow(input: {
     label: input.label,
     status: input.status,
     changedPaths,
+    ...(input.errorKind ? { errorKind: input.errorKind } : {}),
+    ...(input.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
+    ...(input.unjournalablePaths?.length ? { unjournalablePaths: input.unjournalablePaths } : {}),
   });
   return parsed.success ? parsed.data : null;
 }
@@ -586,11 +592,12 @@ export function shareMountResultRow(input: {
  *
  * It gets a status of its own rather than "unchanged", because "unchanged"
  * would hide a mount that can never refresh again behind a word that means
- * everything is fine.
+ * everything is fine. Any other failure is "failed" for the same reason: the
+ * mount did not refresh, and the next refresh tries it again.
  */
 export function classifyShareMountRefreshError(
   error: unknown,
-): { kind: "abort"; message: string } | { kind: "row"; status: "damaged" | "unchanged" } {
+): { kind: "abort"; message: string } | { kind: "row"; status: "damaged" | "failed" } {
   if (error instanceof RelayUnauthorizedError) {
     return {
       kind: "abort",
@@ -598,7 +605,7 @@ export function classifyShareMountRefreshError(
     };
   }
   if (error instanceof SharePinInvalidError) return { kind: "row", status: "damaged" };
-  return { kind: "row", status: "unchanged" };
+  return { kind: "row", status: "failed" };
 }
 
 // Unmount: delete the projection folder (nested engine store included). The

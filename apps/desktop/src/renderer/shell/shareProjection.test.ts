@@ -86,12 +86,42 @@ describe("share refresh summary", () => {
       row({ label: "kim", changedPaths: 2 }),
       row({ label: "alex", status: "damaged" }),
     ]);
-    expect(summary).toContain("Shares refreshed — 2 files updated.");
+    expect(summary).toContain("Refreshed 1 of 2 shares. 2 files updated.");
     expect(
       summary,
       "the summary replaces the damage notice and the fix is lost",
     ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
     expect(summary).not.toContain("grant.");
+  });
+
+  // "Shares refreshed" said every share was current when one wasn't.
+  it("counts the shares that refreshed when one did not", () => {
+    expect(
+      shareRefreshSummary([
+        row({ label: "kim", changedPaths: 4 }),
+        row({ label: "alex", status: "unchanged" }),
+        row({ label: "sam", status: "failed" }),
+      ]),
+    ).toBe("Refreshed 2 of 3 shares. 4 files updated.");
+    expect(
+      shareRefreshSummary([
+        row({ label: "kim", status: "ended" }),
+        row({ label: "sam", status: "failed" }),
+      ]),
+    ).toBe("Refreshed 1 of 2 shares. 0 files updated; kim ended.");
+  });
+
+  it("says no share refreshed instead of counting none", () => {
+    expect(shareRefreshSummary([row({ status: "failed" })])).toBe("dohc could not refresh 1 share.");
+    expect(
+      shareRefreshSummary([
+        row({ label: "kim", status: "failed" }),
+        row({ label: "sam", status: "failed" }),
+        row({ label: "alex", status: "damaged" }),
+      ]),
+    ).toBe(
+      "dohc could not refresh 3 shares. dohc can't read what alex grants. Remove it and add the share again.",
+    );
   });
 
   it("says nothing about damage when every mount is healthy", () => {

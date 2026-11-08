@@ -60,7 +60,6 @@ function repairChangedNothing(
     kind,
     repairedPaths,
     unjournalablePaths,
-    collisionRecordQuarantined,
     failedPaths,
     ...unnamed
   } = outcome;
@@ -72,7 +71,6 @@ function repairChangedNothing(
     repairedPaths === 0 &&
     Array.isArray(unjournalablePaths) &&
     unjournalablePaths.length === 0 &&
-    collisionRecordQuarantined === false &&
     Array.isArray(failedPaths) &&
     failedPaths.length === 0
   );
@@ -83,11 +81,6 @@ function assertOwnedProjectionRepair(
 ): asserts outcome is RepairOutcome {
   if (outcome.kind !== "repair") {
     throw new Error("Shared file repair returned an invalid result.");
-  }
-  if (outcome.collisionRecordQuarantined) {
-    throw new Error(
-      "dohc found a damaged shared file recovery record. Refresh shared files. Retry this action.",
-    );
   }
   if (outcome.unjournalablePaths.length > 0) {
     throw new Error(

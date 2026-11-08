@@ -1757,7 +1757,7 @@ describe("ui-state merge-on-load", () => {
       "A file from this machine already uses this path.",
     );
     expect(notice.textContent).toContain(
-      "Move or remove the file, then refresh.",
+      "Move or rename the file, then refresh.",
     );
     expect(notice.textContent).toContain(
       "dohc could not receive docs/Notes.md. This machine treats docs/Notes.md and docs/notes.md as the same name. " +
@@ -1775,10 +1775,8 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
   });
 
-  it.each([
-    [false, "A refresh can replace them with the shared version, and dohc keeps no copy of yours."],
-    [true, "A refresh can count them as your edits, so check Send changes before you send."],
-  ])("warns when a refresh sets the share collision record aside (takes local writes: %s)", async (takesLocalWrites, risk) => {
+  it.each(["view", "edit"] as const)("reports kept files when a %s refresh rebuilds their saved list", async (access) => {
+    const risk = "dohc keeps these files apart.";
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     bridge.refreshSharedView = vi.fn(async () => ({
       ok: true as const,
@@ -1787,7 +1785,6 @@ describe("ui-state merge-on-load", () => {
       excludedPaths: [],
       unjournalablePaths: [],
       collisionRecordQuarantined: true,
-      takesLocalWrites,
       refusedOps: 0,
       refusedDetail: null,
     }));
@@ -1796,16 +1793,16 @@ describe("ui-state merge-on-load", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
-        access: takesLocalWrites ? "edit" : "view",
+        access,
       },
     });
 
-    // A warning the person may need to act on: an error toast, then a row
+    // A warning the person may need to act on: a warning toast, then a row
     // in Notices. Nothing is inserted above the workbench.
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(
       `dohc could not read this share's record of your files with the same path as a shared file. ${risk}`,
     );
-    // The record is gone, so nothing stays wrong and its row keeps its ×.
+    // The completed rebuild keeps its dismissible notice.
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     const row = within(notices).getByText(risk, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
@@ -1813,14 +1810,13 @@ describe("ui-state merge-on-load", () => {
   });
 
   it("warns that a refresh set the share collision record aside when that refresh then fails", async () => {
-    const risk = "A refresh can replace them with the shared version, and dohc keeps no copy of yours.";
+    const risk = "dohc keeps these files apart.";
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     bridge.refreshSharedView = vi.fn(async (): Promise<RefreshSharedViewResult> => ({
       ok: false,
       changedPaths: 0,
       errorMessage: "Sign in to your server first.",
       collisionRecordQuarantined: true,
-      takesLocalWrites: false,
     }));
     renderShell(bridge, {
       ...WORKSPACE,
@@ -1831,7 +1827,7 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
-    await screen.findByTestId("workspace-shell-error");
+    await screen.findByTestId("workspace-shell-notice");
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
     expect(

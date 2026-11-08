@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
+import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 import type {
   ShareViewFiles,
   ShareViewFilesTarget,
@@ -23,17 +24,21 @@ const validRepair: ShareViewReconcileOutcome = {
   kind: "repair",
   repairedPaths: 0,
   unjournalablePaths: [],
-  collisionRecordQuarantined: false,
   failedPaths: [],
 };
 
+const damagedRecord = new Error("record unreadable");
+
 function owner(input?: {
   statuses?: ShareViewProjectionStatus[];
-  repair?: ShareViewReconcileOutcome;
+  repair?: ShareViewReconcileOutcome | Error;
 }) {
   const statuses = [...(input?.statuses ?? [{ state: "current" }, { state: "current" }])];
   const projectionStatus = vi.fn(async () => statuses.shift() ?? { state: "current" as const });
-  const reconcile = vi.fn(async () => input?.repair ?? validRepair);
+  const reconcile = vi.fn(async () => {
+    if (input?.repair instanceof Error) throw input.repair;
+    return input?.repair ?? validRepair;
+  });
   return {
     files: { projectionStatus, reconcile } satisfies Pick<
       ShareViewFiles,
@@ -117,7 +122,6 @@ describe("createOwnedProjectionRepairer", () => {
         capturedPaths: 0,
         repairedPaths: 0,
         unjournalablePaths: [],
-        collisionRecordQuarantined: false,
       },
     });
 
@@ -128,9 +132,9 @@ describe("createOwnedProjectionRepairer", () => {
 
   it.each([
     {
-      name: "a quarantined collision record",
-      repair: { ...validRepair, collisionRecordQuarantined: true },
-      refusal: /damaged shared file recovery record/i,
+      name: "a damaged collision record",
+      repair: damagedRecord,
+      refusal: /record unreadable/,
     },
     {
       name: "an unjournalable path",
@@ -147,9 +151,20 @@ describe("createOwnedProjectionRepairer", () => {
     await expect(
       ensureCurrent(
         harness.files,
-        `dohc-owned-projection-${repair.kind}`,
+        `dohc-owned-projection-${repair instanceof Error ? "damaged-record" : repair.kind}`,
       ),
     ).rejects.toThrow(refusal);
+  });
+
+  it("passes a refusal from repair through unchanged", async () => {
+    const refusal = await sharedViewRefusal();
+    const harness = owner();
+    harness.reconcile.mockRejectedValue(refusal);
+    await expect(ensureCurrent(harness.files, "dohc-refused-repair")).rejects.toBe(refusal);
+    expect(harness.projectionStatus).toHaveBeenCalledOnce();
+    const failure = new Error("store unavailable");
+    harness.reconcile.mockRejectedValue(failure);
+    await expect(ensureCurrent(harness.files, "dohc-unavailable-repair")).rejects.toBe(failure);
   });
 
   it("waits for the workspace's exclusive lease before repairing", async () => {
@@ -206,9 +221,9 @@ describe("createOwnedProjectionRepairer", () => {
     { name: "lets a write queued behind a no-op repair land", repair: validRepair, writeLands: true },
     { name: "refuses a write queued behind a repair that restored a path", repair: { ...validRepair, repairedPaths: 1 } },
     {
-      name: "refuses a write queued behind a repair that quarantined a recovery record",
-      repair: { ...validRepair, collisionRecordQuarantined: true },
-      refusal: /damaged shared file recovery record/i,
+      name: "refuses a write queued behind a repair that found a damaged record",
+      repair: damagedRecord,
+      refusal: /record unreadable/,
     },
     {
       name: "refuses a write queued behind a repair that found an unjournalable path",
@@ -236,16 +251,16 @@ describe("createOwnedProjectionRepairer", () => {
     },
     {
       name: "refuses a write queued behind an outcome from the wrong reconcile operation",
-      repair: { kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: false },
+      repair: { kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] },
       refusal: /invalid result/i,
     },
     {
       name: "refuses a write queued behind a repair outcome with no repaired-path count",
-      repair: { kind: "repair", unjournalablePaths: [], collisionRecordQuarantined: false, failedPaths: [] } as unknown as ShareViewReconcileOutcome,
+      repair: { kind: "repair", unjournalablePaths: [], failedPaths: [] } as unknown as ShareViewReconcileOutcome,
     },
     {
-      name: "refuses a write queued behind a repair outcome with no quarantine flag",
-      repair: { kind: "repair", repairedPaths: 0, unjournalablePaths: [], failedPaths: [] } as unknown as ShareViewReconcileOutcome,
+      name: "refuses a write queued behind a repair outcome with no failed-path list",
+      repair: { kind: "repair", repairedPaths: 0, unjournalablePaths: [] } as unknown as ShareViewReconcileOutcome,
     },
     {
       name: "refuses a write queued behind a repair outcome with a field the check does not name",
