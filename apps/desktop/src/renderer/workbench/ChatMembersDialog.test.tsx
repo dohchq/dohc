@@ -130,6 +130,26 @@ describe("ChatMembersDialog", () => {
     ]);
   });
 
+  it("treats someone just added as a member before the list reloads", async () => {
+    dialog({ members: [member("ana@example.com")] });
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    await userEvent.type(field(), "ben{Enter}{Enter}");
+    await waitFor(() => expect(screen.getByTestId("chats-share-panel").dataset.view).toBe("members"));
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    await userEvent.type(field(), "ben");
+    expect(screen.getAllByTestId("chats-share-suggestion").map((option) => option.textContent)).toEqual([
+      "Bben@example.comAlready a member",
+    ]);
+  });
+
+  it("puts focus back in the field when Add fails", async () => {
+    dialog({ onAdd: async () => false });
+    await userEvent.type(field(), "new@example.net");
+    await userEvent.click(screen.getByTestId("chats-share-submit"));
+    await waitFor(() => expect(chips()).toEqual(["Nnew@example.net"]));
+    expect(document.activeElement).toBe(field());
+  });
+
   it("keeps whoever was not added picked when one add fails", async () => {
     const { onAdd } = dialog({ onAdd: async ({ email }) => email !== "ben@example.com" });
     await userEvent.type(field(), "ana{Enter}ben{Enter}cy{Enter}");
@@ -181,6 +201,8 @@ describe("memberPicker", () => {
       rest: "nope",
     });
     expect(splitAddresses("a@x")).toEqual({ emails: [], rest: "a@x" });
+    expect(splitAddresses("Ana <ana@x.co> Ben <ben@y.co>")).toEqual({ emails: ["ana@x.co", "ben@y.co"], rest: "" });
+    expect(splitAddresses("a@x.co Ben <ben@y.co>").emails.sort()).toEqual(["a@x.co", "ben@y.co"]);
   });
 
   it("offers a new address only when it is a whole email nobody matches", () => {

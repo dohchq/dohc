@@ -21,15 +21,15 @@ export function splitAddresses(text: string): { emails: string[]; rest: string }
   const emails: string[] = [];
   const rest: string[] = [];
   for (const part of text.split(/[,;\n]+/)) {
-    const bracketed = /<([^<>]+)>/.exec(part)?.[1]?.trim();
-    if (bracketed && isEmail(bracketed)) {
-      emails.push(bracketed);
-      continue;
-    }
-    for (const word of part.trim().split(/\s+/)) {
+    // A part with bracketed addresses names people: keep every address in
+    // it, bracketed or bare, and drop the names.
+    const bracketed = [...part.matchAll(/<([^<>]+)>/g)].map((match) => match[1]!.trim()).filter(isEmail);
+    const words = (bracketed.length > 0 ? part.replace(/<[^<>]*>/g, " ") : part).trim().split(/\s+/);
+    emails.push(...bracketed);
+    for (const word of words) {
       if (word === "") continue;
       if (isEmail(word)) emails.push(word);
-      else rest.push(word);
+      else if (bracketed.length === 0) rest.push(word);
     }
   }
   return { emails, rest: rest.join(" ") };

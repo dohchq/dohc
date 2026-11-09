@@ -699,6 +699,24 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
   });
 
+  it("lets Escape close the people suggestions without leaving the group", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [teamChannel()], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+    expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
+    await userEvent.keyboard("{ArrowDown}");
+    expect(screen.getByTestId("chats-share-suggestions")).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTestId("chats-share-suggestions")).toBeNull();
+    expect(screen.getByTestId("chats-share-panel")).toBeTruthy();
+    expect(screen.getByTestId("chats-channel-view")).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTestId("chats-share-panel")).toBeNull();
+    expect(screen.getByTestId("chats-channel-view")).toBeTruthy();
+  });
+
   // A revocation that landed is a local fact. When the confirming refresh
   // cannot reach the relay, the keep-cached rule must not resurrect the
   // removed person as a member with a live Remove button.

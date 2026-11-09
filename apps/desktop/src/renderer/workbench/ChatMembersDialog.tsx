@@ -17,6 +17,9 @@ const ACCESS: ReadonlyArray<{ value: Access; label: string }> = [
   { value: "view", label: "View only" },
 ];
 
+// A box holding a field wears the field's focus: its border and thin underline.
+const FIELD_FOCUS = "focus-within:border-muted focus-within:shadow-[inset_0_-1px_0_var(--dohc-muted)]";
+
 type Props = {
   groupName: string;
   members: ReadonlyArray<ChatChannelShareGrantRow>;
@@ -53,6 +56,11 @@ export function ChatMembersDialog(props: Props) {
       return left.length === current.length ? current : left;
     });
   }, [memberKeys]);
+  // Someone just added is a member for Add people too, before the list reloads.
+  const allMemberKeys = useMemo(
+    () => new Set([...memberKeys, ...added.map((person) => emailKey(person.email))]),
+    [added, memberKeys],
+  );
   const id = useId();
   const canGoBack = props.members.length > 0 || added.length > 0 || props.readFailure !== null;
 
@@ -64,6 +72,8 @@ export function ChatMembersDialog(props: Props) {
         aria-labelledby={`${id}-title`}
         data-testid="chats-share-panel"
         data-view={view}
+        // Escape belongs to the dialog and its list, never to the chat behind it.
+        data-chat-escape-local="true"
         className="dohc-elevated flex w-[480px] max-w-[calc(100vw-2rem)] flex-col gap-4 rounded-xl border border-line bg-panel p-6"
       >
         <div className="flex items-center gap-2">
@@ -102,7 +112,7 @@ export function ChatMembersDialog(props: Props) {
           <AddPeople
             titleId={`${id}-title`}
             knownPeople={props.knownPeople}
-            memberKeys={memberKeys}
+            memberKeys={allMemberKeys}
             blocked={props.blocked}
             onAdd={props.onAdd}
             onAdded={(people, finished) => {
@@ -144,7 +154,7 @@ function MemberList(props: {
   return (
     <div className="flex flex-col gap-3">
       {total > 0 ? (
-        <label className="flex h-8 items-center gap-2 rounded-md border border-line bg-bg px-2.5 focus-within:border-ink">
+        <label className={`flex h-8 items-center gap-2 rounded-md border border-line bg-bg px-2.5 ${FIELD_FOCUS}`}>
           <Search size={13} aria-hidden className="shrink-0 text-subtle" />
           <input
             ref={searchRef}
@@ -156,7 +166,7 @@ function MemberList(props: {
             maxLength={320}
             spellCheck={false}
             onChange={(event) => setQuery(event.target.value)}
-            className="h-full min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
+            className="h-full min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
           />
         </label>
       ) : null}
@@ -328,6 +338,7 @@ function AddPeople(props: {
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (busy) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       if (!open) {
@@ -400,7 +411,7 @@ function AddPeople(props: {
             }
           }}
           className={`flex min-h-9 cursor-text flex-wrap items-center gap-1 rounded-md border bg-bg px-1.5 py-1 ${
-            error ? "border-danger" : "border-line focus-within:border-ink"
+            error ? "border-danger" : `border-line ${FIELD_FOCUS}`
           } ${props.blocked ? "opacity-60" : ""}`}
         >
           {picked.map((email) => (
@@ -444,7 +455,8 @@ function AddPeople(props: {
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? `${id}-error` : undefined}
             value={text}
-            disabled={props.blocked || busy}
+            disabled={props.blocked}
+            readOnly={busy}
             maxLength={2000}
             placeholder={picked.length === 0 ? "name@example.com" : undefined}
             spellCheck={false}
@@ -461,7 +473,7 @@ function AddPeople(props: {
               setFocused(false);
               setListShown(false);
             }}
-            className="h-6 min-w-[10rem] flex-1 bg-transparent px-1 text-[13px] text-ink outline-none placeholder:text-subtle"
+            className="h-6 min-w-[10rem] flex-1 bg-transparent px-1 text-[13px] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
           />
         </div>
         {open ? (
