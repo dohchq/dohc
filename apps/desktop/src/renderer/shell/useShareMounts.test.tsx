@@ -347,7 +347,7 @@ it.each([false, true])("reports kept mount paths and clears them after refresh (
   try {
     await act(async () => { await result.current.refreshShareMounts(announce); });
     expect(reportShellFailure).toHaveBeenCalledWith({
-      message: "dohc could not receive shared-with-me/alex/docs/blocked. A file from this machine already uses this path. Move or rename the file, then refresh.",
+      message: "dohc could not receive 2 shared files. A file from this machine is in the way. Move or rename your file, then refresh.",
       identity: "share-mount-kept-paths:share-1",
       tone: "warning",
       retry: expect.any(Function),
@@ -381,7 +381,7 @@ it.each([false, true])("reports kept mount paths and clears them after refresh (
       { path: "docs/blocked/a.md", reason: "local-collision", owner: "docs/blocked" },
       { path: "docs/blocked/b.md", reason: "local-collision", owner: "docs/blocked" },
     ])).toBe(
-      "dohc could not receive notes.md, docs/blocked. Files from this machine already use these paths. Move or rename the files, then refresh.",
+      "dohc could not receive 3 shared files. Files from this machine are in the way. Move or rename your files, then refresh.",
     );
   } finally {
     vi.unstubAllGlobals();
@@ -399,7 +399,7 @@ it("includes both spellings in notice details", async () => {
   try {
     await act(async () => { await result.current.refreshShareMounts(); });
     expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({
-      message: "dohc could not receive shared-with-me/alex/docs/Notes.md. This machine treats shared-with-me/alex/docs/Notes.md and shared-with-me/alex/docs/notes.md as the same name. Ask the person who shared the files to rename one of them.",
+      message: "dohc could not receive a shared file. This machine treats its name and another shared file's as the same name. Ask the person who shared the files to rename one of them.",
       paths: ["shared-with-me/alex/docs/Notes.md", "shared-with-me/alex/docs/notes.md"],
     }));
   } finally {
@@ -419,7 +419,7 @@ it("includes every kept mount path in notice details", async () => {
   try {
     await act(async () => { await result.current.refreshShareMounts(); });
     expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({
-      message: "dohc could not receive shared-with-me/alex/docs/a.md, shared-with-me/alex/docs/b.md, shared-with-me/alex/docs/c.md, and 1 more. Files from this machine already use these paths. Move or rename the files, then refresh.",
+      message: "dohc could not receive 4 shared files. Files from this machine are in the way. Move or rename your files, then refresh.",
       paths: paths.map(path => `shared-with-me/alex/${path}`),
     }));
   } finally {

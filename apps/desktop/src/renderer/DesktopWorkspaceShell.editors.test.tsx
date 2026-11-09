@@ -1736,37 +1736,20 @@ describe("ui-state merge-on-load", () => {
     expect(notice.className).toContain("shrink");
     expect(notice.className).toContain("truncate");
     expect(notice.className).not.toContain("shrink-0");
-    expect(notice.textContent).toContain(
-      "dohc could not track changes in docs/oversized.md.",
+    // The words name no path, so a cut line keeps each reason and next step.
+    // The tooltip lists the paths.
+    expect(notice.textContent).toBe(
+      "dohc could not track changes in a shared file. It is larger than the 10.0 MB text limit. Make it smaller, then refresh. " +
+        "dohc could not track changes in a shared file. A folder or another entry replaces it. " +
+        "Restore the file or move the conflicting entry, then refresh. " +
+        "dohc could not receive a shared file. A file from this machine is in the way. Move or rename your file, then refresh. " +
+        "dohc could not receive a shared file. This machine treats its name and another shared file's as the same name. " +
+        "Ask the person who shared the files to rename one of them. " +
+        "dohc could not read a shared file. Close anything using it, or wait, then refresh.",
     );
-    expect(notice.textContent).toContain("10.0 MB text limit");
-    expect(notice.textContent).toContain("Make the file smaller, then refresh.");
-    expect(notice.textContent).toContain(
-      "dohc could not track changes in docs/replaced.md.",
-    );
-    expect(notice.textContent).toContain(
-      "A folder or another entry replaces this file.",
-    );
-    expect(notice.textContent).toContain(
-      "Restore the file or move the conflicting entry, then refresh.",
-    );
-    expect(notice.textContent).toContain(
-      "dohc could not receive docs/local.md.",
-    );
-    expect(notice.textContent).toContain(
-      "A file from this machine already uses this path.",
-    );
-    expect(notice.textContent).toContain(
-      "Move or rename the file, then refresh.",
-    );
-    expect(notice.textContent).toContain(
-      "dohc could not receive docs/Notes.md. This machine treats docs/Notes.md and docs/notes.md as the same name. " +
-        "Ask the person who shared the files to rename one of them.",
-    );
-    expect(notice.textContent).toContain("dohc could not read docs/locked.md.");
-    expect(notice.textContent).toContain(
-      "Close anything using the file, or wait, then refresh.",
-    );
+    expect(notice.title.split("\n")).toEqual([
+      "docs/oversized.md", "docs/replaced.md", "docs/local.md", "docs/Notes.md", "docs/notes.md", "docs/locked.md",
+    ]);
 
     await userEvent.click(screen.getByTestId("shared-view-refresh"));
     await waitFor(() => {
@@ -2456,9 +2439,7 @@ describe("ui-state merge-on-load", () => {
       });
       await second.promise;
     });
-    expect((await screen.findByTestId("shared-view-excluded")).textContent).toContain(
-      "docs/new-local.md",
-    );
+    expect((await screen.findByTestId("shared-view-excluded")).title).toBe("docs/new-local.md");
 
     await act(async () => {
       first.resolve({
@@ -2474,12 +2455,7 @@ describe("ui-state merge-on-load", () => {
       });
       await first.promise;
     });
-    expect(screen.getByTestId("shared-view-excluded").textContent).toContain(
-      "docs/new-local.md",
-    );
-    expect(screen.getByTestId("shared-view-excluded").textContent).not.toContain(
-      "docs/stale-local.md",
-    );
+    expect(screen.getByTestId("shared-view-excluded").title).toBe("docs/new-local.md");
   });
 
   // A manual refresh can record a refusal on an early page and die on a later
