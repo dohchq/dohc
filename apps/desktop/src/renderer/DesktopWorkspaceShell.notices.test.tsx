@@ -1887,6 +1887,27 @@ describe("crash report notice", () => {
       .toContain("dohc could not save that you read the crash report.");
     expect(await screen.findByTestId("crash-report-toast")).toBeTruthy();
   });
+
+  it("shows the row unread again when main could not save it, and saves on the next read", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    bridge.markCrashReportRead.mockRejectedValueOnce(
+      new Error("Error invoking remote method 'desktop:mark-crash-report-read': Error: EACCES: permission denied"),
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.hover(await screen.findByTestId("notice-crash-report"));
+    await waitFor(() => expect(bridge.markCrashReportRead).toHaveBeenCalledOnce());
+    await screen.findByTestId("notice-crash-report-unread");
+
+    bridge.readCrashReport.mockResolvedValue({ report: { ...REPORT, revision: 4, read: true }, sendTo: null });
+    await user.unhover(screen.getByTestId("notice-crash-report"));
+    await user.hover(screen.getByTestId("notice-crash-report"));
+    await waitFor(() => expect(bridge.markCrashReportRead).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId("notice-crash-report-unread")).toBeNull());
+  });
 });
 
 describe("offline copies a previous account left", () => {

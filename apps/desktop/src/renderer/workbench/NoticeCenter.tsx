@@ -1885,7 +1885,11 @@ export function NoticeCenter(props: {
       return kept.length === current.size ? current : new Set(kept);
     });
   }, [notices, props.workspaceId, setAsideKey]);
-  const unreadNotices = notices.filter((notice) => !notice.read && !localRead.has(localReadKey(props.workspaceId, notice)));
+  // Main saves whether the crash report is read, so its row follows main. A
+  // read main could not save shows unread again, and reading it saves again.
+  const savedRead = (notice: Notice) => notice.id === "crash-report" && notice.onRead !== undefined;
+  const unreadNotices = notices.filter((notice) =>
+    !notice.read && (savedRead(notice) || !localRead.has(localReadKey(props.workspaceId, notice))));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
   // Every row counts until it is read.
