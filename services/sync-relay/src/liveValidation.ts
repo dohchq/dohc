@@ -57,7 +57,7 @@ type CapacityRetry = {
 };
 /** How long a first-open build may run. */
 export const FIRST_OPEN_BUILD_MS = 60_000;
-type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; heapExhausted: boolean; exited: Promise<void> };
+type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; work?: LiveValidationWork["kind"]; yielded: boolean; heapExhausted: boolean; exited: Promise<void> };
 /** The validator threw instead of judging the edit, so the edit is tried again. */
 export class LiveValidatorFailure extends Error {
   constructor(readonly errorClass: string) {
@@ -86,7 +86,7 @@ export function createValidatorFailureLog(log: (message: string) => void = messa
 export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFailure = createValidatorFailureLog(), { firstOpenBuildMs = FIRST_OPEN_BUILD_MS } = {}) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
-  let closed = false;
+  let closed = false, yielding = 0;
   const hasCapacity = (auxiliary = false) => !closed && (!auxiliary || ![...slots].some(slot => slot.auxiliary)) && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
@@ -152,7 +152,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     );
     let exit: () => void = () => {};
     const exited = new Promise<void>((resolve) => (exit = resolve));
-    const slot: Slot = { child, busy: false, auxiliary: false, heapExhausted: false, exited };
+    const slot: Slot = { child, busy: false, auxiliary: false, yielded: false, heapExhausted: false, exited };
     slots.add(slot);
     const release = () => {
       slots.delete(slot);
@@ -190,8 +190,26 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
     if (closed) throw new Error("Live validation closed.");
-    const auxiliary = work.kind === "activation" || work.kind === "restore" || work.kind === "first-open" || work.kind === "first-open-history";
-    const slot = auxiliary && [...slots].some((slot) => slot.auxiliary) ? undefined :
+    const foreground = work.kind === "activation" || work.kind === "restore";
+    const auxiliary = foreground || work.kind === "first-open" || work.kind === "first-open-history";
+    // A first-open build can take a minute; an activation or restore ends it
+    // rather than wait, and the build answers `busy`. No first-open job starts meanwhile.
+    const building = foreground ? [...slots].find((slot) => slot.work === "first-open") : undefined;
+    if (building) {
+      building.yielded = true;
+      yielding++;
+      try {
+        kill(building);
+        await building.exited;
+      } finally {
+        yielding--;
+      }
+      signal?.throwIfAborted();
+      if (closed) throw new Error("Live validation closed.");
+    }
+    // After ending a build it starts its own child, so an idle live-edit child stays warm.
+    const slot = auxiliary && ((yielding > 0 && !foreground) || [...slots].some((slot) => slot.auxiliary)) ? undefined :
+      (building && slots.size < 2 ? spawn() : undefined) ??
       [...slots].find((slot) => !slot.busy) ??
       (slots.size < 2 ? spawn() : undefined);
     if (!slot)
@@ -203,6 +221,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     slot.busy = true;
     claim?.(slot);
     slot.auxiliary = auxiliary;
+    slot.work = work.kind;
     hold(slot, true);
     return new Promise<Result>((resolve, reject) => {
       let done = false;
@@ -238,6 +257,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         if (!settle()) return;
         slot.busy = false;
         slot.auxiliary = false;
+        slot.work = undefined;
         // A result that arrives after `close` began must not release its hold.
         if (!closed) hold(slot, false);
         if (failed.kind === "failed") reject(new LiveValidatorFailure(typeof failed.errorClass === "string" ? failed.errorClass : "unknown"));
@@ -311,6 +331,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       const result = await submit<Result>(work, heapExhausted, signal, slot => { claimed = slot; });
       return result.kind === "retry" ? { kind: "busy" } : result as Result;
     } catch (error) {
+      // A build ended for an activation or restore ran nothing to completion; it is asked again later.
+      if (claimed?.yielded) return { kind: "busy" };
       // A deadline answers only after the child releases its slot.
       if (claimed && waitForExitSignal?.aborted && error === waitForExitSignal.reason) await claimed.exited;
       throw error;
