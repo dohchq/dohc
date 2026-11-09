@@ -3548,6 +3548,35 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for change in heads {
             insert_changed_path(&mut pass.changed_paths, change);
         }
+        // A document that moved first in a trade of spellings (#2421) shares
+        // the other's file on a disk that ignores case, whichever change
+        // named its path, so its head waits for the pass that makes it ready.
+        let unready: BTreeSet<&str> = replica
+            .documents
+            .iter()
+            .filter(|(object_id, document)| match reads.get(*object_id) {
+                Some(read) => !read.heads_written,
+                None => {
+                    document.status != crate::HostedDocumentStatus::Ready
+                        || held.contains_key(*object_id)
+                }
+            })
+            .map(|(object_id, _)| object_id.as_str())
+            .collect();
+        if !unready.is_empty() {
+            let shared = store
+                .read_with(|conn| {
+                    let mut shared = BTreeSet::new();
+                    for (key, change) in &pass.changed_paths {
+                        if crate::hosted::shares_a_file(conn, workspace_id, &unready, change)? {
+                            shared.insert(key.clone());
+                        }
+                    }
+                    Ok::<_, SyncError>(shared)
+                })
+                .map_err(local)?;
+            pass.changed_paths.retain(|key, _| !shared.contains(key));
+        }
         // A finished backfill still leaves the main feed or another document,
         // and a held document whose read went on backfills again.
         let more = has_more
@@ -8300,37 +8329,13 @@ fn accumulate_pull_outcome(
                 .ok_or(RelayError::InvalidResponse)?;
             record_facts.extend(routed.record_facts);
             keep_automation_claims(routed.automation_claims);
-            // A document that is not ready and moved onto another spelling
-            // of a path another document holds (#2421) writes nothing there
-            // yet: its write goes with the decisions its pass keeps only
-            // where they still stand.
-            let stored_decisions =
-                crate::router::redelivered_materialization_changes(store, op).map_err(local)?;
-            for change in routed
-                .materialization_changes
-                .into_iter()
-                .chain(stored_decisions)
+            for change in routed.materialization_changes {
+                insert_changed_path(changed_paths, change);
+            }
+            for change in
+                crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
-                let stored = match unready {
-                    Some(object_id)
-                        if change.operation == "write"
-                            && store
-                                .read_with(|conn| {
-                                    crate::hosted::spelling_occupied(
-                                        conn,
-                                        &op.workspace_id,
-                                        &change.version_id,
-                                        object_id,
-                                        &change.path,
-                                    )
-                                })
-                                .map_err(local)? =>
-                    {
-                        redelivered.entry(object_id.to_owned()).or_default()
-                    }
-                    _ => &mut *changed_paths,
-                };
-                insert_changed_path(stored, change);
+                insert_changed_path(changed_paths, change);
             }
             *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }

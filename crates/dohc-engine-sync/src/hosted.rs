@@ -642,19 +642,40 @@ fn spelling_occupants(
     Ok(colliding)
 }
 
-/// Whether another document of the scope holds `path` in `version_id` by
-/// another spelling, or as a folder above or inside it. A write there by
-/// `object_id` while it is not ready would land on that document's file on a
-/// disk that ignores case, so its pass leaves the write to the commit that
-/// makes it ready ([`head_writes`]).
-pub(crate) fn spelling_occupied(
+/// Whether `change` would write the head of a document in `unready` where
+/// another document of the scope holds that path by another spelling, or as
+/// a folder above or inside it. A change brings its path to the head a path
+/// alias there names, so on a disk that ignores case that head would land on
+/// the other document's file. The pass that makes it ready writes it
+/// ([`head_writes`]).
+pub(crate) fn shares_a_file(
     conn: &Connection,
     workspace_id: &str,
-    version_id: &str,
-    object_id: &str,
-    path: &str,
+    unready: &BTreeSet<&str>,
+    change: &crate::MomentMaterializationChange,
 ) -> Result<bool, SyncError> {
-    Ok(!spelling_occupants(conn, workspace_id, version_id, object_id, path)?.is_empty())
+    let head: Option<String> = conn
+        .prepare_cached(
+            "SELECT a.object_id FROM path_aliases a JOIN snapshots s \
+               ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+              AND s.object_id=a.object_id \
+             WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_row(params![workspace_id, change.version_id, change.path], |row| row.get(0))
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    match head {
+        Some(object_id) if unready.contains(object_id.as_str()) => Ok(!spelling_occupants(
+            conn,
+            workspace_id,
+            &change.version_id,
+            &object_id,
+            &change.path,
+        )?
+        .is_empty()),
+        _ => Ok(false),
+    }
 }
 
 /// Whether `occupant` is held at a path that `object_id` holds, or that a
