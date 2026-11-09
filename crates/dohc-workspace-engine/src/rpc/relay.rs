@@ -5213,6 +5213,7 @@ mod tests {
     async fn a_pull_waits_for_an_admitted_collections_update() {
         let ctx = RequestContext::unbounded();
         let (relay, f) = half_pull_fixture("owed-admitted-before-pull", false).await;
+        relay.release();
         // The update takes the gate, and its first actor step waits.
         let hold = f.service.hold_actor(&f.handle).await;
         let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
@@ -5221,19 +5222,34 @@ mod tests {
             f.open.capture_apply_gate.try_lock().is_err(),
             "the update holds the gate"
         );
+        // While the actor is held, queue the update's reconcile before the
+        // fetch's first actor step. A fetch that starts the pull first
+        // rightly holds the update back.
+        drop(hold);
+        let hold = f.service.hold_actor(&f.handle).await;
+        assert!(!poll_once(update.as_mut()).await);
         let mut page_one = Box::pin(pull(&f));
         assert!(!poll_once(page_one.as_mut()).await);
+        drop(hold);
+        // Page one fetches, then waits at the gate the unpolled update holds.
+        bounded("page one reaches the gate", async {
+            while lock(&f.open.applying_pulls).is_empty() {
+                tokio::select! {
+                    biased;
+                    answer = &mut page_one => panic!("page one passed the gate: {answer:?}"),
+                    () = tokio::task::yield_now() => {}
+                }
+            }
+        })
+        .await;
         assert_eq!(
             f.open.pulls_in_flight.load(Ordering::SeqCst),
             0,
             "the pull waits for the gate before it registers"
         );
-        let page_one = tokio::spawn(page_one);
-        relay.release();
-        drop(hold);
         update.await;
         assert!(!f.owed(), "the update ran");
-        let page_one = page_one.await.expect("join").expect("page one lands");
+        let page_one = page_one.await.expect("page one lands");
         assert_eq!(page_one["hasMore"], json!(true));
         assert_eq!(f.edges(), 1, "the update reconciled before page one landed");
         assert!(
