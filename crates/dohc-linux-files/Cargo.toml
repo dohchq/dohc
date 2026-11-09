@@ -13,7 +13,7 @@ signal-hook-registry = "1.4"
 rustix = { version = "1.1", features = ["fs", "process"] }
 # The VFS that opens a store through a held folder delegates to the bundled
 # SQLite's own `unix` VFS.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [features]
 # Lets tests in other crates stand in for /proc/self/fd.

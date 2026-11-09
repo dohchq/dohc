@@ -17,7 +17,7 @@ ureq = { version = "=3.3.0", default-features = false, features = ["json", "rust
 base64 = "0.23"
 dohc-engine-storage = { path = "../dohc-engine-storage" }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
-rusqlite = "0.40"
+rusqlite = "0.41"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [lints]

@@ -51,7 +51,7 @@ dohc-engine-domain = { path = "../dohc-engine-domain" }
 # Connection/Transaction types unify (the `bundled` SQLite comes from storage
 # via feature unification). Incremental reads retain one metadata chunk. The
 # released-tails worker's reader stops on close through a progress handler.
-rusqlite = { version = "0.40", features = ["blob", "hooks"] }
+rusqlite = { version = "0.41", features = ["blob", "hooks"] }
 # The CRDT. Pinned to the exact spike version; every wire-facing Doc is built
 # with OffsetKind::Utf16 (binding constraint 1).
 yrs = "=0.27.3"
@@ -70,7 +70,7 @@ base64 = "0.23"
 
 [dev-dependencies]
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
-rusqlite = { version = "0.40", features = ["limits"] }
+rusqlite = { version = "0.41", features = ["limits"] }
 # Integration tests need the library built with its test APIs.
 dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
