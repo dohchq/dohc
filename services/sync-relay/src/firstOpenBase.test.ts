@@ -472,6 +472,16 @@ describe("first-open worker", () => {
     expect((await building).kind).toBe("built");
   });
 
+  it("ends a running build for an activation, which takes the slot, and the build answers busy", async () => {
+    const { pool, journal } = fixture();
+    const building = pool.buildFirstOpenBase(policy, input("Body"));
+    const activated = pool.ordinaryActivation(policy)({ document: journal.document, currentPath: journal.currentPath, baselineBytes: journal.checkpoint });
+    expect(await pool.buildFirstOpenBase(policy, input("Other"))).toEqual({ kind: "busy" });
+    expect(await building).toEqual({ kind: "busy" });
+    expect((await activated).kind).toBe("accepted");
+    expect((await pool.buildFirstOpenBase(policy, input("Body"))).kind).toBe("built");
+  });
+
   it("does not wait while live admission holds every slot", async () => {
     const { pool, journal, validate } = fixture();
     const live = [validate(journal), validate(journal)];
