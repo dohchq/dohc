@@ -5299,7 +5299,17 @@ it.each([["Pause", false], ["Stop", true]] as const)("publishes nothing when %s 
   // The self-host supervisor's next membership leaves the note out.
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   expect(o.host.firstOpenStatus(plain, source)).toBeUndefined();
-  expect(o.host.blocked(plain)).toBeUndefined();
+  // Live documents shows the note, while it lists it, as paused alone, with no refusal or stop.
+  const handle = createServiceHostEnrollmentRoutes({storage: o.f.storage, history: o.f.history, resolveActor: async () => ({workspaceId: "workspace", userId: "owner"}),
+    host: {ready: document => o.host.isDocumentReady(document), reconcile() {}, unavailable: false, blocked: document => o.host.blocked(document),
+      unblock: document => o.host.unblock(document), diverged: () => false, holdReason: document => o.host.holdReason(document),
+      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenStatus: (document, current) => o.host.firstOpenStatus(document, current),
+      stop: async <T>(_document: unknown, fence: () => T) => fence()}});
+  const listed = (await (await handle(new Request("https://relay.test/sync/workspace/live-host",
+    {headers: {authorization: "Bearer owner-token"}}))).json()).documents as {objectId: string}[];
+  const note = listed.filter(row => row.objectId === neverOpened.objectId);
+  if (!retire) expect(note).toHaveLength(1);
+  for (const row of note) expect(row).toEqual({path: neverOpened.path, objectId: neverOpened.objectId, status: "paused"});
   o.acceptEdit("moving");
   await o.host.drain(o.document);
   expect(o.applied.has("edit-moving")).toBe(true);
