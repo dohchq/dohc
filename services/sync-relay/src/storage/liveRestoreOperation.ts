@@ -127,10 +127,14 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
 // retires before a restore begins; one that starts retiring during a restore
 // is carried by its fence.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
+  const state = requireActivationAtRest(storage, document);
+  if (state !== "absent" && state !== "completed") refuse();
+}
+function requireActivationAtRest(storage: StorageContext, document: LiveDocumentKey) {
   const state = serviceActivationState(readServiceActivation(storage, document));
   if (state === "pending") throw relayError("conflict", "Live editing is still starting. Try again in a moment.");
   if (state === "retiring") throw relayError("conflict", "Live editing is still stopping. Try again in a moment.");
-  if (state !== "absent" && state !== "completed") refuse();
+  return state;
 }
 // The operation row records the revocation it made. Account deletion may purge
 // that grant; its absence ends the same authority for good.
@@ -150,6 +154,7 @@ function requireBootstrapRestorable(storage: StorageContext, document: LiveDocum
 }
 /** Refuses a document whose Stop restore needs a bootstrap that the configured session host can't deliver. */
 export function requireStopRestorable(storage: StorageContext, document: LiveDocumentKey): void {
+  requireActivationAtRest(storage, document);
   const control = storage.getLiveHostControl();
   if (!control || ownerOrigin(storage, liveJournalHistoryNamespace(storage), document, control.configuredHostId) === undefined) {
     requireBootstrapRestorable(storage, document);
