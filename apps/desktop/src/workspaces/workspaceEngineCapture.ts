@@ -1,7 +1,7 @@
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
-import type { HistoryCursor } from "@dohc/workspace-engine-client";
+import type { HistoryCursor, WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
@@ -1022,6 +1022,16 @@ function isTransientEngineCause(error: unknown): boolean {
 // outlasted the settle budget.
 function isCaptureBusy(error: unknown): boolean {
   return isWorkspaceUpdatingRefusal(error) || error instanceof EngineCaptureNotSettledError;
+}
+
+// Capture works unless it stopped. A deliberate rescan, such as a due
+// refresh, `capture.reconcile` or a tracking-rule edit, replaces the watching
+// layer: for a moment it reads not running while ready and neither degraded
+// nor terminal (capture_driver.rs `PolicyChanged`). A failure reads degraded,
+// and a stopped task degraded and terminal.
+function captureWorks(status: WatcherStatusResult | undefined): boolean {
+  return status === undefined
+    || ((status.running || status.phase === "ready") && !status.degraded && !status.terminal);
 }
 
 function isUpdateBackoffCause(error: unknown): boolean {
@@ -4533,8 +4543,7 @@ export function createWorkspaceEngineCapture(
           options.onHeldFiles?.(status.heldFiles);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
-        const healthy =
-          status === undefined || (status.running && !status.degraded && !status.terminal);
+        const healthy = captureWorks(status);
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine).catch((error: unknown) => {
             // Busy leaves a healthy outcome standing; it cannot hide a degraded one.
@@ -6301,8 +6310,7 @@ export function createWorkspaceEngineCapture(
       await enqueueResult("history capture retry", async () => {
         let healthy = false;
         await reportCaptureOutcome(async () => {
-          const status = await engine.watcherStatus?.();
-          healthy = status === undefined || (status.running && !status.degraded && !status.terminal);
+          healthy = captureWorks(await engine.watcherStatus?.());
           return healthy;
         });
         if (!healthy) throw new HistoryStillPausedError([]);

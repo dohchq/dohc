@@ -3255,6 +3255,60 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // A deliberate rescan, such as capture.reconcile or a tracking-rule edit,
+  // drops the watching layer for a moment: not running, but ready and
+  // neither degraded nor terminal. A failed tick reads degraded, and a
+  // stopped task degraded and terminal (capture_driver.rs DriverStatus).
+  it("reads a deliberate rescan as working, and still reports a failed tick or a stopped task", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    const working = { running: true, degraded: false, terminal: false, phase: "ready", deferredWrites: [] as string[] };
+    let watcher = working;
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => watcher;
+        if (property === "listPendingCollectionAdoptions") return async () => ({ adoptions: [], nextCursor: null });
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    const settled = () => engine.flush().catch(() => undefined);
+    // Each health poll publishes an outcome; the last one is what Notices shows.
+    const pollWith = async (status: typeof watcher) => {
+      const before = outcomes.length;
+      watcher = status;
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+      expect(outcomes.length).toBeGreaterThan(before);
+      return outcomes.at(-1);
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([null]);
+
+      expect(await pollWith({ ...working, running: false })).toBeNull();
+      expect(await pollWith({ ...working, running: false, degraded: true })).toBe("other");
+      expect(await pollWith(working)).toBeNull();
+      expect(await pollWith({ ...working, running: false, degraded: true, terminal: true, phase: "degraded" })).toBe("other");
+    } finally {
+      watcher = working;
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a drive without atomic no-replace renames from the engine's status", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
