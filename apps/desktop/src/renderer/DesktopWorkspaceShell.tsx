@@ -6107,15 +6107,23 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   // Reading a refusal's row stores its read mark. Closing its toast alone
-  // doesn't, so an unread one toasts again the next time dohc starts.
+  // doesn't, so an unread one toasts again the next time dohc starts. A mark
+  // main refuses leaves the row unread, and Try again sends the same read.
   const readWorkspaceError = useCallback((id: string) => {
-    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
-    if (!refusal) return;
+    const sent = props.sentNotices;
+    const refusal = sent?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
+    if (!sent || !refusal) return undefined;
     const askedFor = workspaceId;
-    void props.sentNotices!.read([refusal]).catch(error => {
-      if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
+    const identity = `notice-read:${id}`;
+    const attempt = (): Promise<boolean> => sent.read([refusal]).then(() => {
+      if (workspaceIdRef.current === askedFor) clearIdentity(identity);
+      return true;
+    }, error => {
+      if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error, () => void attempt(), undefined, identity);
+      return false;
     });
-  }, [props.sentNotices, workspaceId, reportShellError]);
+    return attempt();
+  }, [props.sentNotices, workspaceId, reportShellError, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);

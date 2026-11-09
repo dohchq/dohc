@@ -2094,6 +2094,48 @@ describe("notices sent to you", () => {
   const HELD: NoticeRow = { ...MENTION, store: "local", kind: "markdown-write-held", noticeId: "held", senderKind: null,
     title: "Held a change to b.md", body: "Saving it would also change parts dohc can't show." };
 
+  it.each([
+    ["a sync refusal", { ...MENTION, store: "local", kind: "sync-refusal", noticeId: "refusal", senderKind: null,
+      body: "A change needs review", refusalCoordinates: [{ originId: "peer", originSeq: 1 }] } satisfies NoticeRow],
+    ["a held change", HELD],
+  ])("shows %s unread again when main cannot mark it read, and Try again sends the same read", async (_, shown) => {
+    const user = userEvent.setup();
+    const marking = deferred<undefined>();
+    let readAtMs: number | null = null;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listNotices: vi.fn(async () => ({ account: null, notices: [{ ...shown, readAtMs }] })),
+      onNoticesChanged: vi.fn(() => () => {}),
+      markNotices: vi.fn(() => marking.promise),
+    });
+    const bootstrap = shellBootstrapProps(bridge);
+    function WithSentNotices() {
+      const sent = useSentNotices(true);
+      return <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]} {...bootstrap}
+        onSwitchWorkspace={() => {}} sentNotices={sent} />;
+    }
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<><CollectionFieldWriteHost /><WithSentNotices /></>);
+    const unread = `notice-${shown.noticeId}-unread`;
+    const read = { account: null, mark: "read", notices: [expect.objectContaining({ store: "local", noticeId: shown.noticeId })] };
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId(`notice-${shown.noticeId}`);
+    expect(screen.getByTestId(unread)).toBeTruthy();
+    fireEvent.pointerEnter(row);
+    expect(screen.queryByTestId(unread)).toBeNull();
+    expect(bridge.markNotices).toHaveBeenCalledExactlyOnceWith(read);
+
+    await act(async () => marking.reject(new Error("disk full")));
+    await waitFor(() => expect(screen.getByTestId(unread)).toBeTruthy());
+    const failed = (await within(screen.getByTestId("notice-center")).findByText(/^dohc could not mark this Notice read\./)).closest("li")!;
+    bridge.markNotices.mockImplementationOnce(async () => { readAtMs = 9_000; return undefined; });
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByTestId(unread)).toBeNull());
+    expect(bridge.markNotices).toHaveBeenCalledTimes(2);
+    expect(bridge.markNotices).toHaveBeenLastCalledWith(read);
+    expect(screen.queryByText(/^dohc could not mark this Notice read\./)).toBeNull();
+  });
+
   it("keeps a held change's row unread when its toast closes", async () => {
     const user = userEvent.setup();
     const notices = sentNotices([HELD]);
