@@ -48,4 +48,9 @@ it("drops a malformed row while returning the good rows", async () => {
   f.reply({ok: true, documents: [good, {...good, path: longPath, firstOpen: {...firstOpen, source: {...source, path: longPath}}},
     {path: "b.md", objectId: "b", status: "ready"}]});
   expect(await f.list()).toEqual([good, {path: "b.md", objectId: "b", status: "ready"}]);
+  // A row that is not an object at all.
+  for (const row of [null, "a.md", 7, ["a.md"]]) {
+    f.reply({ok: true, documents: [row, good]});
+    expect(await f.list(), JSON.stringify(row)).toEqual([good]);
+  }
 });
