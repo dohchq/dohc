@@ -20,6 +20,12 @@ export function shareNoticePaths(paths: readonly UnjournalableSharePath[]): stri
     : entry.reason === "local-collision" ? [entry.owner, entry.path] : [entry.path, entry.owner]))];
 }
 
+// A Notices row's title. The row lists the paths under its text, so it
+// shows the text whole: each reason and next step.
+export function shareUnjournalableTitle(paths: readonly UnjournalableSharePath[], label: string): string {
+  return `dohc skipped ${sharedFiles(new Set(paths.map(entry => entry.path)).size)} from ${label}`;
+}
+
 export function shareUnjournalableNotice(
   paths: readonly UnjournalableSharePath[],
 ): string {

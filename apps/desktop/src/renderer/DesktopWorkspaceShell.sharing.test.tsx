@@ -322,6 +322,30 @@ describe("refreshing shares added to this workspace", () => {
     expect(notices.textContent).not.toContain("could not refresh");
   });
 
+  it("titles a share's skipped files and keeps each reason whole under it", async () => {
+    const tooLarge = "dohc could not track changes in a shared file. It is larger than the 10.0 MB text limit. Make it smaller, then refresh.";
+    const inTheWay = "dohc could not receive a shared file. A file from this machine is in the way. Move or rename your file, then refresh.";
+    const bridge = makeBridge(Promise.resolve(null));
+    Object.assign(bridge, { refreshShareMounts: vi.fn(() => Promise.resolve<RefreshShareMountsResult>({
+      results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0, unjournalablePaths: [
+        { path: "docs/big.md", reason: "oversized-text" },
+        { path: "docs/local.md", reason: "local-collision" },
+      ] }],
+    })) });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    await waitFor(() => expect(screen.getByTestId("notice-center-toggle").textContent).not.toBe(""));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = (await within(notices).findByText(tooLarge, { exact: false })).closest<HTMLElement>("[data-notice-row]")!;
+    expect(row.querySelector("[id$='-title']")?.textContent).toBe("dohc skipped 2 shared files from alex");
+    expect(row.querySelector("[id$='-body']")?.textContent).toBe(`${tooLarge} ${inTheWay}`);
+    expect(row.querySelector("[id$='-body']")?.className).not.toContain("line-clamp");
+  });
+
   // The warning is the press's toast, and its summary waits in Notices. The
   // last press's open summary toast doesn't come back after the warning's.
   it("answers a refresh the person starts with the set-aside row, not the summary", async () => {

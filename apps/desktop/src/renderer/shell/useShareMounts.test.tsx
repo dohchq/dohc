@@ -347,6 +347,7 @@ it.each([false, true])("reports kept mount paths and clears them after refresh (
   try {
     await act(async () => { await result.current.refreshShareMounts(announce); });
     expect(reportShellFailure).toHaveBeenCalledWith({
+      title: "dohc skipped 2 shared files from alex",
       message: "dohc could not receive 2 shared files. A file from this machine is in the way. Move or rename your file, then refresh.",
       identity: "share-mount-kept-paths:share-1",
       tone: "warning",

@@ -3,7 +3,7 @@ import type {
   RefreshShareMountsResult,
   WorkspaceSummary,
 } from "../../ipc/bridgeContract";
-import { shareNoticePaths, shareUnjournalableNotice } from "../shareUnjournalableNotice";
+import { shareNoticePaths, shareUnjournalableNotice, shareUnjournalableTitle } from "../shareUnjournalableNotice";
 import { bridge } from "../bridge";
 import type { ShellErrorKind } from "./useShellError";
 import type { PendingTreeChange } from "../workbench/file-tree-optimistic";
@@ -41,6 +41,7 @@ export function useShareMounts(
   ) => void,
   showSuccessNotice: (message: string, undo?: () => void, kind?: ShellErrorKind) => void,
   reportShellFailure: (failure: {
+    title?: string;
     message: string;
     tone?: "success" | "warning";
     paths?: readonly string[];
@@ -153,6 +154,7 @@ export function useShareMounts(
           } else {
             warned = true;
             reportShellFailure({
+              title: shareUnjournalableTitle(paths, row.label),
               message: shareUnjournalableNotice(paths.map(entry => ({
                 ...entry,
                 path: `shared-with-me/${row.label}/${entry.path}`,
