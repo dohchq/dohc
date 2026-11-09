@@ -120,6 +120,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_wait_for_messages: ["chat.inbox.read"],
   dohc_read_chat: ["chat.read"],
   dohc_list_groups: ["group.list"],
+  dohc_create_group: ["group.create"],
   dohc_start_group_chat: ["chat.post"],
   dohc_start_file_chat: ["file.chat.start"],
   dohc_reply_to_chat: ["chat.reply"],
@@ -2068,6 +2069,17 @@ export async function readChat(ctx: ToolContext, args: {
 // views list only existing groups so discovery never creates durable state.
 export async function listGroups(ctx: ToolContext) {
   return requestCli(ctx, "groupsFull", {});
+}
+
+// New group, as a person makes one: the group and its folder. A taken name
+// is refused; dohc_list_groups finds the group that has it.
+export async function createGroup(
+  ctx: ToolContext,
+  args: { name: string; purpose?: string; type?: "posts" | "chat" | "both" },
+) {
+  const result = await requestCli(ctx, "groupCreate", args);
+  if ("ok" in result) return result;
+  return { ok: true as const, group: { ...result.group, id: engineGroupId(result.group.id) } };
 }
 
 // Canonical chat verbs return CLI handles. MCP reads use engine ids, so

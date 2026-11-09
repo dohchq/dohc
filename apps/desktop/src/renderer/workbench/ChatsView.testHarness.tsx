@@ -234,12 +234,12 @@ export function shareListing(
   };
 }
 
-export const workspaceActivityCallbacks = new Set<() => void>();
+export const workspaceActivityCallbacks = new Set<(event: { workspaceId: string }) => void>();
 // Main pushes each pause or resume of agent dispatch to every window.
 export const chatDispatchPausedCallbacks = new Set<(event: { paused: boolean }) => void>();
 
-export function emitWorkspaceActivity() {
-  for (const callback of [...workspaceActivityCallbacks]) callback();
+export function emitWorkspaceActivity(workspaceId = "workspace-a") {
+  for (const callback of [...workspaceActivityCallbacks]) callback({ workspaceId });
 }
 
 const cloudSessionCallbacks = new Set<
@@ -261,7 +261,7 @@ beforeEach(() => {
   chatDispatchPausedCallbacks.clear();
   cloudSessionCallbacks.clear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
-  bridgeMock.onWorkspaceActivity.mockImplementation((callback: () => void) => {
+  bridgeMock.onWorkspaceActivity.mockImplementation((callback: (event: { workspaceId: string }) => void) => {
     workspaceActivityCallbacks.add(callback);
     return () => {
       workspaceActivityCallbacks.delete(callback);

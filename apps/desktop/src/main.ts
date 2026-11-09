@@ -4973,8 +4973,8 @@ const chatWrites = createChatWrites({
     const { settings } = await readCachedUserSettingsFile(stateDir());
     return listAgents(settings).find(({ id }) => id === agentId)?.name ?? "Agent";
   },
-  agentIdsToWake: async (body, dmAgentId) =>
-    agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId),
+  agentIdsToWake: async (body, dmAgentId, answeredAgentId) =>
+    agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId, answeredAgentId),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
+import { createGroup } from "../workspaces/groupCreate";
+import { createFolder } from "../workspaces/workspaceFiles";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
 import { join, resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
@@ -382,6 +384,14 @@ export function createDesktopCliServer<State>(
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      createGroup: (input) => withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
+        return await createGroup(store, async (folderPath) => {
+          await createFolder(operation.workspace.rootPath, folderPath);
+        }, { workspaceId: workspace.workspaceId, ...input });
+      }),
       fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {

@@ -1171,6 +1171,32 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn chat_dispatch_cover_delivered(
+        &self,
+        workspace_id: String,
+        run_id: String,
+        message_ids: Vec<String>,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<i64, RuntimeError> {
+        self.run_chats(move |chats| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                chats
+                    .cover_delivered_requests(
+                        &workspace_id,
+                        &run_id,
+                        &message_ids,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
     pub async fn chat_dispatch_record_run_message(
         &self,
         workspace_id: String,

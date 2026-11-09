@@ -47,6 +47,29 @@ describe("document commands", () => {
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "documentCreate", args: expect.objectContaining({ actor: "agent", markdown: "" }) }));
   });
 
+  it("sets a record's fields as text through the socket, and refuses a field without a name", async () => {
+    const request = vi.fn(async () => ({ ok: true, recordPath: "board/launch.md" }));
+    const result = await executeCli({
+      argv: ["document", "set-fields", "launch.md", "--field", "status=Blocked", "--field", "decision=Ship on a=b", "--agent", "Nova"],
+      cwd: "/workspace/board", request,
+    });
+    expect(result).toEqual({ exitCode: 0, stdout: "Updated board/launch.md\n", stderr: "" });
+    expect(request).toHaveBeenCalledWith({
+      protocolVersion: CLI_PROTOCOL_VERSION, verb: "collectionSetFields",
+      args: { cwd: resolve("/workspace/board"), actor: "agent", recordPath: "launch.md", fields: { status: "Blocked", decision: "Ship on a=b" }, agent: "Nova" },
+    });
+    const refused = await executeCli({ argv: ["document", "set-fields", "launch.md", "--field", "status=Done", "--json"],
+      request: async () => ({ ok: false, reason: "That record is not in a Collection." }) });
+    expect(refused).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(refused.stderr).toContain("That record is not in a Collection.");
+    for (const [argv, refusal] of [[["launch.md"], "requires --field"], [["launch.md", "--field", "=Done"], "name=value"], [["launch.md", "--field", "status"], "name=value"]] as const) {
+      const parsed = await executeCli({ argv: ["document", "set-fields", ...argv], request });
+      expect(parsed.exitCode).toBe(1);
+      expect(parsed.stderr).toContain(refusal);
+    }
+    expect(request).toHaveBeenCalledOnce();
+  });
+
   it("appends without find and keeps a literal dash in --text", async () => {
     const request = vi.fn(async (_request: CliRequestWithoutToken) => ({ ok: true, path: "plan.md", changed: false, warning: "Check the document." }));
     const result = await executeCli({ argv: ["document", "edit", "plan.md", "--text", "-"], request });
