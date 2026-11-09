@@ -46,6 +46,7 @@ it("asks PostHog not to look up a location, and drops the address after its ? or
         $current_url: "https://dohc.computer/?utm_source=x#top",
         $referrer: "https://dohc.computer/privacy?a=b",
         ph_keyword: "a search",
+        $search_engine: "google",
       },
     });
     expect(sent?.properties).toEqual({

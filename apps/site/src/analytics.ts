@@ -49,10 +49,11 @@ function loadAnalytics(): Promise<PostHog> {
           const value = properties[key];
           if (typeof value === "string") properties[key] = value.split(/[?#]/)[0];
         }
-        // The SDK copies a search term from the referrer's query into this,
-        // and takes this site's own address for a search engine's when its
-        // query mentions one.
+        // The SDK reads both from the referrer's whole address, query
+        // included, and takes this site's own address for a search engine's
+        // when its query mentions one.
         delete properties.ph_keyword;
+        delete properties.$search_engine;
         return { ...event, properties };
       },
       // Anyone can send a link that turns these on, and each keeps a setting

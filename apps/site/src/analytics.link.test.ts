@@ -33,7 +33,7 @@ it("keeps nothing and sends no part of a link after its ? or #", async () => {
   const sent = bodies.join();
   expect(sent).toContain('"$current_url":"http://localhost:3000/"');
   expect(sent).toContain('"$referrer":"http://localhost:3000/privacy"');
-  for (const part of ["utm_source", "news", "gclid", "abc123", "a%40b.c", "__posthog", "b%40c.d", "b@c.d", "#top"]) {
+  for (const part of ["utm_source", "news", "gclid", "abc123", "a%40b.c", "__posthog", "b%40c.d", "b@c.d", "#top", "ph_keyword", "$search_engine"]) {
     expect(sent, part).not.toContain(part);
   }
 });
