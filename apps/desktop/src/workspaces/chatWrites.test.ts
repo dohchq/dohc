@@ -314,9 +314,11 @@ describe("chat writes", () => {
 
   it("wakes the agent dohc starts that a person's reply answers", async () => {
     const test = fixture();
-    const byAgent = (id: string, authorAgentId: string | undefined): ChatMessage => ({
+    // This device keeps the actor key of a message it wrote; a synced one has none.
+    const byAgent = (id: string, authorAgentId: string | undefined, local = true): ChatMessage => ({
       id, workspaceId: "workspace", threadId: "thread", body: "Blocked: which bucket?", createdAtMs: 1, attachments: [],
       author: { kind: "agent", displayName: "Codex" }, ...(authorAgentId ? { authorAgentId } : {}),
+      ...(local ? { authorActorKey: "actor-key" } : {}),
     });
     const reply = (input: { writer?: ChatWriter; body?: string; parentMessageId?: string } = {}) => test.writes.sendMessage(test.place, {
       writer: input.writer ?? PERSON, threadId: "thread", body: input.body ?? "Use the EU one",
@@ -336,6 +338,11 @@ describe("chat writes", () => {
     await reply();
     test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", undefined)], nextAfterMessageOrder: 1 });
     await reply();
+    // Another person's agent with the same settings id posted it on their computer.
+    test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", "codex", false)], nextAfterMessageOrder: 1 });
+    await reply();
+    test.store.getMessage.mockResolvedValueOnce(byAgent("question", "codex", false));
+    await reply({ parentMessageId: "question" });
     // A Group's conversation has no starter: only a reply under Codex's message answers it.
     test.store.getThread.mockResolvedValue({
       thread: { id: "thread", workspaceId: "workspace", title: "", createdAtMs: 1, updatedAtMs: 1, lane: "chat" },
@@ -355,7 +362,7 @@ describe("chat writes", () => {
     await reply({ parentMessageId: "question" });
     test.store.listMessagesPage.mockRejectedValue(new Error("engine busy"));
     await reply();
-    expect(woken()).toEqual([["codex"], ["codex"], [], [], [], [], [], ["codex"], [], []]);
+    expect(woken()).toEqual([["codex"], ["codex"], [], [], [], [], [], [], [], ["codex"], [], []]);
   });
 
   it("writes a dispatched run's reply as its agent, by id and settings name", async () => {

@@ -730,11 +730,21 @@ describe("CLI socket server", () => {
       author: { kind: "human", displayName: "Ice" }, body: "Friday",
     });
     await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: answer.threadId, triggerMessageId: answer.id, agentId: "default" });
+    // An automation's wake for the same agent waits for the run it starts,
+    // which can only reply.
+    const wake = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id, lane: "posts",
+      author: { kind: "automation", displayName: "Stamp the finish date" }, authorOwnerDisplayName: "Ice",
+      automation: { automationId: "collection:board#stamp", chainDepth: 1 }, body: "Stamp the card.",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: wake.thread.id, triggerMessageId: wake.message.id, agentId: "default" });
 
     const watched = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
     expect(watched.messages.map(message => message.messageId)).toContain(cliMessageId(answer.id));
+    expect(watched.messages.map(message => message.messageId)).not.toContain(cliMessageId(wake.message.id));
     await dispatchStore.completeRun({ runId: claim.run.runId, exitCode: 0 });
-    expect(await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" })).toBeNull();
+    const next = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
+    expect(next?.dispatch.triggerMessageId).toBe(wake.message.id);
   });
 
   it("leaves a reply for the next run when the watch times out before its read lands", async () => {

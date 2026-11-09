@@ -1,6 +1,7 @@
 use dohc_engine_domain::{
-    AgentReader, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, ChatThreadLane,
-    LinkedChatStore, NoFaults, SaveBookmark, SendMessage, StartChannelThread,
+    AgentReader, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
+    ChatMessageAutomation, ChatThreadLane, LinkedChatStore, NoFaults, SaveBookmark, SendMessage,
+    StartChannelThread,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -1626,18 +1627,39 @@ fn fail_pending_is_workspace_thread_scoped() {
 #[test]
 fn cover_delivered_takes_only_the_running_runs_agents_pending_requests() {
     let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    // An automation's wake starts its own run, which can only reply.
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: Some(ChatMessageAutomation {
+                    automation_id: "collection:board#stamp".to_owned(),
+                    chain_depth: 1,
+                }),
+                author_owner_display_name: Some("Ada".to_owned()),
+                ..start_input("stamped-thread", "stamped", ChatActorKind::Automation, 3)
+            },
+            &NO_FAULTS,
+        )
+        .expect("automation message");
     claimed_run(&mut store, "start", "thread", "run", 10);
     let mut chats = LinkedChatStore::new(&mut store);
     for (trigger, agent, at) in [
         ("reply", "default", 11),
         ("reply", "codex", 11),
         ("later", "default", 12),
+        ("stamped", "default", 13),
     ] {
         chats
             .enqueue_dispatch(WS, trigger, agent, "thread", at, &NO_FAULTS)
             .expect("enqueue");
     }
-    let delivered = ["reply".to_owned(), "start".to_owned(), "missing".to_owned()];
+    let delivered = [
+        "reply".to_owned(),
+        "start".to_owned(),
+        "missing".to_owned(),
+        "stamped".to_owned(),
+    ];
     assert!(
         chats
             .cover_delivered_requests(OTHER_WS, "run", &delivered, 13, &NO_FAULTS)
@@ -1661,8 +1683,15 @@ fn cover_delivered_takes_only_the_running_runs_agents_pending_requests() {
                 ))
                 .collect::<Vec<_>>()
         ),
-        (1, vec![("reply", "codex"), ("later", "default")]),
-        "only the run agent's pending request among the delivered ones is covered"
+        (
+            1,
+            vec![
+                ("reply", "codex"),
+                ("later", "default"),
+                ("stamped", "default")
+            ]
+        ),
+        "only the run agent's pending request from a person among the delivered ones is covered"
     );
     chats
         .complete_dispatch(WS, "run", 0, 14, &NO_FAULTS)

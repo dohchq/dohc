@@ -244,7 +244,9 @@ export function createChatWrites(dependencies: {
   // The agent a reply answers: the author of the message it replies under,
   // or the agent that started the post or file chat it is in. A Group's
   // running conversation has no starter, so there only a reply under an
-  // agent's message answers one.
+  // agent's message answers one. An agent id is a settings id, so only a
+  // message this device wrote, which alone keeps its actor key, names one of
+  // this person's agents; another person's agent may share the id.
   async function answeredAgentIdOf(place: ChatWritePlace, threadId: string, parentMessageId: string | undefined): Promise<string | null> {
     const { workspaceId, store } = place;
     // A thread or parent this cannot read is the write's own refusal to make,
@@ -252,12 +254,12 @@ export function createChatWrites(dependencies: {
     try {
       if (parentMessageId) {
         const parent = await store.getMessage({ workspaceId, messageId: parentMessageId });
-        if (parent?.authorAgentId) return parent.authorAgentId;
+        if (parent?.authorAgentId && parent.authorActorKey !== undefined) return parent.authorAgentId;
       }
       const { thread } = await store.getThread({ workspaceId, threadId });
       if (thread.lane === "chat") return null;
       const [opening] = (await store.listMessagesPage({ workspaceId, threadId, limit: 1 })).messages;
-      return opening?.authorAgentId ?? null;
+      return opening?.authorAgentId && opening.authorActorKey !== undefined ? opening.authorAgentId : null;
     } catch {
       return null;
     }

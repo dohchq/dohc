@@ -734,6 +734,8 @@ impl<'a> LinkedChatStore<'a> {
     /// Covers the requests a run read while it ran, as a claim covers the
     /// requests already waiting: each pending trigger of the run's agent among
     /// `message_ids` is done under the run, so no later run answers it again.
+    /// A trigger with a chain depth, such as an automation's wake, stays for
+    /// the run it starts, which can only reply.
     /// A run that fails gives them back with the rest it covered. An ended run
     /// covers nothing. Returns how many it covered.
     pub fn cover_delivered_requests(
@@ -759,7 +761,14 @@ impl<'a> LinkedChatStore<'a> {
             for message_id in &message_ids {
                 covered += tx
                     .execute(
-                        "UPDATE chat_dispatch_ledger \n                         SET state = 'done', run_id = ?4, attempt_count = attempt_count + 1, \n                             updated_at_ms = ?5 \n                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?3 \n                           AND state = 'pending'",
+                        "UPDATE chat_dispatch_ledger \
+                         SET state = 'done', run_id = ?4, attempt_count = attempt_count + 1, \
+                             updated_at_ms = ?5 \
+                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?3 \
+                           AND state = 'pending' \
+                           AND NOT EXISTS (SELECT 1 FROM chat_messages m \
+                             WHERE m.workspace_id = ?1 AND m.message_id = ?2 \
+                               AND m.chain_depth IS NOT NULL)",
                         params![workspace_id, message_id, run.agent_id, run_id, now_ms],
                     )
                     .map_err(DomainError::sql_persist)?;

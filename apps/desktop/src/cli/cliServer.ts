@@ -4276,6 +4276,9 @@ async function watchMessages(
             met.add(unread.messageId);
             continue;
           }
+          // A run takes only people's requests. An automation's wake stays
+          // for the run it starts, which can only reply.
+          if (runId !== null && unread.author.kind !== "human") continue;
           const message = {
             threadId: cliThreadId(unread.threadId),
             messageId: cliMessageId(unread.messageId),
