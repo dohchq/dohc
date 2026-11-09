@@ -35,6 +35,8 @@ import {
   ordinaryActivationReadBytes,
   type KnownActivationSource,
 } from "./storage/ordinaryActivationBytes.js";
+import { firstOpenOrigin } from "./storage/firstOpenEligibility.js";
+import type { FirstOpenSource } from "./storage/firstOpenHistory.js";
 import { verifyOrdinaryActivationCut, readOrdinaryActivationHistory } from "./storage/ordinaryActivationSource.js";
 import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 
@@ -376,6 +378,23 @@ const PARITY: [string, string][] = [
   ["link-inside", "See [Report](https://example.com/a).\n"],
   ["image-leading", "![Verify](https://example.com/badge.svg)\n"],
 ];
+
+describe("first-open origin", () => {
+  it("pins the origin the relay derives for the build-skew note's source", () => {
+    // `first_open_build_skew.rs` reads this id instead of deriving it.
+    const fixture = new URL("first-open-origin.json", fixtures);
+    const markdown = PARITY.find(([name]) => name === "table-inline-code")![1];
+    const source: FirstOpenSource = { workspaceId: "workspace", objectId: "object", path: "docs/a.md", sourceMomentId: "head-moment",
+      sourceDigest: sha256(markdown), sourceByteLength: Buffer.byteLength(markdown) };
+    const identity = { replicationEpoch: "epoch-relay", streamIdentity: "stream-relay" };
+    if (process.env.DOHC_WRITE_FIRST_OPEN_FIXTURES === "1")
+      writeFileSync(fixture, `${JSON.stringify({ namespace: "relay", source, identity, originId: firstOpenOrigin("relay", source, identity) }, null, 2)}\n`);
+    const pinned = JSON.parse(readFileSync(fixture, "utf8")) as
+      { namespace: string; source: FirstOpenSource; identity: typeof identity; originId: string };
+    expect({ namespace: pinned.namespace, source: pinned.source, identity: pinned.identity }).toEqual({ namespace: "relay", source, identity });
+    expect(firstOpenOrigin(pinned.namespace, pinned.source, pinned.identity)).toBe(pinned.originId);
+  });
+});
 
 describe("first-open candidates", () => {
   const fixture = new URL("candidates.json", fixtures);
