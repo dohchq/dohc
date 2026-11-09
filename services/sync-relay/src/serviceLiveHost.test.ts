@@ -31,6 +31,7 @@ import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
 import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
 import {nativeRestoreFence} from "./storage/liveRestoreOperation.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {liveValidation} from "./liveValidation.js";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {SERVICE_KEPT_EDITS_PAGE, type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
@@ -1118,7 +1119,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
     refuseCapture(error: Error | undefined) {refusal = error;},
-    refuseCaptureAt(path: string, error: Error) {refusals.set(path, error);},
+    refuseCaptureAt(path: string, error: Error | undefined) {if (error) refusals.set(path, error); else refusals.delete(path);},
     otherActivations,
     refuseRegistration(error: Error | undefined) {registrationRefusal = error;},
     failDetach(error: Error | undefined) {detachFailure = error;},
@@ -5291,14 +5292,79 @@ it.each([["Pause", false], ["Stop", true]] as const)("publishes nothing when %s 
   expect(o.checks).toHaveBeenCalledOnce();
   expect(o.bases()).toHaveLength(0);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
+  // The lost request is neither a refusal nor a stop, so Live documents shows the pause alone.
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const source = () => ({...plain, path: neverOpened.path, sourceMomentId: "plain-moment", sourceDigest: "a".repeat(64)});
+  expect(o.host.firstOpenStatus(plain, source)).toBeUndefined();
   // The self-host supervisor's next membership leaves the note out.
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  expect(o.host.firstOpenStatus(plain, source)).toBeUndefined();
+  expect(o.host.blocked(plain)).toBeUndefined();
   o.acceptEdit("moving");
   await o.host.drain(o.document);
   expect(o.applied.has("edit-moving")).toBe(true);
   await o.nextPull(); await o.nextPull();
   expect(o.requests).toHaveLength(1);
   expect(o.bases()).toHaveLength(0);
+});
+
+// The engine refusing a capture outright, which it answers the same way on every pass.
+const limitExceeded = () => new EngineRequestError(1, {code: "LIMIT_EXCEEDED", message: "capture-too-large", retry: "no"} as never);
+
+// Proves: a note whose first open published a base, and whose capture the
+// engine then refuses outright, reports that refusal with the engine's code in
+// its stable form. No later pass captures it again or asks the relay again
+// until Try again, which allows exactly one more capture, and the same refusal
+// coming back shows again.
+it("reports a refused capture after a first open published its base, and captures again only after Try again", async () => {
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, limitExceeded())});
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const status = () => o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}));
+  const refused = {reason: "ordinary-activation-refused", code: "limit-exceeded", recovery: "report",
+    source: expect.objectContaining({...plain, path: neverOpened.path, sourceMomentId: "plain-moment"})};
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  await vi.waitFor(() => expect(o.host.blocked(plain)).toBe("refused"));
+  expect(status()).toEqual(refused);
+  await o.nextPull(); await o.nextPull();
+  expect(o.captures()).toBe(2);
+  expect(o.fetcher).toHaveBeenCalledOnce();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  expect(o.host.unblock(plain)).toBe(true);
+  expect(status()).toBeUndefined();
+  await vi.waitFor(() => expect(o.captures()).toBe(3));
+  await vi.waitFor(() => expect(status()).toEqual(refused));
+  await o.nextPull(); await o.nextPull();
+  expect(o.captures()).toBe(3);
+  expect(o.fetcher).toHaveBeenCalledOnce();
+});
+
+// Proves: a note whose first open published a base, and whose capture the
+// relay's own activation validation then refuses, reports that refusal with
+// one stable code, releases the capture's native lease at once, and no later
+// pass captures it again.
+it("reports a refused activation validation after a first open published its base, and releases its lease", async () => {
+  const ordinaryActivation = liveValidation.ordinaryActivation;
+  let refuse = false;
+  const validations = vi.spyOn(liveValidation, "ordinaryActivation").mockImplementation(policy => {
+    const validate = ordinaryActivation(policy);
+    return async (work, signal) => refuse ? {kind: "refused", message: "Activation history is invalid."} : validate(work, signal);
+  });
+  cleanup.push(async () => validations.mockRestore());
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => {refuse = true; o.refuseCaptureAt(neverOpened.path, undefined);}});
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const releases = () => o.ownerCalls().filter(([method]) => method === "liveApplication.releaseOwnerActivation").length;
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  await vi.waitFor(() => expect(o.host.blocked(plain)).toBe("refused"));
+  expect(o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}))).toEqual({
+    reason: "ordinary-activation-refused", code: "activation-validation", recovery: "report", source: expect.objectContaining({...plain, path: neverOpened.path})});
+  expect(releases()).toBe(1);
+  await o.nextPull(); await o.nextPull();
+  expect(o.captures()).toBe(2);
+  expect(releases()).toBe(1);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
 // Proves: only the workspace's service-host credential reaches first open. A
