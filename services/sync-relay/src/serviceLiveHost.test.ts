@@ -3735,6 +3735,28 @@ it("keeps a moved document's restore route after a running host detaches and att
   expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
 });
 
+// Proves (#3005): the route also comes back when membership drops the workspace
+// and a later update lists it again. The drop forgets the moved document, so
+// only the update that lists it again can find it.
+it("keeps a moved document's restore route after a running host drops its workspace and lists it again", async () => {
+  const {o, host} = await movedDuringRestore({covered: true});
+  const forgetMoved = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved");
+  await host.update({workspaces: [], documents: [], departing: []});
+  expect(forgetMoved).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId);
+  await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  await o.nextPull();
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(o.ownerCalls().map(([method]) => method)).toContain("liveApplication.cancelRestoreFence");
+  await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+});
+
 // Proves: activation reads that name an object, as departure recovery's do for
 // a document it holds without a target, find that object's activation and not
 // another's at the same path.
