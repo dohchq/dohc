@@ -1873,7 +1873,7 @@ describe("crash report notice", () => {
     expect((await screen.findByTestId("crash-report-toast")).textContent).toContain("A dohc window stopped unexpectedly");
   });
 
-  it("shows the toast again and says so when main could not save that it was read", async () => {
+  it("shows the toast again and says so when main could not save that it was read, and Try again saves it", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
     bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
@@ -1883,9 +1883,15 @@ describe("crash report notice", () => {
     renderShell(bridge);
 
     await user.click(await screen.findByRole("button", { name: "Close crash report notice" }));
-    expect((await screen.findByTestId("workspace-shell-error")).textContent)
-      .toContain("dohc could not save that you read the crash report.");
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("dohc could not save that you read the crash report.");
     expect(await screen.findByTestId("crash-report-toast")).toBeTruthy();
+
+    bridge.readCrashReport.mockResolvedValue({ report: { ...REPORT, revision: 4, read: true }, sendTo: null });
+    await user.click(within(error).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.markCrashReportRead).toHaveBeenCalledTimes(2));
+    expect(bridge.markCrashReportRead).toHaveBeenLastCalledWith({ through: 3 });
+    await waitFor(() => expect(screen.queryByTestId("crash-report-toast")).toBeNull());
   });
 
   it("shows the row unread again when main could not save it, and saves on the next read", async () => {

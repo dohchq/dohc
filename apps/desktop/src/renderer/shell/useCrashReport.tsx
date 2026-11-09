@@ -98,7 +98,7 @@ export function useCrashReport(notify: CrashReportNotify): {
           notifyRef.current.reportError(
             "dohc could not save that you read the crash report.",
             new Error(ipcErrorMessage(error)),
-            null,
+            () => markRead(),
           );
           return reload();
         },
