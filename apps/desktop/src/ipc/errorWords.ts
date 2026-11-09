@@ -589,6 +589,20 @@ export function refusalCode(error: unknown): string | undefined {
   return parse(error).code;
 }
 
+/** Main's codes for a call on the workspace its window has stopped: a read, which lost nothing, and any other call. */
+export const STOPPED_WORKSPACE_READ = "stopped-workspace-read";
+export const STOPPED_WORKSPACE = "stopped-workspace";
+
+export function isStoppedWorkspaceRead(error: unknown): boolean {
+  return refusalCode(error) === STOPPED_WORKSPACE_READ;
+}
+
+/** Try again cannot succeed until the window's stop ends. */
+export function isStoppedWorkspaceCall(error: unknown): boolean {
+  const code = refusalCode(error);
+  return code === STOPPED_WORKSPACE || code === STOPPED_WORKSPACE_READ;
+}
+
 /** The engine refuses reads this way while it reads a new workspace's files. */
 export function isWorkspaceUpdatingError(error: unknown): boolean {
   const { name, code, message } = parse(error);

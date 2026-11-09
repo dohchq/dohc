@@ -5930,6 +5930,26 @@ export function DesktopWorkspaceShell(props: {
     ],
     [appVersion, props.workspace],
   );
+  // A store this build could not migrate, or one a newer build migrated, is
+  // intact. Nothing in this workspace can run against it, so the workspace
+  // stops here until a build that opens it. Other workspaces keep their own
+  // stores.
+  const storeUpdateRefusal =
+    syncStatus?.engineStoreRefused != null &&
+    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update"
+      ? syncStatus.engineStoreRefused
+      : null;
+  const oldWindow = props.oldWindow ?? null;
+  // The workspace also stops in a window Forget left showing it.
+  const workspaceStopped = storeUpdateRefusal !== null || oldWindow !== null;
+  // The rows filed before the stop began. Their Try again would ask the
+  // stopped workspace again, which cannot succeed. Main marks a call that
+  // fails on it later, so a row filed during the stop keeps its own.
+  const filedBeforeStopRef = useRef<ReadonlySet<string> | null>(null);
+  filedBeforeStopRef.current = workspaceStopped
+    ? filedBeforeStopRef.current ?? new Set(shellErrors.map((error) => error.id))
+    : null;
+  const filedBeforeStop = filedBeforeStopRef.current;
   // Errors as the notice center shows them: the message, whether it can be
   // asked again, and what it lets a person copy.
   const workspaceErrors = useMemo(
@@ -5952,7 +5972,7 @@ export function DesktopWorkspaceShell(props: {
               ...reportFacts(error.atMs),
             ]) } }),
         atMs: error.atMs,
-        canRetry: error.retry !== null,
+        canRetry: error.retry !== null && !filedBeforeStop?.has(error.id),
         retryBusy: error.retryBusy,
         ...(versionMerges.retryBlocked && isVersionMergeIdentity(error.identity) ? { retryBlocked: versionMerges.retryBlocked } : {}),
         ...(error.action ? { actionLabel: error.action.label } : {}),
@@ -5963,7 +5983,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.noDismiss ? { noDismiss: true } : {}),
         ...(error.target ? { target: error.target } : {}),
       })),
-    [shellErrors, reportFacts, versionMerges.retryBlocked],
+    [shellErrors, reportFacts, versionMerges.retryBlocked, filedBeforeStop],
   );
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
@@ -5972,18 +5992,6 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setStoreDetailsOpen(false);
   }, [workspaceId]);
-  // A store this build could not migrate, or one a newer build migrated, is
-  // intact. Nothing in this workspace can run against it, so the workspace
-  // stops here until a build that opens it. Other workspaces keep their own
-  // stores.
-  const storeUpdateRefusal =
-    syncStatus?.engineStoreRefused != null &&
-    engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update"
-      ? syncStatus.engineStoreRefused
-      : null;
-  const oldWindow = props.oldWindow ?? null;
-  // The workspace also stops in a window Forget left showing it.
-  const workspaceStopped = storeUpdateRefusal !== null || oldWindow !== null;
   // A stopped workspace or a failed open shows in place of the opening cover.
   openingCoverShown.current = !workbenchRestored && !workspaceStopped && (workspaceIsReady || !workspaceOpenFailure);
   workspaceStoppedRef.current = workspaceStopped;

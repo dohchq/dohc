@@ -28,6 +28,11 @@ function renderShell(bridge: ReturnType<typeof makeBridge>, oldWindow: OldWindow
 
 const workbenchInert = () => screen.getByTestId("workspace-workbench").hasAttribute("inert");
 
+// What the window receives when main marks a call on the workspace it has stopped.
+const stoppedCall = (channel: string, code: "stopped-workspace-read" | "stopped-workspace") =>
+  new Error(`Error invoking remote method '${channel}': Error [${code}]: This workspace is no longer open in this window.`);
+const KEPT_TYPING_FAILED = "dohc could not check for typing it kept in History.";
+
 describe("a window Forget left showing its workspace", () => {
   it("stops the workbench and follows whether another window shows the workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -84,6 +89,47 @@ describe("a window Forget left showing its workspace", () => {
     const checks = bridge.checkForUpdates.mock.calls.length;
     act(() => bridge.emitMenuCommand("check-updates"));
     await waitFor(() => expect(bridge.checkForUpdates).toHaveBeenCalledTimes(checks + 1));
+  });
+
+  it("reports no read that failed after the workspace stopped, and reports other calls without Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const show = renderShell(bridge, null);
+    await waitFor(() => expect(workbenchInert()).toBe(false));
+    await waitFor(() => expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalled());
+    // Main stopped the workspace before this window heard: workspace activity
+    // runs the window's reads again, and each one fails.
+    const reads = bridge.getCaptureRecoveryStatus.mock.calls.length;
+    bridge.getCaptureRecoveryStatus.mockRejectedValue(stoppedCall("desktop:get-capture-recovery-status", "stopped-workspace-read"));
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads));
+    show({ openElsewhere: false });
+    await screen.findByTestId("workspace-old-window");
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads + 1));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(document.body.textContent).not.toContain(KEPT_TYPING_FAILED);
+
+    // Any other failed call is still reported, with nothing to try again.
+    bridge.goToWorkspaceWindow.mockRejectedValueOnce(stoppedCall("desktop:go-to-workspace-window", "stopped-workspace"));
+    show({ openElsewhere: true });
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Go to that window" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not go to that window.");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("offers no Try again on a row filed before the workspace stopped", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getCaptureRecoveryStatus.mockRejectedValue(new Error("The disk is busy."));
+    const show = renderShell(bridge, null);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(KEPT_TYPING_FAILED);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+
+    show({ openElsewhere: false });
+    await screen.findByTestId("workspace-old-window");
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(KEPT_TYPING_FAILED);
+    expect(within(screen.getByTestId("workspace-shell-error")).queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
   it("says when it could not go to that window", async () => {
