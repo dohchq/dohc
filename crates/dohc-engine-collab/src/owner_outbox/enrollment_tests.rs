@@ -2505,10 +2505,16 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         enrolled.pending_bytes > 0,
         "private content stays in its outbox"
     );
-    let (rows, attempt): (i64, Option<i64>) = store.read_with(|conn| {
-        conn.query_row("SELECT (SELECT COUNT(*) FROM ydoc_updates),settle_prior_update_seq FROM ydoc_docs", [],
-            |row| Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)
-    }).unwrap();
+    let (rows, attempt): (i64, Option<i64>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM ydoc_updates),settle_prior_update_seq FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(read_sql)
+        })
+        .unwrap();
     assert_eq!(rows, 0);
     assert_eq!(
         store

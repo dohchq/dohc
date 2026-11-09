@@ -5802,17 +5802,18 @@ mod tests {
                         let marker = durable::read_marker_in(tx, &key())?.unwrap();
                         let local = durable::load_doc_in(tx, &key())?.encode_full_state();
                         let checkpoint = Ydoc::wire().encode_full_state();
-                        let head = crate::owner_outbox::enrollment::install_native_checkpoint_in_tx(
-                            tx,
-                            &key(),
-                            &marker,
-                            &local,
-                            &checkpoint,
-                            &binding().lineage_claim_id,
-                            &Ydoc::wire().encode_state_vector(),
-                            2,
-                        )
-                        .unwrap();
+                        let head =
+                            crate::owner_outbox::enrollment::install_native_checkpoint_in_tx(
+                                tx,
+                                &key(),
+                                &marker,
+                                &local,
+                                &checkpoint,
+                                &binding().lineage_claim_id,
+                                &Ydoc::wire().encode_state_vector(),
+                                2,
+                            )
+                            .unwrap();
                         assert_eq!(head, marker.head_update_seq + 1);
                         Ok::<_, CollabError>(())
                     })
