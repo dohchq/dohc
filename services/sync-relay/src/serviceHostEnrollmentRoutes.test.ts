@@ -1031,4 +1031,45 @@ it("reports a temporary retry stop apart from content refusal, and owner Resume 
     firstOpen: {reason: "retry-stopped", code: "build-deadline", source, deadlineAnswers: 3, recovery: "retry-later"}}]});
   expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
   expect(f.retry.state(source)?.stop).toBeUndefined();
+  // The same stop coming back shows again, and Try again clears it again.
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "unavailable", reason: "live-first-open-retry-stopped"}]});
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "preparing"}]});
+  // An edit to the file ends a stop for its old bytes.
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  f.raw.prepare("UPDATE sync_relay_object_moments SET blob_sha256=? WHERE workspace_id=? AND object_id=?").run("c".repeat(64), scope.workspaceId, enrolled.objectId);
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "preparing"}]});
+});
+
+// Proves: ready wins. A refusal or a stop that lands after the document's
+// activation completed, while its host holds it ready, never shows it refused
+// or stopped. One that stands while it is not ready still shows, with the
+// engine's code in its stable form.
+it("never reports a ready document as refused or stopped by a first-open answer that lands later", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const source = currentSource(f, enrolled.objectId);
+  const refused = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-first-open-refused",
+    firstOpen: {reason: "ordinary-activation-refused", code: "limit-exceeded", source, recovery: "report"}};
+  const ready = {path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}};
+  f.host.firstOpenAnswered(firstOpenOutcome(source, {kind: "refused", reason: "ordinary-activation-refused", code: "LIMIT_EXCEEDED"}));
+  expect(await documents()).toEqual([refused]);
+  retainServiceActivation(f.raw, namespace);
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  f.host.ready.mockReturnValue(true);
+  expect(await documents()).toEqual([ready]);
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  expect(await documents()).toEqual([ready]);
+  f.host.ready.mockReturnValue(false);
+  expect(await documents()).toEqual([refused]);
 });

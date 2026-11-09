@@ -201,6 +201,15 @@ export function createServiceHostEnrollmentRoutes(options: {
   // Nothing its owner does, not even a Pause or Stop, continues a document
   // whose hosted replica diverged. Its store stays for the operator.
   const diverged = (row: ServiceHostEnrollment) => !changed(row) && host.diverged(row);
+  // The ready row of a document whose activation completed and whose host holds it ready, or undefined.
+  function ready(row: ServiceHostEnrollment, base: {path: string; objectId: string}) {
+    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
+    if (!saved?.completed) return undefined;
+    const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
+    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId, shareId: row.shareId}});
+    if (current.kind !== "current" || !host.ready(document)) return undefined;
+    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
+  }
   // Each row names its document, so its owner's Stop and Resume act on that document alone.
   function state(row: ServiceHostEnrollment) {
     const base = {path: row.path, objectId: row.objectId};
@@ -216,7 +225,9 @@ export function createServiceHostEnrollmentRoutes(options: {
         path: head.path, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest} : undefined;
     };
     const firstOpen = host.firstOpenStatus(row, readSource);
-    if (firstOpen) return {...base, status: "unavailable", reason: firstOpen.reason === "retry-stopped" ? "live-first-open-retry-stopped" : "live-first-open-refused", firstOpen};
+    // A first-open answer that lands after the document went live never shows it as refused or stopped.
+    if (firstOpen) return ready(row, base) ??
+      {...base, status: "unavailable", reason: firstOpen.reason === "retry-stopped" ? "live-first-open-retry-stopped" : "live-first-open-refused", firstOpen};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first. A Resume of one whose
     // host copy is missing an owner edit retires its held activation.
@@ -224,12 +235,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
       block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
     if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
-    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024, row.objectId);
-    if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
-    const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
-    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId, shareId: row.shareId}});
-    if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
-    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
+    return ready(row, base) ?? {...base, status: host.unavailable ? "unavailable" : "preparing"};
   }
   // The exact prepared activation, pending or completed, of a document the host
   // holds for an unadmitted live edit. Its Resume retires that activation inside
