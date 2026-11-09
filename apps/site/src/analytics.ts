@@ -35,9 +35,22 @@ function loadAnalytics(): Promise<PostHog> {
       // model, which Chrome reveals only when asked, are not on it.
       disable_scroll_properties: true,
       disableDeviceModel: true,
-      // PostHog's GeoIP step skips an event that carries this, so no report
-      // gains a location, whatever the order of PostHog's pipeline.
-      before_send: (event) => event && { ...event, properties: { ...event.properties, $geoip_disable: true } },
+      // A link can carry anything after its ? or #, such as campaign tags or
+      // an email address, so reports hold only the page's own address.
+      save_campaign_params: false,
+      before_send: (event) => {
+        if (!event) return event;
+        // PostHog's GeoIP step skips an event that carries this, so no report
+        // gains a location, whatever the order of PostHog's pipeline.
+        const properties: Record<string, unknown> = { ...event.properties, $geoip_disable: true };
+        if (typeof properties.$current_url === "string") properties.$current_url = properties.$current_url.split(/[?#]/)[0];
+        return { ...event, properties };
+      },
+      // Anyone can send a link that turns these on, and each keeps a setting
+      // in the browser's storage: ?__posthog_debug=true, and the toolbar's
+      // #__posthog= login, which also loads the toolbar's script.
+      debug: false,
+      __extensionClasses: { toolbar: undefined },
       // The project records sessions for the desktop app. Not here.
       disable_session_recording: true,
       capture_heatmaps: false,
