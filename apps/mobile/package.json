@@ -1,0 +1,52 @@
+{
+  "name": "@dohc/mobile",
+  "version": "0.0.0",
+  "private": true,
+  "main": "./index.js",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "node scripts/build-editor.mjs && tsc --noEmit -p tsconfig.json",
+    "build:editor": "node scripts/build-editor.mjs",
+    "test": "vitest run src"
+  },
+  "dependencies": {
+    "@dohc/brand": "workspace:*",
+    "@dohc/interface-words": "workspace:*",
+    "@dohc/live-session-contract": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
+    "@dohc/ydoc-projection": "workspace:*",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@legendapp/list": "3.3.11",
+    "expo": "~58.0.22",
+    "expo-constants": "~58.0.15",
+    "expo-crypto": "~58.0.7",
+    "expo-dev-client": "~58.0.18",
+    "expo-file-system": "~58.0.13",
+    "expo-glass-effect": "~58.0.5",
+    "expo-haptics": "~58.0.7",
+    "expo-linking": "~58.0.16",
+    "expo-router": "~58.0.30",
+    "expo-secure-store": "~58.0.2",
+    "expo-status-bar": "~58.0.4",
+    "expo-symbols": "~58.0.4",
+    "lucide-react-native": "1.30.0",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-gesture-handler": "~3.3.0",
+    "react-native-keyboard-controller": "1.22.7",
+    "react-native-reanimated": "4.7.1",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-screens": "~4.30.1",
+    "react-native-svg": "15.16.0",
+    "react-native-webview": "14.0.1",
+    "react-native-worklets": "0.13.0",
+    "yjs": "13.6.30"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.0",
+    "esbuild": "0.28.1",
+    "typescript": "^7.0.2"
+  }
+}
