@@ -7,7 +7,7 @@ import { describeApprovedDataset, parseDatasetDescription } from "@dohc/security
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { datasetDefinitionFromDrafts } from "./collections/datasetDefinitionFromDrafts";
 import { transactionalDescription } from "./transactionalCollectionModel";
-import { TransactionalCollectionPage, type TransactionalDatasetDescription, type TransactionalInvoke } from "./TransactionalCollectionPage";
+import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalDatasetDescription, type TransactionalInvoke } from "./TransactionalCollectionPage";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const name = id(3), amount = id(4), status = id(5), secret = id(6);
@@ -32,7 +32,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
   const props = { workspaceId: "workspace-A", dataset: dataset(), tableId: id(2), invoke, onError, onNotice, ...overrides };
   return { invoke, onError, onNotice, props, ...render(<TransactionalCollectionPage {...props} />) };
 }
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetKeptCollectionEditsForTests(); });
 
 it("offers a calendar before the Collection has a date field, and asks for one", async () => {
   const onAddDateField = vi.fn();
@@ -357,6 +357,54 @@ describe("transactional Collection page", () => {
     fireEvent.keyDown(pencil, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(open));
+  });
+  it("opens an edit with changes again in its cell when its page closes and opens again", async () => {
+    const first = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    // Another file opens in the tab group, then the Collection opens again.
+    first.unmount();
+    render(<TransactionalCollectionPage {...first.props} />);
+    const input = await screen.findByLabelText<HTMLInputElement>("Name");
+    expect(input.value).toBe("Alicia");
+    expect(input.closest("td")).not.toBeNull();
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    // The record's version is the one the edit opened with.
+    await waitFor(() => expect(first.invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Name for record 1" })));
+  });
+  it("opens an edit with changes again in record details when its page closes and opens again", async () => {
+    const first = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Open record 1" }));
+    const before = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(before).getByRole("button", { name: "Edit Name" }));
+    fireEvent.change(within(before).getByLabelText("Name"), { target: { value: "Alicia" } });
+    first.unmount();
+    render(<TransactionalCollectionPage {...first.props} />);
+    const dialog = await screen.findByRole("dialog", { name: "Record details" });
+    const input = within(within(dialog).getByRole("form", { name: "Edit Name" })).getByLabelText<HTMLInputElement>("Name");
+    expect(input.value).toBe("Alicia");
+    expect(document.activeElement).toBe(input);
+    // Escape closes only the field, and focus goes to its pencil.
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Edit Name" }));
+  });
+  it("opens no edit again that was cancelled, has no changes, or belongs to rules that changed", async () => {
+    const reopen = async (props: React.ComponentProps<typeof TransactionalCollectionPage>, typed: string | null, cancel = false) => {
+      const view = render(<TransactionalCollectionPage {...props} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+      if (typed !== null) fireEvent.change(screen.getByLabelText("Name"), { target: { value: typed } });
+      if (cancel) fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      view.unmount();
+    };
+    const { props } = setup(); cleanup();
+    await reopen(props, null);
+    await reopen(props, "Alicia", true);
+    await reopen(props, "Alicia");
+    render(<TransactionalCollectionPage {...props} dataset={{ ...dataset(), revision: 2, revisionSha256: "b".repeat(64) }} />);
+    await screen.findByText("Alice");
+    expect(screen.queryByLabelText("Name")).toBeNull();
   });
 
   it("cancels a field open in details on Escape from Done, and the next Escape closes details", async () => {

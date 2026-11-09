@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { BoardViewProps, CalendarViewProps } from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
-import { TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
+import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
 vi.mock("@dohc/collection-views",()=>({
   BoardView: (props:BoardViewProps)=><div>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
@@ -25,7 +25,7 @@ function setup(invoke:(request:TransactionalInvoke,signal:AbortSignal)=>Promise<
   const props={workspaceId:"w",dataset,tableId:"table",invoke,onError:vi.fn(),onSettled:vi.fn(),onNotice:vi.fn(),activeView:view};
   return {...render(<TransactionalCollectionPage {...props}/>),props};
 }
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetKeptCollectionEditsForTests(); });
 it("queries every board group beyond the first table page and pages each independently",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
     const input=request.input as Record<string,AppBackendJson>,group=input.group as {fieldId:string;value:string};
