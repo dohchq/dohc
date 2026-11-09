@@ -5679,20 +5679,25 @@ it.each([["Pause", false], ["Stop", true]] as const)("publishes nothing when %s 
   expect(o.bases()).toHaveLength(0);
 });
 
-// The engine refusing a capture outright, which it answers the same way on every pass.
-const limitExceeded = () => new EngineRequestError(1, {code: "LIMIT_EXCEEDED", message: "capture-too-large", retry: "no"} as never);
+// The engine refusing a capture past its byte budget, which it answers the same way on every pass. The engine
+// names the budget for a live application's own check, and says only "workspace operation failed" for one a
+// Y.Doc read inside the capture meets.
+const limitExceeded = (message: string) => new EngineRequestError(1, {code: "LIMIT_EXCEEDED", message, retry: "no"} as never);
 
 // Proves: a note whose first open published a base, and whose capture the
-// engine then refuses outright, reports that refusal with the engine's code in
-// its stable form. No later pass captures it again or asks the relay again
-// until Try again, which allows exactly one more capture, and the same refusal
-// coming back shows again.
-it("reports a refused capture after a first open published its base, and captures again only after Try again", async () => {
+// engine then refuses past its byte budget, reports that refusal with the
+// engine's code in its stable form. No later pass captures it again or asks
+// the relay again until Try again, which allows exactly one more capture, and
+// the same refusal coming back shows again.
+it.each([
+  ["live-application-byte-budget-exceeded", "live-application-byte-budget-exceeded"],
+  ["workspace operation failed", "limit-exceeded"],
+] as const)("reports a capture refused with %s after a first open published its base, and captures again only after Try again", async (message, code) => {
   let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
-  o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, limitExceeded())});
+  o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, limitExceeded(message))});
   const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
   const status = () => o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}));
-  const refused = {reason: "ordinary-activation-refused", code: "capture-too-large", recovery: "report",
+  const refused = {reason: "ordinary-activation-refused", code, recovery: "report",
     source: expect.objectContaining({...plain, path: neverOpened.path, sourceMomentId: "plain-moment"})};
   await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
   await vi.waitFor(() => expect(o.captures()).toBe(2));
@@ -5709,6 +5714,38 @@ it("reports a refused capture after a first open published its base, and capture
   await o.nextPull(); await o.nextPull();
   expect(o.captures()).toBe(3);
   expect(o.fetcher).toHaveBeenCalledOnce();
+});
+
+// The engine's generic answer for a failure it does not name, which says nothing about the next pass.
+const internalFailure = () => new EngineRequestError(1, {code: "INTERNAL", message: "workspace operation failed", retry: "no"} as never);
+
+// Proves: a note whose first open published a base, and whose fresh capture
+// then meets a conflict that a later pull or an applied conflict resolution
+// clears, or a failure the engine does not name, waits as preparing rather
+// than for Try again. Live documents shows no refusal, every later pass
+// captures it again, and once the conflict clears the next capture goes
+// through, all with no Try again and no new first-open request.
+it.each([
+  ["live-application-conflict", diverged],
+  ["ydoc-conflict-open", conflictOpen],
+  ["a generic engine failure", internalFailure],
+] as const)("captures a first-opened note again after %s, with no Try again", async (_name, failure) => {
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, failure())});
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const status = () => o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}));
+  const capture = o.client().captureOwnerActivation;
+  const through = () => capture.mock.calls.filter((call, index) => call[1] === neverOpened.path && capture.mock.settledResults[index]?.type === "fulfilled").length;
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  await vi.waitFor(() => expect(o.captures()).toBeGreaterThan(3));
+  expect(o.host.blocked(plain)).toBeUndefined();
+  expect(status()).toBeUndefined();
+  expect(through()).toBe(0);
+  o.refuseCaptureAt(neverOpened.path, undefined);
+  await vi.waitFor(() => expect(through()).toBe(1));
+  expect(o.fetcher).toHaveBeenCalledOnce();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
 // Proves: a note whose first open published a base, and whose capture the
