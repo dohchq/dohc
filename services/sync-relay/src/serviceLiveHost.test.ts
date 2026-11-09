@@ -5748,8 +5748,9 @@ it("hears a departed list reaching thousands of waiting documents in linear time
   await o.nextPull();
   expect(o.host.pulledAfterDeparture(departing.at(-1)!)).toBe(true);
   expect(o.host.retains(departing[0]!)).toBe(true);
-  // A lookup in the list for each would compare hundreds of millions of IDs.
-  expect(Math.max(...heard.slice(seen))).toBeLessThan(250);
+  // A lookup in the list for each would compare hundreds of millions of IDs: over 20 s on a fast desktop CPU. The
+  // page takes about 20 ms there and has taken over 500 ms on a busy runner.
+  expect(Math.max(...heard.slice(seen))).toBeLessThan(2500);
 });
 
 // Opus's review: a page whose newly held list may leave some out drops every
