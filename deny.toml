@@ -20,7 +20,11 @@ all-features = true
 version = 2
 yanked = "warn"
 unmaintained = "workspace"
-ignore = []
+ignore = [
+  # Temporary. Remove by 2026-11-13, when the bundled SQLite update (#3511)
+  # lands, together with the matching entry in .cargo/audit.toml.
+  { id = "RUSTSEC-2026-0459", reason = "skipped until the bundled SQLite update in #3511 lands; remove by 2026-11-13" },
+]
 
 [licenses]
 # Permissive licenses acceptable for a shipped desktop app. Add licenses here
