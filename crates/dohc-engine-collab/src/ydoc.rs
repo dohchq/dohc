@@ -762,8 +762,13 @@ impl Ydoc {
             return None;
         }
         let source = self.markdown_source(&reference)?;
-        self.source_reproduces(&source, canonical_projection, false)
-            .then_some(source)
+        let reproduces = self.source_reproduces::<std::convert::Infallible>(
+            &source,
+            canonical_projection,
+            false,
+            &mut || Ok(()),
+        );
+        matches!(reproduces, Ok(true)).then_some(source)
     }
 
     /// Whether `source` rebuilds `canonical_projection` under the source or
