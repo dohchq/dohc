@@ -2037,7 +2037,7 @@ describe("failed run notices", () => {
 
 it("puts the crash report toast's Send report in a row under its title", async () => {
   const onSendCrashReport = vi.fn();
-  renderNotices({ crashReport: { revision: 1, title: "dohc quit unexpectedly", body: "", text: "report", atMs: 0 }, onSendCrashReport });
+  renderNotices({ crashReport: { revision: 1, read: false, title: "dohc quit unexpectedly", body: "", text: "report", atMs: 0 }, onSendCrashReport });
   expectActionRow(screen.getByTestId("crash-report-toast"), ["Send report", "Details"]);
   await userEvent.click(screen.getByTestId("crash-report-toast-send"));
   expect(onSendCrashReport).toHaveBeenCalledOnce();
@@ -3055,7 +3055,7 @@ describe("Details", () => {
 
   it("puts Details after Send report on a crash notice's toast and row", async () => {
     renderNotices({
-      crashReport: { revision: 1, title: "dohc quit unexpectedly", body: "", text: "Crash: renderer gone\nReason: oom", atMs: 1 },
+      crashReport: { revision: 1, read: false, title: "dohc quit unexpectedly", body: "", text: "Crash: renderer gone\nReason: oom", atMs: 1 },
       onSendCrashReport: vi.fn(),
     });
     expectActionRow(screen.getByTestId("crash-report-toast"), ["Send report", "Details"]);
