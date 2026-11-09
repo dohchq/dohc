@@ -39,6 +39,7 @@ import {
   FIRST_OPEN_TOO_LARGE_CODES,
   FIRST_OPEN_UNSUPPORTED_CAUSES,
   type FirstOpenRefusal,
+  type FirstOpenTemporaryStop,
 } from "@dohc/workspace-contracts/first-open";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
@@ -470,6 +471,11 @@ export type OwnerLiveFirstOpen = z.infer<typeof OwnerLiveFirstOpen>;
 type SameType<A, B> = [A] extends [B] ? [B] extends [A] ? true : false : false;
 const ownerLiveFirstOpenMatchesContract: SameType<OwnerLiveFirstOpen, FirstOpenRefusal> = true;
 void ownerLiveFirstOpenMatchesContract;
+// A first open stopped after repeated build deadlines, until an edit or Try again starts it again.
+const OwnerLiveFirstOpenStop = OwnerLiveFirstOpenBase.extend({reason: z.literal("retry-stopped"), code: z.literal("build-deadline"),
+  deadlineAnswers: z.literal(3), recovery: z.literal("retry-later")}).strict();
+const ownerLiveFirstOpenStopMatchesContract: SameType<z.infer<typeof OwnerLiveFirstOpenStop>, FirstOpenTemporaryStop> = true;
+void ownerLiveFirstOpenStopMatchesContract;
 // One document whose owner edits the server refused for good. The edits wait
 // in a queue on this computer, or on the server when the server hosts the
 // document, until the owner tries again or stops live editing. `incident`
@@ -521,9 +527,9 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-first-open-refused", "conflict-parent-withheld"]).optional(),
-  // Present exactly when `reason` is `live-first-open-refused`.
-  firstOpen: OwnerLiveFirstOpen.optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-first-open-refused", "live-first-open-retry-stopped", "conflict-parent-withheld"]).optional(),
+  // Present exactly when `reason` is `live-first-open-refused`, as a refusal, or `live-first-open-retry-stopped`, as a stop.
+  firstOpen: z.union([OwnerLiveFirstOpen, OwnerLiveFirstOpenStop]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.

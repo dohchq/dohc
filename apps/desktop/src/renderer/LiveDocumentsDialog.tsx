@@ -10,7 +10,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "live-first-open-refused" | "conflict-parent-withheld";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "live-first-open-refused" | "live-first-open-retry-stopped" | "conflict-parent-withheld";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */

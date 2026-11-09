@@ -513,6 +513,16 @@ describe("owner live document enrollment", () => {
       {objectId: "object", path: "large.md", status: "unavailable", reason: "session-host-refused", firstOpen}]) {
       await expect(list([row])).resolves.toEqual({documents: [], nextCursor: null});
     }
+    // A first open stopped after repeated build deadlines pairs only with its own reason, and Resume starts it again.
+    const stop = {reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, recovery: "retry-later", source: firstOpen.source};
+    await expect(list([{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen: stop}])).resolves.toEqual({
+      documents: [{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen: stop, canResume: true}], nextCursor: null,
+    });
+    for (const row of [{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped"},
+      {objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: stop},
+      {objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen}]) {
+      await expect(list([row])).resolves.toEqual({documents: [], nextCursor: null});
+    }
   });
 
   it("lists each restore queue as save-only beside the current document, including an unhosted note", async () => {

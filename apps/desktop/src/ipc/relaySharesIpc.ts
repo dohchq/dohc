@@ -65,9 +65,10 @@ import type { createPresencePollRegistry } from "../collab/presencePollRegistry"
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
-// A refused first open always names its refusal, and nothing else carries one.
-const firstOpenPaired = (document: {reason?: string; firstOpen?: unknown}) =>
-  (document.reason === "live-first-open-refused") === (document.firstOpen !== undefined);
+// A refused or stopped first open always names its refusal or stop, and nothing else carries one.
+const firstOpenPaired = (document: {reason?: string; firstOpen?: {reason: string}}) => document.firstOpen === undefined
+  ? document.reason !== "live-first-open-refused" && document.reason !== "live-first-open-retry-stopped"
+  : document.reason === (document.firstOpen.reason === "retry-stopped" ? "live-first-open-retry-stopped" : "live-first-open-refused");
 const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional(), firstOpen: z.unknown().optional()})).max(64);
 function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
   return rows.flatMap(row => {const parsed = schema.safeParse(row); return parsed.success ? [parsed.data] : [];});
@@ -158,7 +159,7 @@ export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "s
 function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
   return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
     document.reason === "live-edit-unadmitted" || document.reason === "live-first-open-refused" ||
-    (!document.reason && (document.status === "retired" || document.status === "paused"));
+    document.reason === "live-first-open-retry-stopped" || (!document.reason && (document.status === "retired" || document.status === "paused"));
 }
 
 /**
