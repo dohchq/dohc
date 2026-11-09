@@ -385,12 +385,20 @@ export function createAgentConnectionRoutes(input: {
     return { kind: "existing", agentId: choice.agentId };
   }
 
-  // A wrong password counts against the account, as sign-in counts it.
+  // A wrong password counts against the account, as sign-in counts it. An
+  // account checks one password at a time, so guesses sent together can't
+  // all start before the first wrong one is counted.
+  const checkingPassword = new Set<string>();
   async function checkPassword(userId: string, passwordHash: string | null, password: string): Promise<void> {
     const { fence, passwordLimiter } = input.personalAgents;
-    if (!passwordLimiter.has(userId, nowMs())) throw relayError("password_rate_limited");
-    if (passwordHash !== null && await fence!.verifyPassword(passwordHash, password)) return;
-    passwordLimiter.allow(userId, nowMs());
+    if (checkingPassword.has(userId) || !passwordLimiter.has(userId, nowMs())) throw relayError("password_rate_limited");
+    checkingPassword.add(userId);
+    try {
+      if (passwordHash !== null && await fence!.verifyPassword(passwordHash, password)) return;
+      passwordLimiter.allow(userId, nowMs());
+    } finally {
+      checkingPassword.delete(userId);
+    }
     throw relayError("password_incorrect");
   }
 

@@ -87,6 +87,7 @@ class FakeFence implements CredentialFence {
   listener: CredentialFenceListener | undefined;
   /** A commit that lands just after consent's read. */
   afterConsentRead: (() => void) | undefined;
+  verifyGate: Promise<void> | undefined;
   private clock = 1_000;
 
   async readEpoch(userId: string): Promise<number> {
@@ -109,6 +110,7 @@ class FakeFence implements CredentialFence {
   }
 
   async verifyPassword(passwordHash: string, password: string): Promise<boolean> {
+    await this.verifyGate;
     return passwordHash === `hash:${password}`;
   }
 
@@ -450,6 +452,17 @@ describe("personal agent sign-in", () => {
     await expectCode(await allow(f, requestId, { password: PASSWORD }), 429, "password_rate_limited");
     const elsewhere = await beginRequest(f, clientId, OTHER_WS);
     await ok(await allow(f, elsewhere, { session: "other-session", password: OTHER_PASSWORD, reach: [{ workspaceId: OTHER_WS, level: "view" }] }));
+  });
+
+  it("checks one password at a time per account", async () => {
+    const f = await fixture();
+    const requestId = await beginRequest(f, await registerClient(f));
+    let open!: () => void;
+    f.fence.verifyGate = new Promise<void>((resolve) => { open = resolve; });
+    const first = allow(f, requestId, { password: "guess" });
+    await expectCode(await allow(f, requestId, { password: "guess" }), 429, "password_rate_limited");
+    open();
+    await expectCode(await first, 403, "password_incorrect");
   });
 });
 

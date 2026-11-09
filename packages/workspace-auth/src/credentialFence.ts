@@ -147,7 +147,8 @@ export function createPostgresCredentialFence(pool: Pool, options: {
           await next.query(`listen ${CREDENTIAL_FENCE_CHANNEL}`);
           if (client === next) listener.onUp();
         } catch {
-          if (next && client !== next) next.release(true);
+          // A client still held is released here once. One that a lost
+          // connection or close() already let go is not released again.
           drop();
         }
       };
