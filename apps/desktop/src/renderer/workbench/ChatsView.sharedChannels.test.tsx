@@ -699,6 +699,32 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
   });
 
+  it("closes Add people on an account change and adds no one else from its batch", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [teamChannel()], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    let finishFirst!: (value: unknown) => void;
+    bridgeMock.shareChatChannel.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }));
+    bridgeMock.shareChatChannel.mockResolvedValue({});
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-share-channel"));
+    await userEvent.type(screen.getByTestId("chats-share-email"), "ana@example.com,ben@example.com,");
+    await userEvent.click(screen.getByTestId("chats-share-submit"));
+    expect(bridgeMock.shareChatChannel).toHaveBeenCalledTimes(1);
+
+    act(() => emitCloudSessionChanged("session-b"));
+    expect(screen.queryByTestId("chats-share-panel")).toBeNull();
+    await act(async () => {
+      finishFirst({});
+      await Promise.resolve();
+    });
+    // Reopening under the new account does not let the old batch go on.
+    await userEvent.click(screen.getByTestId("chats-share-channel"));
+    await waitFor(() => expect(screen.getByTestId("chats-share-panel")).toBeTruthy());
+    expect(bridgeMock.shareChatChannel).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByTestId("chats-share-chip")).toEqual([]);
+  });
+
   it("lets Escape close the people suggestions without leaving the group", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [teamChannel()], fileThreads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
@@ -936,8 +962,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await userEvent.click(screen.getByTestId("chats-share-revoke"));
     await waitFor(() => expect(bridgeMock.revokeRelayShare).toHaveBeenCalled());
 
-    // Switch sessions: the signal clears the panel and issues the new
-    // session's listing, which stays in flight.
+    // Switch sessions: the signal closes the members dialog, clears its rows
+    // and issues the new session's listing, which stays in flight.
     act(() => emitCloudSessionChanged("session-b"));
     await waitFor(() => expect(shareReads).toBe(2));
 
@@ -976,6 +1002,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
       );
       await Promise.resolve();
     });
+    // The switch closed the members dialog; reopen it under session B.
+    await userEvent.click(screen.getByTestId("chats-share-channel"));
     const members = await screen.findAllByTestId("chats-share-member");
     expect(members.map((member) => member.textContent).join(" ")).toContain(
       "bob@example.com",

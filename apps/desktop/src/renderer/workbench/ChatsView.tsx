@@ -747,6 +747,9 @@ export function ChatsView(props: {
   // publish under the previous workspace's scope. Reset on every switch.
   const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
+  // The session the members dialog opened in. Its adds stop once the account
+  // changes, even an add that was already part of a running batch.
+  const [sharePanelSession, setSharePanelSession] = useState(0);
   const [joiningShareId, setJoiningShareId] = useState<string | null>(null);
   // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
   // and stay false until the next render, so a double-send (two Enters in one
@@ -3313,6 +3316,8 @@ export function ChatsView(props: {
         // new account for as long as its own listing takes to arrive — or for
         // good, if that listing stalls. It goes with the rows it explains.
         setShareReadFailure(null);
+        // The members dialog holds the previous account's picks and contacts.
+        setSharePanelOpen(false);
         setDms([]);
         setDmAvailable(false);
         setPendingDmRequests([]);
@@ -4750,7 +4755,10 @@ export function ChatsView(props: {
                   aria-label={channelGrants.length > 0 ? `${channelGrants.length} ${channelGrants.length === 1 ? "member" : "members"}` : "Add people"}
                   aria-haspopup="dialog"
                   aria-expanded={sharePanelOpen}
-                  onClick={() => setSharePanelOpen(true)}
+                  onClick={() => {
+                    setSharePanelSession(sessionGeneration.current);
+                    setSharePanelOpen(true);
+                  }}
                   className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
                 >
                   {channelGrants.length > 0 ? (
@@ -4801,7 +4809,9 @@ export function ChatsView(props: {
             knownPeople={knownPeople}
             readFailure={shareReadFailure}
             blocked={shareGrantsBlocked}
-            onAdd={submitShare}
+            onAdd={(input) =>
+              sharePanelSession === sessionGeneration.current ? submitShare(input) : Promise.resolve(false)
+            }
             onRemove={(grant) =>
               void revokeShare(grant.shareId, grant.recipientEmail ?? "the invited person", nav.channel.name)
             }
