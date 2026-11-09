@@ -13,6 +13,7 @@ import {
   verifyEmailPage,
 } from "./pages";
 import type { ReadinessReport } from "./readiness";
+import { readBodyAtMost, type BodyRead } from "./readBody";
 
 // Every route this service answers. main.ts owns the process (env, Postgres,
 // sockets); this module owns request handling so the routes can be tested
@@ -230,20 +231,13 @@ async function withBodyAtMost(request: Request, maxBytes: number): Promise<Reque
   if (!request.body) return request;
   if (Number(request.headers.get("content-length") ?? "0") > maxBytes) return null;
   const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+  let read: BodyRead;
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) return null;
-      chunks.push(value);
-    }
+    read = await readBodyAtMost(reader, maxBytes);
   } finally {
     reader.releaseLock();
   }
-  return new Request(request, { body: Buffer.concat(chunks, total) });
+  return "bytes" in read ? new Request(request, { body: read.bytes }) : null;
 }
 
 function readyResponse(report: ReadinessReport): Response {

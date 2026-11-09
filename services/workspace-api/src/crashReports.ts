@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readBodyAtMost } from "./readBody";
 
 // Crash reports a person chose to send from the desktop app. The desktop shows
 // the whole report and sends it only after the person confirms, so this route
@@ -234,8 +235,6 @@ function isPlainText(value: string | null): boolean {
   return parameters.every((parameter) => !parameter.startsWith("charset=") || parameter === "charset=utf-8");
 }
 
-// Copies each chunk into one buffer as it arrives, so a report holds at most
-// `maxBytes` however many chunks it comes in.
 async function readAtMost(
   request: Request,
   maxBytes: number,
@@ -243,18 +242,10 @@ async function readAtMost(
 ): Promise<Uint8Array | "too-large"> {
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
-  const bytes = new Uint8Array(maxBytes);
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) return bytes.subarray(0, total);
-    if (total + value.byteLength > maxBytes) {
-      await drainRest(reader, total + value.byteLength);
-      return "too-large";
-    }
-    bytes.set(value, total);
-    total += value.byteLength;
-  }
+  const read = await readBodyAtMost(reader, maxBytes);
+  if ("bytes" in read) return read.bytes;
+  await drainRest(reader, read.tooLarge);
+  return "too-large";
 }
 
 // Reads and throws away the rest of an upload until it ends, `total` reaches
