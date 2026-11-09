@@ -48,7 +48,8 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
         for (const file of snapshot.files) {
           if (file.contentKind !== "text" || !/\.md$/i.test(file.path)) continue;
           const objectId = storage.objectIdAtPathInVersion({workspaceId: context.workspaceId, versionId: "main", path: file.path});
-          if (!objectId) return refuse();
+          // A page without a live object can't open here; the rest still can.
+          if (!objectId) continue;
           files.push({objectId, path: file.path});
         }
         const sharerName = await options.shareSenderLabel?.(share.granterUserId).catch(() => null) ?? null;
