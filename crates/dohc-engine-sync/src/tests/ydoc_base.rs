@@ -5407,6 +5407,7 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
         &NoLiveLeases,
         true,
         None,
+        &Default::default(),
     )
     .expect("the envelope's ingress");
     let ApplyDisposition::Applied(applied) = outcome.primary else {
@@ -5577,6 +5578,7 @@ fn a_replayed_conflict_opening_base_reports_its_conflict_once() {
         &NoLiveLeases,
         true,
         None,
+        &Default::default(),
     )
     .unwrap();
     let ApplyDisposition::Applied(applied) = outcome.primary else {

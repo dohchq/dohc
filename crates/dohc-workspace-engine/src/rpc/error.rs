@@ -364,6 +364,11 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::HostedRefusal(reason)) => {
             return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
         }
+        // The desktop matches the code prefix and names the file. The engine
+        // still logs it as an internal refusal, and that line names no path.
+        RuntimeError::Relay(RelayError::PathOccupied { path, .. }) => {
+            return WireError::new(ErrorCode::Internal, format!("sync-path-occupied: {path}"));
+        }
         RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
             let mut wire = map_runtime_inner(&RuntimeError::Relay((**reason).clone()));
             wire.message = "relay-claim-refused".to_owned();
@@ -572,7 +577,8 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         | RelayError::HttpStatus(_)
         | RelayError::ValidationPending(_)
         | RelayError::Local(_)
-        | RelayError::RepairPending => ErrorCode::Internal,
+        | RelayError::RepairPending
+        | RelayError::PathOccupied { .. } => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }
@@ -1461,6 +1467,30 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn occupied_path_refusal_names_the_path_on_the_wire() {
+        let detail = "retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)";
+        let (wire, logged) = map_runtime_logged(RuntimeError::Relay(RelayError::PathOccupied {
+            path: "notes/trip.txt".into(),
+            detail: detail.into(),
+        }));
+        assert_eq!(
+            (wire.code, wire.message.as_str()),
+            (ErrorCode::Internal, "sync-path-occupied: notes/trip.txt"),
+        );
+        // It retries as any other failed pass does.
+        let generic = map_runtime(RuntimeError::Relay(RelayError::Local(detail.into())));
+        assert_eq!(generic.message, "workspace operation failed");
+        assert_eq!(wire.retry, generic.retry);
+        // The engine's log keeps today's line, which names no path.
+        assert_eq!(
+            logged.as_deref(),
+            Some(
+                "engine: internal refusal: relay error: local sync state failed: retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)"
+            ),
+        );
     }
 
     #[test]

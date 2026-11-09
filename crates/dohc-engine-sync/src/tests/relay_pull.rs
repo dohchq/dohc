@@ -1703,7 +1703,7 @@ fn divergent_repair_base(base: &ReplicationEnvelope) -> (ReplicationEnvelope, Ve
 }
 
 #[test]
-fn base_repair_publication_blocked_pull_matches_main() {
+fn base_repair_held_push_lets_a_fetched_divergent_base_win_and_the_pull_continue() {
     for mixed_absent in [false, true] {
         let (_scratch, mut engine, observed, _checkpoint) = super::owner_publication::fixture();
         let local = seed_base_repair_candidate(&mut engine, "blocked", "local", 1);
@@ -1716,16 +1716,32 @@ fn base_repair_publication_blocked_pull_matches_main() {
         engine.write_with(&NoFaults, |tx| {
             tx.execute("UPDATE replication_log SET op_kind='ydoc.update',payload_json=?1,recorded_at_ms=?2,apply_disposition='applied' WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=0", params![owner.payload.to_string(),owner.recorded_at_ms]).map_err(SyncError::persist)?;
             tx.execute("UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath','private/owner.md','$.selectorPaths',json('[\"private/owner.md\"]'))",[]).map_err(SyncError::persist)?;
+            // Origination stores the base's own coordinate on its marker.
+            tx.execute("UPDATE ydoc_docs SET base_origin_id='local',base_origin_seq=1 WHERE object_id='blocked'",[]).map_err(SyncError::persist)?;
             Ok::<_,SyncError>(())
         }).unwrap();
         let (divergent, bytes) = divergent_repair_base(&local);
+        let text = "an unrelated change";
+        let text_sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        let unrelated = envelope(
+            "peer",
+            0,
+            "moment.append",
+            json!({
+                "momentId":"unrelated-0", "versionId":"main", "objectId":"elsewhere", "objectCreatedAtMs":1,
+                "path":"elsewhere.md", "recordedAtMs":2000, "operation":"write", "payloadBeforeBlobSha256":null, "payloadBeforePath":null,
+                "payloadAfterBlobSha256":text_sha, "payloadAfterPath":"elsewhere.md", "payloadAfterContentKind":"text",
+                "metadata":{"origin":"sync"}, "beforePresent":"absent"
+            }),
+        );
+        // The fixture numbers the page 119 and 120.
         let mut relay = PagedRelay::new([(
             0,
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
                 reference_has_more: false,
-                ops: vec![divergent.clone()],
+                ops: vec![divergent.clone(), unrelated],
                 next_cursor: 120,
                 has_more: false,
             },
@@ -1733,6 +1749,7 @@ fn base_repair_publication_blocked_pull_matches_main() {
         relay
             .blobs
             .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+        relay.blobs.insert(text_sha, text.as_bytes().to_vec());
         if mixed_absent {
             let mut peer = local.clone();
             peer.origin_id = "absent-peer".into();
@@ -1750,7 +1767,7 @@ fn base_repair_publication_blocked_pull_matches_main() {
             SyncPassOutcome::Complete { pushed: 0, .. }
         ));
         assert!(client.transport().pushes.lock().unwrap().is_empty());
-        let refusal = client
+        let pulled = client
             .pull_chat_workspace(
                 &mut engine,
                 &mut dohc_engine_collab::WriterDocCache::new(),
@@ -1759,16 +1776,20 @@ fn base_repair_publication_blocked_pull_matches_main() {
                 &NoLiveLeases,
                 1200,
             )
-            .unwrap_err();
-        let detail = refusal.to_string();
+            .expect("a held push must not stop the pull");
         assert!(
-            detail.contains("Y.Doc base is waiting for its authenticated relay position"),
-            "{detail}"
+            matches!(
+                pulled,
+                SyncPassOutcome::Complete {
+                    applied: 2,
+                    conflicts_opened: 1,
+                    ..
+                }
+            ),
+            "{pulled:?}"
         );
-        assert!(detail.contains("object blocked, origin "), "{detail}");
-        assert!(
-            matches!(refusal, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
-        );
+        // The probe ran after the page and found the local base unsent.
+        assert_eq!(client.transport().pushes.lock().unwrap().len(), 1);
         let lineage: String = engine
             .read_with(|conn| {
                 conn.query_row(
@@ -1778,13 +1799,139 @@ fn base_repair_publication_blocked_pull_matches_main() {
                 )
             })
             .unwrap();
-        assert_eq!(lineage, local.payload["lineageClaimId"].as_str().unwrap());
         assert_eq!(
-            base_repair_state(&engine, "blocked"),
-            (None, 0, if mixed_absent { 2 } else { 1 })
+            lineage,
+            divergent.payload["lineageClaimId"].as_str().unwrap()
         );
+        assert_eq!(base_repair_state(&engine, "blocked"), (Some(119), 0, 0));
+        let unrelated_heads: i64 = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE object_id='elsewhere'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(unrelated_heads, 1);
         assert_eq!(read_pushed_seq(&engine, "ws", "local").unwrap(), -1);
     }
+}
+
+/// Pull once and commit the cursor, as the desktop does after it materializes the pass.
+fn pull_and_commit_base_repair(client: &RelaySyncClient<PagedRelay>, engine: &mut EngineStore) {
+    let pulled = client
+        .pull_chat_workspace(
+            engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        )
+        .expect("pull base repair");
+    match pulled {
+        SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            ..
+        } => assert!(matches!(
+            commit_relay_cursor(engine, "ws", &cursor, &NoFaults, &NoLiveLeases, 1_300),
+            Ok(TxnOutcome::Committed(_))
+        )),
+        other => panic!("unexpected pull outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn base_repair_refused_divergent_base_leaves_the_local_base_to_learn_its_relay_position() {
+    let (_scratch, mut engine, observed, _checkpoint) = super::owner_publication::fixture();
+    let local = seed_base_repair_candidate(&mut engine, "blocked", "local", 1);
+    let owner = envelope(
+        "local",
+        0,
+        "ydoc.update",
+        json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":observed.binding.lineage_claim_id,"isBaseState":true}),
+    );
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET op_kind='ydoc.update',payload_json=?1,recorded_at_ms=?2,apply_disposition='applied' WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=0", params![owner.payload.to_string(),owner.recorded_at_ms]).map_err(SyncError::persist)?;
+        tx.execute("UPDATE ydoc_docs SET base_origin_id='local',base_origin_seq=1 WHERE object_id='blocked'",[]).map_err(SyncError::persist)?;
+        Ok::<_,SyncError>(())
+    }).unwrap();
+    // Another device's base for the same document, whose bytes fail
+    // validation, so apply refuses it before it claims anything.
+    let invalid = vec![0xff];
+    let invalid_sha = dohc_engine_storage::hex_sha256(&invalid);
+    let mut refused = local.clone();
+    refused.origin_id = "refused".into();
+    refused.origin_seq = 0;
+    refused.payload["lineageClaimId"] = json!(invalid_sha);
+    refused.payload["updateBlobSha256"] = json!(invalid_sha);
+    let (later, bytes) = divergent_repair_base(&local);
+    // The fixture numbers the pages 110, then 120 and 121, then 130: the relay
+    // admits this device's base after the refused one and before `later`.
+    let mut relay = PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: vec![refused],
+                next_cursor: 110,
+                has_more: false,
+            },
+        ),
+        (
+            110,
+            PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: vec![owner, local.clone()],
+                next_cursor: 121,
+                has_more: false,
+            },
+        ),
+        (
+            121,
+            PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: vec![later],
+                next_cursor: 130,
+                has_more: false,
+            },
+        ),
+    ]);
+    relay.blobs.insert(invalid_sha, invalid);
+    relay
+        .blobs
+        .insert(dohc_engine_storage::hex_sha256(&bytes), bytes);
+    let client = RelaySyncClient::new(relay);
+
+    pull_and_commit_base_repair(&client, &mut engine);
+    assert_eq!(
+        base_repair_state(&engine, "blocked"),
+        (None, 0, 1),
+        "a refused base must leave the local base waiting for its position"
+    );
+    // The echo of this device's publication records where the relay put it.
+    pull_and_commit_base_repair(&client, &mut engine);
+    assert_eq!(base_repair_state(&engine, "blocked"), (Some(121), 0, 0));
+    // A base the relay admitted after the local one loses to it.
+    pull_and_commit_base_repair(&client, &mut engine);
+    let lineage: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='blocked'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(lineage, local.payload["lineageClaimId"].as_str().unwrap());
+    assert_eq!(base_repair_state(&engine, "blocked"), (Some(121), 0, 0));
 }
 
 #[test]

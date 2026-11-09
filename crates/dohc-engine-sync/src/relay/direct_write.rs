@@ -130,6 +130,7 @@ pub fn read_record_creation_statuses(
         return Err(SyncError::ShareBoundaryViolation);
     }
     let mut statuses = BTreeMap::new();
+    let mut planned = None;
     for path in paths {
         if !crate::share::selected_path_within_grant(path, granted) {
             return Err(SyncError::ShareBoundaryViolation);
@@ -151,6 +152,11 @@ pub fn read_record_creation_statuses(
             )
             .optional().map_err(SyncError::corrupt)
         })?;
+        let returned = creation.is_none();
+        let creation = match creation {
+            None => read_returned_creation(store, workspace_id, share_id, path, &mut planned)?,
+            found => found,
+        };
         if let Some((text, object_id, seq)) = creation {
             // Only delivery of this creation acknowledges it.
             let mut status = store.read_with(|conn| {
@@ -174,15 +180,7 @@ pub fn read_record_creation_statuses(
                 Ok::<_, SyncError>(DirectWriteStatus { state, reason, content_hash: None,
                     original_record_id: None, can_discard: state != DirectWriteState::Accepted && !unresolved })
             })?;
-            status.original_record_id = dohc_engine_domain::collections::markdown_frontmatter_json(
-                &text,
-            )
-            .and_then(|fields| {
-                fields
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            });
+            status.original_record_id = record_id(&text);
             let current_id = store
                 .read_with(|conn| {
                     conn.query_row(
@@ -194,16 +192,15 @@ pub fn read_record_creation_statuses(
                     .optional()
                     .map_err(SyncError::corrupt)
                 })?
-                .and_then(|text| dohc_engine_domain::collections::markdown_frontmatter_json(&text))
-                .and_then(|fields| {
-                    fields
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                });
+                .and_then(|text| record_id(&text));
             // A refused name may now show another recipient's record. It is
             // never a disposable copy of this creation.
             if current_id != status.original_record_id {
+                continue;
+            }
+            // The relay refused this creation, so a received record with its
+            // ID is someone else's copy, such as the owner's accepted proposal.
+            if returned && status.state == DirectWriteState::Refused {
                 continue;
             }
             status.can_discard &= current_id.is_some();
@@ -211,6 +208,113 @@ pub fn read_record_creation_statuses(
         }
     }
     Ok(statuses)
+}
+
+/// A creation's text, object id, and origin seq.
+type Creation = (String, String, i64);
+
+/// A pull can bring this replica's own creation back before its receipt,
+/// under the relay's object id. Find the creation this share planned at the
+/// path with the same record ID. Two such creations name neither.
+fn read_returned_creation(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    path: &str,
+    planned: &mut Option<BTreeMap<String, Vec<Creation>>>,
+) -> Result<Option<Creation>, SyncError> {
+    let current: Option<(String, String)> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT s.object_id,b.sha256 FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3",
+            params![workspace_id, MAIN_VERSION_ID, path],
+            |row| Ok((row.get(0)?, text::prefix_from_row(conn, row, 1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+    })?;
+    let Some(current_id) = current
+        .filter(|(object_id, _)| super::received_object_token(object_id))
+        .and_then(|(_, text)| record_id(&text))
+    else {
+        return Ok(None);
+    };
+    if planned.is_none() {
+        *planned = Some(read_planned_creations(store, workspace_id, share_id)?);
+    }
+    let mut matches = planned
+        .as_ref()
+        .and_then(|creations| creations.get(path))
+        .into_iter()
+        .flatten()
+        .filter(|(text, _, _)| record_id(text).as_ref() == Some(&current_id));
+    Ok(match (matches.next(), matches.next()) {
+        (Some(creation), None) => Some(creation.clone()),
+        _ => None,
+    })
+}
+
+/// This replica's creations that this share planned, by the path each created.
+fn read_planned_creations(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+) -> Result<BTreeMap<String, Vec<Creation>>, SyncError> {
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "WITH planned(object_id) AS (SELECT object_id FROM share_direct_write_marks \
+                   WHERE workspace_id=?1 AND share_id=?2 \
+                   UNION SELECT json_extract(o.value,'$[0]') \
+                   FROM share_direct_write_plan p,json_each(p.objects_json) o \
+                   WHERE p.workspace_id=?1 AND p.share_id=?2) \
+                 SELECT json_extract(log.payload_json,'$.payloadAfterPath'),blob.sha256, \
+                   planned.object_id,log.origin_seq \
+                 FROM planned JOIN replication_log log ON log.workspace_id=?1 \
+                   AND log.op_kind='moment.append' \
+                   AND json_extract(log.payload_json,'$.versionId')=?3 \
+                   AND json_extract(log.payload_json,'$.objectId')=planned.object_id \
+                 JOIN sync_identity identity \
+                   ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
+                 JOIN blobs blob \
+                   ON blob.sha256=json_extract(log.payload_json,'$.payloadAfterBlobSha256') \
+                 WHERE log.imported=0 \
+                   AND json_extract(log.payload_json,'$.payloadBeforePath') IS NULL \
+                   AND json_extract(log.payload_json,'$.operation')='write' \
+                 ORDER BY log.origin_seq",
+            )
+            .map_err(SyncError::corrupt)?;
+        let rows = statement
+            .query_map(params![workspace_id, share_id, MAIN_VERSION_ID], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    text::prefix_from_row(conn, row, 1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(SyncError::corrupt)?;
+        // Each object's first creation, as the status query reads it.
+        let mut seen = BTreeSet::new();
+        let mut creations: BTreeMap<String, Vec<Creation>> = BTreeMap::new();
+        for row in rows {
+            let (path, text, object_id, seq) = row.map_err(SyncError::corrupt)?;
+            if seen.insert(object_id.clone()) {
+                creations
+                    .entry(path)
+                    .or_default()
+                    .push((text, object_id, seq));
+            }
+        }
+        Ok(creations)
+    })
+}
+
+fn record_id(text: &str) -> Option<String> {
+    dohc_engine_domain::collections::markdown_frontmatter_json(text)?
+        .get("id")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Read delivery of the current file, without contacting the relay. A receipt

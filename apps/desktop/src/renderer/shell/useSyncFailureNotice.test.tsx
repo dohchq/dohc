@@ -331,4 +331,25 @@ describe("useSyncFailureNotice", () => {
       syncFailureNotice({ cause: "unknown", detail: "Error: disk full", sinceMs: 1, attempts: 1 }),
     ).toEqual({ message: "dohc could not sync this workspace." });
   });
+
+  it("an occupied-path refusal names the file", async () => {
+    const detail = "DaemonRefusalError: sync-path-occupied: notes/trip.txt";
+    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
+    await waitFor(() => expect(view.toasts()).toHaveLength(1));
+    expect(view.rows()).toHaveLength(1);
+    expect(view.rows()[0]).toMatchObject({
+      kind: "cloud-sync",
+      title: "dohc could not sync this workspace",
+      message: "dohc can't apply a change to notes/trip.txt, because this machine has a different file there. Other changes wait behind it.",
+      details: [["Detail", detail]],
+      seen: false,
+    });
+    expect(view.rows()[0]!.retry).toBeTypeOf("function");
+  });
+
+  it("keeps the generic words for a failed pass that names no file", () => {
+    expect(
+      syncFailureNotice({ cause: "unknown", detail: "DaemonRefusalError: workspace operation failed", sinceMs: 1, attempts: 1 }),
+    ).toEqual({ message: "dohc could not sync this workspace." });
+  });
 });
