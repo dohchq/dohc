@@ -17,10 +17,13 @@
 //! whose bytes are the file's quietly; the parent's base, which settles to
 //! other bytes, opens a conflict beside the file.
 //!
-//! The host pulls its hosted feed as a serving replica does: the ordinary
-//! write that made the file comes first, and the hosted commit makes the
-//! note ready. It holds the file before any base, so a winning parent base
-//! opens a conflict there too, and the conflict refuses the host's capture.
+//! The peer and the host receive the ordinary write that made the file
+//! before the log, as a synced replica does; the host pulls it through its
+//! hosted feed, whose commit makes the note ready. Each holds the file before
+//! any base, so a winning parent base opens a conflict there too, and the
+//! conflict refuses its capture. Resolving the peer's conflict continues the
+//! winner as a successor lineage, which the peer cannot capture either, so
+//! where the parent's base wins no replica captures the winner.
 //!
 //! Mutation checks: drop the untouched-seed rule in `preserve_base_sides_in_tx`
 //! and a desktop whose untouched seed lost writes its own projection over the
@@ -117,23 +120,24 @@ struct Case {
     typing: Typing,
 }
 
-/// A synced desktop holding the note at its head, or an empty peer.
-fn prepare(db: &Path, head: Option<&str>) {
+/// A store that syncs under `sync_origin`, holding the note at its head when
+/// it has one: the desktop's, or a peer's before its pull.
+fn prepare(db: &Path, sync_origin: Option<&str>, head: Option<&str>) {
     let mut store = EngineStore::open(db, 9_300).expect("open store");
-    if head.is_some() {
+    if let Some(origin) = sync_origin {
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
                     "INSERT INTO sync_identity \
                      (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
-                     VALUES (?1, 'origin-local', 'epoch-local', 'stream-local', 1)",
-                    [WS],
+                     VALUES (?1, ?2, 'epoch-local', 'stream-local', 1)",
+                    [WS, origin],
                 )
                 .map_err(StorageError::persist_public)?;
                 tx.execute(
                     "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
-                     VALUES (?1, 'origin-local', 0)",
-                    [WS],
+                     VALUES (?1, ?2, 0)",
+                    [WS, origin],
                 )
                 .map_err(StorageError::persist_public)?;
                 Ok::<_, StorageError>(())
@@ -169,7 +173,7 @@ fn prepare(db: &Path, head: Option<&str>) {
 
 /// A hosted replica with no scope yet: its first pull takes the note's.
 fn prepare_host(db: &Path) {
-    prepare(db, None);
+    prepare(db, None, None);
     let mut store = EngineStore::open(db, 9_310).expect("open host");
     dohc_engine_sync::create_hosted_replica(
         &mut store,
@@ -207,6 +211,33 @@ fn source_write(markdown: &str) -> ReplicationEnvelope {
         }),
         recorded_at_ms: 2,
     }
+}
+
+/// Apply the write that made the note's file, as an ordinary peer's pull
+/// does before the relayed log reaches it.
+fn deliver_source(store: &mut EngineStore, markdown: &str, case: Case) {
+    dohc_engine_sync::hydrate_blob_content(
+        store,
+        &dohc_engine_sync::BlobHydration {
+            sha256: hex_sha256(markdown.as_bytes()),
+            content: dohc_engine_sync::BlobContent::Text(markdown.to_owned()),
+        },
+        &NoFaults,
+    )
+    .expect("copy the file's text");
+    let applied = dohc_engine_sync::apply_replication_envelope(
+        store,
+        &mut WriterDocCache::new(),
+        &source_write(markdown),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap_or_else(|error| panic!("{case:?}: the file's write {error:?}"));
+    assert!(
+        matches!(applied.primary, ApplyDisposition::Applied(_)),
+        "{case:?}: {:?}",
+        applied.primary
+    );
 }
 
 /// The relay's hosted feed for a scope of the one note, which every row
@@ -769,6 +800,109 @@ fn head(store: &EngineStore) -> String {
         .expect("read head")
 }
 
+/// Resolve the peer's open conflict as `conflicts.resolve` does, keeping its
+/// file where the relay's base won and taking the winner's side where the
+/// desktop's did, so the races cover both choices. Either choice continues
+/// the winner as a successor lineage, which names no imported base, so the
+/// peer still captures no activation of the winner.
+async fn resolve_on_peer(
+    case: Case,
+    db: &Path,
+    root: &ScratchDir,
+    reader: &ScratchDir,
+    key: &DocKey,
+    winner: &str,
+    markdown: &str,
+) {
+    let (conflict_id, incoming): (String, String) = EngineStore::open(db, 9_312)
+        .expect("open peer")
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT f.conflict_id, i.text FROM conflicts f \
+                 JOIN blobs i ON i.sha256=f.incoming_blob_sha256 WHERE f.status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("the peer's conflict");
+    let (resolution, chosen) = if case.desktop_builds_parent {
+        (
+            dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+            incoming,
+        )
+    } else {
+        (
+            dohc_engine_domain::ResolveConflictKind::KeepCurrent,
+            markdown.to_owned(),
+        )
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(db, 1).expect("open actor").actor;
+    support::configure_witness_reader(&handle, reader).await;
+    handle
+        .conflict_resolve_indexed(
+            dohc_engine_domain::ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id,
+                resolution,
+                object_id: "resolution-object".to_owned(),
+                write_moment_id: "resolution-write".to_owned(),
+                delete_moment_id: "resolution-remove".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_000,
+                request_id: None,
+                conflict_answer_budget_bytes: usize::MAX,
+            },
+            LeaseRegistry::new(),
+            root.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{case:?}: resolve {error:?}"));
+    supervisor.close(db).expect("close actor");
+
+    let store = EngineStore::open(db, 9_313).expect("open peer");
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM conflicts WHERE status='open'"),
+        0,
+        "{case:?}: the resolution closes the conflict"
+    );
+    assert_eq!(
+        head(&store),
+        chosen,
+        "{case:?}: the file holds the chosen side"
+    );
+    let marker = dohc_engine_collab::read_marker(&store, key)
+        .expect("read marker")
+        .expect("a lineage");
+    assert_eq!(
+        marker.lineage_parent_claim_id.as_deref(),
+        Some(winner),
+        "{case:?}: the resolution continues the winner"
+    );
+    assert_ne!(
+        marker.lineage_claim_id.as_deref(),
+        Some(winner),
+        "{case:?}: under a successor's claim"
+    );
+    assert_eq!(active_lineage(&store).1, "exact", "{case:?}");
+    drop(store);
+    let captured = capture(db, reader, key).await;
+    assert!(
+        matches!(
+            captured,
+            Err(RuntimeError::LiveApplication(
+                dohc_engine_collab::live_update_application::ApplicationError::Conflict
+            ))
+        ),
+        "{case:?}: {captured:?}"
+    );
+}
+
 async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>)) {
     let markdown = current.0.as_str();
     let (desktop_seed, relay_bytes) = if case.desktop_builds_parent {
@@ -784,8 +918,8 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     let d = engine_db_path(&d_scratch).expect("desktop db");
     let p = engine_db_path(&p_scratch).expect("peer db");
     let h = engine_db_path(&h_scratch).expect("host db");
-    prepare(&d, Some(markdown));
-    prepare(&p, None);
+    prepare(&d, Some("origin-local"), Some(markdown));
+    prepare(&p, Some("origin-peer"), None);
     prepare_host(&h);
     let origin = pinned_first_open_origin(markdown);
     let witness = support::witness_reader(&d_scratch);
@@ -1001,11 +1135,22 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     log.extend(typed);
     let last_relay_seq = log.last().and_then(|(op, _)| op.relay_seq).expect("placed");
 
-    // A peer with no copy of the note pulls the whole log. The host that
-    // serves the note pulls its hosted feed: the write that made the file,
-    // then the log, each pass through the hosted commit.
+    // The peer and the host each hold the note's file before any base: the
+    // peer applies the write that made it, then the whole log. The host
+    // pulls its hosted feed, the same write and then the log, each pass
+    // through the hosted commit. Either opens a conflict beside its file
+    // exactly when the parent's base wins.
     let mut p_store = EngineStore::open(&p, 9_303).expect("open peer");
+    deliver_source(&mut p_store, markdown, case);
     deliver(&mut p_store, &key, &log, false, &witness, case).await;
+    assert_eq!(
+        count(
+            &p_store,
+            "SELECT COUNT(*) FROM conflicts WHERE status='open'"
+        ),
+        i64::from(parent_wins),
+        "{case:?}: the peer opens a conflict beside its file only when the parent's base wins"
+    );
     let mut h_store = EngineStore::open(&h, 9_307).expect("open host");
     let feed = HostedFeed {
         rows: std::iter::once(source_write(markdown))
@@ -1202,22 +1347,25 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         return;
     }
 
-    assert_eq!(
-        head(&EngineStore::open(&h, 9_308).expect("open host")),
-        markdown,
-        "{case:?}: the host's file keeps the note"
-    );
+    for (name, db) in [("peer", &p), ("host", &h)] {
+        assert_eq!(
+            head(&EngineStore::open(db, 9_308).expect("open replica")),
+            markdown,
+            "{case:?}: the {name}'s file keeps the note"
+        );
+    }
 
     // Each replica holding the winner's base as an import captures the
     // settled note as an activation of that one lineage, on that base, with
     // one Y.Doc state. The desktop holds an imported base only where the
     // relay's won. An open conflict refuses a capture: the desktop's where
-    // the relay's parent base won, the host's wherever the parent's won.
+    // the relay's parent base won, the peer's and the host's wherever the
+    // parent's won.
     let base = &log[0].0;
     let mut captured = Vec::new();
     commit_fetch(&p, last_relay_seq);
     let mut replicas = vec![
-        ("peer", p.as_path(), false),
+        ("peer", p.as_path(), parent_wins),
         ("host", h.as_path(), parent_wins),
     ];
     if desktop_lost {
@@ -1244,7 +1392,22 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
             captured.push((name, activation));
         }
     }
-    let state = captured[0].1.source.full_state_digest.clone();
+    // Where the parent's base won, no replica captures the winner: the peer
+    // and the host hold a conflict, and the desktop holds one or its own
+    // base. Only the one document above compares them.
+    assert_eq!(
+        captured.is_empty(),
+        parent_wins,
+        "{case:?}: {:?}",
+        captured.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    if parent_wins {
+        resolve_on_peer(case, &p, &p_scratch, &d_scratch, &key, &winner, markdown).await;
+    }
+    let Some((_, first)) = captured.first() else {
+        return;
+    };
+    let state = first.source.full_state_digest.clone();
     for (name, activation) in &captured {
         let source = &activation.source;
         assert_eq!(
