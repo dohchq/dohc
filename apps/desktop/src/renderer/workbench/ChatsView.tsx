@@ -21,6 +21,7 @@ import { ThreadedChat } from "./ThreadedChat";
 import { showChat } from "./chatsOnScreen";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { ChatMembersDialog } from "./ChatMembersDialog";
+import { emailKey, isEmail } from "./memberPicker";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
@@ -76,6 +77,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  UserPlus,
   Users,
   X,
 } from "lucide-react";
@@ -2883,6 +2885,20 @@ export function ChatsView(props: {
     }
     return map;
   }, [channelShares]);
+  // The people Add people suggests: everyone this account shares a group
+  // with, was invited by, or messages directly.
+  const knownPeople = useMemo(() => {
+    const people = new Map<string, string>();
+    const note = (email: string | null | undefined) => {
+      const address = email?.trim();
+      if (address && isEmail(address) && !people.has(emailKey(address))) people.set(emailKey(address), address);
+    };
+    for (const row of channelShares?.granted ?? []) note(row.recipientEmail);
+    for (const row of channelShares?.received ?? []) note(row.granterEmail);
+    for (const request of [...pendingDmRequests, ...declinedDmRequests]) note(request.granterEmail);
+    for (const dm of dms) for (const part of dm.peerLabel.split(/[,;\s]+/)) note(part);
+    return [...people.values()];
+  }, [channelShares, declinedDmRequests, dms, pendingDmRequests]);
   const viewRef = useRef<HTMLDivElement | null>(null);
   const { revealInvitation, onInvitationRevealed } = props;
   const receivedNotJoined = useMemo(() => {
@@ -4730,7 +4746,8 @@ export function ChatsView(props: {
                 <button
                   type="button"
                   data-testid="chats-share-channel"
-                  title={channelGrants.length > 0 ? "Members" : "Add members"}
+                  title={channelGrants.length > 0 ? "Members" : "Add people"}
+                  aria-label={channelGrants.length > 0 ? `${channelGrants.length} ${channelGrants.length === 1 ? "member" : "members"}` : "Add people"}
                   aria-haspopup="dialog"
                   aria-expanded={sharePanelOpen}
                   onClick={() => setSharePanelOpen(true)}
@@ -4749,9 +4766,9 @@ export function ChatsView(props: {
                       ))}
                     </span>
                   ) : (
-                    <Users size={13} aria-hidden />
+                    <UserPlus size={13} aria-hidden />
                   )}
-                  {channelGrants.length > 0 ? `Members · ${channelGrants.length}` : "Add members"}
+                  {channelGrants.length > 0 ? channelGrants.length : "Add people"}
                 </button>
               ) : null}
             </>
@@ -4781,6 +4798,7 @@ export function ChatsView(props: {
           <ChatMembersDialog
             groupName={nav.channel.name}
             members={channelGrants}
+            knownPeople={knownPeople}
             readFailure={shareReadFailure}
             blocked={shareGrantsBlocked}
             onAdd={submitShare}

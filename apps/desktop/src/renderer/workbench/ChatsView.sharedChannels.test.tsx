@@ -644,7 +644,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
     await userEvent.click(screen.getByTestId("chats-channel"));
     const shareButton = await screen.findByTestId("chats-share-channel");
-    expect(shareButton.textContent).toContain("Members · 1");
+    expect(shareButton.textContent).toBe("A1");
+    expect(shareButton.getAttribute("aria-label")).toBe("1 member");
     await userEvent.click(shareButton);
 
     // The member list shows who has it, and Remove revokes their grant. The
@@ -664,13 +665,14 @@ describe("ChatsView shared channels (MU-C4)", () => {
       restoredMessage: "Restored ana@example.com to team.",
     });
 
-    // Adding someone as View only. The dialog stays open with the field
-    // cleared and Can post chosen again, ready for the next person, even
-    // while the member list is still reloading.
+    // Adding someone as View only, from Add people at the top of the list.
+    // The dialog goes back to the list, which shows them while it reloads.
     let finishListing = () => {};
     bridgeMock.listChatChannelShares.mockImplementation(
       () => new Promise((resolve) => { finishListing = () => resolve(shareListing()); }),
     );
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
     await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
     await userEvent.click(screen.getByTestId("chats-share-readonly"));
     await userEvent.click(screen.getByTestId("chats-share-submit"));
@@ -682,14 +684,14 @@ describe("ChatsView shared channels (MU-C4)", () => {
         access: "read-only",
       }),
     );
-    await waitFor(() =>
-      expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe(""),
-    );
-    expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
-    expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
-    await userEvent.type(screen.getByTestId("chats-share-email"), "cy@example.com");
+    const added = await screen.findByText("bo@example.com");
+    expect(added.closest("[data-testid='chats-share-member']")?.textContent).toContain("View only");
     await act(async () => finishListing());
-    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("cy@example.com");
+
+    // Add people starts fresh: no one picked, and Can post chosen again.
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("");
+    expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
 
     // Close leaves the members button where it was.
     await userEvent.click(screen.getByTestId("chats-share-close"));
@@ -778,17 +780,10 @@ describe("ChatsView shared channels (MU-C4)", () => {
     ).toBe("over-limit");
     // ...and the control that would make it worse is off.
     expect(
-      (screen.getByTestId("chats-share-submit") as HTMLButtonElement).disabled,
+      (screen.getByTestId("chats-share-add-people") as HTMLButtonElement).disabled,
     ).toBe(true);
-    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).disabled).toBe(
-      true,
-    );
-
-    // Even typing an address does not enable it.
-    await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
-    expect(
-      (screen.getByTestId("chats-share-submit") as HTMLButtonElement).disabled,
-    ).toBe(true);
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    expect(screen.queryByTestId("chats-share-email")).toBeNull();
     expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
   });
 
@@ -820,6 +815,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       (await screen.findByTestId("chats-share-members-unreadable")).dataset.failure,
     ).toBe("over-limit");
     // ...and outgoing sharing still works, because it adds to the other lane.
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
     expect((screen.getByTestId("chats-share-email") as HTMLInputElement).disabled).toBe(
       false,
     );

@@ -119,10 +119,10 @@ export function Overlay(props: {
       if (!isTopOverlay(idRef.current)) return;
       if (switchModalRegion(event, panelRef.current)) return;
       if (event.key === "Escape") {
-        // One Escape closes one surface: a menu, a control's tooltip or an
-        // edit in place inside the dialog takes this one, and the next
-        // reaches the dialog.
-        if (event.target instanceof Element && event.target.closest("[role='menu'], [data-tooltip-open], [data-edit-in-place]")) return;
+        // One Escape closes one surface: a menu, an open combobox list, a
+        // control's tooltip or an edit in place inside the dialog takes this
+        // one, and the next reaches the dialog.
+        if (event.target instanceof Element && event.target.closest("[role='menu'], [role='combobox'][aria-expanded='true'], [data-tooltip-open], [data-edit-in-place]")) return;
         event.stopPropagation();
         onCloseRef.current?.();
         return;

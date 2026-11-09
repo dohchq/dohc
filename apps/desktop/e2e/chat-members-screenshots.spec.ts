@@ -14,9 +14,9 @@ import {
   seedWorkspaceRegistry,
 } from "./helpers/workspace";
 
-// Screenshot harness (@ui-audit) for a group's Members dialog: empty, with a
-// member who can post and one who can only view, and the header button it
-// leaves behind. Light and dark. Not a regression test; it runs only when a
+// Screenshot harness (@ui-audit) for a group's Members dialog: Add people
+// empty, the member list, suggestions, picked people, and the header button
+// it leaves behind. Light and dark. Not a regression test; it runs only when a
 // shot directory is set, the way chat-agent-screenshots.spec.ts does.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture members screenshots");
@@ -69,26 +69,35 @@ test("@ui-audit a group's Members dialog", async () => {
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await openChatsView(page);
+    // Another group's member, so Add people has someone new to suggest.
+    await page.getByTestId("chats-new-channel").click();
+    await page.getByTestId("chats-new-channel-name").fill("Design");
+    await page.getByTestId("chats-new-channel-submit").click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Design");
+    await page.getByTestId("chats-share-channel").click();
+    await page.getByTestId("chats-share-email").fill("dee@dohc.test");
+    await page.getByTestId("chats-share-submit").click();
+    await expect(page.getByTestId("chats-share-member")).toHaveCount(1);
+    await page.getByTestId("chats-share-close").click();
+
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill("Launch team");
     await page.getByTestId("chats-new-channel-submit").click();
     await expect(page.getByTestId("chats-channel-title")).toHaveText("Launch team");
 
-    // No members yet: the dialog is the field and the access choice.
+    // No members yet: the dialog opens on Add people, its field focused.
     await page.getByTestId("chats-share-channel").click();
     await expect(page.getByTestId("chats-share-panel")).toBeVisible();
     await expect(page.getByTestId("chats-share-email")).toBeFocused();
     await shoot(page, "members-a-empty");
 
-    // One member who can post, one who can only view.
-    await page.getByTestId("chats-share-email").fill("ana@dohc.test");
-    await page.getByTestId("chats-share-submit").click();
-    await expect(page.getByTestId("chats-share-member")).toHaveCount(1);
-    await page.getByTestId("chats-share-email").fill("ben@dohc.test");
-    await page.getByTestId("chats-share-readonly").click();
+    // Two people picked as chips, one typed and one pasted.
+    await page.getByTestId("chats-share-email").pressSequentially("ana@dohc.test,");
+    await page.getByTestId("chats-share-email").pressSequentially("ben@dohc.test ");
+    await expect(page.getByTestId("chats-share-chip")).toHaveCount(2);
     await page.getByTestId("chats-share-submit").click();
     await expect(page.getByTestId("chats-share-member")).toHaveCount(2);
-    await expect(page.getByTestId("chats-share-email")).toHaveValue("");
+    await expect(page.getByTestId("chats-share-panel")).toHaveAttribute("data-view", "members");
     await page.mouse.move(0, 0);
     await shoot(page, "members-b-list");
 
@@ -96,11 +105,29 @@ test("@ui-audit a group's Members dialog", async () => {
     await page.getByTestId("chats-share-member").nth(1).hover();
     await shoot(page, "members-c-hover");
 
+    // Add people suggests the people this account already shares with:
+    // Dee from Design, and Ana and Ben marked as members already.
+    await page.getByTestId("chats-share-add-people").click();
+    await page.getByTestId("chats-share-email").pressSequentially("dohc");
+    await expect(page.getByTestId("chats-share-suggestion")).toHaveCount(3);
+    await page.mouse.move(0, 0);
+    await shoot(page, "members-d-suggestions");
+
+    // A new address, view only, picked and waiting for Add.
+    await page.getByTestId("chats-share-email").fill("");
+    await page.getByTestId("chats-share-email").pressSequentially("cy@dohc.test");
+    await page.getByTestId("chats-share-email").press("Enter");
+    await page.getByTestId("chats-share-readonly").click();
+    await expect(page.getByTestId("chats-share-chip")).toHaveCount(1);
+    await shoot(page, "members-e-picked");
+    await page.getByTestId("chats-share-submit").click();
+    await expect(page.getByTestId("chats-share-member")).toHaveCount(3);
+
     // Closed, the header keeps the member faces and the count.
     await page.getByTestId("chats-share-close").click();
     await expect(page.getByTestId("chats-share-panel")).toHaveCount(0);
     await page.mouse.move(0, 0);
-    await shoot(page, "members-d-header");
+    await shoot(page, "members-f-header");
   } finally {
     try { await desktop?.close(); } catch (error) { console.error("Desktop cleanup failed:", error); }
     try { await relay?.stop(); } catch (error) { console.error("Relay cleanup failed:", error); }
