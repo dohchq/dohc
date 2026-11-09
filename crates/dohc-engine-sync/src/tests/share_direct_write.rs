@@ -326,6 +326,9 @@ fn a_refused_creation_gives_no_status_to_a_received_record_with_its_id() {
     let token = format!("share-object:v1:{}", hex_sha256(b"owner-copy"));
     let sha = hex_sha256(accepted.as_bytes());
     let relay = PagedShareRelay::new([], [(0, ShareViewResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
+        reference_has_more: false,
         ops: vec![ShareReplicationEnvelope {
             origin_id: "owner-proposal".to_owned(), origin_seq: 0, op_kind: "moment.append".to_owned(), recorded_at_ms: 2_500,
             payload: json!({ "versionId": "main", "objectId": token, "operation": "write", "path": path,
