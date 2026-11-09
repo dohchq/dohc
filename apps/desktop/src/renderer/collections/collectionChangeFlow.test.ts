@@ -59,6 +59,17 @@ it("applies the rows the card showed, whatever the attached file says after it l
   expect((await load(place))!.state).toEqual({ kind: "applied", current: true });
 });
 
+it("finds a change that landed without its confirmation already applied, and prepares nothing again", async () => {
+  const place = world(); ask(place);
+  const change = (await load(place))!;
+  place.control.unconfirmed = true;
+  await expect(applyCollectionChange(place.api, "w", change)).rejects.toThrow("The server did not confirm this Collection change.");
+  expect(place.head().revisionSha256).toBe(change.proposal.revisionSha256);
+  const before = place.actions().length;
+  await expect(applyCollectionChange(place.api, "w", change)).resolves.toEqual({ kind: "applied", proposal: change.proposal });
+  expect(place.actions().slice(before)).toEqual(["describe"]);
+});
+
 it("applies nothing when the attached file hid part of the change before the card loaded", async () => {
   const place = world(); const proposal = ask(place);
   place.files[proposalPath] = JSON.stringify({ ...proposal, rows: proposal.rows.filter(row => row.kind !== "field-removed") });
