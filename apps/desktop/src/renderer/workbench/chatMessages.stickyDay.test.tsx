@@ -146,6 +146,28 @@ describe("ChatMessageList pinned day", () => {
     expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(days[0]!.createdAtMs));
   });
 
+  it("keeps the pinned day when a risen entry arrives for a row that has unmounted", () => {
+    const days = [message("d-0", start), message("d-1", start + 60_000), message("d-2", start + 2 * day)];
+    const { rerender } = render(<ChatMessageList testIdPrefix="list" messages={days} loading={false} emptyLabel="Empty" />);
+    const observer = FakeObserver.current!;
+    const dividers = screen.getAllByTestId("list-day");
+    const first = dividers.find(node => node.dataset.dayDivider === "d-0")!;
+    const nextMark = dividers.find(node => node.dataset.dayDivider === "d-2")!.querySelector<HTMLElement>("[data-day-mark]")!;
+
+    observer.deliver(first, -60);
+    showTop(1, days);
+    expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(days[0]!.createdAtMs));
+
+    // The next day's row unmounts, and its mark leaves the observer.
+    const shorter = days.slice(0, 2);
+    rerender(<ChatMessageList testIdPrefix="list" messages={shorter} loading={false} emptyLabel="Empty" />);
+    expect(observer.observed.has(nextMark)).toBe(false);
+
+    // An entry the browser queued before the unmount still arrives.
+    observer.deliver(nextMark, -1);
+    expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(days[0]!.createdAtMs));
+  });
+
   it("shows the day for a top row whose day started further up", () => {
     render(<ChatMessageList testIdPrefix="list" messages={messages} loading={false} emptyLabel="Empty" />);
     showTop(2);

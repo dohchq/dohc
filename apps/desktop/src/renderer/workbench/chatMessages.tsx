@@ -684,6 +684,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         const target = entry.target as HTMLElement;
         const mark = target.dataset.dayMark;
         const id = mark ?? target.dataset.dayDivider!;
+        // An entry queued before its row unmounted describes a detached edge.
+        if ((mark === undefined ? dividers : marks).current.get(id) !== target) continue;
         const above = (mark === undefined ? clippedDividers : risenMarks).current;
         // Crossing or above the pinned copy's line.
         const risen = entry.rootBounds !== null && entry.boundingClientRect.top < entry.rootBounds.top;
