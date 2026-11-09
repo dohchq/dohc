@@ -358,7 +358,9 @@ export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
   if (name === "SyncedDeletionRevivalError" || name === "SyncedDeletionStaleError" || (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")) {
     const path = error instanceof SyncedDeletionRevivalError ? error.path : "this file";
-    return { ...SYNCED_DELETION_REVIVAL_WORDS(path, name === "SyncedDeletionStaleError", error instanceof SyncedDeletionRevivalError && error.restore), mapped: false, cause: text, canRetry: false,
+    // dohc's own refusal carries an instruction or the Reason as its message,
+    // so Copy details would repeat it, or give a second instruction.
+    return { ...SYNCED_DELETION_REVIVAL_WORDS(path, name === "SyncedDeletionStaleError", error instanceof SyncedDeletionRevivalError && error.restore), mapped: false, cause: name === "DaemonRefusalError" ? text : null, canRetry: false,
       ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}) };
   }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
