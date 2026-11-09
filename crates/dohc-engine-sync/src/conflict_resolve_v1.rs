@@ -2258,7 +2258,8 @@ fn preflight_imported_lineage(
 /// The other machine kept its copy over this machine's deletion, which
 /// retired the lineage its resolution replaces. Rebuild that lineage, as a
 /// machine that kept the note holds it, so the import installs the successor
-/// and closes this machine's open conflict. None leaves a review to open.
+/// and closes this machine's open conflict, if one opened. None leaves a
+/// review to open.
 fn retired_kept_predecessor(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
@@ -2268,18 +2269,30 @@ fn retired_kept_predecessor(
     let (Some(key), Some(transition)) = (key, payload.lineage_transition.as_ref()) else {
         return Ok(None);
     };
-    let deletion_open: bool = tx
+    // Either this machine's own conflict is open, or none opened here because
+    // the other machine's edit waited for the history this deletion retired.
+    let deletion_reviewed: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2 \
-               AND status='open' AND current_exists=0 AND incoming_object_id=?3)",
-            params![payload.workspace_id, payload.conflict_id, key.object_id],
+               AND status='open' AND current_exists=0 AND incoming_object_id=?3) \
+             OR (NOT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND (conflict_id=?2 \
+                   OR (status='open' AND (path=?4 OR current_object_id=?3 OR incoming_object_id=?3)))) \
+               AND EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?5 \
+                   AND object_id=?3 AND operation='delete'))",
+            params![
+                payload.workspace_id,
+                payload.conflict_id,
+                key.object_id,
+                payload.paths[payload.result.path_ref()],
+                key.version_id,
+            ],
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
     if disposition != ImportedHeadDisposition::ReviewedSide
         || transition.successor.is_none()
         || payload.incoming.present().is_some()
-        || !deletion_open
+        || !deletion_reviewed
         || dohc_engine_collab::read_marker_in(tx, key)
             .map_err(map_local_collab_error)?
             .is_some()
