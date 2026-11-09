@@ -2678,7 +2678,7 @@ export const SetChatReactionResult = z.object({
 });
 export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 
-const EMAIL_STRING = z.email().max(320);
+export const EMAIL_STRING = z.email().max(320);
 
 // Direct messages (WS-MU-C3). A DM is a `kind:"dm"` channel plus one MU-C4
 // chat grant per participant, riding the shared-channel lane. The

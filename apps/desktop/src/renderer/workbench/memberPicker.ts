@@ -2,10 +2,11 @@
 // pasted text is an email, and which people to suggest for a query. Main checks
 // every address again before it grants anything.
 
-const EMAIL = /^[^\s@<>,;"]+@[^\s@<>,;".]+(\.[^\s@<>,;".]+)+$/;
+import { EMAIL_STRING } from "../../ipc/bridgeContract";
 
+// The same check the share call makes, so a chip never names someone it refuses.
 export function isEmail(text: string): boolean {
-  return text.length <= 320 && EMAIL.test(text);
+  return EMAIL_STRING.safeParse(text).success;
 }
 
 export function emailKey(email: string): string {

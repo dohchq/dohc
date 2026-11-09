@@ -243,6 +243,8 @@ describe("memberPicker", () => {
       rest: "nope",
     });
     expect(splitAddresses("a@x")).toEqual({ emails: [], rest: "a@x" });
+    // The share call refuses a one-letter top-level domain, so the field keeps it.
+    expect(splitAddresses("a@b.c")).toEqual({ emails: [], rest: "a@b.c" });
     expect(splitAddresses("Ana <ana@x.co> Ben <ben@y.co>")).toEqual({ emails: ["ana@x.co", "ben@y.co"], rest: "" });
     expect(splitAddresses("a@x.co Ben <ben@y.co>").emails.sort()).toEqual(["a@x.co", "ben@y.co"]);
     expect(splitAddresses('"Doe, Jane" <jane@x.co>, bob@y.co')).toEqual({ emails: ["jane@x.co", "bob@y.co"], rest: "" });
