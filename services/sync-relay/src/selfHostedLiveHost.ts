@@ -381,7 +381,7 @@ export async function startSelfHostedLiveHost(options: {
       // runs beside it, and the next reconciliation keeps it.
       async page(kept: ServiceKeptEdits, cursor: JsonValue | undefined, callerSignal?: AbortSignal) {
         let host = current;
-        if (!host) await exclusive(async () => {signal.throwIfAborted(); host = current ??= await start();});
+        if (!host) await exclusive(async () => {signal.throwIfAborted(); host = current ??= await start(); startFailed = false;});
         if (!host) throw new Error("This server does not hold the workspace's live documents now.");
         return host.readKeptEditsPage(kept, cursor, join(root, storeName({workspaceId: kept.workspaceId, ...kept.identity})), callerSignal);
       },
