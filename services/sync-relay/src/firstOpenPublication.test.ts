@@ -1100,9 +1100,9 @@ it("maps every answer to one recovery", () => {
 
 it("admits once per object before reading blobs or building, despite edits, while another object stays eligible", async () => {
   const f = await fixture({admissionIntervalMs: 60_000});
-  f.buildWith(async () => ({kind: "busy"}));
+  f.buildWith(async () => ({kind: "deadline"}));
   const blobs = vi.spyOn(f.storage, "getBlob");
-  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline"});
   const readCount = blobs.mock.calls.length;
   f.source = f.writeText("Edited source.");
   expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
@@ -1110,7 +1110,7 @@ it("admits once per object before reading blobs or building, despite edits, whil
   expect(f.builds).toHaveBeenCalledTimes(1);
   const sibling = f.writeText("Sibling", {objectId: "sibling", path: "docs/sibling.md"});
   f.storage.enrollServiceHostDocument({workspaceId: WS, ownerUserId: OWNER, shareId: "share-1", path: "docs/sibling.md", nowMs: 10, guard() {}});
-  expect(await f.open({objectId: "sibling", path: "docs/sibling.md", ...sibling})).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(await f.open({objectId: "sibling", path: "docs/sibling.md", ...sibling})).toMatchObject({kind: "unavailable", reason: "build-deadline"});
   expect(f.builds).toHaveBeenCalledTimes(2);
   f.advance(59_999);
   await f.open();
@@ -1121,13 +1121,31 @@ it("admits once per object before reading blobs or building, despite edits, whil
   nothingAppended(f);
 });
 
+// Opus's r3a review, F3: a build that found no free worker charged the full
+// quiet interval, so the note waited a minute for work that never ran.
+// Proves: such a request leaves no interval, and the next request builds.
+it("leaves no quiet interval after a request whose build found no free worker", async () => {
+  const f = await fixture({admissionIntervalMs: 60_000});
+  f.buildWith(async () => ({kind: "busy"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(f.builds).toHaveBeenCalledTimes(2);
+  // A build that ran leaves the interval: an edit, which the deadline's wait does not cover, waits for it.
+  f.buildWith(async () => ({kind: "deadline"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline"});
+  f.source = f.writeText("Edited source.");
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "busy"});
+  expect(f.builds).toHaveBeenCalledTimes(3);
+  nothingAppended(f);
+});
+
 it("keeps admission through a long build and leaves a quiet interval afterwards, including across edits", async () => {
   const f = await fixture({admissionIntervalMs: 60_000});
   let entered!: () => void, release!: () => void, calls = 0;
   const building = new Promise<void>(resolve => {entered = resolve;}), held = new Promise<void>(resolve => {release = resolve;});
   f.buildWith(async () => {
     if (++calls === 1) {entered(); await held;}
-    return {kind: "busy"};
+    return {kind: "deadline"};
   });
   const pending = f.open();
   await building;
