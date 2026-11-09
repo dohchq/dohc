@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { ChildProcess, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -480,6 +480,54 @@ describe("first-open worker", () => {
     expect(await building).toEqual({ kind: "busy" });
     expect((await activated).kind).toBe("accepted");
     expect((await pool.buildFirstOpenBase(policy, input("Body"))).kind).toBe("built");
+  });
+
+  it("runs a note's next build to the end after an activation ended one, while that activation repeats every pass", async () => {
+    const { pool, journal } = fixture();
+    const activate = pool.ordinaryActivation(policy);
+    // A note that never becomes active, so its activation is validated again on every pass.
+    const pass = () => activate({ document: journal.document, currentPath: journal.currentPath, baselineBytes: Uint8Array.of(255) })
+      .then(answer => answer.kind, () => "threw");
+    const note = input("Body"), other = { ...input("Other"), document: { ...document, objectId: "other" } };
+    const first = pool.buildFirstOpenBase(policy, note);
+    expect(await pass()).not.toBe("retry");
+    expect(await first).toEqual({ kind: "busy" });
+    // Another note's build has had no turn ended yet, so it is ended too.
+    const another = pool.buildFirstOpenBase(policy, other);
+    expect(await pass()).not.toBe("retry");
+    expect(await another).toEqual({ kind: "busy" });
+    const next = pool.buildFirstOpenBase(policy, note);
+    expect(await pass()).toBe("retry");
+    expect(await pass()).toBe("retry");
+    expect((await next).kind).toBe("built");
+    // The turn was one build: the note's following build can be ended again.
+    const after = pool.buildFirstOpenBase(policy, note);
+    expect(await pass()).not.toBe("retry");
+    expect(await after).toEqual({ kind: "busy" });
+  });
+
+  it("keeps an ended build's slot busy until its child exits, even when the build's answer arrives first", async () => {
+    const { pool, journal, validate } = fixture();
+    // Capture the build's child and keep its job from reaching it, so only this test answers for it.
+    const prototype = ChildProcess.prototype as unknown as { spawn(...args: unknown[]): unknown };
+    const spawn = prototype.spawn;
+    let child: ChildProcess | undefined;
+    const held = vi.spyOn(prototype, "spawn").mockImplementation(function (this: ChildProcess, ...args: unknown[]) {
+      const result: unknown = Reflect.apply(spawn, this, args);
+      child = this;
+      this.send = () => true;
+      return result;
+    });
+    const building = (() => {
+      try { return pool.buildFirstOpenBase(policy, input("Body")); } finally { held.mockRestore(); }
+    })();
+    const activated = pool.ordinaryActivation(policy)({ document: journal.document, currentPath: journal.currentPath, baselineBytes: journal.checkpoint });
+    // The build's answer was already in the pipe when the activation killed its child.
+    const answer = { kind: "refused", reason: "update-limit" };
+    child!.emit("message", answer);
+    expect((await validate(journal)).kind).toBe("accepted");
+    expect(await building).toEqual(answer);
+    expect((await activated).kind).toBe("accepted");
   });
 
   it("does not wait while live admission holds every slot", async () => {
