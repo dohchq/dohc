@@ -18,6 +18,7 @@ import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   extractOutline,
   resolveActiveHeadingIndex,
+  updateOutline,
   type OutlineHeading,
 } from "./outline";
 import { useDebouncedWordCount } from "./wordCount";
@@ -314,14 +315,14 @@ type OutlinePanelProps = {
 
 export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePanelProps) {
   // The drawn list: it changes only when a heading's text or level does.
-  const [headings, setHeadings] = useState<OutlineHeading[]>([]);
+  const [headings, setHeadings] = useState<readonly OutlineHeading[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
   const wordCount = useDebouncedWordCount(editor);
 
   // The current headings with their positions, which every edit before a
   // heading moves. The scroll-tracking effect and clicks read them here, so
   // typing redraws nothing.
-  const outlineRef = useRef<OutlineHeading[]>(headings);
+  const outlineRef = useRef<readonly OutlineHeading[]>(headings);
   // The active heading is kept by position, so an edit maps it to where its
   // heading went; the list draws it by index.
   const activePosRef = useRef<number | null>(null);
@@ -336,9 +337,9 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     setActiveIndex(shown);
   };
 
-  // Recompute the heading list synchronously (a walk over blocks, not text)
-  // on every doc change, and redraw only when it changed. The word count is
-  // handled by useDebouncedWordCount above.
+  // Update the heading list synchronously on every doc change, reading again
+  // only the headings an edit touched, and redraw only when it changed. The
+  // word count is handled by useDebouncedWordCount above.
   useEffect(() => {
     setActivePos(null);
     if (!editor) {
@@ -346,25 +347,31 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       setHeadings([]);
       return;
     }
-    const recomputeHeadings = () => {
-      const next = extractOutline(editor.state.doc);
+    let outlineDoc = editor.state.doc;
+    const showHeadings = (next: readonly OutlineHeading[]) => {
       const redraw = !sameOutline(next, outlineRef.current);
       outlineRef.current = next;
       if (redraw) setHeadings(next);
     };
+    // The event's transaction leaves out the ones plugins appended, so the
+    // update compares against the document the outline last read.
     const handleTransaction = ({ transaction }: { transaction: Transaction }) => {
+      const doc = editor.state.doc;
+      if (doc !== outlineDoc) {
+        showHeadings(updateOutline(outlineRef.current, outlineDoc, doc));
+        outlineDoc = doc;
+      }
       if (!transaction.docChanged) return;
-      recomputeHeadings();
       const previousActivePos = activePosRef.current;
       if (previousActivePos !== null) {
         setActivePos(transaction.mapping.map(previousActivePos));
       }
     };
 
-    recomputeHeadings();
+    showHeadings(extractOutline(outlineDoc));
 
     // Tiptap suppresses `update` for setContent(..., { emitUpdate: false }) but
-    // still emits `transaction`; docChanged is the complete document boundary.
+    // still emits `transaction`.
     editor.on("transaction", handleTransaction);
     return () => {
       editor.off("transaction", handleTransaction);

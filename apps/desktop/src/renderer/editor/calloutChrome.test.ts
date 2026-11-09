@@ -136,8 +136,8 @@ describe("callout header title staleness", () => {
 
   it("keeps the focused title input across content inserted before the callout", () => {
     // A collaborator/agent inserting text before a callout shifts its document
-    // position. The widget key must key off callout ordinal (not absolute pos),
-    // or the decoration remints — dropping the focused input and its
+    // position. The widget key must not key off absolute pos, or the
+    // decoration remints — dropping the focused input and its
     // uncommitted title without a blur (the commit never fires).
     const editor = makeEditor("intro\n\n> [!note] Title\n> body");
     const input = titleInput(editor);

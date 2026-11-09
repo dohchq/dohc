@@ -387,6 +387,19 @@ describe('makeMermaidPreviewPlugin — DOM wiring', () => {
     expect(render.mock.calls.length).toBe(renderCallsAfterPaint)
   })
 
+  it('keeps the diagram showing when its fence is wrapped in a quote', async () => {
+    vi.useFakeTimers()
+    const render = vi.fn(async (_id: string, source: string) => ({ svg: `<svg data-src="${source}"></svg>` }))
+    const editor = makeEditor('```mermaid\ngraph TD;\nA-->B\n```', render)
+    await vi.advanceTimersByTimeAsync(400)
+
+    editor.chain().setTextSelection(2).setBlockquote().run()
+
+    const preview = previewContainer(editor)
+    expect(preview.closest('blockquote')).not.toBeNull()
+    expect(preview.querySelector('.dohc-mermaid-preview-canvas')?.innerHTML).toContain('data-src="graph TD;\nA-->B"')
+  })
+
   it('shows a quiet error strip on parse failure, keeping the code editable', async () => {
     vi.useFakeTimers()
     const render = vi.fn(async () => {
