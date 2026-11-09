@@ -5352,6 +5352,24 @@ it.each(["answers", "fails"] as const)("ends a workspace's first-open work befor
   expect(o.bases()).toHaveLength(0);
 });
 
+// Review round 2 of 3b, finding 2: a stale-source answer left its source never
+// asked about again, so a source the relay's history came back to stayed
+// without a first open.
+// Proves: after a stale answer, the next pass that finds the same source asks
+// again, and the relay publishes its base.
+it("asks again about a source whose first-open answer said it was stale", async () => {
+  let answered = 0;
+  const o = await neverOpenedHost({answer: async (request, relay) => {
+    if (answered++ > 0) return relay(request);
+    const body = await request.clone().json() as {objectId: string; path: string; sourceMomentId: string; sourceDigest: string};
+    return Response.json({ok: true, outcome: firstOpenOutcome({workspaceId: "workspace", objectId: body.objectId, path: body.path,
+      sourceMomentId: body.sourceMomentId, sourceDigest: body.sourceDigest}, {kind: "refused", reason: "stale-source"})});
+  }});
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+  expect(o.statuses).toEqual([200, 200]);
+  expect(o.builds).toHaveBeenCalledOnce();
+});
+
 // Proves: a diverged replica stops and detaches, its documents stay retained,
 // and no later update attaches its store again on this daemon. A new
 // identity's store is another store, so it attaches.
