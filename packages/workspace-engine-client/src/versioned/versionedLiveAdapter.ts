@@ -1774,6 +1774,16 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
   }
 
+  // Writes the bytes over the file whole through the engine's temp file, and
+  // saves nothing. Capture sees the change as any edit on disk.
+  async replaceFile(input: { path: string; temporary: string; data: string | Uint8Array }): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.filesReplace, {
+      path: input.path,
+      temporary: input.temporary,
+      bytesBase64: Buffer.from(input.data).toString("base64"),
+    });
+  }
+
   async close(): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.close, {});
   }

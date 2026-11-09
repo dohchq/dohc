@@ -5678,6 +5678,45 @@ fn filesystem_job_component(id: &str) -> String {
     }
 }
 
+/// Replace the file at `rel` whole with `content`, outside any job: a temp
+/// named `temp_name` beside it takes the file's access as a job's temp does,
+/// is flushed and renamed over it, then the folder is flushed. On macOS that
+/// temp never takes the folder's inherited ACL entries. A temp a stopped
+/// write left at that name is removed first.
+pub fn replace_file_whole(
+    root: &Path,
+    rel: &str,
+    temp_name: &str,
+    content: &[u8],
+) -> Result<(), MaterializeError> {
+    let id = temp_name
+        .strip_prefix(".dohc-write-")
+        .and_then(|rest| rest.strip_suffix(".tmp"));
+    if !id.is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())) {
+        return Err(MaterializeError::UnsafeTargetPath);
+    }
+    let target = resolve_target(root, rel)?;
+    prepare_target_parent_symlink_free(root, &target)?;
+    let tmp = sibling_with_name(&target, temp_name);
+    let replaced = write_temp(&target, &tmp, content, false).and_then(|file| {
+        file.sync_all()
+            .map_err(|err| MaterializeError::io(&tmp, &err))?;
+        drop(file);
+        std::fs::rename(&tmp, &target).map_err(|err| MaterializeError::io(&target, &err))
+    });
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    replaced?;
+    #[cfg(unix)]
+    if let Some(parent) = target.parent() {
+        std::fs::File::open(parent)
+            .and_then(|folder| folder.sync_all())
+            .map_err(|err| MaterializeError::io(parent, &err))?;
+    }
+    Ok(())
+}
+
 /// Write an ordinary job's temp beside `target`, which it will replace. An
 /// `owner_only` temp is 0600 whatever the target allows.
 fn write_temp(

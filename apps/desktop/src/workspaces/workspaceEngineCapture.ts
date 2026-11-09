@@ -1772,10 +1772,17 @@ function assertEngineWritablePath(
   }
 }
 
+// The engine's write of a file whole: the resolved workspace path, the
+// temp's name, and the bytes.
+type EngineReplaceFile = (path: string, temporary: string, data: string | Uint8Array) => Promise<void>;
+
 // Exported for direct regression tests of the containment invariants below;
 // production code always goes through WorkspaceEngineCaptureOptions.diskWriter
 // defaulting.
-export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
+// With `replaceFile`, the engine writes the temp after the checks here. On
+// macOS a temp Node creates takes the folder's inherited ACL entries; the
+// engine creates it without them and gives it the replaced file's ACL.
+export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineReplaceFile): EngineDiskWriter {
   // Symlink containment (the same defense versionedFileWorkspace applies to
   // its write path):
   //   1. Before mkdir, the nearest existing ancestor must resolve inside the
@@ -1872,11 +1879,15 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
-    const { resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
+    const { relative: workspacePath, resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
     const replaced = await assertLeafNotSymlink(target);
+    if (replaceFile) {
+      await replaceFile(workspacePath, basename(temporaryFor(target)), data);
+      return;
+    }
     await atomicReplaceFile(target, async (temporary) => {
       const mode = replaced?.isFile() ? 0o600 : 0o666;
       const handle = await open(temporary, "wx", mode).catch(async (error: NodeJS.ErrnoException) => {
@@ -1965,7 +1976,16 @@ export function createWorkspaceEngineCapture(
       // There is nothing left to report the reporting failure to.
     }
   };
-  const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
+  const diskWriter = options.diskWriter ?? createDefaultDiskWriter(
+    rootPath,
+    process.platform === "darwin"
+      ? async (path, temporary, data) => {
+          const { replaceFile } = await engineStore();
+          if (!replaceFile) throw new Error("This engine can't write a file whole on macOS.");
+          await replaceFile({ path, temporary, data });
+        }
+      : undefined,
+  );
   const outsideCopies = outsideWriteCopies({ workspaceId, rootPath, attachmentId });
   let lastOutsideCopies: [string, string, string][] | null = null;
   let reportedOutsideCopies: string | null = null;

@@ -401,6 +401,14 @@ export function createFakeDaemonCapture(input: {
           await rename(from, to);
           return { id: request.id, result: { moved: true } };
         }
+        // The desktop's macOS disk writes; the engine checks the path and swaps
+        // a temp in, which a scratch disk needs no more than a plain write for.
+        case "files.replace": {
+          const target = join(rootPath, String(params.path));
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, Buffer.from(String(params.bytesBase64), "base64"));
+          return { id: request.id, result: { replaced: true } };
+        }
         case "ydoc.open": {
           if (!ydoc) return null;
           const response = await ydoc.sendRequest(request);

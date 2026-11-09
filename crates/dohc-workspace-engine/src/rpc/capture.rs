@@ -85,6 +85,14 @@ struct CaptureMoveFileParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesReplaceParams {
+    path: String,
+    temporary: String,
+    bytes_base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CaptureDuplicateParams {
     hold_id: String,
     from_path: String,
@@ -338,6 +346,49 @@ async fn flush_through(
 }
 
 impl EngineService {
+    /// Write given bytes over a workspace file whole, through the
+    /// materializer's temp, and save nothing: capture sees the change as it
+    /// sees any edit on disk. The desktop's sync writes use it on macOS, where
+    /// a temp Node creates takes the folder's inherited ACL entries.
+    pub(super) async fn files_replace(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use base64::Engine as _;
+
+        let params: FilesReplaceParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "Replacing a file needs the owning handle",
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&params.bytes_base64)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-input"))?;
+        if bytes.len() > dohc_engine_domain::MAX_TEXT_BYTES {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "content-exceeds-capture-cap",
+            ));
+        }
+        let root = open.root.clone();
+        tokio::task::spawn_blocking(move || {
+            dohc_engine_files::materialize::replace_file_whole(
+                &root,
+                &params.path,
+                &params.temporary,
+                &bytes,
+            )
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "workspace operation failed"))?
+        .map_err(|err| map_runtime(dohc_engine_runtime::RuntimeError::Materialize(err)))?;
+        Ok(json!({ "replaced": true }))
+    }
+
     pub(super) async fn capture_duplicate_file(
         &self,
         handle: Option<WorkspaceHandle>,

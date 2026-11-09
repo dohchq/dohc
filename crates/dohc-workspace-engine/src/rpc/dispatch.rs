@@ -446,6 +446,10 @@ impl EngineService {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, true))
                     .await?
             }
+            "files.replace" => {
+                self.files_replace(request.workspace, request.params)
+                    .await?
+            }
             "workReferences.make" => {
                 self.work_references_make(&ctx, request.workspace, request.params)
                     .await?
@@ -1724,6 +1728,7 @@ mod tests {
             "conflicts.resolve",
             "documents.keepRetainedVersion",
             "engine.ping",
+            "files.replace",
             "history.page",
             "keptCopies.list",
             "keptCopies.save",
