@@ -307,6 +307,12 @@ spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'})
     t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
     controller.abort();await running;
     assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
+    // On Linux the owner is a child subreaper: it adopts the orphaned swapper and stops it with the tree, so nothing escapes.
+    if(process.platform==='linux'){
+      assert.equal(await exited(escaped),true);
+      assert.deepEqual((await readdir(context.scratch)).filter(name=>name.startsWith('dohc-app-compiler-')),[]);
+      return;
+    }
     // A swapper the owner killed answers kill(pid, 0) until launchd reaps it.
     let escapedAlive=alive(escaped)&&!zombie(escaped);
     // Stop the swapper before the fixture's own recursive cleanup runs.

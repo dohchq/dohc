@@ -228,6 +228,11 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
+      # Blacksmith's image sets HOME to the runner's home in every login shell. The login
+      # shell tests start bash with their own HOME and must read that HOME's profile.
+      - name: Login shells keep their HOME
+        run: if [ -f /etc/profile.d/blacksmith.sh ]; then sudo mv /etc/profile.d/blacksmith.sh "$RUNNER_TEMP/"; fi
+
       - name: Rust toolchain
         run: |
           set -euo pipefail

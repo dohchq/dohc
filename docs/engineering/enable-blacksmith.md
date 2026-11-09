@@ -108,6 +108,8 @@ It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
 The local gate runs no Linux JavaScript, so the replica suites run only in this job.
 
+Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript job moves that file aside, so the login shell tests read the profile in their own `HOME`.
+
 ## Read the result
 
 PR jobs check out the event's merge commit and compare it with the event's base commit.

@@ -23,6 +23,10 @@ fn helper_command(role: &str) -> Command {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+    // The helper starts the reader with the test Node the gate chose.
+    if let Some(node) = std::env::var_os("DOHC_READER_TEST_NODE") {
+        command.env("DOHC_READER_TEST_NODE", node);
+    }
     command
 }
 fn receipt(reader: &mut impl BufRead) -> Value {
