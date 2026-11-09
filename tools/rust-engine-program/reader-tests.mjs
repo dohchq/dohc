@@ -6,15 +6,18 @@
 //
 //   node tools/rust-engine-program/reader-tests.mjs
 //
-// Each regression runs as its own nextest run that must find it, so a renamed
-// or deleted regression fails the phase instead of dropping out of it. The
-// runs share the workspace test step's build.
+// A regression joins the phase through its ignore reason, READER_PHASE, so no
+// list here can miss one. Before running them, the phase lists the tests its
+// filter selects and fails unless each regression's name selects exactly as
+// many tests as the sources declare. The run shares the workspace test step's
+// build.
 //
 // The bundle is built into this user's private scratch parent and removed
 // afterwards. On macOS the reader runs the staged pinned Node, as the reader's
 // own tests do; Linux and Windows use DOHC_READER_TEST_NODE when it is set, and
 // otherwise the Node running this script.
 import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,17 +26,45 @@ import { testScratchParent } from "./scratch-leak-report.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** The ignored regressions that need a real reader, by their full test names. */
-export const READER_TESTS = [
-  "live_update_application::adoption::tests::a_reader_built_lineage_adopts_its_successor",
-  "live_update_application::adoption::tests::a_reader_built_lineage_checkpoints_at_the_native_cadence",
-  "live_update_application::adoption::tests::a_reader_built_note_resumes_over_the_file_its_predecessor_settled",
-];
+/** The ignore reason of every regression this phase runs. */
+export const READER_PHASE = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG";
+const PHASE_TEST = new RegExp(String.raw`#\[ignore = "${READER_PHASE}"\](?:\s*#\[[^\]]*\])*\s*(?:async\s+)?fn\s+(\w+)`, "gu");
 
-/** The nextest arguments that run `name` and nothing else. */
-export function readerTestArgs(name) {
-  return [...nextest, "--run-ignored", "ignored-only", "--no-tests=fail",
-    "-E", `package(dohc-engine-collab) & test(=${name})`];
+/** The function names of the regressions this phase runs, sorted, from the sources under `crates`. */
+export function readerTests(crates = join(repoRoot, "crates")) {
+  const names = [];
+  for (const path of readdirSync(crates, { recursive: true })) {
+    if (!path.endsWith(".rs")) continue;
+    for (const [, name] of readFileSync(join(crates, path), "utf8").matchAll(PHASE_TEST)) names.push(name);
+  }
+  return names.sort();
+}
+
+/** The cargo arguments that `list` or `run` the ignored tests named `names`, in any module, and nothing else. */
+export function readerTestArgs(command, names) {
+  if (!names.length) throw new Error("No test has the reader phase's ignore reason.");
+  const filter = [...new Set(names)].map(name => `test(/(^|::)${name}$/)`).join(" | ");
+  return ["nextest", command, ...nextest.slice(2), "--run-ignored", "ignored-only", "-E", filter];
+}
+
+/**
+ * The regressions in `names` that nextest's JSON test list did not select as
+ * often as the sources declare them, each with the count it found.
+ */
+export function readerTestMismatches(names, list) {
+  const found = new Map();
+  for (const suite of Object.values(list["rust-suites"] ?? {})) {
+    for (const [test, testcase] of Object.entries(suite.testcases ?? {})) {
+      if (testcase["filter-match"]?.status !== "matches") continue;
+      const name = test.split("::").at(-1);
+      found.set(name, (found.get(name) ?? 0) + 1);
+    }
+  }
+  const declared = new Map();
+  for (const name of names) declared.set(name, (declared.get(name) ?? 0) + 1);
+  return [...new Set([...declared.keys(), ...found.keys()])]
+    .filter(name => declared.get(name) !== found.get(name))
+    .map(name => `${name} (declared ${declared.get(name) ?? 0}, found ${found.get(name) ?? 0})`);
 }
 
 async function readerNode() {
@@ -43,6 +74,12 @@ async function readerNode() {
 }
 
 export async function runReaderTests() {
+  const names = readerTests();
+  const listed = spawnSync("cargo", [...readerTestArgs("list", names), "--message-format", "json"],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "inherit"] });
+  if (listed.status !== 0) throw new Error(`The reader regressions did not list: ${listed.error?.message ?? `exit ${listed.status}`}.`);
+  const mismatches = readerTestMismatches(names, JSON.parse(listed.stdout));
+  if (mismatches.length) throw new Error(`The reader phase's filter does not select exactly its regressions: ${mismatches.join(", ")}.`);
   const node = await readerNode();
   const parent = testScratchParent();
   await mkdir(parent, { recursive: true });
@@ -55,12 +92,9 @@ export async function runReaderTests() {
     const env = { ...process.env, DOHC_ENGINE_READER_CONFIG: JSON.stringify({
       node, bundle: join(bundle, "reader.cjs"), manifest: join(bundle, "manifest.json"),
     }) };
-    const failed = READER_TESTS.filter(name => {
-      const run = spawnSync("cargo", readerTestArgs(name), { cwd: repoRoot, env, stdio: "inherit" });
-      if (run.error) console.error(`  ${name}: ${run.error.message}`);
-      return run.status !== 0;
-    });
-    if (failed.length) throw new Error(`Reader regressions failed: ${failed.join(", ")}.`);
+    const run = spawnSync("cargo", [...readerTestArgs("run", names), "--no-tests=fail", "--no-fail-fast"],
+      { cwd: repoRoot, env, stdio: "inherit" });
+    if (run.status !== 0) throw new Error(`Reader regressions failed: ${run.error?.message ?? `exit ${run.status}`}.`);
   } finally {
     // Windows can hold the bundle a moment after the last reader exits.
     await rm(bundle, { recursive: true, force: true, maxRetries: 5 });

@@ -142,7 +142,7 @@ fn commit(
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history() {
     for joined in [false, true] {
         for source in [
@@ -225,7 +225,7 @@ async fn outside_reader_fold_owner_and_joined_keep_tree_marks_settle_and_history
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_noncanonical_and_native_match_existing_capture() {
     for source in [
         "Plain native paragraph",
@@ -318,13 +318,13 @@ async fn refuse_stale_preparation(change_file: bool) {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_refuses_remote_staleness() {
     refuse_stale_preparation(false).await;
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_refuses_file_staleness() {
     refuse_stale_preparation(true).await;
 }
@@ -559,7 +559,7 @@ fn outside_reader_fold_inline_grammar_and_structural_refusals_need_reader() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_native_admissions_match_the_editor_tree() {
     let (_scratch, store, key) = fixture(false);
     let checkpoint = store
@@ -672,7 +672,7 @@ fn round1_batch(
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author() {
     let (scratch, store, _) = fixture(false);
     let db = store.database_path().to_owned();
@@ -815,7 +815,7 @@ async fn outside_reader_fold_round1_preparation_error_is_per_item() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_round1_later_batch_failure_keeps_committed_receipts() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct FailRetry(AtomicUsize);
@@ -975,7 +975,7 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_retries_once_then_uses_strict_fallback() {
     for file in [false, true] {
         for changes in [1, 2] {
@@ -1039,7 +1039,7 @@ async fn outside_reader_fold_retries_once_then_uses_strict_fallback() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_batch_retry_preserves_committed_sibling_receipts() {
     struct Root;
     impl WorkspaceRootGuard for Root {
@@ -1103,7 +1103,7 @@ async fn outside_reader_fold_batch_retry_preserves_committed_sibling_receipts() 
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
     for ending in ["\n", "\r\n"] {
         let (scratch, mut store, key) = fixture(false);
@@ -1144,7 +1144,7 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn outside_reader_fold_preserves_existing_history_undo_refusal() {
     let (scratch, mut store, key) = fixture(false);
     let source = "Changed beside list\n\n- parent\n  - child";

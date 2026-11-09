@@ -340,7 +340,7 @@ fn raw_output_cannot_use_witness_metadata_as_snapshot_authority() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn real_reader_settles_without_edits_and_revalidates_after_restart() {
     let (scratch, db, key, source, claim) = seed();
     for _ in 0..2 {
@@ -385,7 +385,7 @@ async fn real_reader_settles_without_edits_and_revalidates_after_restart() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn real_reader_expires_body_sources_across_settles_and_restart() {
     let (scratch, db, key, source, claim) = seed();
     let mut expected = source;
@@ -436,7 +436,7 @@ async fn real_reader_expires_body_sources_across_settles_and_restart() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn markdown_hold_commonmark_sources_keep_their_edited_paragraph_after_reopen_restart_and_compaction()
  {
     use dohc_engine_collab::Ydoc;

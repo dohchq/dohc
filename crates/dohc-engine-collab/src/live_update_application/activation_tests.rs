@@ -52,7 +52,7 @@ fn reader_owner_base_and_activation_hold_without_a_reader() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_owner_base_and_activation_revalidate_their_snapshot() {
     let mut f = reader_imported_fixture();
     let config =
@@ -1043,7 +1043,7 @@ fn reader_activation_validates_before_requesting_proof() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_activation_reuses_proof_after_unrelated_relay_progress() {
     let mut f = reader_fixture_case("valid");
     let config = serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
@@ -1063,7 +1063,7 @@ fn reader_activation_reuses_proof_after_unrelated_relay_progress() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_activation_and_adoption_reject_receipts_without_reader_source() {
     let mut f = reader_fixture_case("valid");
     let resolver = reader_resolver();
@@ -1084,7 +1084,7 @@ fn reader_activation_and_adoption_reject_receipts_without_reader_source() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_adoption_validates_the_receipts_reader_baseline() {
     let mut f = reader_fixture_case("valid");
     let resolver = reader_resolver();
@@ -1102,7 +1102,7 @@ fn reader_adoption_validates_the_receipts_reader_baseline() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_can_fence_before_lazy_proof_dispatch() {
     let mut f = reader_fixture_case("valid");
     let resolver = Arc::new(reader_resolver());
@@ -1212,7 +1212,7 @@ fn reader_fence(f: &mut Fixture) {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_owner_base_has_its_own_authority_matrix() {
     for case in ["valid", "forged", "partial", "stale"] {
         let mut f = reader_fixture_case(case);
@@ -1260,7 +1260,7 @@ fn reader_owner_base_has_its_own_authority_matrix() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_imported_activation_has_its_own_authority_matrix() {
     for case in [
         "valid",
@@ -1407,7 +1407,7 @@ fn reader_imported_activation_has_its_own_authority_matrix() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_resume_and_adoption_recheck_mutable_authority() {
     for case in ["binding", "claim", "fence", "missing", "self-anchor"] {
         let mut f = reader_fixture_case("valid");
