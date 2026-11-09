@@ -34,9 +34,9 @@ import {
   ordinaryActivationReadBytes,
   verifyOrdinaryActivationCut,
   readOrdinaryActivationHistory,
-  validateOrdinaryActivation,
   type KnownActivationSource,
 } from "./storage/ordinaryActivationSource.js";
+import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 const sha256 = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
@@ -130,8 +130,8 @@ describe("the verifier's byte counts", () => {
       const history = readOrdinaryActivationHistory(storage, input);
       const validation = validateOrdinaryActivation({document: live, currentPath: source.currentPath, baselineBytes: base,
         cut: {source, fullState, history, maxBytesPerDrain: bounds.maxBytesPerDrain}}, policy);
-      if (validation.kind !== "accepted") throw new Error("Ordinary activation validation refused.");
-      return verifyOrdinaryActivationCut(storage, {...input, baseline: validation.baseline, history});
+      if (validation.kind !== "accepted") throw new Error(validation.message);
+      return verifyOrdinaryActivationCut(storage, {...input, baseline: validation.baseline, history, proof: validation.proof});
     };
     return { base, source, logEntryBytes, verify,
       close() { raw.close(); storage.close(); rmSync(root, { recursive: true, force: true }); } };
