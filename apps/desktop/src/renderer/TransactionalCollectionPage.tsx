@@ -132,6 +132,14 @@ function Cell({ field, value }: { field: TransactionalField; value: AppBackendJs
 }
 
 const sameRecord = (a: TransactionalRow, b: TransactionalRow) => JSON.stringify(a.id) === JSON.stringify(b.id);
+type KeptEdit = { contract: string; editor: Editor; draft: Record<string, AppBackendJson>; inDetails: boolean };
+// Edits with changes a page held when it closed without asking, as when another file opens in its
+// tab group, by workspace, Collection and table. The page opens the edit again.
+const keptEdits = new Map<string, KeptEdit>();
+/** Tests start without edits an earlier test's page kept. */
+export function resetKeptCollectionEditsForTests(): void {
+  keptEdits.clear();
+}
 
 /** Keep view state across refreshes, but never across Collection identities. */
 export function TransactionalCollectionPage(props: TransactionalCollectionPageProps) {
@@ -198,6 +206,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     first?.focus();
     // The caret goes after the value, so typing adds to it.
     if (first instanceof HTMLInputElement && (first.type === "text" || first.type === "url")) first.setSelectionRange(first.value.length, first.value.length);
+    // An edit the page opened again has no opener, so focus returns to the field's own button beside its input.
+    if (editor && trigger.current === null) trigger.current = editorForm.current?.closest("td, dd")?.querySelector<HTMLElement>(":scope > button[hidden]") ?? null;
   }, [editor]);
   // The field of the cell open for editing, read when a save answers after this render.
   const openCell = useRef<string | null>(null), cellSave = useRef<HTMLButtonElement>(null);
@@ -275,6 +285,30 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     }
     setPage(null); setUndo(null); setEditor(null); setDetails(null);
   }, [contractKey]);
+  // An edit with changes still open when the page closes opens again once the page shows its records. It keeps
+  // the record's version from when it opened, so a change made to the record meanwhile is refused, not overwritten.
+  const keptKey = JSON.stringify([workspaceId, dataset.datasetId, tableId]);
+  const restoring = useRef(keptEdits.get(keptKey) ?? null);
+  const typed = editor !== null && (editor.kind === "edit" ? [editor.field] : createFields).some(field =>
+    JSON.stringify(draft[field.fieldId] ?? null) !== JSON.stringify(editor.kind === "edit" ? editor.row.values[field.fieldId] ?? null : initialValue(field)));
+  const keeping = useRef<KeptEdit | null>(null);
+  keeping.current = editor && typed ? { contract: contractKey, editor, draft, inDetails: editor.kind === "edit" && details !== null && sameRecord(details, editor.row) } : null;
+  useEffect(() => {
+    keptEdits.delete(keptKey);
+    // A change still saving goes on without the page and reports how it ended, so its edit is not kept.
+    // An edit not opened again yet, because the page closed before its records showed, stays kept.
+    return () => { const kept = keeping.current ?? restoring.current; if (kept && !mutation.current) keptEdits.set(keptKey, kept); };
+  }, [keptKey]);
+  useLayoutEffect(() => {
+    const kept = restoring.current;
+    // A board or calendar opens the edit once its view has read, since the page's first load closes record details.
+    if (!kept || (visual ? visualRefresh === 0 || visualBusy : page === null)) return;
+    restoring.current = null;
+    // The Collection's fields or rules changed while the page was closed, so the edit may no longer apply.
+    if (kept.contract !== contractKey) return;
+    setDraft(kept.draft); setInvalid({}); setEditor(kept.editor);
+    if (kept.inDetails && kept.editor.kind === "edit") { const row = kept.editor.row; setDetails(page?.rows.find(shown => sameRecord(shown, row)) ?? row); }
+  }, [page, visual, visualRefresh, visualBusy]);
   useEffect(() => {
     const view = selectedView;
     setPage(null);
