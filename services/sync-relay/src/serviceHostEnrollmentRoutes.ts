@@ -190,8 +190,8 @@ function heldResponse(body: unknown, release: () => void, signal: AbortSignal): 
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "holdReason" | "unblock" | "diverged" | "keptEdits" | "stop" | "firstOpenRefusal"> & {
-    firstOpenStatus?(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined):
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "holdReason" | "unblock" | "diverged" | "keptEdits" | "stop"> & {
+    firstOpenStatus(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined):
       FirstOpenRefusal | FirstOpenTemporaryStop | undefined;
   };
 }) {
@@ -215,7 +215,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       return head?.path && head.sourceDigest ? {workspaceId: row.workspaceId, objectId: row.objectId,
         path: head.path, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest} : undefined;
     };
-    const firstOpen = host.firstOpenStatus?.(row, readSource) ?? host.firstOpenRefusal(row, readSource);
+    const firstOpen = host.firstOpenStatus(row, readSource);
     if (firstOpen) return {...base, status: "unavailable", reason: firstOpen.reason === "retry-stopped" ? "live-first-open-retry-stopped" : "live-first-open-refused", firstOpen};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first. A Resume of one whose

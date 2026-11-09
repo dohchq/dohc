@@ -57,6 +57,8 @@ export async function startSelfHostedLiveHost(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; root: string; engineExecutable: string;
   relayOrigin: string; key: Uint8Array; frameChanges: LiveHostChanges;
   startHost?: typeof startServiceLiveHost;
+  /** Reaches the relay's public origin for first-open requests, unless a test routes them elsewhere. */
+  firstOpenFetch?: typeof fetch;
   onError?(error: unknown): void;
 }) {
   const {storage, history} = options, profile = selfHostLiveProfile();
@@ -186,7 +188,9 @@ export async function startSelfHostedLiveHost(options: {
       await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces: [],
         ...profile.service, activation: {...profile.service.activation, targets: []}, recovery: {...profile.service.recovery, root}}), {flag: "wx", mode: 0o600});
       signal.throwIfAborted();
-      const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
+      // Each daemon asks the relay to start documents with no live-editing history, as its workspaces' service host.
+      const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal,
+        firstOpen: {fetch: options.firstOpenFetch}});
       host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
       host.invalidated.addEventListener("abort", schedule, {once: true});
       return host;
@@ -246,7 +250,7 @@ export async function startSelfHostedLiveHost(options: {
         if (refused.has(key)) continue;
         refused.add(key);
         const store = `Its store is kept at ${join(root, storeName(row))}.`;
-        // Until the session host can start a document's Y.Doc itself (#2069), a device must.
+        // A document its first open could not start, as one with earlier live history, waits for a device.
         options.onError?.(new Error(block === "without-lineage"
           ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
           : block === "live-edit-unadmitted"
@@ -338,9 +342,9 @@ export async function startSelfHostedLiveHost(options: {
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
-    /** The first-open refusal the owner sees for a document's current source, if the running daemon holds one. */
-    firstOpenRefusal(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) {
-      return current?.firstOpenRefusal(document, source);
+    /** The first-open refusal or stop Live documents shows for a document's current source, if the running daemon holds one. */
+    firstOpenStatus(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) {
+      return current?.firstOpenStatus(document, source);
     },
     /** Why the running daemon's hosted pass left this document held. */
     holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},

@@ -8,7 +8,13 @@ import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
-import { EngineClientError, EngineRequestDeadlineError, EngineRequestError, InvalidFirstOpenCandidateCheck } from "@dohc/workspace-engine-client/daemon";
+import { EngineClientError, EngineRequestDeadlineError, EngineRequestError, InvalidFirstOpenCandidateCheck, firstOpenCandidateBinding,
+  type FirstOpenCandidateInput } from "@dohc/workspace-engine-client/daemon";
+import {createFirstOpenPublisher, type FirstOpenBuild, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication.js";
+import {buildFirstOpenBase} from "./firstOpenBase.js";
+import {readFirstOpenHistoryFile} from "./storage/firstOpenHistory.js";
+import {createServiceHostReplication} from "./serviceHostReplication.js";
+import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential.js";
 import { firstOpenOutcome } from "@dohc/workspace-contracts/first-open";
 import {errorResponse} from "./errors.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
@@ -61,7 +67,8 @@ async function fixture() {
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const deploymentConfig = join(root, "deployment.json");
   initializeRelayDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
-  const deployment = openRelayDeployment(deploymentConfig);
+  // First-open history reads in this process, as firstOpenPublication.test.ts reads it.
+  const deployment = openRelayDeployment(deploymentConfig, {firstOpenHistory: async read => readFirstOpenHistoryFile(read)});
   deployment.storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard() {} });
   const config = { version: 1, engineExecutable: process.execPath, hostId: "service", instanceId: "instance",
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
@@ -601,8 +608,9 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
+// With `firstOpen`, the host asks the relay to start documents with no lineage through its `fetch`.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits} = {}) {
+  maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -663,7 +671,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
 
   const target ={workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
-  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
+  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: options.passDeadlineMs ?? 10_000, validation: policy,
     ...(options.empty || options.polling ? {pollIntervalMs: 20} : {}),
     ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {}), ...options.limits});
   // An empty host receives this workspace and document through `update`.
@@ -1098,7 +1106,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     doc.destroy();
     native.outboxId = NATIVE;
   };
-  const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
+  const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {}),
+    ...(options.firstOpen ? {firstOpen: options.firstOpen} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
@@ -1306,7 +1315,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits} = {}) {
+  limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -5037,7 +5046,7 @@ it("holds a first-open refusal past later Y.Doc updates until its owner tries ag
   const driver = activations.at(-1) as ServiceActivationDriver;
   const source = {workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId, path: o.sibling.path, sourceMomentId: "moment-1", sourceDigest: "a".repeat(64)};
   const later = {...source, sourceMomentId: "moment-2", sourceDigest: "b".repeat(64)};
-  const refusal = (current: typeof source) => o.host.firstOpenRefusal(current, () => current);
+  const refusal = (current: typeof source) => o.host.firstOpenStatus(current, () => current);
   driver.firstOpenAnswered(firstOpenOutcome(source, {kind: "refused", reason: "deletion"}));
   expect(refusal(source)).toMatchObject({reason: "deletion", recovery: "none"});
   appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
@@ -5055,7 +5064,7 @@ it("holds a first-open refusal past later Y.Doc updates until its owner tries ag
   expect(o.host.unblock(o.other)).toBe(false);
   driver.removeTarget(o.target);
   expect(driver.firstOpenStanding(later)).toBeUndefined();
-  expect(driver.firstOpenRefusal(later, () => later)).toBeUndefined();
+  expect(driver.firstOpenStatus(later, () => later)).toBeUndefined();
 });
 
 // Proves: owner status never reads a ready document as refused. A refusal the
@@ -5074,7 +5083,7 @@ it("never reports a ready document's first open as refused", async () => {
   const handle = createServiceHostEnrollmentRoutes({storage: o.f.storage, history: o.f.history, resolveActor: async () => ({workspaceId: "workspace", userId: "owner"}),
     host: {ready: document => o.host.isDocumentReady(document), reconcile() {}, unavailable: false, blocked: document => o.host.blocked(document),
       unblock: document => o.host.unblock(document), diverged: () => false, holdReason: document => o.host.holdReason(document),
-      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenRefusal: (document, source) => o.host.firstOpenRefusal(document, source),
+      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenStatus: (document, source) => o.host.firstOpenStatus(document, source),
       stop: async <T>(_document: unknown, fence: () => T) => fence()}});
   const status = async () => (await (await handle(new Request("https://relay.test/sync/workspace/live-host",
     {headers: {authorization: "Bearer owner-token"}}))).json()).documents;
@@ -5148,6 +5157,165 @@ it("captures a second target without lineage once more for an update during the 
   await vi.waitFor(() => expect(captures()).toBe(2));
   await o.nextPull(); await o.nextPull();
   expect(captures()).toBe(2);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// A note an agent wrote as a file, which no device ever opened.
+const neverOpened = {workspaceId: "workspace", objectId: "object-plain", path: "docs/plain.md", shareId: "share"};
+const serviceKey = new Uint8Array(32).fill(5);
+// The engine's verdict, standing in for the native check firstOpenPublication.native.test.ts drives.
+const checkedCandidate = (input: FirstOpenCandidateInput): FirstOpenNativeCheck => ({kind: "answered", current: () => true,
+  check: {status: "checked", contractVersion: 1, binding: firstOpenCandidateBinding(input), settledSourceSha256: input.sourceSha256,
+    settledSourceByteLength: input.source.byteLength, fullStateSha256: "f".repeat(64), fullStateByteLength: input.candidate.byteLength + 7}});
+
+// An empty host given the sibling and the never-opened note, whose captures
+// find no lineage. Its first-open requests reach the relay's real route,
+// publisher and storage, with the engine's check standing in. `answer` sees
+// each request before the relay does; `onCheck` runs once the engine checked a
+// base, before the relay writes it. The workspace's credential is its
+// service-host credential, or with `credential: "other"`, a well-formed one
+// the relay never derived.
+async function neverOpenedHost(options: {passDeadlineMs?: number; nowMs?: () => number; credential?: "service-host" | "other"; onCheck?: () => void;
+  answer?: (request: Request, relay: (request: Request) => Promise<Response>) => Promise<Response>} = {}) {
+  let relay!: (request: Request) => Promise<Response>;
+  // Each request, its signal, and the signal of the pass whose capture started it.
+  const requests: {request: Request; signal: AbortSignal; pass: AbortSignal | undefined}[] = [], statuses: number[] = [];
+  const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    const request = new Request(url, init);
+    const pass = vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === neverOpened.path).at(-1)?.[1];
+    requests.push({request, signal: init!.signal!, pass});
+    const response = await (options.answer ?? (next => relay(next)))(request, relay);
+    statuses.push(response.status);
+    return response;
+  });
+  const o = await emptyServiceHost({passDeadlineMs: options.passDeadlineMs, firstOpen: {fetch: fetcher, nowMs: options.nowMs}});
+  const text = new TextEncoder().encode("# Plan\n\nBring snacks.\n"), digest = sha256(text);
+  o.f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: text, createdAtMs: 1});
+  o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "agent", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+    payloadJson: JSON.stringify({momentId: "plain-moment", objectId: neverOpened.objectId, versionId: "main", operation: "write", path: neverOpened.path,
+      payloadAfterPath: neverOpened.path, payloadAfterBlobSha256: digest, payloadAfterByteLength: text.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1_001})}]});
+  const enrollment = o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: neverOpened.path,
+    nowMs: 10, guard() {}});
+  const namespace = o.f.history.namespace;
+  const builds = vi.fn<FirstOpenBuild>(async (policy, input) => buildFirstOpenBase(policy, input));
+  const checks = vi.fn<FirstOpenCheckHost["checkFirstOpenCandidate"]>(async (_workspaceId, input) => {options.onCheck?.(); return checkedCandidate(input);});
+  const publisher = createFirstOpenPublisher({storage: o.f.storage, namespace, activation: () => o.host.activationConfig(),
+    host: () => ({checkFirstOpenCandidate: checks}), build: builds});
+  relay = createServiceHostReplication({storage: o.f.storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
+    authorize: input => authorizeServiceHostReplication(o.f.storage, {key: serviceKey, namespace, ...input})});
+  const bearer = options.credential === "other" ? `dohc-service-v1.${"A".repeat(43)}` : deriveServiceHostBearer(enrollment, {key: serviceKey, namespace});
+  const hostedReplication = o.workspace.hostedReplication!;
+  const workspace = {...o.workspace, hostedReplication: {...hostedReplication, relay: {...hostedReplication.relay, bearerToken: bearer}}};
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(neverOpened.path, withoutLineage());
+  await o.host.update({workspaces: [workspace], documents: [o.sibling, neverOpened], ...stay});
+  return {...o, workspace, bearer, requests, statuses, fetcher, builds, checks,
+    captures: () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === neverOpened.path).length,
+    bases: () => o.raw.prepare("SELECT payload_json FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%'").all()};
+}
+
+// Proves: a hosted note no device ever opened starts through its first open.
+// Its fresh capture finds no lineage, the host asks the relay's real route with
+// the workspace's service-host credential, the relay publishes a base, and
+// the next pass pulls and captures the note again with no Resume. The receipt
+// alone does not make it ready: this engine's capture still finds no lineage,
+// so the note waits for a device like any other without lineage.
+it("starts a never-opened note through its first open, and only a later capture can make it ready", async () => {
+  const o = await neverOpenedHost();
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  expect(o.statuses).toEqual([200]);
+  expect(o.requests[0]!.request.headers.get("authorization")).toBe(`Bearer ${o.bearer}`);
+  expect(o.builds).toHaveBeenCalledOnce();
+  await vi.waitFor(() => expect(o.host.blocked(neverOpened)).toBe("without-lineage"));
+  const base = JSON.parse(String(o.bases()[0]!.payload_json)) as {lineageClaimId: string};
+  expect(o.host.isDocumentReady({workspaceId: "workspace", mainVersionId: "main", objectId: neverOpened.objectId, lineageClaimId: base.lineageClaimId})).toBe(false);
+  await o.nextPull(); await o.nextPull();
+  expect(o.fetcher).toHaveBeenCalledOnce();
+  expect(o.captures()).toBe(2);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Proves: a first-open request runs outside the pass whose capture started it.
+// It outlives that pass's deadline unaborted, as a build longer than a pass
+// must. No later pass asks again while it runs, the note reads as preparing,
+// not blocked, the other document stays ready, and the answer still counts.
+it("keeps a first-open request running past the deadline of the pass that started it", async () => {
+  const answer = deferred<void>();
+  const o = await neverOpenedHost({passDeadlineMs: 1_000, answer: async (request, relay) => {await answer.promise; return relay(request);}});
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  const {signal, pass} = o.requests[0]!;
+  await vi.waitFor(() => expect(pass?.aborted).toBe(true), {timeout: 5_000});
+  await o.nextPull(); await o.nextPull();
+  expect(signal.aborted).toBe(false);
+  expect(o.requests).toHaveLength(1);
+  expect(o.host.blocked(neverOpened)).toBeUndefined();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  answer.resolve();
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+});
+
+// Proves: a first-open request ends with the note's place on the host. The
+// note leaving the host, as after Stop, or the host closing,
+// aborts it before the relay builds anything, and nothing asks again.
+it.each(["the note leaves the host", "the host closes"] as const)("cancels a first-open request when %s", async ending => {
+  const o = await neverOpenedHost({answer: request => new Promise((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), {once: true});
+  })});
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  const {signal} = o.requests[0]!;
+  expect(signal.aborted).toBe(false);
+  if (ending === "the host closes") await o.host.close();
+  else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  expect(signal.aborted).toBe(true);
+  if (ending === "the note leaves the host") {
+    await o.nextPull(); await o.nextPull();
+    expect(o.host.isDocumentReady(o.document)).toBe(true);
+  }
+  expect(o.requests).toHaveLength(1);
+  expect(o.builds).not.toHaveBeenCalled();
+  expect(o.bases()).toHaveLength(0);
+});
+
+// Proves: Pause or Stop landing after the engine checked the base,
+// before the relay writes it, publishes nothing through the wired route. The
+// host takes the answer as a failed request, the note's departure ends its
+// first open, and the other document keeps delivering edits throughout.
+it.each([["Pause", false], ["Stop", true]] as const)("publishes nothing when %s lands after the engine checked, and the other note keeps moving", async (_name, retire) => {
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => {
+    o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: neverOpened.path, ownerUserId: "owner", enabled: false, retire, nowMs: 20, guard() {}});
+  }});
+  await vi.waitFor(() => expect(o.statuses).toEqual([404]));
+  expect(o.checks).toHaveBeenCalledOnce();
+  expect(o.bases()).toHaveLength(0);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  // The self-host supervisor's next membership leaves the note out.
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  o.acceptEdit("moving");
+  await o.host.drain(o.document);
+  expect(o.applied.has("edit-moving")).toBe(true);
+  await o.nextPull(); await o.nextPull();
+  expect(o.requests).toHaveLength(1);
+  expect(o.bases()).toHaveLength(0);
+});
+
+// Proves: only the workspace's service-host credential reaches first open. A
+// request with a credential the relay never derived is not found before
+// anything is read or built, and the host asks again only after backing off.
+it("builds nothing for a first-open request with another credential, and asks again only after backing off", async () => {
+  let clock = 0;
+  const o = await neverOpenedHost({credential: "other", nowMs: () => clock});
+  await vi.waitFor(() => expect(o.statuses).toEqual([404]));
+  await o.nextPull(); await o.nextPull();
+  expect(o.requests).toHaveLength(1);
+  // The first failure waits at most 1.5 s, with jitter.
+  clock += 1_500;
+  await vi.waitFor(() => expect(o.statuses).toEqual([404, 404]));
+  expect(o.builds).not.toHaveBeenCalled();
+  expect(o.checks).not.toHaveBeenCalled();
+  expect(o.bases()).toHaveLength(0);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 

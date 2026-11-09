@@ -21,7 +21,7 @@ export async function heldDocumentFixture(workspaceId = ticketScope.workspaceId,
       shareId: ticketScope.shareId, nowMs: 10, guard() {}});
     let held = true;
     const host = {
-      firstOpenRefusal: () => undefined, ready: () => false, unavailable: false, blocked: () => undefined, unblock: () => false, diverged: () => false,
+      firstOpenStatus: () => undefined, ready: () => false, unavailable: false, blocked: () => undefined, unblock: () => false, diverged: () => false,
       holdReason: () => held ? "hosted-conflict-parent-withheld" as const : undefined,
       reconcile() {if (f.storage.readServiceHostEnrollment(workspaceId, binding.currentPath)?.retired) held = false;},
       keptEdits: {async page() {return null;}, async retry() {return "unavailable" as const;}, async copied() {}},

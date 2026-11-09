@@ -21,6 +21,7 @@ import { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import {startSelfHostedLiveHost} from "../../sync-relay/src/selfHostedLiveHost.js";
 import {authorizeServiceHostReplication} from "../../sync-relay/src/serviceHostCredential.js";
 import {createServiceHostReplication} from "../../sync-relay/src/serviceHostReplication.js";
+import {createFirstOpenPublisher} from "../../sync-relay/src/firstOpenPublication.js";
 import {createServiceHostEnrollmentRoutes} from "../../sync-relay/src/serviceHostEnrollmentRoutes.js";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
@@ -43,6 +44,8 @@ import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveR
 import { createNamedLiveBrowserTransport, type NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// The service host's first-open requests, sent to the loopback relay the supervisor's public origin stands for.
+const firstOpenFetch: typeof fetch = (url, init) => fetch(String(url).replace("https://service-activation-relay.example.test", harness.relayUrl), init);
 const profile = selfHostLiveProfile();
 const frames = profile.frames, browserLimits = profile.requests, routeLimits = profile.namedLive.transport;
 const audience = "https://share.example.test", exchangeKey = "native-network-exchange-".repeat(2), ticketKey = "native-network-tickets-".repeat(2);
@@ -243,7 +246,10 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     closes.push(() => validation.close());
     const {storage, history} = deployment, frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners), validate = validation.validator(profile.validation);
     const resolveActor = createSessionActorResolver(relayAuth);
-    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    // As main.ts wires it: one publisher, checking with the daemon running when each request arrives.
+    const firstOpen = createFirstOpenPublisher({storage, namespace: history.namespace, activation: () => supervisor?.current()?.activationConfig(),
+      host: () => supervisor?.current(), build: (policy, input, signal) => validation.buildFirstOpenBase(policy, input, signal)});
+    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen,
       authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
     let routes: ReturnType<typeof createNamedLiveRoutes> | undefined;
     const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor: createSessionActorResolver(relayAuth),
@@ -307,7 +313,8 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     workspace = join(hostRoot, hash(Buffer.from(JSON.stringify(["hosted-v1", history.namespace, "workspace", identity.replicationEpoch, identity.streamIdentity]))));
     async function startSupervisor() {
       supervisor = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), storage, history, frameChanges, root: hostRoot, engineExecutable: executable!,
-        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {harness.failed?.(error instanceof Error ? error : new Error(String(error)));}});
+        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), firstOpenFetch,
+        onError: error => {harness.failed?.(error instanceof Error ? error : new Error(String(error)));}});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
       await vi.waitFor(() => {active = supervisor!.current(); expect(active).toBeDefined();}, {timeout: 30000});
     }
@@ -712,10 +719,14 @@ async function openSelfHostProof(name: string) {
     let frameChanges!: ReturnType<typeof createNamedFrameChanges>, serviceReplication!: ReturnType<typeof createServiceHostReplication>;
     let relayApp!: ReturnType<typeof createSyncRelayHandler>, activations!: ReturnType<typeof storage.createServiceActivationStore>;
     const openRelay = () => {
-      deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
+      deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now},
+        firstOpenHistory: (read, signal) => validation.readFirstOpenHistory(read, signal)});
       ({storage, history} = deployment);
       frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners);
-      serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+      // As main.ts wires it: one publisher, checking with the daemon running when each request arrives.
+      const firstOpen = createFirstOpenPublisher({storage, namespace: history.namespace, activation: () => supervisor?.current()?.activationConfig(),
+        host: () => supervisor?.current(), build: (policy, input, signal) => validation.buildFirstOpenBase(policy, input, signal)});
+      serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen,
         authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
       relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor,
         namedBrowserSessionLimits: profile.browserSessions, ownerRestoreHost: () => supervisor?.current()});
@@ -795,7 +806,8 @@ async function openSelfHostProof(name: string) {
     const reports: string[] = [];
     const startSupervisor = async () => {
       supervisor = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), storage, history, frameChanges, root: hostRoot, engineExecutable: executable,
-        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));}});
+        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), firstOpenFetch,
+        onError: error => {reports.push(error instanceof Error ? error.message : String(error));}});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
     };
     const activation = (path = "docs/a.md") => activations.read("workspace", path, 1_000_000);
@@ -1481,34 +1493,28 @@ it("retires a paused document's activation at once, and Resume starts a successo
   return {activationId: P, successor: S, editWhilePaused: edit, capturesBeforeResume: captured, capturesBeforeRestart: captures};
 }), 180000);
 
-// Until the session host starts a document's Y.Doc itself (#2069), a file only
-// written as text has nothing to activate, so it blocks instead of retrying.
-// Its owner only opens it, as the Notice tells them, and the lineage that
-// reaches the relay gives it one more attempt, which activates it.
-it("blocks a document written only as text, and activates it once its owner opens it", () => withSelfHostProof("self-host-without-lineage", async proof => {
-  const attempts = () => proof.started("captureOwnerActivation"), from = harness.calls.length;
+// #2069: a note an agent wrote as a file, which no device ever opened, starts
+// live editing on the session host alone. Its first capture finds no Y.Doc
+// lineage, the host asks the relay with its service-host credential, and the
+// relay publishes a base once the engine checked it settles back to the file.
+// The next pass pulls that base and captures once more, with no Resume and no
+// device, and only that capture's activation makes the note ready.
+it("starts a note no device ever opened through its first open", () => withSelfHostProof("self-host-first-open", async proof => {
+  const from = harness.calls.length;
   const failures = () => harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.message);
   const plain = await proof.ownerDocument("docs/plain.md", "Written as text", {seeded: false});
-  const refused = {path: "docs/plain.md", objectId: plain.objectId, status: "unavailable", reason: "live-document-without-lineage"};
-  await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(refused), {timeout: 30000});
-  expect(failures().at(-1)).toContain("live-document-without-lineage");
+  const bases = () => proof.relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id LIKE 'service-host:first-open:%'")
+    .all().map(row => JSON.parse(String(row.payload_json)) as {objectId: string; lineageClaimId: string});
+  await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(expect.objectContaining({path: "docs/plain.md", status: "ready"})), {timeout: 60000});
+  expect(bases()).toEqual([expect.objectContaining({objectId: plain.objectId})]);
   expect(failures().filter(message => !message?.includes("hosted-document-unready"))).toEqual([expect.stringContaining("live-document-without-lineage")]);
-  // Later passes leave it alone, while its workspace keeps pulling.
-  const blocked = attempts(), pulls = harness.pulls.length;
-  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
-  expect(attempts()).toBe(blocked);
-  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/plain.md"))).toEqual([
-    `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${proof.store}.`]);
-  // Its owner opens it on their device without changing it, which starts its Y.Doc and pushes it to the relay.
-  // The next pass pulls it into the host's replica and captures once more, with no Resume.
-  await plain.open();
-  await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(expect.objectContaining({path: "docs/plain.md", status: "ready"})), {timeout: 30000});
-  expect(attempts()).toBe(blocked + 1);
+  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/plain.md"))).toEqual([]);
   const claim = proof.serviceRead(engine => engine.prepare("SELECT lineage_claim_status AS status, lineage_claim_id AS id FROM ydoc_docs WHERE workspace_id='workspace' AND object_id=?")
     .get(plain.objectId)) as {status: string; id: string | null} | undefined;
   expect(claim?.status).toBe("exact");
+  expect(claim!.id).toBe(bases()[0]!.lineageClaimId);
   expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(claim!.id);
-  return {attemptsBeforeOpen: blocked, failures: failures(), reports: proof.reports};
+  return {base: bases()[0], failures: failures(), reports: proof.reports};
 }), 120000);
 
 // #2088: the operator puts back an older copy of the session host's store,

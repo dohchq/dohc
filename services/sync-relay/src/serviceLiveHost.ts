@@ -1,6 +1,7 @@
 import {workspaceIsDeleted} from "./storage/accountDeletion";
 import {stopWithoutSessionHost} from "./sessionHostStop";
-import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp} from "./serviceActivationDriver";
+import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp,type ServiceFirstOpenRequest} from "./serviceActivationDriver";
+import {createFirstOpenClient} from "./firstOpenClient";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
@@ -21,7 +22,7 @@ import * as Scope from "effect/Scope";
 import { createEngineClient, EngineClientError, EngineRequestDeadlineError, EngineRequestError, firstOpenCandidateBinding, firstOpenCandidateUploadBytes,
   InvalidFirstOpenCandidateCheck, isHostedDocumentUnready, type FirstOpenCandidateInput } from "@dohc/workspace-engine-client/daemon";
 import type {FirstOpenNativeCheck} from "./firstOpenPublication.js";
-import type {FirstOpenRefusal, FirstOpenSourceIdentity} from "@dohc/workspace-contracts/first-open";
+import type {FirstOpenRefusal, FirstOpenSourceIdentity, FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
 import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
@@ -201,6 +202,8 @@ const recoveryRefusal = (error: unknown) => new RecoveryCopyRefusal(
 interface HostedAttachment {
   readonly handle: string; readonly hosted: ServiceHostedReplication; readonly replica: ServiceActivationReplica;
   readonly identity: ServiceKeptEditsIdentity;
+  /** First-open requests with this attachment's service-host credential, when the host asks the relay to start documents. */
+  readonly firstOpen?: ServiceFirstOpenRequest;
   pulls: number; confirmed: number; readonly announced: Map<string, number>;
   readonly reached: Map<string, {pull: number; listed: boolean}>; dropped: number;
 }
@@ -217,6 +220,12 @@ export async function startServiceLiveHost(options: {
   history: LiveJournalHistoryAuthority;
   signal?: AbortSignal;
   frameChanges?: LiveHostChanges;
+  /**
+   * Asks the relay to start hosted documents that have no Y.Doc lineage, as
+   * each workspace's service host. `fetch` reaches the relay, and `nowMs` and
+   * `random` time the retries, unless a test injects others.
+   */
+  firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number};
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
@@ -436,7 +445,8 @@ export async function startServiceLiveHost(options: {
       if (!attachment) return;
       const replica = new ServiceHostedReplication({client, workspace: handle, workspaceId: workspace.workspaceId, nextRequestId,
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
-      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0, replica: {
+      const firstOpen = options.firstOpen && createFirstOpenClient({relay: attachment.relay, identity: attachment.identity, fetch: options.firstOpen.fetch});
+      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, firstOpen, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0, replica: {
         pull: joined => pull(attached, joined), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
@@ -1223,7 +1233,10 @@ export async function startServiceLiveHost(options: {
             recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); heldOf.delete(key); observed.delete(key);
             activation.addTarget(document.target, document.objectId);
           }
-        } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
+        } else if (!changed.includes(document.target.workspaceId)) {
+          // A first open of a document that left would start a document someone stopped, or one this host lost access to.
+          leaving.add(key); activation.cancelFirstOpen(document.target);
+        }
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
       for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
@@ -1283,7 +1296,9 @@ export async function startServiceLiveHost(options: {
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         maxApplications:config.settlement?.maxApplicationsPerSettlement,
-        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
+        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation),
+        firstOpen:target=>leaving.has(JSON.stringify([target.workspaceId,target.path]))?undefined:checked(target.workspaceId)?.firstOpen,
+        lifetime:signal,firstOpenClock:options.firstOpen});
       registerRetained();
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
       const pass=async()=>{
@@ -1500,10 +1515,15 @@ export async function startServiceLiveHost(options: {
         const key = hostedKey(document);
         return key !== undefined && activation!.unblock(hosted.get(key)!.target);
       },
-      /** The first-open refusal the owner sees for a hosted document's current source, if one stands. Reads the source only when one might. */
-      firstOpenRefusal(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined): FirstOpenRefusal | undefined {
-        return hostedKey(document) === undefined ? undefined : activation!.firstOpenRefusal(document, source);
+      /**
+       * What Live documents shows of a hosted document's first open for its current source: a refusal that stands,
+       * or a stop after repeated build deadlines. Reads the source only when one might stand.
+       */
+      firstOpenStatus(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined): FirstOpenRefusal | FirstOpenTemporaryStop | undefined {
+        return hostedKey(document) === undefined ? undefined : activation!.firstOpenStatus(document, source);
       },
+      /** The activation configuration this host's driver runs with, which a first-open base must fit. */
+      activationConfig(): ServiceActivationConfig | undefined {return activation?.config;},
       /**
        * Reads one bounded page of a refused queue this host keeps, as the
        * engine pages a recovery read, for its owner's recovery copy. `cursor`

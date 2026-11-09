@@ -54,14 +54,12 @@ async function fixture() {
       return blocked.delete(document.objectId) || retried || resumed;
     }),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
-    firstOpenRefusal: vi.fn((document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
-      const current = answers.has(document) ? source() : undefined;
-      return current && answers.refusal(current, FIRST_OPEN_CONTEXT);
-    }),
-    firstOpenStatus: (document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
+    // As the driver's: the source is read only while an answer or a stop stands.
+    firstOpenStatus: vi.fn((document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
+      if (!answers.has(document) && !retry.stopped(document)) return undefined;
       const current = source();
-      return current && (retry.state(current)?.stop ?? answers.refusal(current, FIRST_OPEN_CONTEXT));
-    },
+      return current && (answers.refusal(current, FIRST_OPEN_CONTEXT) ?? retry.state(current)?.stop);
+    }),
     firstOpenAnswered: (outcome: FirstOpenOutcome) => answers.record(outcome, FIRST_OPEN_CONTEXT),
     keptEdits: {page: vi.fn(async (kept: ServiceKeptEdits, cursor: JsonValue | undefined) => keptPage(kept, cursor)),
       // The host grants in the document's turn after rechecking its caller and the refusal.

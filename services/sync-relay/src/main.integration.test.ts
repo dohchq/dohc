@@ -14,7 +14,8 @@ import { realDaemonReaderConfig } from "../../../apps/desktop/src/testing/realDa
 const projectionEngine = requireEngineBinaryOrSkip();
 import { buildRelay } from "../scripts/build.mjs";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
-import { initializeRelayDeployment } from "./relayDeployment";
+import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
+import { deriveServiceHostBearer } from "./serviceHostCredential";
 import { RELAY_API_VERSIONS } from "./apiVersion";
 import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 
@@ -1067,6 +1068,50 @@ describe("sync relay startup guards", () => {
       expect(await response.json()).toEqual({ok: true, service: "sync-relay", selfHostedLive: true, apiVersions: RELAY_API_VERSIONS, automations: "on"});
     }, {timeout: 10_000});
     expect((await fetch(`${relay.baseUrl}/sync/workspace/live-host`)).status).toBe(404);
+  });
+
+  // Proves: the self-host relay answers its service host's first-open route.
+  // A request with the workspace's service-host credential reaches the
+  // publisher and answers with an outcome for its source, not 404.
+  it("answers a service host's first-open request on the self-host relay", async () => {
+    const root = await tempRoot("self-host-first-open"), configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+    const text = new TextEncoder().encode("# Plan\n\nBring snacks.\n"), sourceDigest = createHash("sha256").update(text).digest("hex");
+    const source = {workspaceId: "workspace", objectId: "object-1", path: "docs/a.md", sourceMomentId: "moment-1", sourceDigest};
+    const deployment = openRelayDeployment(configPath), {storage} = deployment;
+    let bearer: string;
+    try {
+      storage.claimWorkspace({workspaceId: source.workspaceId, ownerUserId: "owner", createdAtMs: 0});
+      storage.claimWorkspaceIdentity({workspaceId: source.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+      storage.createShare({share: {shareId: "share", workspaceId: source.workspaceId, granterUserId: "owner",
+        selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: 0},
+      grant: {grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "edit",
+        generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null}});
+      storage.putBlob({workspaceId: source.workspaceId, sha256: sourceDigest, content: text, createdAtMs: 1});
+      storage.appendLogBatch({workspaceId: source.workspaceId, originId: "owner-device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+        payloadJson: JSON.stringify({momentId: source.sourceMomentId, objectId: source.objectId, versionId: "main", operation: "write", path: source.path,
+          payloadAfterPath: source.path, payloadAfterBlobSha256: sourceDigest, payloadAfterByteLength: text.byteLength, payloadAfterContentKind: "text",
+          recordedAtMs: 1_001})}]});
+      const enrollment = storage.enrollServiceHostDocument({workspaceId: source.workspaceId, ownerUserId: "owner", shareId: "share", path: source.path,
+        nowMs: 10, guard() {}});
+      bearer = deriveServiceHostBearer(enrollment, {key: Buffer.from("y".repeat(32)), namespace: deployment.history.namespace});
+    } finally {storage.close();}
+    const relay = await spawnRunningRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
+      DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
+      DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.require(), DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1", DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
+      DOHC_RELAY_SHARE_WEB_URL: "http://share-web:1790", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32), DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig()});
+    // Any outcome proves the route; which one depends on how far the service host got.
+    await vi.waitFor(async () => {
+      const response = await fetch(`${relay.baseUrl}/sync/${source.workspaceId}/hosted/first-open`, {method: "POST",
+        headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+        body: JSON.stringify({objectId: source.objectId, path: source.path, sourceMomentId: source.sourceMomentId, sourceDigest,
+          replicationEpoch: "epoch", streamIdentity: "stream"})});
+      const body = await response.text();
+      expect(response.status, `${body}\nstderr:\n${relay.stderr()}`).toBe(200);
+      expect(JSON.parse(body)).toMatchObject({outcome: {source}});
+    }, {timeout: 10_000});
   });
 
   it.each(["true", "", "2"])("refuses an invalid automations flag before opening storage: %j", async value => {
