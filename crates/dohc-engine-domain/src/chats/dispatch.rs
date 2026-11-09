@@ -84,9 +84,9 @@ fn normalize_dispatch_agent_id(agent_id: &str) -> Result<String, DomainError> {
 }
 
 /// Record a pending request for each agent a person's message wakes: the
-/// agent whose chat holds it, and each agent it names. The message's sender
-/// records them in the message's own write, so only that computer runs them.
-/// A message from the CLI wakes no agent.
+/// agent whose chat holds it, and each agent in `wake_agent_ids`. The
+/// message's sender records them in the message's own write, so only that
+/// computer runs them. A message from the CLI wakes no agent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_message_triggers(
     tx: &Transaction<'_>,
@@ -95,7 +95,7 @@ pub(super) fn record_message_triggers(
     message_id: &str,
     author_kind: ChatActorKind,
     origin: Option<&str>,
-    named_agent_ids: &[String],
+    wake_agent_ids: &[String],
     created_at_ms: i64,
 ) -> Result<(), DomainError> {
     if author_kind != ChatActorKind::Human || origin == Some("cli") {
@@ -112,7 +112,7 @@ pub(super) fn record_message_triggers(
         .optional()
         .map_err(DomainError::sql_corrupt)?
         .flatten();
-    for agent_id in chat_agent.iter().chain(named_agent_ids) {
+    for agent_id in chat_agent.iter().chain(wake_agent_ids) {
         tx.execute(
             "INSERT OR IGNORE INTO chat_dispatch_ledger \
              (workspace_id, trigger_message_id, agent_id, thread_id, state, run_id, \

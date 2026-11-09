@@ -64,6 +64,7 @@ import type {
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type {
   ChannelThreadSummary,
+  ChatAgentReader,
   ChatChannelSummary,
   ChatMessage,
   ChatStreamItem,
@@ -1350,6 +1351,12 @@ async function buildShowResult(
   };
 }
 
+// A run dohc dispatched reads as its agent. Any other agent reads as an
+// unnamed one.
+function agentReader(runId: string | null): ChatAgentReader {
+  return runId === null ? { kind: "unnamed" } : { kind: "run", runId };
+}
+
 async function markShownThreadRead(
   context: CliWorkspaceContext,
   actor: CliActor,
@@ -1366,7 +1373,7 @@ async function markShownThreadRead(
         : current);
     await context.store.markThreadReadByAgent({
       workspaceId: context.workspaceId,
-      ...(runId === null ? {} : { runId }),
+      reader: agentReader(runId),
       threadId,
       upTo: { createdAtMs: latest.createdAtMs, messageId: latest.id },
     });
@@ -3505,7 +3512,7 @@ async function dispatchWorkspace(
         ? new Set(
             (await context.store.listAgentUnreadThreads(
               context.workspaceId,
-              options.dispatchedRunId(context.workspaceId) ?? undefined,
+              agentReader(options.dispatchedRunId(context.workspaceId)),
             )).map(
               (thread) => thread.id,
             ),
@@ -3576,14 +3583,15 @@ async function dispatchWorkspace(
       );
       // Inside a run dohc dispatched, the inbox is that run's agent's unread
       // work: its chat, and each message elsewhere that asked it. Outside a
-      // run, connected agents share DMs, plain @agent mentions, and replies
-      // in threads they posted in.
+      // run, unnamed agents share plain @agent mentions and replies in
+      // threads they posted in. Agent chats belong to their agents.
       const runId = options.dispatchedRunId(context.workspaceId);
       const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
-      const mentionRows = await context.store.listAgentUnreadRequests(context.workspaceId, runId ?? undefined);
+      const reader = agentReader(runId);
+      const mentionRows = await context.store.listAgentUnreadRequests(context.workspaceId, reader);
       const unread = runId === null
         ? [...new Set(mentionRows.map(row => row.threadId))].map(id => ({ id }))
-        : await context.store.listAgentUnreadThreads(context.workspaceId, runId);
+        : await context.store.listAgentUnreadThreads(context.workspaceId, reader);
       const agentChannelIds = new Set(
         channels
           .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
@@ -3797,10 +3805,9 @@ async function dispatchWorkspace(
       }
       if (actor === "agent") {
         try {
-          const runId = options.dispatchedRunId(context.workspaceId);
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
-            ...(runId === null ? {} : { runId }),
+            reader: agentReader(options.dispatchedRunId(context.workspaceId)),
             threadId,
             upTo: { createdAtMs: message.createdAtMs, messageId: message.id },
           });
@@ -4143,7 +4150,7 @@ async function watchMessages(
         });
       };
       // Keep the outside-run inbox's reach even while dohc has a run open.
-      for (const mention of await context.store.listAgentUnreadRequests(context.workspaceId)) {
+      for (const mention of await context.store.listAgentUnreadRequests(context.workspaceId, { kind: "unnamed" })) {
         const thread = byId.get(mention.threadId);
         if (!thread) continue;
         const message = (await read(mention.threadId)).find(row => row.id === mention.messageId);

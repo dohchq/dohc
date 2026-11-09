@@ -64,7 +64,7 @@ struct ChatMessageSendParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    named_agent_ids: Option<Vec<String>>,
+    wake_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
 
@@ -619,7 +619,7 @@ impl EngineService {
                     automation: params.automation.map(ChatMessageAutomation::from),
                     author_agent_id: params.author_agent_id,
                     author_reported: params.author_reported,
-                    named_agent_ids: params.named_agent_ids.unwrap_or_default(),
+                    wake_agent_ids: params.wake_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },

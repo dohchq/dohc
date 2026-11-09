@@ -259,7 +259,7 @@ export function createChatWrites(dependencies: {
     }
     const writer = await admittedWriter(input.writer);
     const actor = await actorFor(writer);
-    const namedAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
+    const wakeAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,
@@ -275,7 +275,7 @@ export function createChatWrites(dependencies: {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(authorUserId ? { authorUserId } : {}),
       ...(input.writer.via === "cli" ? { origin: "cli" as const } : {}),
-      ...(namedAgentIds.length > 0 ? { namedAgentIds } : {}),
+      ...(wakeAgentIds.length > 0 ? { wakeAgentIds } : {}),
       body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),

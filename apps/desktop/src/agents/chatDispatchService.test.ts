@@ -796,7 +796,7 @@ async function createAgentThread(
         : { kind: "agent", displayName: "Sam" },
     ...(input.authorUserId === undefined ? {} : { authorUserId: input.authorUserId }),
     ...(input.origin === undefined ? {} : { origin: input.origin }),
-    ...(actor === "human" ? { namedAgentIds: ["default"] } : {}),
+    ...(actor === "human" ? { wakeAgentIds: ["default"] } : {}),
     body: `@Nova ${input.body}`,
   });
   return { threadId: started.thread.id, messageId: started.message.id };
@@ -845,7 +845,7 @@ async function askAgain(fixture: Fixture, threadId: string): Promise<string> {
     threadId,
     author: { kind: "human", displayName: "Sam" },
     authorUserId: "user_local",
-    namedAgentIds: ["default"],
+    wakeAgentIds: ["default"],
     body: "@Nova Please go again.",
   });
   return message.id;
@@ -1054,7 +1054,7 @@ describe("chatDispatchService", () => {
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
-      namedAgentIds: ["default", "codex"],
+      wakeAgentIds: ["default", "codex"],
       body: "Could @Nova and @Codex audit this plan?",
     });
     // Plain text naming no agent by id wakes nobody.
@@ -1072,7 +1072,7 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "agent", displayName: "Nova" },
-      namedAgentIds: ["default"],
+      wakeAgentIds: ["default"],
       body: "@Nova does not wake itself.",
     })).rejects.toThrow();
 
@@ -1107,7 +1107,7 @@ describe("chatDispatchService", () => {
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
-      namedAgentIds: ["default", "codex", "scout"],
+      wakeAgentIds: ["default", "codex", "scout"],
       body: "@Nova @Codex @Scout plan the trip.",
     });
 
@@ -1152,7 +1152,7 @@ describe("chatDispatchService", () => {
         workspaceId: WORKSPACE_ID,
         threadId: listed.threadId,
         author: { kind: "human", displayName: "Sam" },
-        namedAgentIds: ["codex"],
+        wakeAgentIds: ["codex"],
         body: "Review it too.",
       });
       expect((await fixture.dispatch.listPending(WORKSPACE_ID))[0]).toMatchObject({
@@ -1187,7 +1187,7 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
       threadId: listed.threadId,
       author: { kind: "human", displayName: "Sam" },
-      namedAgentIds: ["codex"],
+      wakeAgentIds: ["codex"],
       body: "Review it too.",
     });
     fixture.service.start();
@@ -1699,7 +1699,7 @@ describe("chatDispatchService", () => {
         threadId: trigger.threadId,
         author: { kind: "human", displayName: "Sam" },
         authorUserId: "user_local",
-        namedAgentIds: ["default"],
+        wakeAgentIds: ["default"],
         body,
       });
     }
@@ -1729,7 +1729,7 @@ describe("chatDispatchService", () => {
       threadId: trigger.threadId,
       author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
-      namedAgentIds: ["default"],
+      wakeAgentIds: ["default"],
       body: "@Nova Arrived after spawn.",
     });
     // The request is written with the message, so the thread's next read,
@@ -1941,7 +1941,7 @@ describe("chatDispatchService", () => {
       threadId: trigger.threadId,
       author: { kind: "human", displayName: "Sam" },
       authorUserId: "user_local",
-      namedAgentIds: ["default"],
+      wakeAgentIds: ["default"],
       body: "@Nova Still needs the same missing runner.",
     });
     await fixture.service.scanWorkspace(WORKSPACE_ID);
@@ -4890,7 +4890,7 @@ describe("chatDispatchService", () => {
           channelId: general.id,
           author: { kind: "human", displayName: "Sam" },
           authorUserId: "user_local",
-          namedAgentIds: ["default", "codex"],
+          wakeAgentIds: ["default", "codex"],
           body: "@Nova @Codex plan day 9.",
         });
         service.start();
@@ -4912,7 +4912,7 @@ describe("chatDispatchService", () => {
     // refuse each start in turn. Returns the run notices' titles.
     async function refusedStartTitles(
       agents: Agent[],
-      namedAgentIds: string[],
+      wakeAgentIds: string[],
       { afterLookup, body = "Plan day 9" }: { afterLookup?: () => void; body?: string } = {},
     ): Promise<string[]> {
       const fixture = await createFixture({
@@ -4931,16 +4931,16 @@ describe("chatDispatchService", () => {
           channelId: general.id,
           author: { kind: "human", displayName: "Sam" },
           authorUserId: "user_local",
-          namedAgentIds,
+          wakeAgentIds,
           body,
         });
         service.start();
-        for (const _ of namedAgentIds) {
+        for (const _ of wakeAgentIds) {
           await trustWorkspace(fixture);
           await service.scanWorkspace(WORKSPACE_ID);
         }
         expect(fixture.spawnCalls).toEqual([]);
-        await vi.waitFor(() => expect(fixture.notices).toHaveLength(namedAgentIds.length));
+        await vi.waitFor(() => expect(fixture.notices).toHaveLength(wakeAgentIds.length));
         return fixture.notices.map(({ title }) => title);
       } finally {
         await service.stop();
@@ -5057,7 +5057,7 @@ describe("chatDispatchService", () => {
       await fixture.trust.trust(fixture.workspace);
       await fixture.chat.sendMessage({
         authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: first.threadId,
-        author: { kind: "human", displayName: "Sam" }, authorUserId: "user_local", namedAgentIds: ["default"], body: "@Nova Book the hotel.",
+        author: { kind: "human", displayName: "Sam" }, authorUserId: "user_local", wakeAgentIds: ["default"], body: "@Nova Book the hotel.",
       });
       await fixture.service.scanWorkspace(WORKSPACE_ID);
       expect(fixture.spawnCalls).toHaveLength(1);

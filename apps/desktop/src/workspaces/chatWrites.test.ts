@@ -267,7 +267,7 @@ describe("chat writes", () => {
     await test.writes.sendMessage(test.place, {
       writer: PERSON, threadId: "thread", body: "@Codex and @nova, plan the day", resolveAttachments: async () => [],
     });
-    expect(test.store.sendMessage.mock.calls[0]![0].namedAgentIds).toEqual(["default", "codex"]);
+    expect(test.store.sendMessage.mock.calls[0]![0].wakeAgentIds).toEqual(["default", "codex"]);
     await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "human" }, threadId: "thread", body: "@Codex plan", resolveAttachments: async () => [],
     });
@@ -277,7 +277,7 @@ describe("chat writes", () => {
     await test.writes.sendMessage(test.place, {
       writer: PERSON, threadId: "thread", body: "No one named", resolveAttachments: async () => [],
     });
-    for (const [input] of test.store.sendMessage.mock.calls.slice(1)) expect(input).not.toHaveProperty("namedAgentIds");
+    for (const [input] of test.store.sendMessage.mock.calls.slice(1)) expect(input).not.toHaveProperty("wakeAgentIds");
   });
 
   it("writes a dispatched run's reply as its agent, by id and settings name", async () => {

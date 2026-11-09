@@ -105,21 +105,27 @@ function strictObject(
 }
 
 // The daemon's rule: only an agent's message names its agent, and only a
-// person's message names agents, each by a valid id.
-function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undefined; namedAgentIds: string[] } {
+// person's message wakes agents, each once by a valid id.
+function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undefined; wakeAgentIds: string[] } {
   const authorAgentId = optionalString(params, "authorAgentId");
   if (authorAgentId !== undefined && (params.authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))) {
     throw new Error("invalid-input");
   }
-  const named = params.namedAgentIds ?? [];
-  const namedAgentIds = Array.isArray(named)
-    ? named.filter((agentId): agentId is string => typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId))
+  const listed = params.wakeAgentIds ?? [];
+  const valid = Array.isArray(listed)
+    ? listed.filter((agentId): agentId is string => typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId))
     : [];
-  if (!Array.isArray(named) || namedAgentIds.length !== named.length || (named.length > 0 && params.authorKind !== "human")) {
+  const wakeAgentIds = [...new Set(valid)];
+  if (
+    !Array.isArray(listed) || valid.length !== listed.length ||
+    (listed.length > 0 && params.authorKind !== "human") || wakeAgentIds.length > MAX_WAKE_AGENTS
+  ) {
     throw new Error("invalid-input");
   }
-  return { authorAgentId, namedAgentIds };
+  return { authorAgentId, wakeAgentIds };
 }
+
+const MAX_WAKE_AGENTS = 64;
 
 const MAX_REPORTED_AGENT_CHARS = 64;
 
@@ -151,9 +157,90 @@ function requiredString(object: ChatsJsonObject, key: string, code = "invalid-in
   return value;
 }
 
-// The place agents outside a run share. No agent id is empty.
+// The place unnamed agents share. No agent id is empty.
 const OUTSIDE_RUN_READER = "";
 const agentReadKey = (reader: string, threadId: string) => `${reader}\0${threadId}`;
+const MAX_AGENT_REQUESTERS = 64;
+const MAX_AUTHOR_USER_ID_CHARS = 200;
+
+type AgentReader =
+  | { kind: "run"; runId: string }
+  | { kind: "unnamed" }
+  | { kind: "connected"; agentId: string; handle: string; requesters: string[]; unattributedCounts: boolean };
+
+// The engine's handle rule: one mention token, stored as mentions store it.
+function mentionHandle(value: string): string {
+  const input = value.trim();
+  const token = scanMentionTokens("@" + input)[0];
+  if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) {
+    throw new Error("invalid-message-body");
+  }
+  return normalizeHandle(token.handle);
+}
+
+// The engine's reader rules. Each kind takes only its own fields. An agent
+// you run has a valid id, a handle, and at most 64 accounts, each kept once.
+// The binding is the reader as sent, so a cursor works only for that reader.
+function agentReaderParam(params: ChatsJsonObject): { reader: AgentReader; binding: string } {
+  const value = params.reader ?? null;
+  const kind = asObject(value, "reader").kind;
+  if (kind === "run") {
+    const runId = requiredString(strictObject(value, "reader", ["kind", "runId"]), "runId", "invalid-parameters");
+    return { reader: { kind: "run", runId }, binding: `run\0${runId}` };
+  }
+  if (kind === "unnamed") {
+    strictObject(value, "reader", ["kind"]);
+    return { reader: { kind: "unnamed" }, binding: "unnamed" };
+  }
+  if (kind !== "connected") throw new Error("invalid-parameters");
+  const object = strictObject(value, "reader", ["kind", "agentId", "handle", "requesters", "unattributedCounts"]);
+  const agentId = requiredString(object, "agentId", "invalid-parameters");
+  const handle = requiredString(object, "handle", "invalid-parameters");
+  const listed = Array.isArray(object.requesters) ? object.requesters : [];
+  const requesters = listed.filter((account): account is string => typeof account === "string");
+  const unattributedCounts = object.unattributedCounts;
+  if (!Array.isArray(object.requesters) || requesters.length !== listed.length || typeof unattributedCounts !== "boolean") {
+    throw new Error("invalid-parameters");
+  }
+  const binding = ["connected", agentId, handle, unattributedCounts ? "1" : "0", ...requesters].join("\0");
+  if (!AGENT_ID_PATTERN.test(agentId) || requesters.length > MAX_AGENT_REQUESTERS) throw new Error("invalid-input");
+  const accounts: string[] = [];
+  for (const requester of requesters) {
+    const account = requester.trim();
+    if (account === "" || account.length > MAX_AUTHOR_USER_ID_CHARS) throw new Error("invalid-sender");
+    if (!accounts.includes(account)) accounts.push(account);
+  }
+  const normalized = { agentId, handle: mentionHandle(handle), requesters: accounts, unattributedCounts };
+  return { reader: { kind: "connected", ...normalized }, binding };
+}
+
+function readCoordinate(value: JsonValue): { createdAtMs: number; messageId: string } {
+  const object = strictObject(value, "after", ["createdAtMs", "messageId"]);
+  const createdAtMs = optionalInteger(object, "createdAtMs");
+  const messageId = optionalString(object, "messageId");
+  if (createdAtMs === undefined || messageId === undefined) throw new Error("invalid-parameters");
+  return { createdAtMs, messageId };
+}
+
+// Messages after the first one `posted` matches in each thread, in thread order.
+function messagesAfterFirstPost(state: WorkspaceState, posted: (message: ChatMessage) => boolean): ChatMessage[] {
+  const after: ChatMessage[] = [];
+  for (const ids of state.threadMessages.values()) {
+    let found = false;
+    for (const id of ids) {
+      const message = state.messages.get(id);
+      if (!message) continue;
+      if (found) after.push(message);
+      else found = posted(message);
+    }
+  }
+  return after;
+}
+
+function isAgentChat(state: WorkspaceState, thread: ChatThread | undefined): boolean {
+  const channelId = thread?.channelId;
+  return channelId !== undefined && state.channels.get(channelId)?.kind === "agent";
+}
 
 function optionalBoolean(object: ChatsJsonObject, key: string): boolean | undefined {
   const value = object[key];
@@ -731,7 +818,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "namedAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "wakeAgentIds", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -749,7 +836,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
         "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "namedAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "wakeAgentIds", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -776,13 +863,15 @@ function allowedKeys(method: string): readonly string[] {
       return ["handle", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadListUnreadRequests:
     case CHATS_METHOD.agentReadListUnreadThreads:
-      return ["runId", "pageLimit", "cursor"];
+      return ["reader", "pageLimit", "cursor"];
+    case CHATS_METHOD.agentReadListRequestsPage:
+      return ["reader", "channelId", "threadId", "after", "pageLimit"];
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
       return ["pageLimit", "cursor"];
     case CHATS_METHOD.dispatchListFailedRunRecoveries: return ["threadId", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
-      return ["runId", "threadId", "upTo", "expectedRevision"];
+      return ["reader", "threadId", "upTo", "expectedRevision"];
     case CHATS_METHOD.followsSet:
       return [
         "ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs",
@@ -1013,6 +1102,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.mentionsList(state, workspace, params);
       case CHATS_METHOD.agentReadListUnreadRequests:
         return this.agentUnreadRequests(state, workspace, params);
+      case CHATS_METHOD.agentReadListRequestsPage:
+        return this.agentRequestsPage(state, params);
       case CHATS_METHOD.agentReadListUnreadThreads:
         return this.agentUnreadThreads(state, workspace, params);
       case CHATS_METHOD.agentReadMarkThreadRead:
@@ -1253,13 +1344,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   // Mirrors the daemon's message hash, which it takes after checking the
-  // agents: the author's agent, then each named agent once, in first-named order.
+  // agents: the author's agent, then each agent it wakes once, in first-listed order.
   private agentsFingerprint(params: ChatsJsonObject): [string, string, string] {
-    const { authorAgentId, namedAgentIds } = messageAgents(params);
+    const { authorAgentId, wakeAgentIds } = messageAgents(params);
     const reported = messageReported(params);
     return [
       authorAgentId ?? "",
-      [...new Set(namedAgentIds)].join(","),
+      wakeAgentIds.join(","),
       reported === undefined ? "" : JSON.stringify(reported),
     ];
   }
@@ -1751,7 +1842,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
     if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
     const automation = messageAutomation(authorKind, params.automation);
-    const { authorAgentId, namedAgentIds } = messageAgents(params);
+    const { authorAgentId, wakeAgentIds } = messageAgents(params);
     const authorReported = messageReported(params);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
@@ -1809,11 +1900,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     state.messages.set(messageId, message);
     // The engine's rule: a person's message requests the agent whose chat
-    // holds it and each agent it names, in the message's own write.
+    // holds it and each agent it wakes, in the message's own write.
     if (authorKind === "human" && origin !== "cli") {
       const thread = state.threads.get(threadId);
       const chatAgent = thread?.channelId ? state.channels.get(thread.channelId)?.agentId : undefined;
-      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...namedAgentIds]) {
+      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...wakeAgentIds]) {
         const key = dispatchKey(messageId, agentId);
         if (state.dispatches.has(key)) continue;
         state.dispatches.set(key, {
@@ -2228,10 +2319,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const input = requiredString(params, "handle", "invalid-message-body").trim();
-    const token = scanMentionTokens("@" + input)[0];
-    if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) throw new Error("invalid-message-body");
-    const handle = normalizeHandle(token.handle);
+    const handle = mentionHandle(requiredString(params, "handle", "invalid-message-body"));
     const rows = state.mentions
       .filter((mention) => mention.handle === handle)
       .filter((mention) => state.messages.has(mention.messageId) && state.threads.has(mention.threadId))
@@ -2244,32 +2332,27 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   // The engine's rule: a run names itself and reads as its agent while it
-  // runs. Without a run, the reads are those of agents outside a run.
-  private agentReader(state: WorkspaceState, runId: string | undefined): string {
-    if (runId === undefined) return OUTSIDE_RUN_READER;
-    const run = state.runs.get(runId);
+  // runs, an agent you run reads as itself, and unnamed agents share a place.
+  private agentPlace(state: WorkspaceState, reader: AgentReader): string {
+    if (reader.kind === "unnamed") return OUTSIDE_RUN_READER;
+    if (reader.kind === "connected") return reader.agentId;
+    const run = state.runs.get(reader.runId);
     if (!run || run.endedAtMs !== undefined) throw new Error("run-not-found");
     return run.agentId;
   }
 
-  // Unread requests for a run's agent, or the shared outside-run reader.
-  private agentUnreadRequests(
-    state: WorkspaceState,
-    workspace: string,
-    params: ChatsJsonObject,
-  ): JsonValue {
-    const runId = optionalString(params, "runId");
-    const agentId = this.agentReader(state, runId);
-    const candidates = runId === undefined
-      ? this.outsideAgentRequests(state)
-      : [...state.dispatches.values()]
-      .filter((dispatch) => dispatch.agentId === agentId)
-      .flatMap((dispatch) => {
-        const message = state.messages.get(dispatch.triggerMessageId);
-        return message && state.threads.has(message.threadId) ? [message] : [];
-      });
-    const rows = candidates.filter((message) => {
-        const read = state.agentReads.get(agentReadKey(agentId, message.threadId));
+  // One reader's unread requests, oldest first.
+  private agentRequests(state: WorkspaceState, reader: AgentReader): ChatMessage[] {
+    const place = this.agentPlace(state, reader);
+    const candidates = reader.kind === "run"
+      ? this.runRequests(state, place)
+      : reader.kind === "unnamed"
+        ? this.unnamedRequests(state)
+        : this.connectedRequests(state, reader);
+    return [...new Set(candidates)]
+      .filter((message) => {
+        if (!state.threads.has(message.threadId)) return false;
+        const read = state.agentReads.get(agentReadKey(place, message.threadId));
         return !read ||
           message.createdAtMs > read.lastReadCreatedAtMs ||
           (
@@ -2277,44 +2360,103 @@ export class ChatsLoopbackEngine implements EngineTransport {
             compareText(message.id, read.lastReadMessageId) > 0
           );
       })
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id))
-      .map((message) => ({
-        threadId: message.threadId,
-        messageId: message.id,
-        authorKind: message.author.kind,
-        createdAtMs: message.createdAtMs,
-      }));
-    const result = page(rows, params, `${workspace}\0agentRequests\0${runId}`);
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id));
+  }
+
+  // The requests the run's agent was woken for.
+  private runRequests(state: WorkspaceState, agentId: string): ChatMessage[] {
+    return [...state.dispatches.values()]
+      .filter((dispatch) => dispatch.agentId === agentId)
+      .flatMap((dispatch) => state.messages.get(dispatch.triggerMessageId) ?? []);
+  }
+
+  // A plain @agent no agent was woken for, and a person's reply in a thread
+  // an unnamed agent posted in. Agent chats belong to their agents.
+  private unnamedRequests(state: WorkspaceState): ChatMessage[] {
+    const unnamedPost = (message: ChatMessage) => message.author.kind === "agent" && message.authorAgentId === undefined;
+    const dispatched = new Set([...state.dispatches.values()].map((row) => row.triggerMessageId));
+    const mentioned = state.mentions
+      .filter((row) => row.handle === "agent" && !dispatched.has(row.messageId))
+      .flatMap((row) => state.messages.get(row.messageId) ?? []);
+    const replies = messagesAfterFirstPost(state, unnamedPost).filter((message) => message.author.kind === "human");
+    return [...mentioned, ...replies].filter((message) =>
+      !unnamedPost(message) && !isAgentChat(state, state.threads.get(message.threadId)));
+  }
+
+  // Its chat, a mention of its handle, and a reply in a thread it posted in,
+  // each by its person and not from the CLI.
+  private connectedRequests(
+    state: WorkspaceState,
+    reader: Extract<AgentReader, { kind: "connected" }>,
+  ): ChatMessage[] {
+    const chats = new Set(
+      [...state.channels.values()].filter((channel) => channel.agentId === reader.agentId).map((channel) => channel.channelId),
+    );
+    const inChat = [...state.messages.values()].filter((message) => {
+      const channelId = state.threads.get(message.threadId)?.channelId;
+      return channelId !== undefined && chats.has(channelId);
+    });
+    const mentioned = state.mentions
+      .filter((row) => row.handle === reader.handle)
+      .flatMap((row) => state.messages.get(row.messageId) ?? []);
+    const replies = messagesAfterFirstPost(state, (message) => message.authorAgentId === reader.agentId);
+    return [...inChat, ...mentioned, ...replies].filter((message) =>
+      message.author.kind === "human" && message.origin !== "cli" &&
+      (message.authorUserId === undefined
+        ? reader.unattributedCounts
+        : reader.requesters.includes(message.authorUserId)));
+  }
+
+  private agentUnreadRequests(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const { reader, binding } = agentReaderParam(params);
+    const rows = this.agentRequests(state, reader).map((message) => ({
+      threadId: message.threadId,
+      messageId: message.id,
+      authorKind: message.author.kind,
+      createdAtMs: message.createdAtMs,
+    }));
+    const result = page(rows, params, `${workspace}\0agentRequests\0${binding}`);
     return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
   }
 
-  private outsideAgentRequests(state: WorkspaceState): ChatMessage[] {
-    const postedReplies = new Set<string>();
-    const latestHumanThreads = new Set<string>();
-    for (const [threadId, ids] of state.threadMessages) {
-      let posted = false;
-      let latest: ChatMessage | undefined;
-      for (const id of ids) {
-        const message = state.messages.get(id);
-        if (!message) continue;
-        if (posted && message.author.kind === "human") postedReplies.add(id);
-        if (message.author.kind === "agent" && message.authorAgentId === undefined) posted = true;
-        if (!latest || message.createdAtMs > latest.createdAtMs ||
-          (message.createdAtMs === latest.createdAtMs && compareText(message.id, latest.id) > 0)) latest = message;
-      }
-      if (latest?.author.kind === "human") latestHumanThreads.add(threadId);
-    }
-    const mentions = new Set(state.mentions.filter(row => row.handle === "agent").map(row => `${row.threadId}\0${row.messageId}`));
-    const dispatched = new Set([...state.dispatches.values()].map(row => row.triggerMessageId));
-    return [...state.messages.values()].filter(message => {
-      if (message.author.kind === "agent" && message.authorAgentId === undefined) return false;
-      const thread = state.threads.get(message.threadId);
-      if (!thread) return false;
-      const agentChat = thread.channelId && state.channels.get(thread.channelId)?.kind === "agent";
-      if (agentChat && !latestHumanThreads.has(thread.id)) return false;
-      return (agentChat && message.author.kind === "human") || postedReplies.has(message.id) ||
-        (mentions.has(`${message.threadId}\0${message.id}`) && !dispatched.has(message.id));
+  // One reader's unread requests after a coordinate, with what a waiting
+  // agent shows. A Group or thread filter narrows them.
+  private agentRequestsPage(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+    const { reader } = agentReaderParam(params);
+    const channelId = optionalString(params, "channelId");
+    const threadId = optionalString(params, "threadId");
+    const after = params.after === undefined ? undefined : readCoordinate(params.after);
+    const limit = pageLimit(params);
+    const rows = this.agentRequests(state, reader).filter((message) =>
+      (after === undefined || message.createdAtMs > after.createdAtMs ||
+        (message.createdAtMs === after.createdAtMs && compareText(message.id, after.messageId) > 0)) &&
+      (channelId === undefined || state.threads.get(message.threadId)?.channelId === channelId) &&
+      (threadId === undefined || message.threadId === threadId));
+    const requests = rows.slice(0, limit).map((message) => {
+      const chatId = state.threads.get(message.threadId)?.channelId;
+      const channel = chatId === undefined ? undefined : state.channels.get(chatId);
+      return {
+        threadId: message.threadId,
+        messageId: message.id,
+        channel: channel === undefined
+          ? null
+          : {
+              id: channel.channelId,
+              kind: channel.kind,
+              name: channel.name,
+              slug: channel.slug,
+              purpose: channel.purpose,
+            },
+        author: { kind: message.author.kind, displayName: message.author.displayName },
+        body: message.body,
+        createdAtMs: message.createdAtMs,
+      };
     });
+    return jsonResult({ requests, more: rows.length > limit });
   }
 
   private agentUnreadThreads(
@@ -2322,8 +2464,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const runId = optionalString(params, "runId");
-    const reader = this.agentReader(state, runId);
+    const { reader: agentReader, binding } = agentReaderParam(params);
+    const reader = this.agentPlace(state, agentReader);
     const rows = [...state.threads.values()]
       .map((thread) => ({
         thread,
@@ -2331,6 +2473,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }))
       .filter((entry): entry is { thread: ChatThread; latest: ChatMessage } => {
         if (!entry.latest || entry.latest.author.kind !== "human") return false;
+        // An unnamed reader leaves agent chats to their agents.
+        if (agentReader.kind === "unnamed" && isAgentChat(state, entry.thread)) return false;
         const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
         return !read ||
           entry.latest.createdAtMs > read.lastReadCreatedAtMs ||
@@ -2351,7 +2495,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           messageId: read?.lastReadMessageId ?? "",
         } };
       });
-    const result = page(rows, params, `${workspace}\0agentUnread\0${runId ?? ""}`);
+    const result = page(rows, params, `${workspace}\0agentUnread\0${binding}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
   }
 
@@ -2360,7 +2504,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const reader = this.agentReader(state, optionalString(params, "runId"));
+    const reader = this.agentPlace(state, agentReaderParam(params).reader);
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const upTo = strictObject(params.upTo ?? null, "upTo", ["createdAtMs", "messageId"]);

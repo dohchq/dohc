@@ -3639,6 +3639,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("ydoc_update_agent_run.sql"),
         sets_user_version: None,
     },
+    // Finds the threads an agent you run posted in.
+    Migration {
+        ordinal: 89,
+        id: "v2-chat-agent-author-threads",
+        sql: include_str!("chat_agent_author_threads.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5646,6 +5653,10 @@ mod tests {
             (
                 "v2-ydoc-update-agent-run",
                 "7847cf674a01b4a938882ffa6a50d79f2542f8dd1e7f37af8dcb6c09a7f7f26d",
+            ),
+            (
+                "v2-chat-agent-author-threads",
+                "64e50015c740f0ab43aa83ff7665fd660463f0bc31eb92ece6d5358f5de89660",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

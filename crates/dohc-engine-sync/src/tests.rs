@@ -1402,7 +1402,7 @@ fn one_message_registers_more_than_one_reference_page_without_resending_acknowle
                 attachments: vec![],
                 automation: None,
                 author_agent_id: None,
-                named_agent_ids: vec![],
+                wake_agent_ids: vec![],
                 now_ms: 3,
                 request_id: None,
             },

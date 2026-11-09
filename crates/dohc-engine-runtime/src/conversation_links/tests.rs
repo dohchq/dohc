@@ -402,7 +402,7 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
                 }],
                 author_agent_id: None,
                 author_reported: None,
-                named_agent_ids: Vec::new(),
+                wake_agent_ids: Vec::new(),
                 now_ms: 10,
                 request_id: None,
             },

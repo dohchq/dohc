@@ -1,5 +1,5 @@
 use dohc_engine_domain::{
-    BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, ChatThreadLane,
+    AgentReader, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, ChatThreadLane,
     LinkedChatStore, NoFaults, SaveBookmark, SendMessage, StartChannelThread,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
@@ -9,6 +9,7 @@ use rusqlite::params;
 const WS: &str = "b2-ws";
 const OTHER_WS: &str = "b2-other";
 const NO_FAULTS: NoFaults = NoFaults;
+const UNNAMED: AgentReader = AgentReader::Unnamed;
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
@@ -38,7 +39,7 @@ fn start_input(thread: &str, message: &str, kind: ChatActorKind, at: i64) -> Sta
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
         now_ms: at,
         request_id: None,
     }
@@ -83,7 +84,7 @@ fn send(
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
-                named_agent_ids: Vec::new(),
+                wake_agent_ids: Vec::new(),
                 now_ms: at,
                 request_id: None,
             },
@@ -108,7 +109,7 @@ fn base_chat(store: &mut EngineStore) {
 
 fn outside_requests(chats: &LinkedChatStore<'_>) -> Vec<String> {
     chats
-        .list_agent_unread_requests(WS, None, None, 100)
+        .list_agent_unread_requests(WS, &UNNAMED, None, 100)
         .expect("requests")
         .into_iter()
         .map(|row| row.message_id)
@@ -163,20 +164,19 @@ fn outside_requests_include_mentions_and_posted_thread_replies_once() {
         ["reply @agent", "hello @agent", "plain reply"]
     );
     let page = chats
-        .list_agent_unread_requests(WS, None, Some((20, "reply @agent".into())), 1)
+        .list_agent_unread_requests(WS, &UNNAMED, Some((20, "reply @agent".into())), 1)
         .expect("page");
     assert_eq!(page[0].message_id, "hello @agent");
 }
 
 #[test]
-fn outside_dm_requests_require_a_human_latest_message() {
+fn unnamed_reader_skips_agent_chats_that_a_run_still_reads() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .ensure_agent_channel(WS, "channel", "default", "Agent", 2, &NO_FAULTS)
         .expect("agent chat");
     start(&mut chats, "thread", "first", ChatActorKind::Human, 10);
-    assert_eq!(outside_requests(&chats), ["first"]);
     send(
         &mut chats,
         "thread",
@@ -185,28 +185,454 @@ fn outside_dm_requests_require_a_human_latest_message() {
         Some("first"),
         20,
     );
-    assert!(outside_requests(&chats).is_empty());
-    chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "first", None, 21, &NO_FAULTS)
-        .expect("read");
     send(
         &mut chats,
         "thread",
-        "later",
+        "later @agent",
         ChatActorKind::Human,
-        Some("first"),
+        Some("own"),
         30,
     );
-    assert_eq!(outside_requests(&chats), ["later"]);
-    send(
-        &mut chats,
-        "thread",
-        "answered",
-        ChatActorKind::Agent,
-        Some("later"),
-        40,
+    assert!(
+        outside_requests(&chats).is_empty(),
+        "an agent chat belongs to its agent, even where an unnamed agent posted."
     );
-    assert!(outside_requests(&chats).is_empty());
+    assert!(
+        chats
+            .list_agent_unread_threads(WS, &UNNAMED, None, 10)
+            .expect("threads")
+            .is_empty()
+    );
+    chats
+        .claim_next_pending(WS, "default", "run", "agent", None, 40, &NO_FAULTS)
+        .expect("claim")
+        .expect("the chat's agent has a request");
+    let run = run_reader("run");
+    assert_eq!(
+        message_ids(
+            chats
+                .list_agent_unread_requests(WS, &run, None, 100)
+                .expect("run requests")
+        ),
+        ["first", "later @agent"]
+    );
+    assert_eq!(
+        chats
+            .list_agent_unread_threads(WS, &run, None, 10)
+            .expect("run threads")
+            .len(),
+        1
+    );
+}
+
+fn run_reader(run_id: &str) -> AgentReader {
+    AgentReader::Run {
+        run_id: run_id.to_owned(),
+    }
+}
+
+fn terminal(requesters: &[&str], unattributed_counts: bool) -> AgentReader {
+    AgentReader::Connected {
+        agent_id: "terminal".to_owned(),
+        handle: "terminal".to_owned(),
+        requesters: requesters.iter().map(|id| (*id).to_owned()).collect(),
+        unattributed_counts,
+    }
+}
+
+fn message_ids(rows: Vec<dohc_engine_domain::ChatAgentRequest>) -> Vec<String> {
+    rows.into_iter().map(|row| row.message_id).collect()
+}
+
+fn requests_for(chats: &LinkedChatStore<'_>, reader: &AgentReader) -> Vec<String> {
+    message_ids(
+        chats
+            .list_agent_unread_requests(WS, reader, None, 100)
+            .expect("requests"),
+    )
+}
+
+/// A post in `channel`'s `thread`, which the first post starts.
+#[allow(clippy::too_many_arguments)]
+fn post(
+    chats: &mut LinkedChatStore<'_>,
+    channel: &str,
+    thread: &str,
+    message: &str,
+    kind: ChatActorKind,
+    user: Option<&str>,
+    agent: Option<&str>,
+    at: i64,
+) {
+    let exists = chats
+        .list_messages(WS, thread, 1, None)
+        .is_ok_and(|page| !page.messages.is_empty());
+    if exists {
+        let mut input = send_input(thread, message, kind, at);
+        input.author_user_id = user.map(str::to_owned);
+        input.author_agent_id = agent.map(str::to_owned);
+        chats.send_message(&input, &NO_FAULTS).expect("send");
+    } else {
+        let mut input = start_input(thread, message, kind, at);
+        input.channel_id = channel.to_owned();
+        input.author_user_id = user.map(str::to_owned);
+        input.author_agent_id = agent.map(str::to_owned);
+        chats
+            .start_channel_thread(&input, &NO_FAULTS)
+            .expect("start");
+    }
+}
+
+/// A person's post, by `user` or with no account.
+fn ask_by(
+    chats: &mut LinkedChatStore<'_>,
+    user: Option<&str>,
+    channel: &str,
+    thread: &str,
+    message: &str,
+    at: i64,
+) {
+    post(
+        chats,
+        channel,
+        thread,
+        message,
+        ChatActorKind::Human,
+        user,
+        None,
+        at,
+    );
+}
+
+fn ask(chats: &mut LinkedChatStore<'_>, channel: &str, thread: &str, message: &str, at: i64) {
+    ask_by(chats, Some("ada"), channel, thread, message, at);
+}
+
+/// A post by the agent you run.
+fn answer(chats: &mut LinkedChatStore<'_>, channel: &str, thread: &str, message: &str, at: i64) {
+    post(
+        chats,
+        channel,
+        thread,
+        message,
+        ChatActorKind::Agent,
+        None,
+        Some("terminal"),
+        at,
+    );
+}
+
+fn send_input(thread: &str, message: &str, kind: ChatActorKind, at: i64) -> SendMessage {
+    SendMessage {
+        automation: None,
+        workspace_id: WS.to_owned(),
+        thread_id: thread.to_owned(),
+        message_id: message.to_owned(),
+        author_kind: kind,
+        author_display_name: "Ada".to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some("ada".to_owned()),
+        parent_message_id: None,
+        origin: None,
+        body: message.to_owned(),
+        needs_decision: false,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        author_agent_id: None,
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
+        now_ms: at,
+        request_id: None,
+    }
+}
+
+fn agent_chats(chats: &mut LinkedChatStore<'_>) {
+    chats
+        .create_channel(
+            WS,
+            "channel",
+            "Channel",
+            ChatChannelKind::Channel,
+            2,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+    chats
+        .ensure_agent_channel(WS, "t", "terminal", "Terminal", 3, &NO_FAULTS)
+        .expect("terminal's chat");
+    chats
+        .ensure_agent_channel(WS, "r", "research", "Research", 4, &NO_FAULTS)
+        .expect("research's chat");
+}
+
+#[test]
+fn connected_reader_reads_its_chat_its_mentions_and_threads_it_posted_in() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    agent_chats(&mut chats);
+    ask(&mut chats, "t", "dm", "dm-ask", 10);
+    ask(&mut chats, "channel", "group", "ask @terminal", 20);
+    ask(&mut chats, "channel", "posted", "opening", 25);
+    answer(&mut chats, "channel", "posted", "terminal-post", 30);
+    ask(&mut chats, "channel", "posted", "reply", 40);
+    ask(&mut chats, "r", "other", "other-ask", 50);
+    ask(&mut chats, "r", "other", "other @terminal", 55);
+    answer(&mut chats, "t", "dm", "terminal-reply", 60);
+    let mut cli = send_input("dm", "from-cli", ChatActorKind::Human, 70);
+    cli.origin = Some("cli".to_owned());
+    chats.send_message(&cli, &NO_FAULTS).expect("cli post");
+    ask_by(&mut chats, Some("bob"), "t", "dm", "bob-ask", 80);
+    ask(&mut chats, "channel", "group", "plain", 90);
+
+    let reader = terminal(&["ada"], false);
+    assert_eq!(
+        requests_for(&chats, &reader),
+        ["dm-ask", "ask @terminal", "reply", "other @terminal"],
+        "a CLI post, an agent post, another person's post, a post before it joined a \
+         thread, and another agent's chat without a mention do not ask it."
+    );
+    assert!(
+        requests_for(&chats, &UNNAMED).is_empty(),
+        "an unnamed agent does not read an agent's chat or its handle."
+    );
+}
+
+#[test]
+fn each_reader_keeps_its_own_place() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    agent_chats(&mut chats);
+    start(&mut chats, "group", "own", ChatActorKind::Agent, 10);
+    ask(&mut chats, "channel", "group", "ask @terminal", 20);
+    let reader = terminal(&["ada"], false);
+    assert_eq!(requests_for(&chats, &reader), ["ask @terminal"]);
+    assert_eq!(requests_for(&chats, &UNNAMED), ["ask @terminal"]);
+
+    chats
+        .mark_thread_read_by_agent(
+            WS,
+            &reader,
+            "group",
+            20,
+            "ask @terminal",
+            None,
+            30,
+            &NO_FAULTS,
+        )
+        .expect("connected read");
+    assert!(requests_for(&chats, &reader).is_empty());
+    assert_eq!(
+        requests_for(&chats, &UNNAMED),
+        ["ask @terminal"],
+        "the agent you run reading leaves the unnamed place where it was."
+    );
+    assert_eq!(
+        chats
+            .list_agent_unread_threads(WS, &UNNAMED, None, 10)
+            .expect("unnamed threads")
+            .len(),
+        1
+    );
+    assert!(
+        chats
+            .list_agent_unread_threads(WS, &reader, None, 10)
+            .expect("connected threads")
+            .is_empty()
+    );
+
+    ask(&mut chats, "channel", "group", "again @terminal", 40);
+    chats
+        .mark_thread_read_by_agent(
+            WS,
+            &UNNAMED,
+            "group",
+            40,
+            "again @terminal",
+            None,
+            50,
+            &NO_FAULTS,
+        )
+        .expect("unnamed read");
+    assert_eq!(
+        requests_for(&chats, &reader),
+        ["again @terminal"],
+        "the unnamed place does not move the agent you run's."
+    );
+    let state = chats
+        .mark_thread_read_by_agent(
+            WS,
+            &reader,
+            "group",
+            40,
+            "again @terminal",
+            Some(1),
+            60,
+            &NO_FAULTS,
+        )
+        .expect("connected read again");
+    assert_eq!(state.revision, 2);
+}
+
+#[test]
+fn only_its_persons_posts_ask_an_agent_you_run() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    agent_chats(&mut chats);
+    ask_by(&mut chats, Some("me"), "t", "dm", "mine", 10);
+    ask_by(&mut chats, Some("owner"), "t", "dm", "owners", 20);
+    ask_by(&mut chats, None, "t", "dm", "no-account", 30);
+
+    assert_eq!(
+        requests_for(&chats, &terminal(&["me"], false)),
+        ["mine"],
+        "in a received workspace the owner's posts, and posts with no account, are not yours."
+    );
+    assert_eq!(
+        requests_for(&chats, &terminal(&["me"], true)),
+        ["mine", "no-account"],
+        "in your own workspace a post with no account is yours."
+    );
+    assert!(
+        requests_for(&chats, &terminal(&[], false)).is_empty(),
+        "with no account recorded for you, no post asks it."
+    );
+    assert_eq!(
+        requests_for(&chats, &terminal(&["me", "owner", "me"], false)),
+        ["mine", "owners"]
+    );
+}
+
+#[test]
+fn a_request_from_before_signing_out_stays_until_its_thread_is_read() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    agent_chats(&mut chats);
+    let reader = terminal(&["me"], true);
+    ask_by(&mut chats, Some("me"), "t", "t1", "signed-in", 10);
+    ask_by(&mut chats, None, "t", "t2", "signed-out", 20);
+    assert_eq!(requests_for(&chats, &reader), ["signed-in", "signed-out"]);
+    answer(&mut chats, "t", "t2", "answer", 25);
+    chats
+        .mark_thread_read_by_agent(WS, &reader, "t2", 25, "answer", None, 26, &NO_FAULTS)
+        .expect("reply acknowledged");
+    assert_eq!(
+        requests_for(&chats, &reader),
+        ["signed-in"],
+        "a reply in one thread never passes over a request in another."
+    );
+    chats
+        .mark_thread_read_by_agent(WS, &reader, "t1", 10, "signed-in", None, 30, &NO_FAULTS)
+        .expect("acknowledged");
+    assert!(requests_for(&chats, &reader).is_empty());
+
+    ask_by(&mut chats, Some("me"), "t", "t3", "first", 40);
+    ask_by(&mut chats, None, "t", "t3", "second", 50);
+    let page = chats
+        .list_agent_unread_requests(WS, &reader, None, 1)
+        .expect("first request");
+    assert_eq!(
+        message_ids(page),
+        ["first"],
+        "the older request in a thread comes first, so a reply past the later one \
+         never passes one the agent was not shown."
+    );
+    chats
+        .mark_thread_read_by_agent(WS, &reader, "t3", 40, "first", None, 60, &NO_FAULTS)
+        .expect("acknowledged first");
+    assert_eq!(requests_for(&chats, &reader), ["second"]);
+}
+
+#[test]
+fn a_connected_reader_is_checked() {
+    let (_scratch, mut store) = open_store();
+    let chats = LinkedChatStore::new(&mut store);
+    let bad_id = AgentReader::Connected {
+        agent_id: "Terminal".to_owned(),
+        handle: "terminal".to_owned(),
+        requesters: Vec::new(),
+        unattributed_counts: true,
+    };
+    assert!(matches!(
+        chats.list_agent_unread_requests(WS, &bad_id, None, 10),
+        Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+    ));
+    let bad_handle = AgentReader::Connected {
+        agent_id: "terminal".to_owned(),
+        handle: "@".to_owned(),
+        requesters: Vec::new(),
+        unattributed_counts: true,
+    };
+    assert_eq!(
+        chats
+            .list_agent_unread_requests(WS, &bad_handle, None, 10)
+            .unwrap_err()
+            .code(),
+        "invalid-message-body"
+    );
+    let too_many = AgentReader::Connected {
+        agent_id: "terminal".to_owned(),
+        handle: "terminal".to_owned(),
+        requesters: (0..65).map(|index| format!("account-{index}")).collect(),
+        unattributed_counts: false,
+    };
+    assert!(matches!(
+        chats.list_agent_unread_threads(WS, &too_many, None, 10),
+        Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+    ));
+    assert_eq!(
+        chats
+            .list_agent_unread_requests(WS, &run_reader("no-such-run"), None, 10)
+            .unwrap_err()
+            .code(),
+        "run-not-found"
+    );
+}
+
+#[test]
+fn a_requests_page_filters_by_group_and_thread_and_carries_what_a_wait_shows() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    agent_chats(&mut chats);
+    ask(&mut chats, "t", "dm", "dm-ask", 10);
+    ask(&mut chats, "channel", "group", "ask @terminal", 20);
+    ask(&mut chats, "channel", "group", "more @terminal", 20);
+    let reader = terminal(&["ada"], false);
+    let page = |channel: Option<&str>, thread: Option<&str>, after: Option<(i64, String)>| {
+        chats
+            .list_agent_requests_page(WS, &reader, channel, thread, after, 10)
+            .expect("page")
+            .into_iter()
+            .map(|row| row.request.message_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        page(None, None, None),
+        ["dm-ask", "ask @terminal", "more @terminal"]
+    );
+    assert_eq!(
+        page(Some("channel"), None, None),
+        ["ask @terminal", "more @terminal"]
+    );
+    assert_eq!(page(None, Some("dm"), None), ["dm-ask"]);
+    assert!(page(Some("t"), Some("group"), None).is_empty());
+    assert_eq!(
+        page(None, None, Some((20, "ask @terminal".to_owned()))),
+        ["more @terminal"],
+        "a page continues after the coordinate, ties broken by message id."
+    );
+
+    let detail = chats
+        .list_agent_requests_page(WS, &reader, None, Some("dm"), None, 10)
+        .expect("detail")
+        .remove(0);
+    assert_eq!(detail.request.author_kind, ChatActorKind::Human);
+    assert_eq!(detail.request.created_at_ms, 10);
+    assert_eq!(detail.author_display_name, "Ada");
+    assert_eq!(detail.body, "dm-ask");
+    let channel = detail.channel.expect("the thread's Group");
+    assert_eq!(channel.channel_id, "t");
+    assert_eq!(channel.kind, ChatChannelKind::Agent);
+    assert_eq!(channel.name, "Terminal");
 }
 
 #[test]
@@ -230,7 +656,7 @@ fn outside_posted_thread_reply_still_counts_when_it_names_a_dohc_agent() {
                 parent_message_id: Some("own".to_owned()),
                 origin: None,
                 body: "@Research, please also look".to_owned(),
-                named_agent_ids: vec!["research".to_owned()],
+                wake_agent_ids: vec!["research".to_owned()],
                 automation: None,
                 needs_decision: false,
                 options: Vec::new(),
@@ -297,12 +723,12 @@ fn outside_participation_excludes_prior_replies_and_named_agents() {
     assert_eq!(outside_requests(&chats), ["later"]);
     assert!(
         chats
-            .list_agent_unread_requests(OTHER_WS, None, None, 100)
+            .list_agent_unread_requests(OTHER_WS, &UNNAMED, None, 100)
             .expect("other workspace")
             .is_empty()
     );
     chats
-        .mark_thread_read_by_agent(WS, None, "thread", 40, "later", None, 41, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 40, "later", None, 41, &NO_FAULTS)
         .expect("read");
     assert!(outside_requests(&chats).is_empty());
 }
@@ -330,15 +756,15 @@ fn outside_reply_cursor_tie_breaks_by_message_id() {
         20,
     );
     let first = chats
-        .list_agent_unread_requests(WS, None, None, 1)
+        .list_agent_unread_requests(WS, &UNNAMED, None, 1)
         .expect("first page");
     assert_eq!(first[0].message_id, "a");
     let second = chats
-        .list_agent_unread_requests(WS, None, Some((20, "a".into())), 1)
+        .list_agent_unread_requests(WS, &UNNAMED, Some((20, "a".into())), 1)
         .expect("second page");
     assert_eq!(second[0].message_id, "b");
     chats
-        .mark_thread_read_by_agent(WS, None, "thread", 20, "a", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 20, "a", None, 30, &NO_FAULTS)
         .expect("read");
     assert_eq!(outside_requests(&chats), ["b"]);
 }
@@ -778,10 +1204,10 @@ fn agent_read_cursor_rejects_stale_revision() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 10, "m1", None, 20, &NO_FAULTS)
         .expect("advance");
     let error = chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
         .unwrap_err();
     assert_eq!(
         error.code(),
@@ -798,10 +1224,10 @@ fn agent_read_cursor_clamps_to_latest_and_never_moves_back() {
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     send(&mut chats, "thread", "m2", ChatActorKind::Human, None, 20);
     let clamped = chats
-        .mark_thread_read_by_agent(WS, None, "thread", 999, "z", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 999, "z", None, 30, &NO_FAULTS)
         .expect("clamp");
     let backward = chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 31, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 10, "m1", None, 31, &NO_FAULTS)
         .expect("backward");
     assert_eq!(
         (
@@ -820,10 +1246,10 @@ fn agent_read_revision_bumps_only_on_advance() {
     let mut chats = LinkedChatStore::new(&mut store);
     start(&mut chats, "thread", "m1", ChatActorKind::Human, 10);
     let first = chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 10, "m1", None, 20, &NO_FAULTS)
         .expect("first");
     let replay = chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
         .expect("replay");
     assert_eq!(
         (first.revision, replay.revision),
@@ -841,10 +1267,10 @@ fn agent_unread_requires_latest_human_message_beyond_cursor() {
     start(&mut chats, "agent", "a1", ChatActorKind::Human, 11);
     send(&mut chats, "agent", "a2", ChatActorKind::Agent, None, 12);
     chats
-        .mark_thread_read_by_agent(WS, None, "human", 10, "h1", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "human", 10, "h1", None, 20, &NO_FAULTS)
         .expect("read");
     let rows = chats
-        .list_agent_unread_threads(WS, None, None, 10)
+        .list_agent_unread_threads(WS, &UNNAMED, None, 10)
         .expect("unread");
     assert!(
         rows.is_empty(),
@@ -860,10 +1286,10 @@ fn agent_unread_tie_breaks_equal_timestamps_by_message_id() {
     start(&mut chats, "thread", "a", ChatActorKind::Human, 10);
     send(&mut chats, "thread", "b", ChatActorKind::Human, None, 10);
     chats
-        .mark_thread_read_by_agent(WS, None, "thread", 10, "a", None, 20, &NO_FAULTS)
+        .mark_thread_read_by_agent(WS, &UNNAMED, "thread", 10, "a", None, 20, &NO_FAULTS)
         .expect("read a");
     let rows = chats
-        .list_agent_unread_threads(WS, None, None, 10)
+        .list_agent_unread_threads(WS, &UNNAMED, None, 10)
         .expect("unread");
     assert_eq!(
         rows[0].latest_message_id, "b",
