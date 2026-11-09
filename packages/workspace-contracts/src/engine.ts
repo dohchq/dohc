@@ -1008,7 +1008,7 @@ interface ChatAgentRequestRecord {
 }
 
 // An unread request with what a waiting agent shows.
-export interface ChatAgentRequestDetail {
+interface ChatAgentRequestDetail {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   channel: {

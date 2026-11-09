@@ -259,7 +259,7 @@ type ChatMentionsParams = ChatPageParams & {
 };
 // Which agent reads. A run dohc dispatched names itself, and the engine reads
 // its agent from the run's record.
-export type ChatAgentReaderParams =
+type ChatAgentReaderParams =
   | (ChatsJsonObject & { kind: "run"; runId: string })
   | (ChatsJsonObject & { kind: "unnamed" })
   | (ChatsJsonObject & {
