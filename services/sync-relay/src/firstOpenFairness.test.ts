@@ -83,9 +83,13 @@ const checkpointOf = (markdown: string) => {
 const everyday = (label: string) => Array.from({length: 200}, (_, i) => `${label} ${i}: **bold**, *italic*, \`code\` and [a link](https://example.com/${i}).`).join("\n\n");
 /** Builds in full, and the engine settles `a && b` in code to other bytes. Each cycle numbers it anew, so each is a new source. */
 const pathological = (cycle: number) => {
-  let text = `Log ${cycle}\n=====\n\n`;
-  for (let i = 0; Buffer.byteLength(text) < PATHOLOGICAL_BYTES - 64; i++) text += `Use \`a && b\` here, entry ${cycle}-${i}.\n\n`;
-  return text;
+  const lines = [`Log ${cycle}\n=====\n\n`];
+  for (let i = 0, bytes = lines[0]!.length; bytes < PATHOLOGICAL_BYTES - 64; i++) {
+    const line = `Use \`a && b\` here, entry ${cycle}-${i}.\n\n`;
+    lines.push(line);
+    bytes += line.length;
+  }
+  return lines.join("");
 };
 
 it("keeps live edits, a sibling activation and a restore within budget while a writer replaces a note first open refuses every minute", async () => {
@@ -111,8 +115,10 @@ it("keeps live edits, a sibling activation and a restore within budget while a w
   raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
     VALUES ('grant-1','share-1','user','reader-2',NULL,'edit',1,'active',0,NULL,NULL)`).run();
   let originSeq = 0;
+  // Composed before any timing starts: making the text is the writer's work, not the relay's.
+  const notes = Array.from({length: CYCLES + 1}, (_, cycle) => new TextEncoder().encode(pathological(cycle)));
   const write = (cycle: number): FirstOpenSourceIdentity => {
-    const bytes = new TextEncoder().encode(pathological(cycle)), sourceDigest = sha256Hex(bytes), sourceMomentId = `log-${cycle}`;
+    const bytes = notes[cycle]!, sourceDigest = sha256Hex(bytes), sourceMomentId = `log-${cycle}`;
     storage.putBlob({workspaceId: WS, sha256: sourceDigest, content: bytes, createdAtMs: 1});
     storage.appendLogBatch({workspaceId: WS, originId: "agent-device", ops: [{originSeq: originSeq++, opKind: "moment.append", recordedAtMs: 1,
       payloadJson: JSON.stringify({momentId: sourceMomentId, objectId: OBJECT, versionId: "main", operation: "write", path: PATH, payloadAfterPath: PATH,

@@ -51,6 +51,11 @@ vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => {
 // publishes its base, and the host pulls, captures and completes the
 // activation, while the appends go on.
 //
+// Contention: the first request is held, after the engine's check and after
+// each catch-up, until the appender's next push has landed, so each of its
+// writer attempts meets a moved log and it answers `contention`. Later
+// requests run unheld, at the appender's own rate.
+//
 // Time: the relay's publisher and the host's first-open retries read one
 // injected clock that runs SCALE times faster than real time, so the relay's
 // one-minute quiet interval and the host's backoffs pass quickly. Builds, the
@@ -112,11 +117,30 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
     writes.push(written.kind);
     return written;
   };
+  // The appender's pushes, as they land at the relay.
+  let appended = 0;
+  const landed = new Set<() => void>();
+  const nextAppend = () => new Promise<void>(resolve => landed.add(resolve));
+  let held = false;
+  const catchUpFirstOpen = storage.catchUpFirstOpen.bind(storage);
+  storage.catchUpFirstOpen = async (proof, signal) => {
+    const caught = await catchUpFirstOpen(proof, signal);
+    if (held) await nextAppend();
+    return caught;
+  };
   let supervisor: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
   const publish = createFirstOpenPublisher({storage, namespace: history.namespace, nowMs: clock,
-    activation: () => supervisor?.current()?.activationConfig(), host: () => supervisor?.current()});
+    activation: () => supervisor?.current()?.activationConfig(), host: () => {
+      const host = supervisor?.current();
+      return host && {checkFirstOpenCandidate: async (...args: Parameters<typeof host.checkFirstOpenCandidate>) => {
+        const answer = await host.checkFirstOpenCandidate(...args);
+        if (held) await nextAppend();
+        return answer;
+      }};
+    }});
   const firstOpen: typeof publish = async input => {
     writes = [];
+    held = !requests.some(row => row.outcome === "contention");
     const outcome: FirstOpenOutcome = await publish(input);
     requests.push({atS: virtualSeconds(), outcome: outcome.kind === "unavailable" ? outcome.reason : outcome.kind === "refused" ? `refused:${outcome.reason}` : outcome.kind,
       writerAttempts: writes});
@@ -169,13 +193,15 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
       status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}});
 
   // The other writer: an agent writing notes outside the shared folder, at its steady rate, until the note activates.
-  let appending = true, appended = 0;
+  let appending = true;
   const appendStarted = performance.now();
   const appender = (async () => {
     for (let i = 0; appending; i++) {
       const tick = performance.now();
       await writeFile(`notes/agent-${i % 20}.md`, `Agent note ${i}\n`);
       appended++;
+      for (const resolve of landed) resolve();
+      landed.clear();
       const wait = APPEND_EVERY_MS - (performance.now() - tick);
       if (wait > 0) await pace(wait);
     }
@@ -218,6 +244,9 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
     budget: {appendEveryMs: APPEND_EVERY_MS, scale: SCALE, runBudgetMs: RUN_BUDGET_MS, requestBudget: REQUEST_BUDGET},
     appender: {appended, appendsPerSecond: Number((appended / appendSeconds).toFixed(2)), rowsWhileFirstOpenRan: headAtActivation - headAtStart, appendedBeforeActivation},
     activatedRealSeconds: Number((activatedMs / 1_000).toFixed(1)), activatedVirtualSeconds: progress.at(-1)?.atS, requests, progress, reports}, null, 2));
+  // The held request met a moved log on each of its three writer attempts; every request stopped within three.
+  expect(requests.find(row => row.outcome === "contention")?.writerAttempts).toEqual(["retry", "retry", "retry"]);
+  for (const row of requests) expect(row.writerAttempts.length).toBeLessThanOrEqual(3);
   expect(requests.length).toBeLessThanOrEqual(REQUEST_BUDGET);
   expect(activatedMs).toBeLessThanOrEqual(RUN_BUDGET_MS);
   // The appends went on through the first open: the workspace log moved while it ran.
