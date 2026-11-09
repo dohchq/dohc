@@ -12,6 +12,8 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  # posthog-js depends on core-js, whose postinstall only prints a message.
+  core-js: false
   msgpackr-extract: false
 
 minimumReleaseAgeExclude:
