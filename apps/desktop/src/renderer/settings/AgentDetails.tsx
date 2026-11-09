@@ -107,8 +107,9 @@ function Term(props: { label: string; children: ReactNode }) {
 
 /**
  * An agent's details under its row: its color, how dohc starts it, and how
- * long a run may take, or what an agent you run reaches. Each change saves
- * at once.
+ * long a run may take, or what an agent you run reaches. An agent you run has
+ * no command: one would make it an agent dohc starts and end its MCP config.
+ * Each change saves at once.
  */
 export function AgentDetails(props: {
   agent: Agent;
@@ -165,7 +166,7 @@ export function AgentDetails(props: {
             </>}
           </Term>
         ) : null}
-        <Term label="Command">
+        {agent.launch ? <Term label="Command">
           {editing === "command" ? (
             <InlineField label={`Command that starts ${agent.name}`} initial={agent.launch ? launchCommand(agent.launch) : ""} className="w-full font-mono"
               hint={(draft) => launchCommandHint(launchFromCommand(draft, profile))}
@@ -176,7 +177,7 @@ export function AgentDetails(props: {
           </> : (
             <button type="button" className={LINK} onClick={() => setEditing("command")}>Use your own command</button>
           )}
-        </Term>
+        </Term> : null}
       </dl>
       {agent.launch ? null : (
         <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">

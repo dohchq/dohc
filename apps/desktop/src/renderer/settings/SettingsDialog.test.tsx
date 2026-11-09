@@ -1440,18 +1440,18 @@ describe("SettingsDialog", () => {
     }));
   });
 
-  it("gives an agent you run a command of its own, and leaves it off", async () => {
+  it("shows an agent you run no command, so it stays one you run", async () => {
     const user = userEvent.setup();
     const { launch: _launch, ...mcpOnly } = testAgent({ name: "Nova", enabled: false });
     bridge.getUserSettings.mockResolvedValueOnce({ settings: { ...DEFAULT_USER_SETTINGS, agents: { default: mcpOnly } }, source: "stored" });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     await user.click(await screen.findByRole("button", { name: "Nova actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Details" }));
-    // Without a way to start it, there is nothing to stop.
+    // dohc never starts it, so there is nothing to stop and no command to give.
+    expect(await screen.findByText("Reaches every workspace dohc opens on this computer.")).toBeTruthy();
     expect(screen.queryByText("Stops after")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Use your own command" }));
-    await user.type(screen.getByRole("textbox", { name: "Command that starts Nova" }), "node agent.mjs{Enter}");
-    await waitFor(() => expect(savedSettings()?.agents.default).toMatchObject({ launch: { command: "node agent.mjs" }, enabled: false }));
+    expect(screen.queryByText("Command")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use your own command" })).toBeNull();
   });
 
   it("keeps an agent's command when the field is left empty", async () => {
