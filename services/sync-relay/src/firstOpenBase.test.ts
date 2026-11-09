@@ -15,7 +15,7 @@ import * as richdocSeed from "@dohc/ydoc-projection/richdoc-seed";
 import { encodeRichdocSeed, richdocSeedFile, seedClientId } from "@dohc/ydoc-projection/richdoc-seed";
 import * as projectionImport from "../../../packages/ydoc-projection/src/import-export.js";
 import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
-import type { NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
+import { parseNativeOwnerActivationSource, type NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import {
   MAX_YDOC_UPDATE_BYTES,
   buildFirstOpenBase,
@@ -30,6 +30,7 @@ import {
   activationCaptureBytes,
   activationDescriptorBytes,
   activationDescriptorReserve,
+  activationReserveSource,
   ordinaryActivationEntryBytes,
   ordinaryActivationReadBytes,
   type KnownActivationSource,
@@ -124,11 +125,11 @@ describe("the verifier's byte counts", () => {
       sourceMomentId: "head-moment", sourceDigest: sha256(markdown), sourceByteLength: Buffer.byteLength(markdown), nativeHeadSequence: 1,
       fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length };
     const logEntryBytes = ordinaryActivationEntryBytes({ relay_seq: 2, origin_id: "origin", origin_seq: 1, op_kind: "ydoc.update" }, Buffer.byteLength(payload));
-    const verify = (bounds: { maxCaptureBytes: number; maxBytesPerDrain: number }) => {
-      const input = {source, document: live, baselineBytes: base, fullState, bounds: {maxEntriesPerDrain: 10, ...bounds}};
+    const verify = (bounds: { maxCaptureBytes: number; maxBytesPerDrain: number }, captured = source) => {
+      const input = {source: captured, document: live, baselineBytes: base, fullState, bounds: {maxEntriesPerDrain: 10, ...bounds}};
       const history = readOrdinaryActivationHistory(storage, input);
-      const validation = validateOrdinaryActivation({document: live, currentPath: source.currentPath, baselineBytes: base,
-        cut: {source, fullState, history, maxBytesPerDrain: bounds.maxBytesPerDrain}}, policy);
+      const validation = validateOrdinaryActivation({document: live, currentPath: captured.currentPath, baselineBytes: base,
+        cut: {source: captured, fullState, history, maxBytesPerDrain: bounds.maxBytesPerDrain}}, policy);
       if (validation.kind !== "accepted") throw new Error(validation.message);
       return verifyOrdinaryActivationCut(storage, {...input, baseline: validation.baseline, history, proof: validation.proof});
     };
@@ -198,9 +199,33 @@ describe("the verifier's byte counts", () => {
     const known: KnownActivationSource = { relayDatabaseNamespace: "history", workspaceId: "工作区-ü", objectId: "objét-🎉",
       currentPath: "notes/café \"q\"\\\u0001.md", replicationEpoch: "epoch-ü", streamIdentity: "stream", baseOriginId: "relay-origin-ü",
       sourceMomentId: "moment-ü", sourceDigest: sha256("source"), sourceByteLength: 2_097_152 };
+    const widest = activationReserveSource(known), descriptor = JSON.stringify(widest);
     const reserve = activationDescriptorReserve(known);
-    if (process.env.DOHC_WRITE_FIRST_OPEN_FIXTURES === "1") writeFileSync(fixture, `${JSON.stringify({ known, reserve })}\n`);
-    expect(JSON.parse(readFileSync(fixture, "utf8"))).toEqual({ known, reserve });
+    expect(reserve).toBe(Buffer.byteLength(descriptor));
+    if (process.env.DOHC_WRITE_FIRST_OPEN_FIXTURES === "1") writeFileSync(fixture, `${JSON.stringify({ known, descriptor, reserve })}\n`);
+    expect(JSON.parse(readFileSync(fixture, "utf8"))).toEqual({ known, descriptor, reserve });
+    // The client's parser reads it as a successor's source, in native's field order.
+    const parsed = parseNativeOwnerActivationSource(JSON.parse(descriptor), known.currentPath, Number.MAX_SAFE_INTEGER);
+    expect(parsed.predecessorActivationId).toBe(`ordinary-activation-${"f".repeat(64)}`);
+    expect(JSON.stringify(parsed)).toBe(descriptor);
+  });
+
+  it("verifies a successor's descriptor at exactly its capture bytes, within the reserve", () => {
+    const history = baseOnlyHistory("# Shared\n\nResumed.\n");
+    try {
+      const B = history.base.length, root = history.source;
+      const successor: NativeOwnerActivationSource = { ...root, predecessorActivationId: `ordinary-activation-${sha256("root")}` };
+      const reserve = activationDescriptorReserve(root);
+      for (const source of [root, successor]) {
+        const descriptorBytes = activationDescriptorBytes(source);
+        expect(descriptorBytes).toBeLessThanOrEqual(reserve);
+        const capture = activationCaptureBytes(B, B, descriptorBytes);
+        expect(history.verify({ maxCaptureBytes: capture, maxBytesPerDrain: 1_000_000 }, source)).toEqual({ verified: true });
+        expect(() => history.verify({ maxCaptureBytes: capture - 1, maxBytesPerDrain: 1_000_000 }, source)).toThrow("capture exceeds");
+      }
+      expect(activationDescriptorBytes(successor) - activationDescriptorBytes(root))
+        .toBe(Buffer.byteLength(`,"predecessorActivationId":"${successor.predecessorActivationId}"`));
+    } finally { history.close(); }
   });
 });
 
