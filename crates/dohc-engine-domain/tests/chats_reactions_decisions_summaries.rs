@@ -646,7 +646,8 @@ fn record_hash_as_before(store: &mut EngineStore, request_id: &str, hash: &str) 
 fn a_request_recorded_before_names_were_cleaned_replays_its_saved_result() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
-    let name = "Ana\u{202E}lisa";
+    // The old hash held the name trimmed, so the spaces must not reach it.
+    let name = " Ana\u{202E}lisa ";
     let start = StartChannelThread {
         automation: None,
         workspace_id: WS.to_owned(),
@@ -716,7 +717,8 @@ fn a_request_recorded_before_names_were_cleaned_replays_its_saved_result() {
 
     // Fields in each request's hash order. A request with no attachments
     // hashes their count, eight zero bytes.
-    let (name, none, no_attachments): (&[u8], &[u8], &[u8]) = (name.as_bytes(), b"", &[0; 8]);
+    let (name, none, no_attachments): (&[u8], &[u8], &[u8]) =
+        (name.trim().as_bytes(), b"", &[0; 8]);
     let start_hash = recorded_hash(&[
         b"thread",
         b"opening",
