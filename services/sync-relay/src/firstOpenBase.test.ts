@@ -506,6 +506,29 @@ describe("first-open worker", () => {
     expect(await after).toEqual({ kind: "busy" });
   });
 
+  it("keeps a note's turn after as many other notes' builds are ended as the executor remembers", async () => {
+    const maxEndedBuilds = 2;
+    const { pool, journal } = fixture({ maxEndedBuilds });
+    const activate = pool.ordinaryActivation(policy);
+    const pass = () => activate({ document: journal.document, currentPath: journal.currentPath, baselineBytes: Uint8Array.of(255) })
+      .then(answer => answer.kind, () => "threw");
+    const note = input("Body");
+    const first = pool.buildFirstOpenBase(policy, note);
+    expect(await pass()).not.toBe("retry");
+    expect(await first).toEqual({ kind: "busy" });
+    const others: string[] = [];
+    for (let index = 0; index < maxEndedBuilds; index++) {
+      const build = pool.buildFirstOpenBase(policy, { ...input("Other"), document: { ...document, objectId: `other-${index}` } });
+      const waited = await pass() === "retry";
+      others.push(`${waited ? "waited" : "ended"} ${(await build).kind}`);
+    }
+    const next = pool.buildFirstOpenBase(policy, note);
+    expect(await pass()).toBe("retry");
+    expect((await next).kind).toBe("built");
+    // With the memory full, an activation waits behind a build rather than end it.
+    expect(others).toEqual([...Array<string>(maxEndedBuilds - 1).fill("ended busy"), "waited built"]);
+  });
+
   it("keeps an ended build's slot busy until its child exits, even when the build's answer arrives first", async () => {
     const { pool, journal, validate } = fixture();
     // Capture the build's child and keep its job from reaching it, so only this test answers for it.

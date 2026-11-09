@@ -85,7 +85,7 @@ export function createValidatorFailureLog(log: (message: string) => void = messa
  * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
  * Activation, restore and first-open work together hold at most one slot, so live edits always keep the other.
  */
-export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFailure = createValidatorFailureLog(), { firstOpenBuildMs = FIRST_OPEN_BUILD_MS } = {}) {
+export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFailure = createValidatorFailureLog(), { firstOpenBuildMs = FIRST_OPEN_BUILD_MS, maxEndedBuilds = MAX_ENDED_BUILDS } = {}) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false, yielding = 0;
@@ -205,7 +205,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       if (building.note !== undefined) {
         ended.delete(building.note);
         ended.add(building.note);
-        if (ended.size > MAX_ENDED_BUILDS) ended.delete(ended.values().next().value!);
+        if (ended.size > maxEndedBuilds) ended.delete(ended.values().next().value!);
       }
       yielding++;
       try {
