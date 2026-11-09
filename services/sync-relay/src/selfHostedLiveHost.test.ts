@@ -23,9 +23,14 @@ import type {StorageContext} from "./storage/context";
 // While `hold` is set, opening one waits for its release. `synced` counts the flushes of marker files.
 const markerFailure = vi.hoisted(() => ({error: undefined as Error | undefined, synced: 0,
   hold: undefined as {entered(): void; release: Promise<void>} | undefined}));
+// While `error` is set, creating a folder fails, so a pass cannot prepare its hosted stores.
+const folderFailure = vi.hoisted(() => ({error: undefined as Error | undefined}));
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return {...actual, open: async (...args: Parameters<typeof actual.open>) => {
+  return {...actual, mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+    if (folderFailure.error) throw folderFailure.error;
+    return actual.mkdir(...args);
+  }, open: async (...args: Parameters<typeof actual.open>) => {
     if (!String(args[0]).endsWith(".diverged")) return actual.open(...args);
     const hold = markerFailure.hold;
     if (hold) {markerFailure.hold = undefined; hold.entered(); await hold.release;}
@@ -36,7 +41,7 @@ vi.mock("node:fs/promises", async importOriginal => {
 });
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => {Object.assign(markerFailure, {error: undefined, synced: 0, hold: undefined}); vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
+afterEach(async () => {Object.assign(markerFailure, {error: undefined, synced: 0, hold: undefined}); folderFailure.error = undefined; vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 type Configuration = {workspaces: unknown[]; activation: {targets: unknown[]}; hostId: string; instanceId: string};
 type Hosted = ServiceHostedSet["documents"][number];
 type Workspace = ServiceHostedSet["workspaces"][number];
@@ -298,10 +303,12 @@ it.each([
 
 // Proves: Stop names a failed start only while the daemon's last start failed.
 // A discovery failure leaves the daemon waiting for the next pass to start it,
-// and a start that later succeeds answers as a running daemon.
+// and a recovery read's later successful start ends the start failure, even
+// once that daemon fails and the next pass cannot replace it.
 it("answers Stop with a start failure only while the daemon's start failed", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   const discoveryFailure = new Error("private discovery failure detail"), startFailure = new Error("private engine start failure detail");
+  const folder = new Error("private store folder failure detail");
   const failing: {discovery?: Error; start?: Error} = {discovery: discoveryFailure};
   const f = await fixture({beforeStart: async () => {if (failing.start) throw failing.start;}, seed: async (_data, relay) => {
     const scan = relay.storage.scanServiceHostCandidateShares.bind(relay.storage);
@@ -330,9 +337,20 @@ it("answers Stop with a start failure only while the daemon's start failed", asy
   await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(startFailure), {timeout: 10_000});
   expect(await stop(), "a failed start").toEqual({code: "host-start-failed", sessionHost: "couldn't start"});
 
-  failing.start = undefined; f.host.reconcile();
-  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
-  expect(await stop(), "a later start").toEqual({code: "host-not-loaded", sessionHost: "running, document not loaded yet"});
+  // Passes now fail while preparing their stores, before they could start a daemon.
+  folderFailure.error = folder; f.host.reconcile();
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(folder), {timeout: 10_000});
+  failing.start = undefined;
+  const identity = {replicationEpoch: "epoch", streamIdentity: "stream"};
+  f.storage.recordServiceKeptEdits({identity, outboxId: "outbox", binding, reason: "invalid-update", headDeliveryId: "delivery", refusalKey: "refusal", nowMs: 1});
+  const kept = f.storage.readServiceKeptEdits({workspaceId: scope.workspaceId, identity, outboxId: "outbox"})!;
+  await expect(f.host.keptEdits.page(kept, undefined)).resolves.toEqual({kind: "page"});
+  expect(f.starts).toHaveLength(1);
+  // The recovery read's daemon fails, and the next pass removes it without starting another.
+  f.starts[0]!.controller.abort();
+  await vi.waitFor(() => {expect(f.starts[0]!.close).toHaveBeenCalled(); expect(f.host.current()).toBeUndefined();}, {timeout: 10_000});
+  expect(f.starts).toHaveLength(1);
+  expect(await stop(), "a failed pass after a later successful start").toEqual({code: "host-not-loaded", sessionHost: "starting"});
   expect(f.enrollment()?.ownerStop).toBeNull();
 });
 
