@@ -28,6 +28,8 @@ type CliCommandBody =
   | ({ verb: "linksResolve" } & ResolveInput)
   | { verb: "stopSync"; agent?: string }
   | { verb: "shareCopy"; shareId: string; grantId: string }
+  | { verb: "shareAgents"; shareId: string; grantId: string; cursor?: string }
+  | { verb: "shareDisconnect"; shareId: string; grantId: string; connectionId: string }
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
@@ -1256,7 +1258,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   share: {
-    summary: "Read copy details for an owned share grant.",
+    summary: "Read copy details, and list and disconnect a link's agents.",
     notes: ["Requires the original workspace and its signed-in owner account."],
     verbs: {
       copy: {
@@ -1265,6 +1267,27 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
           const [shareId, grantId, ...extra] = input.operands; noExtraArgs(extra, "share copy");
           if (!shareId || !grantId) return fail("Provide a share id and grant id.");
           return { verb: "shareCopy", shareId, grantId };
+        },
+      },
+      agents: {
+        capabilityId: "share.link.agents.list", summary: "List the agents connected through a share link.", operands: "<shareId> <grantId>",
+        notes: ["Find a link's share id and grant id with dohc access sharing granted.",
+          "Each name is the one the agent reported. dohc cannot check it."],
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+        parse: input => {
+          const [shareId, grantId, ...extra] = input.operands; noExtraArgs(extra, "share agents");
+          if (!shareId || !grantId) return fail("Provide a share id and grant id.");
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "shareAgents", shareId, grantId, ...(cursor ? { cursor } : {}) };
+        },
+      },
+      disconnect: {
+        capabilityId: "share.link.agent.disconnect", summary: "Disconnect one agent from a share link.", operands: "<shareId> <grantId> <connectionId>",
+        notes: ["Find the connection id with dohc share agents."],
+        parse: input => {
+          const [shareId, grantId, connectionId, ...extra] = input.operands; noExtraArgs(extra, "share disconnect");
+          if (!shareId || !grantId || !connectionId) return fail("Provide a share id, grant id, and connection id.");
+          return { verb: "shareDisconnect", shareId, grantId, connectionId };
         },
       },
     },

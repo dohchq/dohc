@@ -35,11 +35,12 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
   const { tls, cert } = testCertificate();
   const spki = createHash("sha256").update(cert.publicKey.export({ type: "spki", format: "der" })).digest("base64");
   const failures: string[] = [];
-  const application = createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
+  const createApplication = () => createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
     relayExchangeKey: input.exchangeKey, publicHosts: new Set(["viewer.example.com"]),
     viewerAssetsDir,
     appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
     ...(input.editLinks ? editLinkOptions : {}) });
+  let application = createApplication();
   const server = https.createServer(tls, async (request, response) => {
     try {
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -54,11 +55,12 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
   });
   // The live editor's socket, built as share-web's main.ts builds it, with a self-hosted server's limits.
   const limits = selfHostLiveProfile().gateway;
-  const linkGateway = application.linkLive ? createLiveGateway({ bufferBudget: createLiveBufferBudget(limits.maxBufferedBytes),
+  const createLinkGateway = () => application.linkLive ? createLiveGateway({ bufferBudget: createLiveBufferBudget(limits.maxBufferedBytes),
     publicHosts: new Set(["viewer.example.com"]), publicOrigin: sharedDatasetViewerOrigin, path: "/api/live/link", limits,
     resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute }) : undefined;
+  let linkGateway = createLinkGateway();
   if (linkGateway) server.on("upgrade", (request, socket, head) => {
-    if (request.url?.startsWith("/api/live/link?")) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
+    if (request.url?.startsWith("/api/live/link?") && linkGateway) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw Error("No TLS listener.");
@@ -66,7 +68,12 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
   try {
     const browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${spki}`,
       `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`, "--no-proxy-server"] });
-    return { browser, failures, handle: application.handle, async close() { try { await browser.close(); } finally { await closeServer(); } } };
+    return { browser, failures,
+      // Always the running share-web, so a handle taken before restart() reaches the new one.
+      handle: (request: Request) => application.handle(request),
+      // A share-web restart: a new process's memory behind the same address. The relay keeps what lasts.
+      restart() { linkGateway?.close(); application = createApplication(); linkGateway = createLinkGateway(); },
+      async close() { try { await browser.close(); } finally { await closeServer(); } } };
   } catch (error) { await closeServer(); throw error; }
 }
 

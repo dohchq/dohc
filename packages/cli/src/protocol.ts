@@ -8,6 +8,9 @@ import {
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
+import {
+  DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult, ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
+} from "@dohc/workspace-contracts/share-link-agents";
 import { AccessAnswer, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
@@ -522,6 +525,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("shareAgents"), args: ShareLinkAgentsInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("shareDisconnect"), args: ShareLinkAgentDisconnectInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessRefresh"), args: z.object(argsBase).strict() }).strict(),
@@ -635,6 +640,8 @@ export const CLI_CAPABILITIES = {
   linksIn: ["links.in"],
   linksResolve: ["links.resolve"],
   shareCopy: ["share.copy.read"],
+  shareAgents: ["share.link.agents.list"],
+  shareDisconnect: ["share.link.agent.disconnect"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
   accessRefresh: ["access.refresh"],
@@ -1775,6 +1782,8 @@ export const cliResultSchemas = {
   linksIn: LinksInResult,
   linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
+  shareAgents: ListRelayShareLinkAgentsResult,
+  shareDisconnect: DisconnectRelayShareLinkAgentResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,
   accessRefresh: AccessRefreshResult,

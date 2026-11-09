@@ -178,6 +178,8 @@
   "desktop:retune-relay-share-link": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:rotate-relay-share-link": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:revoke-relay-share-link": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-relay-share-link-agents": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:disconnect-relay-share-link-agent": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-relay-share-discussion": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:append-relay-share-discussion": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:delete-relay-share-discussion-message": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

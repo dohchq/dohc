@@ -146,7 +146,7 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
-  it("records the 19 owner relay operations with their existing admission", () => {
+  it("records the 21 owner relay operations with their existing admission", () => {
     const channels = [
       "desktop:list-owner-live-documents",
       "desktop:list-owner-live-refusals",
@@ -158,6 +158,8 @@ describe("main inventories", () => {
       "desktop:retune-relay-share-link",
       "desktop:rotate-relay-share-link",
       "desktop:revoke-relay-share-link",
+      "desktop:list-relay-share-link-agents",
+      "desktop:disconnect-relay-share-link-agent",
       "desktop:list-relay-share-discussion",
       "desktop:append-relay-share-discussion",
       "desktop:delete-relay-share-discussion-message",

@@ -6,6 +6,8 @@ import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sy
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
+import { RelayShareLinkAgent, ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/workspace-contracts/share-link-agents";
+export { DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult, RelayShareLinkAgent } from "@dohc/workspace-contracts/share-link-agents";
 import { accessOperations } from "./accessOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
@@ -4317,6 +4319,37 @@ export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
 export type RevokeRelayShareLinkResult = z.infer<
   typeof RevokeRelayShareLinkResult
 >;
+
+// The window, the CLI, and MCP share these contracts. The window's payload
+// also names its workspace, which main checks against the window.
+export const ListRelayShareLinkAgentsPayload = ShareLinkAgentsInput
+  .extend({ workspaceId: WORKSPACE_ID })
+  .strict();
+export type ListRelayShareLinkAgentsPayload = z.infer<
+  typeof ListRelayShareLinkAgentsPayload
+>;
+
+export const RelayShareLinkAgentsResponse = z.object({
+  ok: z.literal(true),
+  agents: z.array(RelayShareLinkAgent.extend({ status: z.literal("active") })).max(50),
+  nextCursor: RELAY_SHARE_LINK_CURSOR.nullable(),
+});
+
+export const DisconnectRelayShareLinkAgentPayload = ShareLinkAgentDisconnectInput
+  .extend({ workspaceId: WORKSPACE_ID })
+  .strict();
+export type DisconnectRelayShareLinkAgentPayload = z.infer<
+  typeof DisconnectRelayShareLinkAgentPayload
+>;
+
+// Disconnect is idempotent while the link is active: a connection already
+// disconnected, or retired by Reset link or by widening the link, answers with
+// its row. Once End link has ended the link, the relay answers 404, as for
+// any link this owner does not hold, and End has already retired its agents.
+export const RelayShareLinkAgentDisconnectResponse = z.object({
+  ok: z.literal(true),
+  agent: RelayShareLinkAgent.extend({ status: z.enum(["disconnected", "retired"]) }),
+});
 
 const RELAY_SHARE_DISCUSSION_CURSOR = z
   .string()

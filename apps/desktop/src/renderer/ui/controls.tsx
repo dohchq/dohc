@@ -226,8 +226,9 @@ export function FieldError(props: { id: string; children: ReactNode; className?:
  * Notices row, reported through the shell's error hook; here the mark says it
  * failed and Try again reads again. A caller that passes `children` also shows
  * that sentence beside the mark. It wraps, and Try again follows it on the same
- * line when both fit. */
-export function RetryRow(props: { testId: string; onRetry: () => void; children?: ReactNode }) {
+ * line when both fit. `disabled` holds Try again while another read of the
+ * same list is in flight. */
+export function RetryRow(props: { testId: string; onRetry: () => void; disabled?: boolean; children?: ReactNode }) {
   return (
     <div data-testid={props.testId} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1">
       {props.children ? (
@@ -238,7 +239,7 @@ export function RetryRow(props: { testId: string; onRetry: () => void; children?
       ) : (
         <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
       )}
-      <SecondaryButton size="compact" onClick={props.onRetry}>
+      <SecondaryButton size="compact" disabled={props.disabled} onClick={props.onRetry}>
         Try again
       </SecondaryButton>
     </div>

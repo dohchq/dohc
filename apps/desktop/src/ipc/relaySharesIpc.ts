@@ -53,6 +53,7 @@ import {
 import { z } from "zod";
 import {OwnerRestoreActionResponse} from "./ownerRestoreContract";
 import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import { createShareLinkAgentActions } from "./shareLinkAgentActions";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -902,6 +903,19 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
+  // The active-workspace guard has matched the payload's workspace to this
+  // window. The actions name the workspace the operation holds.
+  const linkAgents = createShareLinkAgentActions<Workspace>({
+    remoteForWorkspace,
+    currentCredentialGeneration,
+    relayJson: relayShareJsonWithCredentials,
+    relayShareErrorCopy,
+  });
+  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+    linkAgents.list(operation, input);
+  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+    linkAgents.disconnect(operation, input);
+
   const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
       operation,
@@ -1281,6 +1295,8 @@ export function createRelaySharesIpcHandlers<
     retuneRelayShareLink,
     rotateRelayShareLink,
     revokeRelayShareLink,
+    listRelayShareLinkAgents,
+    disconnectRelayShareLinkAgent,
     listRelayShareDiscussion,
     pollRelayShareDiscussionActivity,
     cancelRelayShareDiscussionActivity,

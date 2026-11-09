@@ -36,6 +36,30 @@ The code and invite link belong to the owner's sharing. Shared profiles do not o
 
 Returns `{ status: "active", shareCode, browserInvitationUrl? } | { status: "ended" }`.
 
+### `dohc_list_link_agents`
+
+List the agents signed in through one share link, 50 a page. Requires the original workspace and its signed-in owner account. Find the link's shareId and grantId with `dohc access sharing granted`. reportedName is the name the agent's client reported; dohc cannot check it. Pass nextCursor as cursor until it is null.
+
+A link's agents belong to the owner's sharing. Shared profiles do not offer this read.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ agents: { connectionId, reportedName, connectedAtMs, lastActionAtMs }[], nextCursor }`.
+
+### `dohc_disconnect_link_agent`
+
+End one agent's connection through a share link. The link and its other agents keep working. Requires the original workspace and its signed-in owner account. Find connectionId with dohc_list_link_agents.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+- `connectionId`: `string`. Required.
+
+Returns `{ connectionId }`.
+
 ### `dohc_list_automations`
 
 Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.
@@ -845,7 +869,7 @@ With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } |
 
 ### `dohc share`
 
-Read copy details for an owned share grant.
+Read copy details, and list and disconnect a link's agents.
 
 Requires the original workspace and its signed-in owner account.
 
@@ -858,6 +882,32 @@ dohc share copy <shareId> <grantId> [options]
 Read a grant's share code and named-account invite link.
 
 With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvitationUrl? }` or `{ schemaVersion, status: "ended" }`.
+
+#### `dohc share agents`
+
+```sh
+dohc share agents <shareId> <grantId> [options]
+```
+
+List the agents connected through a share link.
+
+Find a link's share id and grant id with dohc access sharing granted. Each name is the one the agent reported. dohc cannot check it.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, agents: { connectionId, reportedName, connectedAtMs, lastActionAtMs }[], nextCursor }`.
+
+#### `dohc share disconnect`
+
+```sh
+dohc share disconnect <shareId> <grantId> <connectionId> [options]
+```
+
+Disconnect one agent from a share link.
+
+Find the connection id with dohc share agents.
+
+With `--json`, prints `{ schemaVersion, connectionId }`.
 
 ### `dohc document`
 

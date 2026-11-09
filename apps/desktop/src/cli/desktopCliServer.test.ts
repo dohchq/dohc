@@ -1,9 +1,10 @@
 import { liveStopError } from "../ipc/liveEditingStop";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
-import { getShareCopyDetails, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
+import { createShareLinkAgentActions } from "../ipc/shareLinkAgentActions";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import { closeTestStorages, testStorage, testHandler, request as relayRequest, inspectDatabase, storagePath, SHARE_WEB_ORIGIN, RELAY_EXCHANGE_KEY } from "@dohc/sync-relay/testing";
@@ -1635,6 +1636,99 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
     const f = await shareCopyFixture(); const context = await f.create().openCliWorkspace(f.workspace);
     await f.authorities.invalidate("workspace");
     await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+});
+
+// Both agent doors reach the Share dialog's Agents list and Disconnect through
+// desktop attachment admission. The relay stand-in records what main asks it.
+async function linkAgentsFixture() {
+  const root = await createTestScratch("dohc-cli-link-agents-");
+  const f = fixture(root);
+  let credentials: CloudCredentials = { serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
+    userId: "owner", email: "owner@test", token: "secret" };
+  const remote = vi.fn(async (workspace: RegistryEntry) => {
+    if (!workspaceRemoteMatchesCredentials(workspace.remote!, credentials)) throw Error("Sign in to the account that synced this workspace.");
+    return { credentials, credentialGeneration: 1 };
+  });
+  const agent = { connectionId: "connection", reportedName: "Claude", connectedAtMs: 1, lastActionAtMs: null };
+  const relay = vi.fn(async (_account: CloudCredentials, path: string, _init?: RequestInit): Promise<unknown> => path.endsWith("/disconnect")
+    ? { ok: true, agent: { ...agent, status: "disconnected" } }
+    : { ok: true, agents: [{ ...agent, status: "active" }], nextCursor: null });
+  f.dependencies.shareLinkAgents = createShareLinkAgentActions<RegistryEntry>({ remoteForWorkspace: remote, currentCredentialGeneration: () => 1,
+    relayJson: relay, relayShareErrorCopy: () => "The share changed. Try again." });
+  await f.create().startDesktopCliServer();
+  const transport = async (input: CliRequestWithoutToken) => {
+    const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
+    const response = cliTransportResponseSchema.parse(JSON.parse(line));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const cli = async (argv: string[]) => {
+    const result = await executeCli({ argv: [...argv, "--json"], cwd: root, env: {}, request: transport });
+    if (result.exitCode !== 0) return { ok: false, reason: result.stderr };
+    const { schemaVersion: _schemaVersion, ...answer } = JSON.parse(result.stdout);
+    return answer;
+  };
+  const list = (door: "cli" | "mcp", cursor?: string) => door === "mcp"
+    ? listLinkAgents({ root, home: "state", request: transport }, { shareId: "share", grantId: "grant", ...(cursor ? { cursor } : {}) })
+    : cli(["share", "agents", "share", "grant", ...(cursor ? ["--cursor", cursor] : [])]);
+  const disconnect = (door: "cli" | "mcp") => door === "mcp"
+    ? disconnectLinkAgent({ root, home: "state", request: transport }, { shareId: "share", grantId: "grant", connectionId: "connection" })
+    : cli(["share", "disconnect", "share", "grant", "connection"]);
+  return { ...f, root, agent, list, disconnect, transport, remote, relay,
+    otherAccount: () => { credentials = { ...credentials, userId: "stranger" }; } };
+}
+
+describe.each(["cli", "mcp"] as const)("link agents through %s", door => {
+  it("lists the agents of the admitted workspace's link with the owner's credentials", async () => {
+    const f = await linkAgentsFixture();
+    expect(await f.list(door)).toEqual({ agents: [f.agent], nextCursor: null });
+    expect(f.relay.mock.lastCall?.[0]).toMatchObject({ userId: "owner" });
+    expect(f.relay.mock.lastCall?.[1]).toBe("/sync/workspace/shares/share/links/grant/agents");
+    await f.list(door, "next");
+    expect(f.relay.mock.lastCall?.[1]).toBe("/sync/workspace/shares/share/links/grant/agents?cursor=next");
+  });
+  it("disconnects exactly the named connection", async () => {
+    const f = await linkAgentsFixture();
+    expect(await f.disconnect(door)).toEqual({ connectionId: "connection" });
+    expect(f.relay).toHaveBeenCalledOnce();
+    expect(f.relay.mock.lastCall?.slice(1)).toEqual(["/sync/workspace/shares/share/links/grant/agents/connection/disconnect", { method: "POST" }]);
+  });
+  it("refuses another account before contacting the relay", async () => {
+    const f = await linkAgentsFixture(); f.otherAccount();
+    expect(await f.list(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
+    expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses a received workspace at socket per-verb admission", async () => {
+    const f = await linkAgentsFixture(); vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+    expect(await f.list(door)).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it("refuses a received marker before reading credentials", async () => {
+    const f = await linkAgentsFixture(); f.workspace.shareView = {} as RegistryEntry["shareView"];
+    expect(await f.list(door)).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it("refuses a relay reply for another connection", async () => {
+    const f = await linkAgentsFixture();
+    f.relay.mockResolvedValue({ ok: true, agent: { ...f.agent, connectionId: "other", status: "disconnected" } });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false });
+  });
+  it("refuses a caller-named workspace before contacting the relay", async () => {
+    const f = await linkAgentsFixture();
+    await expect(f.transport({ protocolVersion: CLI_PROTOCOL_VERSION, door, verb: "shareAgents",
+      args: { shareId: "share", grantId: "grant", cwd: f.root, actor: "agent", workspaceId: "other-workspace" } } as unknown as CliRequestWithoutToken)).rejects.toThrow();
+    expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses a retired desktop attachment before reading credentials", async () => {
+    const f = await linkAgentsFixture(); const context = await f.create().openCliWorkspace(f.workspace);
+    await f.authorities.invalidate("workspace");
+    await expect(context.shareLinkAgents!.list({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
+    await expect(context.shareLinkAgents!.disconnect({ shareId: "share", grantId: "grant", connectionId: "connection" })).rejects.toThrow("This workspace changed while this ran. Try again.");
     expect(f.remote).not.toHaveBeenCalled();
   });
 });

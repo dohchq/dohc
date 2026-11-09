@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
+import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/workspace-contracts/share-link-agents";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
@@ -28,6 +29,8 @@ import {
   MCP_TOOL_CAPABILITIES,
   chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
+  listLinkAgents,
+  disconnectLinkAgent,
   createDocument,
   createRecord,
   dataset, publishApp,
@@ -151,6 +154,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     description: "Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.",
     inputSchema: ShareCopyInput.shape,
   }, async args => text(await getShareCopyDetails(ctx, args)));
+
+  register("dohc_list_link_agents", {
+    description: "List the agents signed in through one share link, 50 a page. Requires the original workspace and its signed-in owner account. Find the link's shareId and grantId with `dohc access sharing granted`. reportedName is the name the agent's client reported; dohc cannot check it. Pass nextCursor as cursor until it is null.",
+    inputSchema: ShareLinkAgentsInput.shape,
+  }, async args => text(await listLinkAgents(ctx, args)));
+
+  register("dohc_disconnect_link_agent", {
+    description: "End one agent's connection through a share link. The link and its other agents keep working. Requires the original workspace and its signed-in owner account. Find connectionId with dohc_list_link_agents.",
+    inputSchema: ShareLinkAgentDisconnectInput.shape,
+  }, async args => text(await disconnectLinkAgent(ctx, args)));
 
   register("dohc_list_automations", {
     description: "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",

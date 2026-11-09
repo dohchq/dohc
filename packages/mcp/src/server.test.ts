@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { getShareCopyDetails, type ToolContext } from "./tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -628,6 +628,44 @@ describe("share copy profile admission", () => {
   it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
     const request = vi.fn(async () => details);
     expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("link agent profile admission", () => {
+  const page = { agents: [{ connectionId: "connection", reportedName: "Claude", connectedAtMs: 1, lastActionAtMs: null }], nextCursor: null };
+  const tools = [
+    { name: "dohc_list_link_agents", verb: "shareAgents", input: { shareId: "share", grantId: "grant", cursor: "next" }, reply: page, call: listLinkAgents },
+    { name: "dohc_disconnect_link_agent", verb: "shareDisconnect", input: { shareId: "share", grantId: "grant", connectionId: "connection" }, reply: { connectionId: "connection" }, call: disconnectLinkAgent },
+  ] as const;
+  it.each(tools)("advertises and calls $name only for the owner profile", async ({ name, verb, input, reply }) => {
+    const request = vi.fn(async () => reply);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    expect(names).toContain(name);
+    expect((await client.callTool({ name, arguments: input })).structuredContent).toEqual(reply);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb, door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("offers neither tool to a %s profile", async shareAccess => {
+    const request = vi.fn(async () => page);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    for (const { name, input, call } of tools) {
+      expect(names).not.toContain(name);
+      expect(await client.callTool({ name, arguments: input })).toMatchObject({ isError: true });
+      expect(await call({ root: "/workspace", home: "/state", shareAccess, request }, input))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
+    const request = vi.fn(async () => page);
+    for (const { input, call } of tools) {
+      expect(await call({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("refuses a disconnect without a connection id before transport", async () => {
+    const request = vi.fn(async () => page);
+    expect(await disconnectLinkAgent({ root: "/workspace", home: "/state", request }, { shareId: "share", grantId: "grant" })).toMatchObject({ ok: false });
     expect(request).not.toHaveBeenCalled();
   });
 });

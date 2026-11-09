@@ -23,7 +23,7 @@ const bridgeMock = {
 };
 
 const notices = { report: vi.fn(), clear: vi.fn() };
-const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
 const callbacks = {
   onReviewConflicts: vi.fn(),
   onReviewChanges: vi.fn(),
@@ -106,6 +106,7 @@ function View(props: {
       sharesChanged();
     },
     failed: shareRemovals.failed,
+    agentDisconnected: shareRemovals.agentDisconnected,
   }), []);
   if (props.open === false) return null;
   return (
