@@ -4730,13 +4730,21 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
     expect(await readdir(root)).toEqual(["notes.md"]);
   });
 
-  it.skipIf(process.platform === "win32")("keeps the replaced file's permission bits", async () => {
+  // A Linux ACL's mask shows as the group bits, and Node can't read the ACL,
+  // so copying the group or other bits could let someone read what it denied.
+  it.skipIf(process.platform === "win32")("keeps only the owner's bits of a replaced file", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "run.sh", "old");
     await chmod(join(root, "run.sh"), 0o754);
-    await createDefaultDiskWriter(root).writeBinaryFile(join(root, "run.sh"), new Uint8Array([1, 2]));
-    expect((await stat(join(root, "run.sh"))).mode & 0o777).toBe(0o754);
+    await write(root, "shared.md", "old");
+    await chmod(join(root, "shared.md"), 0o640);
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeBinaryFile(join(root, "run.sh"), new Uint8Array([1, 2]));
+    await writer.writeTextFile(join(root, "shared.md"), "new\n");
+    expect((await stat(join(root, "run.sh"))).mode & 0o777, "run.sh").toBe(0o700);
+    expect((await stat(join(root, "shared.md"))).mode & 0o777, "shared.md").toBe(0o600);
     expect(await readFile(join(root, "run.sh"))).toEqual(Buffer.from([1, 2]));
+    expect(await readFile(join(root, "shared.md"), "utf8")).toBe("new\n");
   });
 
   it.skipIf(process.platform === "win32")("leaves a replaced file owner-only when its mode can't be copied", async () => {
