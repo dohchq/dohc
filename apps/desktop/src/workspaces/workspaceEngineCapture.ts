@@ -1914,18 +1914,17 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   };
 }
 
-// The temp takes the permission bits of the file it replaces, as the engine's
-// materializer does (`Replaced::apply_to` in materialize.rs). Group and other
-// bits stay only when the temp has the file's group or the two sets match, so
-// nobody gains access. The temp starts owner-only, so a failed copy leaves the
-// file owner-only and never fails the write.
+// The temp takes only the owner's bits of the file it replaces. Node can't
+// read a file's ACL, and a Linux ACL's mask shows as the group bits, so
+// copying the group or other bits could let someone read what the ACL denied.
+// The engine's materializer keeps only the owner's bits on a Unix where it
+// can't check for an ACL (`temp_mode` in materialize.rs). The temp starts
+// owner-only, so a failed copy leaves it so and never fails the write.
 async function keepPermissions(handle: FileHandle, replaced: Stats): Promise<void> {
   if (process.platform === "win32") return;
   try {
     const temp = await handle.stat();
-    const bits = replaced.mode & 0o777;
-    const shared = temp.gid === replaced.gid || ((bits >> 3) & 0o7) === (bits & 0o7);
-    await handle.chmod((shared ? bits : bits & 0o700) | (temp.uid === replaced.uid ? 0 : 0o600));
+    await handle.chmod((replaced.mode & 0o700) | (temp.uid === replaced.uid ? 0 : 0o600));
   } catch {
     // The new bytes matter more than the copied mode.
   }
