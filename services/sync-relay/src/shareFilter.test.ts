@@ -920,6 +920,21 @@ describe("chat share op filter", () => {
     }).allowed).toBe(false);
   });
 
+  it("serves a personal agent's id, and never the id of an agent a desktop runs", () => {
+    const post = {
+      messageId: "personal-message:m", threadId: "thread-in", authorKind: "agent", authorDisplayName: "Helper",
+      authorUserId: "u1", agentConnectionId: "connection-1", body: "Done", createdAtMs: 2,
+    };
+    const personal = decide("chat.message.append", { ...post, authorAgentId: `p-${"a".repeat(26)}` });
+    expect(personal.allowed).toBe(true);
+    if (!personal.allowed) return;
+    expect(personal.payload).toMatchObject({ authorAgentId: `p-${"a".repeat(26)}`, agentConnectionId: "connection-1" });
+    const local = decide("chat.message.append", { ...post, messageId: "m-local", authorAgentId: "PRIVATE-helper" });
+    expect(local.allowed).toBe(true);
+    if (!local.allowed) return;
+    expect(local.payload).not.toHaveProperty("authorAgentId");
+  });
+
   it("serves parentMessageId on a granted-channel message", () => {
     const decision = decide("chat.message.append", {
       messageId: "m-child",

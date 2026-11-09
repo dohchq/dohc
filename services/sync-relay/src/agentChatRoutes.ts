@@ -61,7 +61,7 @@ export function agentMention(reportedName: string | null): string {
   return `@${handleForName(agentName(reportedName)) || "Agent"}`;
 }
 
-function mentions(body: string | null, mention: string): boolean {
+export function mentions(body: string | null, mention: string): boolean {
   const handle = normalizeHandle(mention.slice(1));
   return body !== null && chatMentionTokens(body).some(token => normalizeHandle(token.handle) === handle);
 }

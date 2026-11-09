@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { accountDeletionIdentity } from "@dohc/workspace-auth/accountDeletion";
 import type {
   ConsentCredentials,
   CredentialFence,
@@ -6,16 +8,24 @@ import type {
   CredentialFenceListener,
 } from "@dohc/workspace-auth/credentialFence";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
+import { PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
 import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, PERSONAL_PASSWORD_ATTEMPTS, type PersonalRunningEntry } from "./personalAgents";
+import { personalAgentOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
+import { CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
 import { PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT } from "./storage/personalAgents";
 import {
+  appendLog,
+  chatChannelCreate,
+  chatMessageAppend,
+  chatThreadCreate,
   claimWorkspace,
   closeTestStorage,
   closeTestStorages,
@@ -25,13 +35,17 @@ import {
   json,
   jsonBody,
   linkSecret,
+  moment,
+  putBlob,
   RELAY_EXCHANGE_KEY,
   reopenTestStorage,
   request,
+  sequenced,
   SHARE_WEB_ORIGIN,
   storagePath,
   testHandler,
   testStorage,
+  type ChatOp,
   type HandlerOverrides,
 } from "./testing";
 
@@ -970,5 +984,595 @@ describe("the owner's controls", () => {
 
     await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
     expect(inA).toHaveBeenCalledTimes(1);
+  });
+});
+
+type WaitCursor = { v: 1; agentId: string; seqs: Record<string, number>; turn: string | null };
+type WaitAnswer = { ok: true; messages: Array<Record<string, unknown>>; cursor: WaitCursor; more: boolean };
+type ChatPage = { messages: Array<Record<string, unknown>>; olderCursor: number | null };
+
+const computerSeqs = new WeakMap<SyncRelayStorage, Map<string, number>>();
+
+/** The owner's computer pushes these ops, and held waits wake. */
+function fromComputer(f: Fixture, workspaceId: string, ops: ChatOp[]): void {
+  const seqs = computerSeqs.get(f.storage) ?? new Map<string, number>();
+  computerSeqs.set(f.storage, seqs);
+  for (let start = 0; start < ops.length; start += 500) {
+    const batch = ops.slice(start, start + 500);
+    const first = seqs.get(workspaceId) ?? 0;
+    f.storage.appendLogBatch({
+      workspaceId, originId: "owner-computer",
+      ops: sequenced(batch, first).map(({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) })),
+    });
+    seqs.set(workspaceId, first + batch.length);
+  }
+  f.activity.wakeLog(workspaceId);
+}
+
+/** A post by the owner's account from their computer. */
+function ownerSays(messageId: string, threadId: string, body: string, extra: Record<string, unknown> = {}): ChatOp {
+  return chatMessageAppend(messageId, threadId, body, { authorUserId: OWNER, authorDisplayName: "Ada", ...extra });
+}
+
+/** A team channel with two threads, and a thread in the agent's DM. */
+function chats(f: Fixture, workspaceId: string, agentId: string): void {
+  fromComputer(f, workspaceId, [
+    chatChannelCreate("wire-team"),
+    chatThreadCreate("thread-team", "wire-team"),
+    chatThreadCreate("thread-other", "wire-team"),
+    chatThreadCreate("thread-dm", agentChannelWireId(agentId)),
+  ]);
+}
+
+/** A personal agent's tool call, as share-web forwards it. */
+function tool(
+  f: Fixture, agent: Pick<Signed, "accessToken" | "resource">, action: string, body: unknown, signal?: AbortSignal,
+): Promise<Response> {
+  return f.h(request(null, `/sync/link/personal-agent/${action}`, {
+    method: "POST",
+    headers: {
+      authorization: `DohcAgent ${agent.accessToken}`,
+      "x-dohc-agent-resource": agent.resource,
+      "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    ...(signal === undefined ? {} : { signal }),
+  }));
+}
+
+function post(f: Fixture, agent: Signed, fields: Record<string, unknown>): Promise<Response> {
+  return tool(f, agent, "post", { workspaceId: WS_A, body: "from the agent", idempotencyKey: "post-1", ...fields });
+}
+
+async function waitOnce(f: Fixture, agent: Signed, fields: Record<string, unknown> = {}): Promise<WaitAnswer> {
+  return await ok(await tool(f, agent, "wait", { timeoutMs: 0, ...fields })) as WaitAnswer;
+}
+
+function ids(answer: { messages: Array<Record<string, unknown>> }): unknown[] {
+  return answer.messages.map((message) => message.messageId);
+}
+
+function logOf(f: Fixture, workspaceId: string) {
+  return f.storage.fetchLogPage({ workspaceId, sinceRelaySeq: 0, limit: 100_000 }).rows;
+}
+
+function payloadOf(row: { payloadJson: string }): Record<string, unknown> {
+  return JSON.parse(row.payloadJson) as Record<string, unknown>;
+}
+
+/** Resolves once `count` subscriptions are parked. */
+async function parked(f: Fixture, count: number): Promise<void> {
+  await vi.waitFor(() => expect(f.activity.stats().waiters).toBe(count));
+}
+
+function setOwner(f: Fixture, workspaceId: string, userId: string): void {
+  const db = inspectDatabase(f.dbPath, { foreignKeys: true });
+  try {
+    db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(userId, workspaceId);
+  } finally {
+    db.close();
+  }
+}
+
+function deleteAccountAtFence(f: Fixture): void {
+  const context = f.storage as StorageContext;
+  initializeAccountDeletion(context, DELETION_KEY);
+  const job = fenceAccount(context, DELETION_KEY, OWNER, `${OWNER}@dohc.test`);
+  f.h.deleteAccount(OWNER, job.manifest!.workspaces.map((row) => row.workspaceId), job.manifest!.shareIds);
+}
+
+function setReach(f: Fixture, agent: Signed, reach: Reach): Promise<Response> {
+  return owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
+}
+
+const BOTH_VIEW: Reach = [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }];
+const BOTH_COMMENT: Reach = [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "comment" }];
+
+describe("a personal agent's DM", () => {
+  it("is appended from the agent's origin in each workspace entering its reach, at sign-in and on widening", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const origin = personalAgentOrigin(agent.agentId);
+    const creates = (workspaceId: string) => logOf(f, workspaceId).filter((row) => row.originId === origin);
+    expect(creates(WS_A)).toEqual([expect.objectContaining({ opKind: "chat.channel.create", originSeq: 0 })]);
+    expect(payloadOf(creates(WS_A)[0]!)).toEqual({
+      channelId: `personal-dm:${agent.agentId}`, name: "Helper", slug: `my-agent-${agent.agentId}`, kind: "agent",
+      createdAtMs: f.now.value, wireId: agentChannelWireId(agent.agentId),
+    });
+    expect(creates(WS_B)).toEqual([]);
+
+    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }]));
+    expect(creates(WS_A)).toHaveLength(1);
+    expect(creates(WS_B)).toEqual([expect.objectContaining({ opKind: "chat.channel.create", originSeq: 0 })]);
+    // Leaving reach and entering again costs one more small op.
+    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }]));
+    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }]));
+    expect(creates(WS_B).map((row) => row.originSeq)).toEqual([0, 1]);
+  });
+});
+
+describe("a personal agent's posts", () => {
+  it("posts as itself from its own origin, with its account, connection, and current name, whatever the request names", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    chats(f, WS_A, agent.agentId);
+    const dm = agentChannelWireId(agent.agentId);
+    const before = logOf(f, WS_A).length;
+
+    // A field that would name the author is refused, not ignored.
+    for (const forged of [{ authorUserId: OTHER }, { authorAgentId: `p-${"b".repeat(26)}` }, { originId: "owner-computer" }]) {
+      expect((await post(f, agent, { channelWireId: dm, ...forged })).status).toBe(400);
+    }
+    expect(logOf(f, WS_A)).toHaveLength(before);
+
+    const { message } = await ok(await post(f, agent, { channelWireId: dm })) as { message: Record<string, unknown> };
+    expect(message).toMatchObject({
+      workspaceId: WS_A, channelWireId: dm, authorKind: "agent", authorDisplayName: "Helper", linkAgent: false, body: "from the agent",
+    });
+    expect(String(message.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX)).toBe(true);
+    expect(String(message.threadId).startsWith(PERSONAL_THREAD_ID_PREFIX)).toBe(true);
+    const [thread, appended] = logOf(f, WS_A).slice(before);
+    expect(thread).toMatchObject({ originId: personalAgentOrigin(agent.agentId), opKind: "chat.thread.create" });
+    expect(payloadOf(thread!)).toMatchObject({ threadId: message.threadId, channelWireId: dm, lane: "chat" });
+    expect(appended).toMatchObject({ originId: personalAgentOrigin(agent.agentId), opKind: "chat.message.append" });
+    expect(payloadOf(appended!)).toMatchObject({
+      messageId: message.messageId, authorKind: "agent", authorUserId: OWNER, authorAgentId: agent.agentId,
+      agentConnectionId: agent.connectionId, authorDisplayName: "Helper",
+    });
+
+    // A retry answers the same post; the same key with another body is a conflict.
+    expect((await ok(await post(f, agent, { channelWireId: dm }))).message).toMatchObject({ messageId: message.messageId });
+    await expectCode(await post(f, agent, { channelWireId: dm, body: "something else" }), 409, "conflict");
+    expect(logOf(f, WS_A)).toHaveLength(before + 2);
+
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
+    expect((await ok(await post(f, agent, { threadId: "thread-team", idempotencyKey: "post-2" }))).message).toMatchObject({
+      threadId: "thread-team", channelWireId: "wire-team", authorDisplayName: "Research",
+    });
+    expect(count(f, "sync_relay_personal_agent_threads", "agent_id = ?", agent.agentId)).toBe(2);
+  });
+
+  it("resolves a channel or thread only inside the named workspace, and never posts in another agent's DM", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const second = await signIn(f, { agent: { kind: "new", name: "Second" }, reach: BOTH_COMMENT });
+    fromComputer(f, WS_B, [chatChannelCreate("wire-b"), chatThreadCreate("thread-b", "wire-b")]);
+
+    await expectRefused(await post(f, agent, { threadId: "thread-b" }));
+    await expectRefused(await post(f, agent, { channelWireId: "wire-b" }));
+    await expectRefused(await post(f, agent, { channelWireId: "wire-nowhere" }));
+    // Another agent's DM, as a new thread there or a reply in one of its threads.
+    const theirs = await ok(await post(f, second, { channelWireId: agentChannelWireId(second.agentId) })) as {
+      message: { threadId: string };
+    };
+    await expectRefused(await post(f, agent, { channelWireId: agentChannelWireId(second.agentId), idempotencyKey: "post-2" }));
+    await expectRefused(await post(f, agent, { threadId: theirs.message.threadId, idempotencyKey: "post-3" }));
+
+    await ok(await post(f, agent, { workspaceId: WS_B, threadId: "thread-b" }));
+    await ok(await post(f, agent, { channelWireId: agentChannelWireId(agent.agentId), idempotencyKey: "post-4" }));
+  });
+
+  it("refuses a workspace out of reach, a post at View, and a workspace its account lost or deleted", async () => {
+    const f = await fixture();
+    await claimWorkspace(f.h, OWNER, "workspace-c");
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "comment" }] });
+    for (const workspaceId of [WS_A, WS_B, "workspace-c"]) fromComputer(f, workspaceId, [chatChannelCreate("wire-team")]);
+    const read = (workspaceId: string) => tool(f, agent, "chat", { workspaceId, channelWireId: "wire-team" });
+
+    await expectCode(await post(f, agent, { channelWireId: "wire-team" }), 403, "personal_agent_view_only");
+    await ok(await read(WS_A));
+    await ok(await post(f, agent, { workspaceId: WS_B, channelWireId: "wire-team" }));
+    // An owned workspace not in reach, and another account's, answer the same.
+    for (const workspaceId of ["workspace-c", OTHER_WS]) {
+      await expectCode(await read(workspaceId), 403, "personal_agent_out_of_reach");
+      await expectCode(await post(f, agent, { workspaceId, channelWireId: "wire-team" }), 403, "personal_agent_out_of_reach");
+      await expectCode(await tool(f, agent, "files", { workspaceId }), 403, "personal_agent_out_of_reach");
+    }
+    expect(Object.keys((await waitOnce(f, agent)).cursor.seqs)).toEqual([WS_A, WS_B]);
+
+    setOwner(f, WS_B, OTHER);
+    await expectCode(await post(f, agent, { workspaceId: WS_B, channelWireId: "wire-team", idempotencyKey: "post-2" }), 403,
+      "personal_agent_out_of_reach");
+    await expectCode(await read(WS_B), 403, "personal_agent_out_of_reach");
+
+    const context = f.storage as StorageContext;
+    initializeAccountDeletion(context, DELETION_KEY);
+    context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
+      .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
+    await expectCode(await read(WS_A), 403, "personal_agent_out_of_reach");
+    expect((await waitOnce(f, agent)).cursor.seqs).toEqual({});
+  });
+
+  const commitRaces: Array<[string, (f: Fixture, agent: Signed) => Promise<void>, string]> = [
+    ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }, "not-authorized"],
+    ["a reset and its notification", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER, NEW_PASSWORD)); }, "not-authorized"],
+    ["account deletion", async (f) => { deleteAccountAtFence(f); }, "not-authorized"],
+    ["narrowing", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "comment" }])); }, "out-of-reach"],
+    ["lowering to View", async (f, agent) => { await ok(await setReach(f, agent, BOTH_VIEW)); }, "read-only"],
+    ["ownership lost", async (f) => { setOwner(f, WS_A, OTHER); }, "out-of-reach"],
+  ];
+
+  it.each(commitRaces)("refuses a post whose access ends by %s between authentication and its commit", async (_, revoke, reason) => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const authority = await f.h.linkAuthority.personal(agentRequest(agent.accessToken, agent.resource));
+    const commit = (idempotencyKey: string) => f.storage.appendPersonalChatPost({
+      check: authority.check, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch, now: () => f.now.value,
+      workspaceId: WS_A, target: { channelWireId: agentChannelWireId(agent.agentId) }, body: "late", idempotencyKey,
+    });
+    expect(commit("before")).toMatchObject({ ok: true, replayed: false });
+    await revoke(f, agent);
+    expect(commit("after")).toEqual({ ok: false, reason });
+  });
+});
+
+describe("a personal agent's tools", () => {
+  it("serve only a personal agent's token at its address, with the relay exchange key, by POST", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await ok(await tool(f, agent, "files", { workspaceId: WS_A }));
+    await expectRefused(await f.h(request(null, "/sync/link/personal-agent/files", {
+      method: "POST",
+      headers: { authorization: `DohcAgent ${agent.accessToken}`, "x-dohc-agent-resource": agent.resource, "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: WS_A }),
+    })));
+    await expectRefused(await tool(f, { ...agent, accessToken: "x".repeat(43) }, "files", { workspaceId: WS_A }));
+    await expectRefused(await tool(f, { ...agent, resource: resourceFor(WS_B) }, "files", { workspaceId: WS_A }));
+    expect((await f.h(request(null, "/sync/link/personal-agent/files", { method: "GET" }))).status).toBe(405);
+    expect((await tool(f, agent, "list", {})).status).toBe(404);
+    expect((await tool(f, agent, "files", { workspaceId: WS_A, extra: 1 })).status).toBe(400);
+  });
+
+  const revocations: Array<[string, (f: Fixture, agent: Signed) => Promise<void>]> = [
+    ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }],
+    // No notification: the direct read of the fence refuses.
+    ["a reset", async (f) => { f.fence.changePassword(OWNER, NEW_PASSWORD); }],
+    ["account deletion", async (f) => { deleteAccountAtFence(f); }],
+  ];
+
+  it.each(revocations)("refuse every call after %s, before any read", async (_, revoke) => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    const sha = await putBlob(f.h, OWNER, WS_A, "hello");
+    await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
+    const dm = agentChannelWireId(agent.agentId);
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["post", { workspaceId: WS_A, channelWireId: dm, body: "hello", idempotencyKey: "post-1" }],
+      ["wait", { timeoutMs: 0 }],
+      ["chat", { workspaceId: WS_A, channelWireId: dm }],
+      ["files", { workspaceId: WS_A }],
+      ["blob", { workspaceId: WS_A, sha256: sha }],
+    ];
+    for (const [action, body] of calls) {
+      const response = await tool(f, agent, action, body);
+      expect(response.status, action).toBe(200);
+      await response.arrayBuffer();
+    }
+    await revoke(f, agent);
+    for (const [action, body] of calls) await expectRefused(await tool(f, agent, action, body));
+  });
+
+  it("reach nothing in a workspace narrowing removed", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    const sha = await putBlob(f.h, OWNER, WS_A, "hello");
+    await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
+    const dm = agentChannelWireId(agent.agentId);
+    await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "comment" }]));
+
+    await expectCode(await post(f, agent, { channelWireId: dm }), 403, "personal_agent_out_of_reach");
+    await expectCode(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: dm }), 403, "personal_agent_out_of_reach");
+    await expectCode(await tool(f, agent, "files", { workspaceId: WS_A }), 403, "personal_agent_out_of_reach");
+    await expectCode(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: sha }), 403, "personal_agent_out_of_reach");
+    expect(Object.keys((await waitOnce(f, agent)).cursor.seqs)).toEqual([WS_B]);
+  });
+});
+
+describe("a personal agent's wait", () => {
+  it("answers its owner's posts in its DM, mentioning its current name, and in threads it posted in, and nothing else", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    chats(f, WS_A, agent.agentId);
+    const elsewhere = agentChannelWireId(`p-${"b".repeat(26)}`);
+    fromComputer(f, WS_A, [chatChannelCreate(elsewhere, { kind: "agent" }), chatThreadCreate("thread-elsewhere", elsewhere)]);
+    await ok(await post(f, agent, { threadId: "thread-team" }));
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
+    fromComputer(f, WS_A, [
+      ownerSays("dm", "thread-dm", "hello"),
+      ownerSays("mention", "thread-other", "@Research a question"),
+      ownerSays("reply", "thread-team", "thanks"),
+      ownerSays("old-name", "thread-other", "@Helper an old handle"),
+      ownerSays("unrelated", "thread-other", "no one in particular"),
+      ownerSays("from-cli", "thread-dm", "from the CLI", { origin: "cli" }),
+      ownerSays("as-agent", "thread-dm", "an agent's post", { authorKind: "agent" }),
+      chatMessageAppend("other-account", "thread-dm", "hello", { authorUserId: OTHER, authorDisplayName: "Bo" }),
+      chatMessageAppend("no-account", "thread-dm", "hello"),
+      ownerSays("other-dm", "thread-elsewhere", "@Research not this one"),
+    ]);
+
+    const answer = await waitOnce(f, agent);
+    expect(ids(answer)).toEqual(["dm", "mention", "reply"]);
+    expect(answer.messages[0]).toMatchObject({
+      workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId), authorKind: "human", body: "hello",
+    });
+    expect(answer.messages[0]).not.toHaveProperty("authorUserId");
+    expect(answer.messages[1]).toMatchObject({ workspaceId: WS_A, channelWireId: "wire-team" });
+    expect(answer).toMatchObject({ more: false, cursor: { v: 1, agentId: agent.agentId, turn: WS_A } });
+    expect(ids(await waitOnce(f, agent, { cursor: answer.cursor }))).toEqual([]);
+  });
+
+  it("reads only from where each workspace entered its reach, whatever the cursor names", async () => {
+    const f = await fixture();
+    fromComputer(f, WS_A, [
+      chatChannelCreate("wire-team"), chatThreadCreate("thread-other", "wire-team"), ownerSays("before", "thread-other", "@Helper before"),
+    ]);
+    const agent = await signIn(f);
+    fromComputer(f, WS_A, [ownerSays("after", "thread-other", "@Helper after")]);
+    const answer = await waitOnce(f, agent, {
+      cursor: { v: 1, agentId: agent.agentId, seqs: { [WS_A]: 0, [WS_B]: 0, [OTHER_WS]: 0 }, turn: null },
+    });
+    expect(ids(answer)).toEqual(["after"]);
+    expect(Object.keys(answer.cursor.seqs)).toEqual([WS_A]);
+
+    // Another agent's cursor, and a malformed one, are refused.
+    const second = await signIn(f, { agent: { kind: "new", name: "Second" } });
+    expect((await tool(f, second, "wait", { timeoutMs: 0, cursor: answer.cursor })).status).toBe(400);
+    expect((await tool(f, agent, "wait", { timeoutMs: 0, cursor: { ...answer.cursor, seqs: { [WS_A]: -1 } } })).status).toBe(400);
+    expect((await tool(f, agent, "wait", { timeoutMs: 0, cursor: { ...answer.cursor, extra: 1 } })).status).toBe(400);
+  });
+
+  it("answers a match 2,500 rows in on the second call, after an empty answer with more", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    chats(f, WS_A, agent.agentId);
+    fromComputer(f, WS_A, [
+      ...Array.from({ length: 2_500 }, (_, index) => ownerSays(`noise-${index}`, "thread-other", "elsewhere")),
+      ownerSays("dm", "thread-dm", "hello"),
+    ]);
+    const parks = vi.spyOn(f.activity, "wait");
+    const first = await ok(await tool(f, agent, "wait", {})) as WaitAnswer;
+    expect(first).toMatchObject({ messages: [], more: true });
+    const second = await ok(await tool(f, agent, "wait", { cursor: first.cursor })) as WaitAnswer;
+    expect(ids(second)).toEqual(["dm"]);
+    expect(second.more).toBe(false);
+    expect(parks).not.toHaveBeenCalled();
+  });
+
+  it("answers 101 matches as 100, then the last at once", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    chats(f, WS_A, agent.agentId);
+    const all = Array.from({ length: PERSONAL_WAIT_MAX_MESSAGES + 1 }, (_, index) => `dm-${index}`);
+    fromComputer(f, WS_A, all.map((id) => ownerSays(id, "thread-dm", "hello")));
+    const parks = vi.spyOn(f.activity, "wait");
+    const first = await ok(await tool(f, agent, "wait", {})) as WaitAnswer;
+    expect(ids(first)).toEqual(all.slice(0, PERSONAL_WAIT_MAX_MESSAGES));
+    expect(first.more).toBe(true);
+    const second = await ok(await tool(f, agent, "wait", { cursor: first.cursor })) as WaitAnswer;
+    expect(ids(second)).toEqual(all.slice(PERSONAL_WAIT_MAX_MESSAGES));
+    expect(parks).not.toHaveBeenCalled();
+  });
+
+  it("resumes a size-cut answer at the message that didn't fit", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    chats(f, WS_A, agent.agentId);
+    const large = "x".repeat(200_000);
+    fromComputer(f, WS_A, ["large-0", "large-1", "large-2"].map((id) => ownerSays(id, "thread-dm", large)));
+    const first = await waitOnce(f, agent);
+    expect(ids(first)).toEqual(["large-0", "large-1"]);
+    expect(first.more).toBe(true);
+    const second = await waitOnce(f, agent, { cursor: first.cursor });
+    expect(ids(second)).toEqual(["large-2"]);
+    expect(second.messages[0]).toMatchObject({ body: large, bodyTooLarge: false });
+  });
+
+  it("gives the next call to another workspace while one has more than a budget, and keeps the first one's place", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    chats(f, WS_A, agent.agentId);
+    chats(f, WS_B, agent.agentId);
+    const noise = (from: number) => Array.from({ length: 2 * CHAT_HISTORY_SCAN_WINDOW }, (_, index) =>
+      ownerSays(`noise-${from + index}`, "thread-other", "elsewhere"));
+    fromComputer(f, WS_A, noise(0));
+    fromComputer(f, WS_B, [ownerSays("in-b", "thread-dm", "hello")]);
+
+    // A's turn uses the whole budget.
+    const first = await waitOnce(f, agent);
+    expect(first).toMatchObject({ messages: [], more: true, cursor: { turn: WS_B } });
+    // B's turn finds its message, and A goes on with what is left.
+    const second = await waitOnce(f, agent, { cursor: first.cursor });
+    expect(ids(second)).toEqual(["in-b"]);
+    expect(second).toMatchObject({ more: true, cursor: { turn: WS_A } });
+    expect(second.cursor.seqs[WS_A]).toBeGreaterThan(first.cursor.seqs[WS_A]!);
+
+    fromComputer(f, WS_A, noise(2 * CHAT_HISTORY_SCAN_WINDOW));
+    fromComputer(f, WS_B, [ownerSays("in-b-again", "thread-dm", "hello")]);
+    const third = await waitOnce(f, agent, { cursor: second.cursor });
+    expect(third).toMatchObject({ messages: [], more: true, cursor: { turn: WS_B } });
+    expect(third.cursor.seqs[WS_A]).toBeGreaterThan(second.cursor.seqs[WS_A]!);
+    expect(ids(await waitOnce(f, agent, { cursor: third.cursor }))).toEqual(["in-b-again"]);
+  });
+
+  it("parks on every workspace in reach, and releases every subscription on answer, abort, and deadline", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    chats(f, WS_A, agent.agentId);
+    chats(f, WS_B, agent.agentId);
+    const { cursor } = await waitOnce(f, agent);
+
+    const answered = tool(f, agent, "wait", { cursor });
+    await parked(f, 2);
+    fromComputer(f, WS_B, [ownerSays("in-b", "thread-dm", "hello")]);
+    const answer = await ok(await answered) as WaitAnswer;
+    expect(ids(answer)).toEqual(["in-b"]);
+    expect(f.activity.stats().waiters).toBe(0);
+
+    const controller = new AbortController();
+    const aborted = tool(f, agent, "wait", { cursor: answer.cursor }, controller.signal);
+    await parked(f, 2);
+    controller.abort();
+    await expectRefused(await aborted);
+    expect(f.activity.stats().waiters).toBe(0);
+
+    // Both subscriptions hold to the same deadline.
+    const holds: number[] = [];
+    const original = f.activity.wait.bind(f.activity);
+    vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
+      holds.push(options.holdMs);
+      f.now.value += options.holdMs;
+      return original(group, actor, { ...options, holdMs: 1 });
+    });
+    expect(await ok(await tool(f, agent, "wait", { cursor: answer.cursor, timeoutMs: 40 }))).toMatchObject({ messages: [], more: false });
+    expect(holds).toEqual([40, 40]);
+    expect(f.activity.stats().waiters).toBe(0);
+  });
+
+  it("holds at most its connection's share of waits, and frees a place when one ends", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    chats(f, WS_A, agent.agentId);
+    const controllers = Array.from({ length: MAX_AGENT_CHAT_WAITS_PER_CONNECTION }, () => new AbortController());
+    const held = controllers.map((controller) => tool(f, agent, "wait", {}, controller.signal));
+    await parked(f, MAX_AGENT_CHAT_WAITS_PER_CONNECTION);
+    await expectCode(await tool(f, agent, "wait", { timeoutMs: 0 }), 429, "link_read_rate_limited");
+    controllers.forEach((controller) => controller.abort());
+    for (const response of await Promise.all(held)) await expectRefused(response);
+    await waitOnce(f, agent);
+  });
+
+  const parkedRevocations: Array<[
+    string,
+    (f: Fixture, agent: Signed) => Promise<void>,
+    (f: Fixture, agent: Signed, response: Response) => Promise<void>,
+  ]> = [
+    ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); },
+      async (_f, _agent, response) => { await expectRefused(response); }],
+    ["a reset", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER, NEW_PASSWORD)); },
+      async (_f, _agent, response) => { await expectRefused(response); }],
+    ["account deletion", async (f) => { deleteAccountAtFence(f); },
+      async (_f, _agent, response) => { await expectRefused(response); }],
+    ["narrowing", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "view" }])); },
+      async (_f, _agent, response) => {
+        const answer = await ok(response) as WaitAnswer;
+        expect(answer).toMatchObject({ messages: [], more: false });
+        expect(Object.keys(answer.cursor.seqs)).toEqual([WS_A]);
+      }],
+    ["the fence notifications stopping", async (f) => { f.fence.listener!.onDown(); }, async (f, agent, response) => {
+      expect(await ok(response)).toMatchObject({ messages: [] });
+      await expectCode(await tool(f, agent, "wait", { timeoutMs: 0 }), 503, "personal_agent_unavailable");
+    }],
+  ];
+
+  it.each(parkedRevocations)("answers a parked wait at once after %s", async (_, revoke, expectAnswer) => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    const { cursor } = await waitOnce(f, agent);
+    const held = tool(f, agent, "wait", { cursor });
+    await parked(f, 2);
+    await revoke(f, agent);
+    await expectAnswer(f, agent, await held);
+    expect(f.activity.stats().waiters).toBe(0);
+  });
+});
+
+describe("a personal agent's reads", () => {
+  it("reads a channel's messages newest first, a page at a time, only in a channel of the named workspace", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    chats(f, WS_A, agent.agentId);
+    fromComputer(f, WS_B, [chatChannelCreate("wire-b")]);
+    fromComputer(f, WS_A, ["first", "second", "third"].map((id) => ownerSays(id, "thread-team", id)));
+    const read = (fields: Record<string, unknown>) => tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-team", ...fields });
+
+    const page = await ok(await read({ limit: 2 })) as ChatPage;
+    expect(ids(page)).toEqual(["third", "second"]);
+    expect(page.messages[0]).not.toHaveProperty("authorUserId");
+    expect(page.olderCursor).toEqual(expect.any(Number));
+    const older = await ok(await read({ limit: 2, before: page.olderCursor })) as ChatPage;
+    expect(ids(older)).toEqual(["first"]);
+    expect(older.olderCursor).toBeNull();
+
+    // A row at the agent's origin that names another agent isn't the agent's post.
+    f.storage.appendLogBatch({
+      workspaceId: WS_A, originId: personalAgentOrigin(agent.agentId),
+      ops: [{ originSeq: 1, opKind: "chat.message.append", recordedAtMs: 1, payloadJson: JSON.stringify({
+        messageId: `${PERSONAL_MESSAGE_ID_PREFIX}forged`, threadId: "thread-team", authorKind: "agent", authorDisplayName: "Helper",
+        authorUserId: OWNER, authorAgentId: `p-${"b".repeat(26)}`, agentConnectionId: agent.connectionId, body: "forged", createdAtMs: 3,
+      }) }],
+    });
+    expect(ids(await ok(await read({})) as ChatPage)).toEqual(["third", "second", "first"]);
+
+    await expectRefused(await read({ channelWireId: "wire-b" }));
+    await expectRefused(await read({ channelWireId: "wire-nowhere" }));
+    expect((await read({ limit: 101 })).status).toBe(400);
+  });
+
+  it("lists the workspace's current files and reads a current file's bytes, only through that workspace", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const sha = await putBlob(f.h, OWNER, WS_A, "hello");
+    const stale = await putBlob(f.h, OWNER, WS_A, "not a current file");
+    await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
+    const inB = await putBlob(f.h, OWNER, WS_B, "in b");
+    await appendLog(f.h, OWNER, WS_B, [moment("notes/b.md", "in b", { originSeq: 0 })]);
+
+    expect(await ok(await tool(f, agent, "files", { workspaceId: WS_A }))).toMatchObject({
+      workspaceId: WS_A, truncated: false, files: [expect.objectContaining({ path: "notes/a.md", blobSha256: sha })],
+    });
+    const read = await tool(f, agent, "blob", { workspaceId: WS_A, sha256: sha });
+    expect(read.status).toBe(200);
+    expect(await read.text()).toBe("hello");
+    await expectRefused(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: stale }));
+    await expectRefused(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: inB }));
+    await expectCode(await tool(f, agent, "blob", { workspaceId: WS_B, sha256: inB }), 403, "personal_agent_out_of_reach");
+    expect((await tool(f, agent, "blob", { workspaceId: WS_A, sha256: "not-a-sha" })).status).toBe(400);
+  });
+
+  it("ends a file's stream at the next chunk once the agent's access ends", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    const content = "z".repeat(200_000);
+    const sha = await putBlob(f.h, OWNER, WS_A, content);
+    await appendLog(f.h, OWNER, WS_A, [moment("notes/large.md", content, { originSeq: 0 })]);
+    const open = async () => {
+      const response = await tool(f, agent, "blob", { workspaceId: WS_A, sha256: sha });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      expect((await reader.read()).value?.byteLength).toBe(64 * 1024);
+      return reader;
+    };
+
+    // A reach change ends it as running work.
+    const narrowed = await open();
+    await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "view" }]));
+    await expect(narrowed.read()).rejects.toThrow("personal agent access changed during stream");
+
+    // Ownership lost: the next chunk's check refuses.
+    await ok(await setReach(f, agent, BOTH_VIEW));
+    const lost = await open();
+    setOwner(f, WS_A, OTHER);
+    await expect(lost.read()).rejects.toMatchObject({ code: "not_found" });
   });
 });

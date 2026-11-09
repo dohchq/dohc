@@ -39,7 +39,8 @@ function linkPostIds(principalId: string, profileTokenHash: string, idempotencyK
 }
 
 // A retry answers with its first post. The same key for another post conflicts.
-function replayedLinkPost(storage: StorageContext, workspaceId: string, ids: ReturnType<typeof linkPostIds>, body: string):
+export function replayedLinkPost(storage: StorageContext, workspaceId: string,
+  ids: { originId: string; messageId: string; threadId: string }, body: string):
   SyncRelayLogRow | "conflict" | null {
   const existing = fetchChatMessage(storage, { workspaceId, originId: ids.originId, messageId: ids.messageId });
   if (!existing) return null;
@@ -66,19 +67,29 @@ function linkPostLimitRefusal(storage: StorageContext, input: {
   return Number(sharePosts ?? 0) >= storage.options.discussionNonOwnerShareRowLimit ? "share-limit" : null;
 }
 
-type LinkPostAuthor = {
-  authorKind: "link";
-  authorDisplayName: string;
-  linkGrantId: string;
-  linkPrincipalId: string;
-  agentConnectionId?: string;
-};
+export type RelayPostAuthor =
+  | {
+    authorKind: "link";
+    authorDisplayName: string;
+    linkGrantId: string;
+    linkPrincipalId: string;
+    agentConnectionId?: string;
+  }
+  | {
+    authorKind: "agent";
+    authorDisplayName: string;
+    authorUserId: string;
+    authorAgentId: string;
+    agentConnectionId: string;
+  };
 
-// The operations every desktop accepts for a link post: the link grant and
-// link principal, the agent connection when an agent posted, and no account.
-function linkPostOps(storage: StorageContext, input: {
+// The operations every desktop accepts for a post the relay writes. A link
+// post names the link grant and link principal, the agent connection when an
+// agent posted, and no account. A personal agent's post names the account,
+// the agent, and the connection it signed in with.
+export function linkPostOps(storage: StorageContext, input: {
   workspaceId: string; originId: string; messageId: string; threadId: string; createThread: boolean;
-  channelWireId: string; body: string; createdAtMs: number; author: LinkPostAuthor;
+  channelWireId: string; body: string; createdAtMs: number; author: RelayPostAuthor;
 }) {
   const { createdAtMs, threadId } = input;
   const firstOriginSeq = maxOriginSeq(storage, input.workspaceId, input.originId) + 1;
@@ -91,7 +102,7 @@ function linkPostOps(storage: StorageContext, input: {
     payloadJson: JSON.stringify(op.payload), recordedAtMs: createdAtMs }));
 }
 
-function linkChatBody(value: string): string | null {
+export function linkChatBody(value: string): string | null {
   if (!value.isWellFormed()) return null;
   const body = value.replace(/\r\n?/gu, "\n").trimEnd();
   return body && Buffer.byteLength(body) <= LINK_CHAT_BODY_BYTE_LIMIT ? body : null;

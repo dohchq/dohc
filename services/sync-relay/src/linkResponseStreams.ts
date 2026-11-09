@@ -1,5 +1,74 @@
-const LINK_STREAM_CHUNK_BYTES = 64 * 1024;
+const STREAM_CHUNK_BYTES = 64 * 1024;
 const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
+
+/**
+ * Answers with bytes sent in bounded chunks, each only when the transport
+ * asks for it. The guard runs before every chunk. `register` receives the
+ * stream's terminate, which errors it with `terminatedMessage`, and returns
+ * its unregister. `release` runs once, with the bytes sent, however the
+ * stream ends.
+ */
+export function guardedByteResponse(bytes: Uint8Array, headers: Record<string, string>, options: {
+  register(terminate: () => void): () => void;
+  release(emittedByteLength: number): void;
+  terminatedMessage: string;
+  guard?(): void;
+  signal?: AbortSignal;
+}): Response {
+  let offset = 0;
+  let active = true;
+  let unregister = (): void => undefined;
+  let abort = (): void => undefined;
+  const release = (): void => {
+    if (!active) return;
+    active = false;
+    options.signal?.removeEventListener("abort", abort);
+    unregister();
+    options.release(offset);
+  };
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        const terminate = (): void => {
+          if (!active) return;
+          release();
+          controller.error(new Error(options.terminatedMessage));
+        };
+        unregister = options.register(terminate);
+        abort = terminate;
+        options.signal?.addEventListener("abort", abort, {once: true});
+        if (options.signal?.aborted) abort();
+      },
+      pull(controller) {
+        if (!active) return;
+        try {options.guard?.();} catch (error) {
+          release();
+          controller.error(error);
+          return;
+        }
+        if (offset >= bytes.byteLength) {
+          release();
+          controller.close();
+          return;
+        }
+        const end = Math.min(offset + STREAM_CHUNK_BYTES, bytes.byteLength);
+        controller.enqueue(bytes.subarray(offset, end));
+        offset = end;
+      },
+      cancel() {
+        if (!active) return;
+        release();
+      },
+    },
+    // Pull only when the transport asks for another chunk. This keeps one
+    // bounded view, rather than the full response, queued ahead of backpressure.
+    { highWaterMark: 0 },
+  );
+  return new Response(body, {
+    status: 200,
+    headers,
+  });
+}
 
 export function createLinkResponseStreams(nowMs: () => number) {
   type ActiveLinkStream = {
@@ -66,65 +135,15 @@ export function createLinkResponseStreams(nowMs: () => number) {
     settleEgress: (emittedByteLength: number, settledAtMs: number) => void,
     headers: Record<string, string>,
     options?: {guard(): void; signal: AbortSignal},
-  ): Response => {
-    let offset = 0;
-    let active = true;
-    let unregister = (): void => undefined;
-    const release = (): void => {
-      if (!active) return;
-      active = false;
-      options?.signal.removeEventListener("abort", abort);
-      unregister();
+  ): Response => guardedByteResponse(bytes, headers, {
+    register: terminate => registerLinkStream(grantId, {shareId, terminate}),
+    release: emitted => {
       releaseRetainedBytes();
-      settleEgress(offset, nowMs());
-    };
-    let abort = (): void => undefined;
-    const body = new ReadableStream<Uint8Array>(
-      {
-        start(controller) {
-          const stream: ActiveLinkStream = {
-            shareId,
-            terminate: () => {
-              if (!active) return;
-              release();
-              controller.error(new Error("link grant changed during stream"));
-            },
-          };
-          unregister = registerLinkStream(grantId, stream);
-          abort = stream.terminate;
-          options?.signal.addEventListener("abort", abort, {once: true});
-          if (options?.signal.aborted) abort();
-        },
-        pull(controller) {
-          if (!active) return;
-          try {options?.guard();} catch (error) {
-            release();
-            controller.error(error);
-            return;
-          }
-          if (offset >= bytes.byteLength) {
-            release();
-            controller.close();
-            return;
-          }
-          const end = Math.min(offset + LINK_STREAM_CHUNK_BYTES, bytes.byteLength);
-          controller.enqueue(bytes.subarray(offset, end));
-          offset = end;
-        },
-        cancel() {
-          if (!active) return;
-          release();
-        },
-      },
-      // Pull only when the transport asks for another chunk. This keeps one
-      // bounded view, rather than the full response, queued ahead of backpressure.
-      { highWaterMark: 0 },
-    );
-    return new Response(body, {
-      status: 200,
-      headers,
-    });
-  };
+      settleEgress(emitted, nowMs());
+    },
+    terminatedMessage: "link grant changed during stream",
+    ...options,
+  });
 
   return {
     admitLinkBlobBytes,

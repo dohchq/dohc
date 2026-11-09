@@ -9,7 +9,10 @@ import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActiv
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { accountDisplayName } from "./accountDisplayName";
-import { linkChatOrigin, LINK_CHAT_MESSAGE_ID_PREFIX, namedShareOrigin, type LogAuthorNameLookup } from "./relayLogInputs";
+import {
+  linkChatOrigin, LINK_CHAT_MESSAGE_ID_PREFIX, namedShareOrigin, personalAgentOrigin, PERSONAL_AGENT_ID_PREFIX,
+  PERSONAL_AGENT_ORIGIN_PREFIX, PERSONAL_MESSAGE_ID_PREFIX, type LogAuthorNameLookup,
+} from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import { chatSideOf, filterOpForShare, type AnyShareSelector, type ChatShareThreadResolver } from "./shareFilter";
@@ -43,7 +46,18 @@ const linkId = (value: unknown): value is string => typeof value === "string" &&
 // IDs, an agent connection when an agent posted, and nothing account-shaped.
 // Every desktop refuses any other row that names a link, so no reader shows one either.
 function linkProvenanceHolds(p: Record<string, unknown>, originId: string): boolean {
-  if (p.authorKind !== "link") return !["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(p, key));
+  // A personal agent's post names the account, the agent, and the connection
+  // it signed in with, from that agent's own origin, as every desktop checks.
+  if (originId.startsWith(PERSONAL_AGENT_ORIGIN_PREFIX)) {
+    return p.authorKind === "agent" && linkId(p.authorUserId) && linkId(p.agentConnectionId) &&
+      typeof p.authorAgentId === "string" && p.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX) &&
+      originId === personalAgentOrigin(p.authorAgentId) && String(p.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX) &&
+      !["linkGrantId", "linkPrincipalId", "authorOwnerDisplayName", "chainDepth", "authorReported", "origin"].some(key => Object.hasOwn(p, key));
+  }
+  if (p.authorKind !== "link") {
+    return !["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(p, key)) &&
+      !String(p.authorAgentId ?? "").startsWith(PERSONAL_AGENT_ID_PREFIX);
+  }
   return linkId(p.linkGrantId) && linkId(p.linkPrincipalId) && originId === linkChatOrigin(p.linkPrincipalId) &&
     (!Object.hasOwn(p, "agentConnectionId") || linkId(p.agentConnectionId)) &&
     String(p.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX) &&
@@ -60,7 +74,7 @@ export function messageFromOp(op: Record<string, unknown>, originId: string): Na
       !linkProvenanceHolds(p, originId)) return null;
   return {relaySeq: op.relaySeq, messageId: p.messageId, threadId: p.threadId, authorUserId: typeof p.authorUserId === "string" ? p.authorUserId : null,
     authorDisplayName: p.authorDisplayName, authorKind: p.authorKind as NamedChatMessage["authorKind"],
-    linkAgent: Object.hasOwn(p, "agentConnectionId"),
+    linkAgent: p.authorKind === "link" && Object.hasOwn(p, "agentConnectionId"),
     authorOwnerDisplayName: typeof p.authorOwnerDisplayName === "string" ? p.authorOwnerDisplayName : null,
     createdAtMs: p.createdAtMs, body: p.body, bodyTooLarge: false};
 }

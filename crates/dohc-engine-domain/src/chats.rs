@@ -106,6 +106,15 @@ pub const LINK_MESSAGE_ID_PREFIX: &str = "link-message:";
 pub const LINK_THREAD_ID_PREFIX: &str = "link-thread:";
 /// The relay's origin for one link holder's posts.
 pub const LINK_ORIGIN_PREFIX: &str = "relay:share-link:";
+/// The relay's origin for one personal agent's chat: its DM and its posts.
+pub const PERSONAL_AGENT_ORIGIN_PREFIX: &str = "relay:personal-agent:";
+/// The relay names a personal agent's messages and new threads with these
+/// prefixes; no other message or thread may use them.
+pub const PERSONAL_MESSAGE_ID_PREFIX: &str = "personal-message:";
+pub const PERSONAL_THREAD_ID_PREFIX: &str = "personal-thread:";
+/// Every personal agent's id starts with this. A settings file can't use it,
+/// so only the agent's relay origin names one as an author.
+pub const PERSONAL_AGENT_ID_PREFIX: &str = "p-";
 /// Thread title char cap (`normalizeThreadTitle`).
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
@@ -2188,13 +2197,32 @@ pub fn replicated_source_origin(origin_id: &str) -> &str {
         .map_or(origin_id, |(_, source)| source)
 }
 
-/// A replicated message's link provenance. A link message names its grant and
-/// link principal, carries no account, owner, origin or chain depth, stays
-/// within the link body cap, uses the link message id prefix, and comes from
-/// its link principal's relay origin, as the relay writes it. An agent's link
-/// message also names its agent connection. No other message names a link or
-/// an agent connection, or uses the prefix. Ids must already be in their
-/// stored form.
+/// What the relay vouches for in a replicated message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplicatedMessageAuthor {
+    /// Nothing: a computer wrote it.
+    Device,
+    /// A link holder, or an agent that signed in with the link.
+    Link(ChatMessageLinkAuthor),
+    /// A personal agent, through the connection it signed in with.
+    PersonalAgent { connection_id: String },
+}
+
+/// A replicated message's relay provenance.
+///
+/// A link message names its grant and link principal, carries no account,
+/// owner, origin or chain depth, stays within the link body cap, uses the link
+/// message id prefix, and comes from its link principal's relay origin, as the
+/// relay writes it. An agent's link message also names its agent connection.
+///
+/// A personal agent's message comes from that agent's relay origin. It is an
+/// agent message by that agent for an account, names the agent's connection,
+/// carries no link, owner, origin, chain depth or reported agent, stays within
+/// the link body cap, and uses the personal message id prefix. The relay
+/// checks that the account is the workspace's owner.
+///
+/// No other message names a link, an agent connection or a personal agent, or
+/// uses either prefix. Ids must already be in their stored form.
 #[allow(clippy::too_many_arguments)]
 pub fn validate_replicated_link_author(
     origin_id: &str,
@@ -2203,9 +2231,11 @@ pub fn validate_replicated_link_author(
     grant_id: Option<&str>,
     principal_id: Option<&str>,
     agent_connection_id: Option<&str>,
-    account_fields: bool,
+    author_user_id: Option<&str>,
+    author_agent_id: Option<&str>,
+    other_account_fields: bool,
     body: &str,
-) -> Result<Option<ChatMessageLinkAuthor>, DomainError> {
+) -> Result<ReplicatedMessageAuthor, DomainError> {
     let invalid = || DomainError::InvalidInput {
         reason: "chat message link author is invalid",
     };
@@ -2216,29 +2246,46 @@ pub fn validate_replicated_link_author(
             && value.trim_matches(is_js_trim_ws) == value
             && !has_projection_control_char(value)
     };
-    match (
-        author_kind == ChatActorKind::Link.as_str(),
-        grant_id,
-        principal_id,
-    ) {
-        (false, None, None)
-            if agent_connection_id.is_none() && !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) =>
-        {
-            Ok(None)
+    let personal_origin = source.strip_prefix(PERSONAL_AGENT_ORIGIN_PREFIX);
+    let personal_author =
+        author_agent_id.is_some_and(|agent_id| agent_id.starts_with(PERSONAL_AGENT_ID_PREFIX));
+    let reserved_id = message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
+        || message_id.starts_with(PERSONAL_MESSAGE_ID_PREFIX);
+    let link = author_kind == ChatActorKind::Link.as_str();
+    match (grant_id, principal_id, agent_connection_id) {
+        (None, None, None) if !link && personal_origin.is_none() && !personal_author && !reserved_id => {
+            Ok(ReplicatedMessageAuthor::Device)
         }
-        (true, Some(grant_id), Some(principal_id))
-            if id(grant_id)
+        (None, None, Some(connection_id))
+            if author_kind == ChatActorKind::Agent.as_str()
+                && id(connection_id)
+                && personal_origin.is_some_and(|agent_id| agent_id.starts_with(PERSONAL_AGENT_ID_PREFIX))
+                && author_agent_id == personal_origin
+                && author_user_id.is_some()
+                && !other_account_fields
+                && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
+                && message_id.starts_with(PERSONAL_MESSAGE_ID_PREFIX) =>
+        {
+            Ok(ReplicatedMessageAuthor::PersonalAgent {
+                connection_id: connection_id.to_owned(),
+            })
+        }
+        (Some(grant_id), Some(principal_id), connection_id)
+            if link
+                && id(grant_id)
                 && id(principal_id)
-                && agent_connection_id.is_none_or(id)
-                && !account_fields
+                && connection_id.is_none_or(id)
+                && author_user_id.is_none()
+                && author_agent_id.is_none()
+                && !other_account_fields
                 && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
                 && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
                 && source.strip_prefix(LINK_ORIGIN_PREFIX) == Some(principal_id) =>
         {
-            Ok(Some(ChatMessageLinkAuthor {
+            Ok(ReplicatedMessageAuthor::Link(ChatMessageLinkAuthor {
                 grant_id: grant_id.to_owned(),
                 principal_id: principal_id.to_owned(),
-                agent_connection_id: agent_connection_id.map(str::to_owned),
+                agent_connection_id: connection_id.map(str::to_owned),
             }))
         }
         _ => Err(invalid()),
@@ -8512,7 +8559,10 @@ fn map_bookmark_row(
 
 #[cfg(test)]
 mod replicated_origin_tests {
-    use super::{ChatMessageLinkAuthor, replicated_source_origin, validate_replicated_link_author};
+    use super::{
+        ChatMessageLinkAuthor, ReplicatedMessageAuthor, replicated_source_origin,
+        validate_replicated_link_author,
+    };
 
     #[test]
     fn a_shared_origin_unwraps_once_and_any_other_origin_stays_as_written() {
@@ -8539,6 +8589,8 @@ mod replicated_origin_tests {
                 Some("grant-1"),
                 Some("p"),
                 None,
+                None,
+                None,
                 false,
                 "Hi",
             )
@@ -8549,7 +8601,10 @@ mod replicated_origin_tests {
             agent_connection_id: None,
         };
         for applies in ["relay:share-link:p", "shared:s:relay:share-link:p"] {
-            assert_eq!(author(applies).expect(applies), Some(link.clone()));
+            assert_eq!(
+                author(applies).expect(applies),
+                ReplicatedMessageAuthor::Link(link.clone())
+            );
         }
         for refused in [
             "shared:s:relay:share-link:q",
@@ -8572,13 +8627,15 @@ mod replicated_origin_tests {
                 link.then_some("grant-1"),
                 link.then_some("p"),
                 Some(connection),
+                None,
+                None,
                 false,
                 "Hi",
             )
         };
         assert_eq!(
             author("link", "link-message:m", true, "connection-1").expect("agent link post"),
-            Some(ChatMessageLinkAuthor {
+            ReplicatedMessageAuthor::Link(ChatMessageLinkAuthor {
                 grant_id: "grant-1".to_owned(),
                 principal_id: "p".to_owned(),
                 agent_connection_id: Some("connection-1".to_owned()),
@@ -8593,5 +8650,124 @@ mod replicated_origin_tests {
                 "{connection:?}"
             );
         }
+    }
+
+    const PERSONAL: &str = "p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OTHER_PERSONAL: &str = "p-bbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[allow(clippy::too_many_arguments)]
+    fn author(
+        origin: &str,
+        kind: &str,
+        message_id: &str,
+        link: bool,
+        user: Option<&str>,
+        agent: Option<&str>,
+        connection: Option<&str>,
+        other_account_fields: bool,
+    ) -> Result<ReplicatedMessageAuthor, crate::DomainError> {
+        validate_replicated_link_author(
+            origin,
+            message_id,
+            kind,
+            link.then_some("grant-1"),
+            link.then_some("p"),
+            connection,
+            user,
+            agent,
+            other_account_fields,
+            "Hi",
+        )
+    }
+
+    #[test]
+    fn a_personal_agent_posts_only_from_its_own_origin() {
+        let origin = format!("relay:personal-agent:{PERSONAL}");
+        let post = |origin: &str| {
+            author(
+                origin,
+                "agent",
+                "personal-message:m",
+                false,
+                Some("owner"),
+                Some(PERSONAL),
+                Some("connection-1"),
+                false,
+            )
+        };
+        let personal = ReplicatedMessageAuthor::PersonalAgent {
+            connection_id: "connection-1".to_owned(),
+        };
+        for applies in [origin.clone(), format!("shared:s:{origin}")] {
+            assert_eq!(post(&applies).expect(&applies), personal);
+        }
+        for refused in [
+            format!("relay:personal-agent:{OTHER_PERSONAL}"),
+            format!("shared:s2:shared:s1:{origin}"),
+            "relay:share-link:p".to_owned(),
+            "origin_1".to_owned(),
+        ] {
+            assert!(post(&refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_personal_agent_origin_speaks_only_as_that_agent_for_an_account() {
+        let origin = format!("relay:personal-agent:{PERSONAL}");
+        let id = "personal-message:m";
+        let owner = Some("owner");
+        let connection = Some("connection-1");
+        for (kind, message_id, link, user, agent, connection, other) in [
+            ("human", id, false, owner, None, connection, false),
+            ("agent", id, false, owner, Some(OTHER_PERSONAL), connection, false),
+            ("agent", id, false, owner, None, connection, false),
+            ("agent", id, false, None, Some(PERSONAL), connection, false),
+            ("agent", id, false, owner, Some(PERSONAL), None, false),
+            ("agent", id, false, owner, Some(PERSONAL), Some(""), false),
+            ("agent", id, false, owner, Some(PERSONAL), connection, true),
+            ("agent", "m", false, owner, Some(PERSONAL), connection, false),
+            ("agent", id, true, owner, Some(PERSONAL), connection, false),
+            ("link", "link-message:m", true, None, None, connection, false),
+        ] {
+            assert!(
+                author(&origin, kind, message_id, link, user, agent, connection, other).is_err(),
+                "{kind} {message_id} {user:?} {agent:?} {connection:?} {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_other_origin_names_a_personal_agent_or_its_connection() {
+        for origin in ["origin_1", "relay:share-link:p", "shared:s:origin_1"] {
+            for (message_id, link, agent, connection) in [
+                ("m", false, Some(PERSONAL), None),
+                ("personal-message:m", false, None, None),
+                ("m", false, None, Some("connection-1")),
+                ("m", false, Some("helper"), Some("connection-1")),
+                ("link-message:m", true, Some(PERSONAL), None),
+            ] {
+                let kind = if link { "link" } else { "agent" };
+                let user = (!link).then_some("owner");
+                assert!(
+                    author(origin, kind, message_id, link, user, agent, connection, false).is_err(),
+                    "{origin} {message_id} {agent:?} {connection:?}"
+                );
+            }
+        }
+        // A computer's own agent still posts as itself.
+        assert_eq!(
+            author(
+                "origin_1",
+                "agent",
+                "m",
+                false,
+                Some("owner"),
+                Some("helper"),
+                None,
+                false
+            )
+            .expect("an agent you run"),
+            ReplicatedMessageAuthor::Device
+        );
     }
 }

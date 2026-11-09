@@ -3,7 +3,7 @@ import { type SyncRelayLogRow, type ThreadFileBinding, type ObjectMomentRow } fr
 import { SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
 import { rowToLogRow, rowToObjectMomentRow } from "./rows";
 import { asRecord } from "@dohc/workspace-core";
-import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 
 export function listObjectMomentLogRowsByBlob(storage: StorageContext, input: {
     workspaceId: string;
@@ -192,7 +192,7 @@ export function findChannelCreateKind(
         (record.kind !== "channel" && record.kind !== "dm" && record.kind !== "agent") ||
         typeof record.createdAtMs !== "number" ||
         !Number.isFinite(record.createdAtMs) ||
-        ((record.kind === "agent") !== (record.wireId === AGENT_CHANNEL_WIRE_ID))
+        ((record.kind === "agent") !== (agentIdForChannelWireId(channelWireId) !== null))
       ) {
         return null;
       }

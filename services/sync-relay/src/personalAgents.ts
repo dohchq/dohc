@@ -284,7 +284,7 @@ export function createPersonalAgents(input: {
         });
       }
       const change = await changeFor(request, route.action);
-      const result = storage.changePersonalAgent({ ownerUserId, agentId: route.agentId, change });
+      const result = storage.changePersonalAgent({ ownerUserId, agentId: route.agentId, change, nowMs: input.nowMs() });
       if (!result.ok) {
         if (result.reason === "conflict") throw relayError("conflict");
         if (result.reason === "invalid") throw badRequest(`${route.action} is invalid`);

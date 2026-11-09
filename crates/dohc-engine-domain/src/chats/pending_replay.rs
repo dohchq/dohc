@@ -4,8 +4,9 @@ use super::{
     ThreadMessageResolution, bump_chat_conversation_revision,
     index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
     normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
-    normalize_reported_agent, parse_mention_handles, reported_agent_json, resolve_feed_coordinate,
-    resolve_follow_target, resolve_thread_message, validate_replicated_link_author,
+    ReplicatedMessageAuthor, normalize_reported_agent, parse_mention_handles, reported_agent_json,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_replicated_link_author,
 };
 use crate::AutomationClaim;
 use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
@@ -608,26 +609,31 @@ fn apply_pending_message(
     }
     // Checked from the same values as sync apply, so replay refuses only a
     // link author that sync apply would have refused.
-    let link_author = validate_replicated_link_author(
+    let relay_author = validate_replicated_link_author(
         origin_id,
         &payload.message_id,
         &payload.author_kind,
         payload.link_grant_id.as_deref(),
         payload.link_principal_id.as_deref(),
         payload.agent_connection_id.as_deref(),
-        author_user_id.is_some()
-            || owner_name.is_some()
+        author_user_id.as_deref(),
+        payload.author_agent_id.as_deref(),
+        owner_name.is_some()
             || payload.origin.is_some()
             || payload.chain_depth.is_some()
-            || payload.author_agent_id.is_some()
             || author_reported.is_some(),
         &body,
     );
-    if link_author.is_err() {
-        return Ok(PendingReplayOutcome::Refused(
-            "pending chat message link author is invalid",
-        ));
-    }
+    let (link_connection, personal_connection) = match relay_author {
+        Ok(ReplicatedMessageAuthor::Device) => (None, None),
+        Ok(ReplicatedMessageAuthor::Link(link)) => (link.agent_connection_id, None),
+        Ok(ReplicatedMessageAuthor::PersonalAgent { connection_id }) => (None, Some(connection_id)),
+        Err(_) => {
+            return Ok(PendingReplayOutcome::Refused(
+                "pending chat message link author is invalid",
+            ));
+        }
+    };
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(message_order), -1) FROM chat_messages \
@@ -660,8 +666,9 @@ fn apply_pending_message(
             "INSERT OR IGNORE INTO chat_messages \
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
               author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name, \
-              link_grant_id,link_principal_id,author_agent_id,author_reported,agent_connection_id) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+              link_grant_id,link_principal_id,author_agent_id,author_reported,agent_connection_id, \
+              personal_agent_connection_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -679,7 +686,8 @@ fn apply_pending_message(
                 payload.link_principal_id,
                 payload.author_agent_id,
                 reported_agent_json(author_reported.as_ref()),
-                payload.agent_connection_id,
+                link_connection,
+                personal_connection,
             ],
         )
         .map_err(DomainError::sql_persist)?;

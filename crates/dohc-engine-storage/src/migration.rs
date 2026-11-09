@@ -3646,6 +3646,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_agent_author_threads.sql"),
         sets_user_version: None,
     },
+    // A personal agent's message names the connection it signed in with.
+    Migration {
+        ordinal: 90,
+        id: "v2-chat-personal-agent-connection",
+        sql: include_str!("chat_personal_agent_connection.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5657,6 +5664,10 @@ mod tests {
             (
                 "v2-chat-agent-author-threads",
                 "64e50015c740f0ab43aa83ff7665fd660463f0bc31eb92ece6d5358f5de89660",
+            ),
+            (
+                "v2-chat-personal-agent-connection",
+                "6b344137a0359bb98b4c34a3cc09117612d487824c9d873e8c8bde4de8a4fad9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -8792,6 +8803,48 @@ mod tests {
         assert!(
             insert(8, "link", true, Some("")).is_err(),
             "an agent connection id is never empty"
+        );
+    }
+
+    /// Only a personal agent's message names a personal connection.
+    #[test]
+    fn only_a_personal_agent_message_names_a_personal_connection() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("current store");
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1);",
+        )
+        .expect("seed a thread");
+        let insert = |order: i64, kind: &str, agent: Option<&str>, connection: Option<&str>| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      body, created_at_ms, author_user_id, author_agent_id, personal_agent_connection_id) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Helper', 'Done', 2, 'user-ice', ?4, ?5)",
+                rusqlite::params![order, format!("message-{order}"), kind, agent, connection],
+            )
+        };
+        let personal = Some("p-aaaaaaaaaaaaaaaaaaaaaaaaaa");
+        insert(0, "agent", personal, Some("connection-1")).expect("a personal agent's message");
+        insert(1, "agent", personal, None).expect("a personal agent's message without one");
+        for (order, kind, agent) in [
+            (2, "agent", Some("helper")),
+            (3, "human", None),
+            (4, "automation", None),
+            (5, "agent", None),
+        ] {
+            assert!(
+                insert(order, kind, agent, Some("connection-1")).is_err(),
+                "a {kind} message by {agent:?} names no personal connection"
+            );
+        }
+        assert!(
+            insert(6, "agent", personal, Some("")).is_err(),
+            "a personal connection id is never empty"
         );
     }
 

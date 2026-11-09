@@ -1,7 +1,10 @@
+import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { AGENT_URI_CHAR_LIMIT } from "@dohc/security-contract/wire-patterns";
 import { AGENT_HUE_ASSIGNMENT_ORDER, isAgentHue, type AgentHue } from "@dohc/workspace-contracts/agent-hues";
+import { nameSlug } from "@dohc/workspace-contracts/names";
 import { constantTimeHashEqual } from "../linkSecurity";
+import { personalAgentOrigin } from "../relayLogInputs";
 import { accountIsFenced, workspaceIsDeleted } from "./accountDeletion";
 import {
   AGENT_AUTHORIZATION_CODE_TTL_MS,
@@ -18,6 +21,7 @@ import {
   type AgentAccessCheck,
 } from "./agentConnections";
 import type { StorageContext } from "./context";
+import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import { nullableText } from "./rows";
 import type { SqliteDb } from "./types";
 import { workspaceIsOwnedBy } from "./workspaces";
@@ -186,6 +190,17 @@ export function initializePersonalAgentSchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_personal_agent_tokens_connection
       ON sync_relay_personal_agent_tokens(connection_id, kind, issued_at_ms);
 
+    -- The threads a personal agent posted in. A wait reads one row per
+    -- candidate message, by primary key.
+    CREATE TABLE IF NOT EXISTS sync_relay_personal_agent_threads (
+      agent_id TEXT NOT NULL REFERENCES sync_relay_personal_agents(agent_id) ON DELETE CASCADE,
+      workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL CHECK (length(thread_id) >= 1),
+      PRIMARY KEY (agent_id, workspace_id, thread_id)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_sync_relay_personal_agent_threads_workspace
+      ON sync_relay_personal_agent_threads(workspace_id);
+
     -- Increases on every sign-in, rename, color, reach, or status change, so
     -- each computer refetches the roster only when it changed.
     CREATE TABLE IF NOT EXISTS sync_relay_personal_agent_rosters (
@@ -253,7 +268,7 @@ export function personalAgentName(value: unknown): string | null {
 }
 
 /** Owned here by the account, which isn't being deleted, and not deleted. */
-function ownsWorkspace(storage: StorageContext, ownerUserId: string, workspaceId: string): boolean {
+export function ownsWorkspace(storage: StorageContext, ownerUserId: string, workspaceId: string): boolean {
   return !accountIsFenced(storage, ownerUserId) && !workspaceIsDeleted(storage, workspaceId) &&
     workspaceIsOwnedBy(storage, workspaceId, ownerUserId);
 }
@@ -287,6 +302,31 @@ function writeReach(storage: StorageContext, agentId: string, reach: readonly Pe
     added.push(entry.workspaceId);
   }
   return added;
+}
+
+/**
+ * Appends the agent's DM in each workspace that just entered its reach, from
+ * the agent's own origin. Every computer that holds the DM already converges
+ * on its wire id, so a repeat costs one small op.
+ */
+function appendPersonalDms(storage: StorageContext, agentId: string, workspaceIds: readonly string[], nowMs: number): void {
+  if (workspaceIds.length === 0) return;
+  const name = String(storage.db.prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?").get(agentId)?.name);
+  const originId = personalAgentOrigin(agentId);
+  const payloadJson = JSON.stringify({
+    channelId: `personal-dm:${agentId}`,
+    // The engine names a chat only with a name that has a slug.
+    name: nameSlug(name) ? name : "Agent",
+    slug: `my-agent-${agentId}`,
+    kind: "agent",
+    createdAtMs: nowMs,
+    wireId: agentChannelWireId(agentId),
+  });
+  for (const workspaceId of workspaceIds) {
+    appendLogBatchInTransaction(storage, { workspaceId, originId, ops: [{
+      originSeq: maxOriginSeq(storage, workspaceId, originId) + 1, opKind: "chat.channel.create", payloadJson, recordedAtMs: nowMs,
+    }] });
+  }
 }
 
 /** Ends the agent's connections and tokens, and deletes its pending authorizations and unredeemed codes. */
@@ -511,6 +551,7 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
     storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'active', epoch = ?, last_action_at_ms = ?
       WHERE agent_id = ?`).run(agentEpoch, nowMs, agentId);
     const newlyReached = writeReach(storage, agentId, reach);
+    appendPersonalDms(storage, agentId, newlyReached, nowMs);
     storage.db.prepare(`INSERT INTO sync_relay_personal_agent_connections (
         connection_id, agent_id, owner_user_id, client_id, resource_hash, agent_epoch, fence_epoch, connected_at_ms
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -545,6 +586,22 @@ function rowToConnection(row: Record<string, unknown>): PersonalConnectionRow {
 function connectionIsCurrent(storage: StorageContext, row: Record<string, unknown>, fenceEpoch: number): boolean {
   return row.agent_status === "active" && Number(row.current_agent_epoch) === Number(row.agent_epoch) &&
     Number(row.fence_epoch) === fenceEpoch && !accountIsFenced(storage, String(row.owner_user_id));
+}
+
+/**
+ * The agent's reach in one workspace its account still owns, or null. The
+ * route checks the level it needs.
+ */
+export function personalReachIn(storage: StorageContext, connection: PersonalConnectionRow, workspaceId: string): PersonalReach | null {
+  const row = storage.db.prepare(`SELECT level, start_seq FROM sync_relay_personal_agent_reach
+    WHERE agent_id = ? AND workspace_id = ?`).get(connection.agentId, workspaceId);
+  if (!row || !ownsWorkspace(storage, connection.ownerUserId, workspaceId)) return null;
+  return { workspaceId, level: String(row.level) as PersonalReachLevel, startSeq: Number(row.start_seq) };
+}
+
+/** Every workspace in the agent's reach that its account still owns. */
+export function ownedPersonalReach(storage: StorageContext, connection: PersonalConnectionRow): PersonalReach[] {
+  return reachOf(storage, connection.agentId).filter(entry => ownsWorkspace(storage, connection.ownerUserId, entry.workspaceId));
 }
 
 /** Rotates a refresh token of a current connection. Reusing a recently used one ends the connection. */
@@ -643,7 +700,7 @@ export type PersonalAgentChangeResult =
     revision: number;
     /** Running work here ends: the agent's credentials ended, or the workspace left its reach. */
     endedWorkspaceIds: string[];
-    /** Parked waits here re-check. */
+    /** Parked waits here re-check, and pick up a workspace new to reach. */
     wakeWorkspaceIds: string[];
   }
   | { ok: false; reason: "not-found" | "conflict" | "invalid" };
@@ -658,6 +715,7 @@ export function changePersonalAgent(storage: StorageContext, input: {
   ownerUserId: string;
   agentId: string;
   change: PersonalAgentChange;
+  nowMs: number;
 }): PersonalAgentChangeResult {
   return storage.tx(() => {
     const agent = agentById(storage, input.agentId);
@@ -667,6 +725,7 @@ export function changePersonalAgent(storage: StorageContext, input: {
     }
     const before = agent.reach.map(entry => entry.workspaceId);
     let ended: string[] = [];
+    let added: string[] = [];
     switch (input.change.kind) {
       case "name": {
         const name = personalAgentName(input.change.name);
@@ -682,7 +741,8 @@ export function changePersonalAgent(storage: StorageContext, input: {
         if (!reachIsOwned(storage, input.ownerUserId, input.change.reach)) return { ok: false, reason: "invalid" };
         const kept = new Set(input.change.reach.map(entry => entry.workspaceId));
         ended = before.filter(workspaceId => !kept.has(workspaceId));
-        writeReach(storage, agent.agentId, input.change.reach);
+        added = writeReach(storage, agent.agentId, input.change.reach);
+        appendPersonalDms(storage, agent.agentId, added, Math.trunc(input.nowMs));
         storage.db.prepare("DELETE FROM sync_relay_personal_agent_authorizations WHERE agent_id = ? AND status != 'redeemed'")
           .run(agent.agentId);
         break;
@@ -700,7 +760,9 @@ export function changePersonalAgent(storage: StorageContext, input: {
         break;
     }
     const revision = bumpRoster(storage, input.ownerUserId);
-    return { ok: true, agent: agentById(storage, agent.agentId)!, revision, endedWorkspaceIds: ended, wakeWorkspaceIds: before };
+    return {
+      ok: true, agent: agentById(storage, agent.agentId)!, revision, endedWorkspaceIds: ended, wakeWorkspaceIds: [...before, ...added],
+    };
   });
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID, agentIdForChannelWireId } from "./chatWireIds";
+import { AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID, agentChannelWireId, agentIdForChannelWireId } from "./chatWireIds";
 
 describe("agentIdForChannelWireId", () => {
   it("reads the agent from an agent chat's wire id", () => {
@@ -20,5 +20,11 @@ describe("agentIdForChannelWireId", () => {
     `${AGENT_CHANNEL_WIRE_ID}_${"a".repeat(65)}`,
   ])("names no agent for %s", (wireId) => {
     expect(agentIdForChannelWireId(wireId)).toBeNull();
+  });
+});
+
+describe("agentChannelWireId", () => {
+  it.each(["default", "terminal", `p-${"a".repeat(26)}`])("names the chat of %s", (agentId) => {
+    expect(agentIdForChannelWireId(agentChannelWireId(agentId))).toBe(agentId);
   });
 });

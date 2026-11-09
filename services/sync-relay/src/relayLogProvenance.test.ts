@@ -1,10 +1,18 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SERVICE_HOST_ORIGIN_PREFIX, SHARED_REPLAY_ORIGIN_PREFIX } from "./relayLogInputs";
+import {
+  assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX,
+  PERSONAL_AGENT_ORIGIN_PREFIX, PERSONAL_COLLECTION_ORIGIN_PREFIX, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX, SERVICE_HOST_ORIGIN_PREFIX,
+  SHARED_REPLAY_ORIGIN_PREFIX,
+} from "./relayLogInputs";
 import { claimWorkspace, closeTestStorages, createShare, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
 
-const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SHARED_REPLAY_ORIGIN_PREFIX];
+const RELAY_ORIGIN_PREFIXES = [
+  SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SHARED_REPLAY_ORIGIN_PREFIX,
+  PERSONAL_AGENT_ORIGIN_PREFIX, PERSONAL_COLLECTION_ORIGIN_PREFIX,
+];
+const PERSONAL_AGENT = `p-${"a".repeat(26)}`;
 const RELAY_AUTHORS = [
   // A live author snapshot's account or link holder is the relay's to admit.
   {kind: "human", humanId: "recipient", humanName: "Recipient"},
@@ -70,6 +78,29 @@ describe("client log provenance", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({code: "bad_request"});
     expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows).toEqual([]);
+  });
+  it.each(["owner", "recipient"] as const)("refuses an %s's chat op that takes a personal agent's ids or name", async user => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
+    const url = user === "owner" ? "/sync/workspace/log" : `/sync/shares/${share}/log`;
+    const post = {messageId: "m", threadId: "thread", body: "hi", authorKind: "human", authorUserId: user, createdAtMs: 1};
+    const forged = [
+      {opKind: "chat.thread.create", payload: {threadId: `${PERSONAL_THREAD_ID_PREFIX}t`, channelWireId: "wire", title: "", createdAtMs: 1}},
+      {opKind: "chat.message.append", payload: {...post, messageId: `${PERSONAL_MESSAGE_ID_PREFIX}m`}},
+      {opKind: "chat.message.append", payload: {...post, authorKind: "agent", authorAgentId: PERSONAL_AGENT}},
+      {opKind: "chat.message.append", payload: {...post, authorKind: "agent", authorAgentId: "p-helper"}},
+    ];
+    for (const op of forged) {
+      const response = await handler(request(user, url, jsonBody({originId: "device", ops: [{originSeq: 0, recordedAtMs: 1, ...op}]})));
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({code: "authorship_mismatch"});
+    }
+    expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows).toEqual([]);
+    // The account's own agents still sync their posts.
+    expect(() => assertChatAuthorship([{opKind: "chat.message.append", payload: {...post, authorKind: "agent", authorAgentId: "helper"}}], user))
+      .not.toThrow();
   });
   it("lets only the service host's feed write from its reserved origins", () => {
     expect(() => assertClientLogProvenance(`${SERVICE_HOST_ORIGIN_PREFIX}host`, [], {serviceHost: true})).not.toThrow();
