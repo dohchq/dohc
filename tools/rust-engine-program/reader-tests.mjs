@@ -12,7 +12,8 @@
 //
 // The bundle is built into this user's private scratch parent and removed
 // afterwards. On macOS the reader runs the staged pinned Node, as the reader's
-// own tests do; Linux and Windows use the Node running this script.
+// own tests do; Linux and Windows use DOHC_READER_TEST_NODE when it is set, and
+// otherwise the Node running this script.
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -36,7 +37,7 @@ export function readerTestArgs(name) {
 }
 
 async function readerNode() {
-  if (process.platform !== "darwin") return process.execPath;
+  if (process.platform !== "darwin") return process.env.DOHC_READER_TEST_NODE || process.execPath;
   const { stageReaderTestNode } = await import("./reader-test-node.mjs");
   return stageReaderTestNode();
 }

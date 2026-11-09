@@ -26,14 +26,16 @@ const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInp
 // dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin=process.platform==='darwin'&&process.arch==='arm64';
 const confined=darwin||process.platform==='linux'&&process.arch==='x64';
-const owned={skip:!(process.platform==='win32'||confined),timeout:30000};
-const ownerOnly={skip:!confined,timeout:30000};
+// PR checks set this where the kernel has no Landlock, and run these tests in their confinement job.
+const excluded=process.env.DOHC_CONFINEMENT_SUITES==='exclude';
+const owned={skip:excluded||!(process.platform==='win32'||confined),timeout:30000};
+const ownerOnly={skip:excluded||!confined,timeout:30000};
 // macOS and Linux run the worker under the staged official Node and owner, as
 // the installed app does. Seatbelt stops any Node that loads libraries from
 // outside its own file. Windows runs this Node under the compiled job owner.
 let staged,stagedRoot;
 before(async()=>{
-  if(!confined&&process.platform!=='win32')return;
+  if(excluded||!confined&&process.platform!=='win32')return;
   stagedRoot=await mkdtemp(join(tmpdir(),'dohc-compiler-process-staged-'));
   staged=join(stagedRoot,'app-compiler');
   if(confined)await stageAppCompiler({destination:staged});
@@ -305,6 +307,12 @@ spawn(process.execPath,['-e',launcher,swapper,process.argv[2]],{stdio:'ignore'})
     t.after(()=>{try{process.kill(escaped,'SIGKILL');}catch{}});
     controller.abort();await running;
     assert.equal(await readFile(join(canary,'keep.txt'),'utf8'),'user data');
+    // On Linux the owner is a child subreaper: it adopts the orphaned swapper and stops it with the tree, so nothing escapes.
+    if(process.platform==='linux'){
+      assert.equal(await exited(escaped),true);
+      assert.deepEqual((await readdir(context.scratch)).filter(name=>name.startsWith('dohc-app-compiler-')),[]);
+      return;
+    }
     // A swapper the owner killed answers kill(pid, 0) until launchd reaps it.
     let escapedAlive=alive(escaped)&&!zombie(escaped);
     // Stop the swapper before the fixture's own recursive cleanup runs.

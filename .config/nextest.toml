@@ -50,3 +50,8 @@ threads-required = "num-test-threads"
 [[profile.default.overrides]]
 filter = 'test(=actor::link_rewrites::tests::publication::two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update)'
 slow-timeout = { period = "60s", terminate-after = 20 }
+
+# PR checks select this profile on runners without Landlock, and run the app
+# compiler owner's tests, which apply Landlock, in their confinement job.
+[profile.without-confinement]
+default-filter = "not package(dohc-compiler-owner)"

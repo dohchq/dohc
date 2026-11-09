@@ -1,7 +1,20 @@
-import { lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
+import { configDefaults, defineConfig } from "vitest/config";
+
+// Replicas need Landlock and the relay's outer seccomp filter. PR checks run these files
+// in their confinement job, under Docker's default profile, and leave them out elsewhere.
+const confinementSuites = ["src/replicaJournal.integration.test.ts", "src/replicaJournal.native.test.ts",
+  "src/replicaSupervisor.native.test.ts", "src/replicaSupervisor.test.ts"];
+// A renamed suite would otherwise drop out of the confinement job without failing it.
+const missing = confinementSuites.filter(suite => !existsSync(fileURLToPath(new URL(suite, import.meta.url))));
+if (missing.length) throw new Error(`Confinement suites not found: ${missing.join(", ")}.`);
+const selection = process.env.DOHC_CONFINEMENT_SUITES;
+if (selection !== undefined && selection !== "only" && selection !== "exclude") {
+  throw new Error(`DOHC_CONFINEMENT_SUITES must be "only" or "exclude", not ${JSON.stringify(selection)}.`);
+}
 
 // macOS $TMPDIR is a link into /private. Tests that make folders under
 // os.tmpdir() must hold the path that code resolving links sees.
@@ -36,6 +49,8 @@ function privateShortTmpdir(): string {
 export default defineConfig({
   test: {
     testTimeout: 30_000,
+    ...(selection === "only" ? { include: confinementSuites } : {}),
+    ...(selection === "exclude" ? { exclude: [...configDefaults.exclude, ...confinementSuites] } : {}),
     // expect.poll's own default is 1 s; a loaded host needs the same 10 s as desktop.
     expect: { poll: { timeout: 10_000 } },
   },

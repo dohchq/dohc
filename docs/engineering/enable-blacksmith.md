@@ -99,6 +99,17 @@ Use ten minutes per PR as a planning target, not a measured runtime or permissio
 The free allowance is shared across the organization; check its remaining balance before including it in the budget.
 An 8-vCPU runner costs twice as much per minute. Choose it only after comparing cost per passing run.
 
+## Sandbox suites run on GitHub's image
+
+Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
+The `confinement` job runs those suites on GitHub's `ubuntu-24.04` image whenever either gate runs.
+It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
+It fails if an app compiler or replica test skips.
+The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
+The local gate runs no Linux JavaScript, so the replica suites run only in this job.
+
+Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript job moves that file aside, so the login shell tests read the profile in their own `HOME`.
+
 ## Read the result
 
 PR jobs check out the event's merge commit and compare it with the event's base commit.
