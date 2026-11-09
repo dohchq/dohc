@@ -242,6 +242,45 @@ describe("crash report store", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("keeps a read report read after a restart, and a newer problem unread", () => {
+    const onChanged = vi.fn();
+    const reports = store(null, onChanged);
+    reports.record(EVERY_KIND[0]!);
+    reports.record(EVERY_KIND[1]!);
+    expect(reports.read().report?.read).toBe(false);
+
+    reports.markRead(reports.read().report!.through);
+    expect(onChanged).toHaveBeenCalledTimes(3);
+    const next = store(null).read().report!;
+    expect(next).toMatchObject({ read: true, problems: 2, source: "window" });
+
+    // A mark for fewer problems, or a repeated one, changes nothing.
+    reports.markRead(1);
+    reports.markRead(next.through);
+    expect(onChanged).toHaveBeenCalledTimes(3);
+
+    reports.record(EVERY_KIND[3]!);
+    expect(store(null).read().report).toMatchObject({ read: false, problems: 3, source: "engine" });
+  });
+
+  it("never marks a problem read before it happens", () => {
+    const reports = store(null);
+    reports.record(EVERY_KIND[0]!);
+    reports.markRead(reports.read().report!.through + 5);
+    expect(reports.read().report?.read).toBe(true);
+    reports.record(EVERY_KIND[1]!);
+    expect(reports.read().report?.read).toBe(false);
+  });
+
+  it("starts a new report from a file an older dohc wrote", () => {
+    writeFileSync(join(directory, "crash-report.json"), JSON.stringify({
+      version: 2, revision: 4, seq: 1, leftOut: 0,
+      problems: [{ seq: 1, atMs: 1_000, source: "utility", text: "dohc crash report" }],
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(store(null).read().report).toBeNull();
+  });
+
   it("starts a new report when the file is damaged", () => {
     writeFileSync(join(directory, "crash-report.json"), "{not json");
     vi.spyOn(console, "error").mockImplementation(() => undefined);

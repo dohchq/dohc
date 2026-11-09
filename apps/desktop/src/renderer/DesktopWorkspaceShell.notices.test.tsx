@@ -1723,6 +1723,7 @@ describe("crash report notice", () => {
   const REPORT = {
     revision: 3,
     through: 3,
+    read: false,
     source: "engine" as const,
     problems: 1,
     atMs: 5_000,
@@ -1820,6 +1821,66 @@ describe("crash report notice", () => {
     const row = await screen.findByTestId("notice-crash-report");
     expect(row.textContent).toContain("A dohc window stopped unexpectedly");
     expect(row.textContent).toContain("This report holds 2 problems.");
+  });
+
+  it("saves a closed toast with main, so the next launch shows only the row", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    const { unmount } = renderShell(bridge);
+
+    bridge.readCrashReport.mockResolvedValue({ report: { ...REPORT, revision: 4, read: true }, sendTo: null });
+    await user.click(await screen.findByRole("button", { name: "Close crash report notice" }));
+    expect(screen.queryByTestId("crash-report-toast")).toBeNull();
+    await waitFor(() => expect(bridge.markCrashReportRead).toHaveBeenCalledWith({ through: 3 }));
+    unmount();
+
+    // The next launch reads the report main kept, already read.
+    renderShell(bridge);
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    expect((await screen.findByTestId("notice-crash-report")).textContent).toContain("The workspace engine failed");
+    expect(screen.queryByTestId("crash-report-toast")).toBeNull();
+    expect(screen.queryByTestId("notice-crash-report-unread")).toBeNull();
+    expect(bridge.markCrashReportRead).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves the report as read when its row is read, and a newer problem toasts again", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    renderShell(bridge);
+
+    await screen.findByTestId("crash-report-toast");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    bridge.readCrashReport.mockResolvedValue({ report: { ...REPORT, revision: 4, read: true }, sendTo: null });
+    await user.hover(await screen.findByTestId("notice-crash-report"));
+    await waitFor(() => expect(bridge.markCrashReportRead).toHaveBeenCalledWith({ through: 3 }));
+    // Open Notices hides every toast, so close it to see that this one stays closed.
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+    expect(screen.queryByTestId("crash-report-toast")).toBeNull();
+
+    bridge.readCrashReport.mockResolvedValue({
+      report: { ...REPORT, revision: 5, through: 4, read: false, source: "window", problems: 2 },
+      sendTo: null,
+    });
+    act(() => bridge.emitCrashReportChanged());
+    expect((await screen.findByTestId("crash-report-toast")).textContent).toContain("A dohc window stopped unexpectedly");
+  });
+
+  it("shows the toast again and says so when main could not save that it was read", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCrashReport.mockResolvedValue({ report: REPORT, sendTo: null });
+    bridge.markCrashReportRead.mockRejectedValueOnce(
+      new Error("Error invoking remote method 'desktop:mark-crash-report-read': Error: EACCES: permission denied"),
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByRole("button", { name: "Close crash report notice" }));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent)
+      .toContain("dohc could not save that you read the crash report.");
+    expect(await screen.findByTestId("crash-report-toast")).toBeTruthy();
   });
 });
 

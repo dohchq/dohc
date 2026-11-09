@@ -776,6 +776,7 @@ function makeBaseBridge(
       }),
     ),
     dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
+    markCrashReportRead: vi.fn(async (_payload: { through: number }) => undefined),
     sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
     readReportsNotice: vi.fn(async (_payload: Record<string, never>) => ({ usage: false, errors: false })),
     acknowledgeReportsNotice: vi.fn(async (_shown: ReportKinds) => undefined),

@@ -25,12 +25,15 @@ const SEND_TIMEOUT_MS = 20_000;
 const DOHC_REPORT_SERVER: URL | null = null;
 
 const PendingReport = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   // Counts every change to the report, so any change to its text is a new
   // revision.
   revision: z.number().int().nonnegative(),
   // The last problem's number. Dismiss removes the problems up to it.
   seq: z.number().int().nonnegative(),
+  // The last problem the person has read, by closing its toast or reading
+  // its row. A problem after it is announced again.
+  readThrough: z.number().int().nonnegative(),
   leftOut: z.number().int().nonnegative(),
   problems: z.array(z.object({
     seq: z.number().int().positive(),
@@ -54,6 +57,9 @@ export interface CrashReportStore {
   read(): ReadCrashReportResult;
   // Removes the problems up to `through`; a newer one stays.
   dismiss(through: number): void;
+  // Saves that the person read the problems up to `through`, so their
+  // toast does not show again. The problems stay in the report.
+  markRead(through: number): void;
   // Asks the person through `confirm`, main's own dialog, then posts
   // exactly the text it showed and removes those problems. False when they
   // did not confirm, or when another send is already asking.
@@ -102,7 +108,7 @@ export function createCrashReportStore(deps: {
 
   function load(): PendingReport {
     if (cached) return cached;
-    const empty: PendingReport = { version: 2, revision: 0, seq: 0, leftOut: 0, problems: [] };
+    const empty: PendingReport = { version: 3, revision: 0, seq: 0, readThrough: 0, leftOut: 0, problems: [] };
     let raw: string;
     try {
       raw = readFileSync(deps.path, "utf8");
@@ -160,7 +166,7 @@ export function createCrashReportStore(deps: {
         }];
         const dropped = Math.max(0, problems.length - CRASH_REPORT_MAX_PROBLEMS);
         save({
-          version: 2,
+          ...report,
           seq,
           leftOut: report.leftOut + dropped,
           problems: problems.slice(dropped),
@@ -179,6 +185,7 @@ export function createCrashReportStore(deps: {
           ? {
               revision: report.revision,
               through: report.seq,
+              read: report.readThrough >= report.seq,
               source: newest.source,
               problems: report.problems.length + report.leftOut,
               atMs: newest.atMs,
@@ -191,6 +198,14 @@ export function createCrashReportStore(deps: {
 
     dismiss(through) {
       removeThrough(through);
+    },
+
+    markRead(through) {
+      const report = load();
+      const readThrough = Math.max(report.readThrough, Math.min(through, report.seq));
+      if (readThrough === report.readThrough) return;
+      save({ ...report, readThrough });
+      deps.onChanged();
     },
 
     async send(confirm) {
