@@ -6323,17 +6323,110 @@ fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
         .expect("stored reaction");
     assert_eq!(reacted, "Analisa");
 
-    // A name made only of such characters is no name.
-    let blank = envelope(
-        "peer",
-        8,
-        "chat.message.append",
-        json!({
-            "messageId": "blank", "threadId": "thread-imported", "authorKind": "human",
-            "authorDisplayName": "\u{200B}\u{3164}", "body": "Hi", "createdAtMs": 31
-        }),
+    // A name with nothing visible left is no name, for a post and for the
+    // person an agent posts for.
+    for (seq, name, owner) in [
+        (8, "\u{200B}\u{3164}", None),
+        (9, "\u{200C}", None),
+        (10, "\u{200D}\u{FE0F}", None),
+        (11, " \u{E0100} ", None),
+        (12, "Nova", Some("\u{200D}")),
+    ] {
+        let author_kind = if owner.is_some() { "agent" } else { "human" };
+        let mut payload = json!({
+            "messageId": format!("blank-{seq}"), "threadId": "thread-imported",
+            "authorKind": author_kind, "authorDisplayName": name, "body": "Hi", "createdAtMs": 31
+        });
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        let blank = envelope("peer", seq, "chat.message.append", payload);
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &blank, &NoFaults));
+    }
+}
+
+/// An older build parked posts whose names this build refuses. When their
+/// thread arrives, the thread applies and each such post is refused.
+#[test]
+fn a_parked_post_whose_name_is_now_refused_lets_its_thread_arrive() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let parked = [
+        ("human", "\u{200B}", None),
+        ("human", "\u{3164}", None),
+        ("agent", "Nova", Some("\u{200D}")),
+    ];
+    for (seq, (author_kind, name, owner)) in parked.into_iter().enumerate() {
+        let seq = seq as i64;
+        let mut payload = json!({
+            "messageId": format!("parked-{seq}"), "threadId": "late-thread",
+            "authorKind": author_kind, "authorDisplayName": "Ana", "body": "Hi",
+            "createdAtMs": 30
+        });
+        if owner.is_some() {
+            payload["authorOwnerDisplayName"] = json!("Ana");
+        }
+        let op = envelope("old-peer", seq, "chat.message.append", payload.clone());
+        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("parked post");
+        // The payload as the older build recorded it.
+        payload["authorDisplayName"] = json!(name);
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET payload_json = ?2 \
+                     WHERE workspace_id = 'ws' AND origin_id = 'old-peer' AND origin_seq = ?1",
+                    params![seq, payload.to_string()],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("record the older payload");
+    }
+    assert_eq!(pending_chat_coordinate_count(&engine), 3);
+
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({ "threadId": "late-thread", "title": "Late thread", "createdAtMs": 20, "channelSlug": "imported" }),
     );
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &blank, &NoFaults));
+    let outcome = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("the thread applies");
+    assert!(
+        matches!(outcome.primary, ApplyDisposition::Applied(_)),
+        "the thread arrives"
+    );
+    let mut refused: Vec<(String, i64)> = outcome
+        .refusals
+        .iter()
+        .map(|refusal| (refusal.origin_id.clone(), refusal.origin_seq))
+        .collect();
+    refused.sort();
+    assert_eq!(
+        refused,
+        [0, 1, 2].map(|seq| ("old-peer".to_owned(), seq)).to_vec()
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let (threads, posts): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, dohc_engine_storage::StorageError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_threads WHERE thread_id = 'late-thread'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id LIKE 'parked-%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+            ))
+        })
+        .expect("counts");
+    assert_eq!((threads, posts), (1, 0));
 }
 
 #[test]

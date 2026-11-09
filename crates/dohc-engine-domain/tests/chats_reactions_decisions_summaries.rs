@@ -617,6 +617,174 @@ fn reaction_request_replay_does_not_mint_a_later_cell() {
     assert_eq!(ops, 1);
 }
 
+/// A request hash as a build before this one recorded it: each field's
+/// length, then its bytes, with the sender's name only trimmed.
+fn recorded_hash(fields: &[&[u8]]) -> String {
+    let mut bytes = Vec::new();
+    for field in fields {
+        bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(field);
+    }
+    dohc_engine_storage::hex_sha256(&bytes)
+}
+
+fn record_hash_as_before(store: &mut EngineStore, request_id: &str, hash: &str) {
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE engine_requests SET payload_hash = ?2 WHERE request_id = ?1",
+                params![request_id, hash],
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("record the hash");
+}
+
+/// A thread start, post or reaction recorded before names dropped hidden
+/// characters returns its saved result when it is retried.
+#[test]
+fn a_request_recorded_before_names_were_cleaned_replays_its_saved_result() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let name = "Ana\u{202E}lisa";
+    let start = StartChannelThread {
+        automation: None,
+        workspace_id: WS.to_owned(),
+        channel_id: "channel".to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: "opening".to_owned(),
+        title: None,
+        lane: ChatThreadLane::Posts,
+        own_thread: false,
+        author_kind: ChatActorKind::Human,
+        author_display_name: name.to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some("ana".to_owned()),
+        origin: None,
+        body: "Opening".to_owned(),
+        needs_decision: false,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        author_agent_id: None,
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
+        now_ms: 20,
+        request_id: Some("start".to_owned()),
+    };
+    let send = SendMessage {
+        automation: None,
+        workspace_id: WS.to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: "post".to_owned(),
+        author_kind: ChatActorKind::Human,
+        author_display_name: name.to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some("ana".to_owned()),
+        parent_message_id: None,
+        origin: None,
+        body: "Hi".to_owned(),
+        needs_decision: false,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        author_agent_id: None,
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
+        now_ms: 30,
+        request_id: Some("post".to_owned()),
+    };
+    let react = SetReaction {
+        workspace_id: WS.to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: "post".to_owned(),
+        emoji: "👍".to_owned(),
+        author_id: "ana".to_owned(),
+        replication_author_id: Some("ana".to_owned()),
+        author_kind: ChatActorKind::Human,
+        author_display_name: name.to_owned(),
+        state: ChatReactionState::Added,
+        now_ms: 40,
+        request_id: "react".to_owned(),
+    };
+    let mut chats = LinkedChatStore::new(&mut store);
+    let (_, opening) = chats
+        .start_channel_thread(&start, &NO_FAULTS)
+        .expect("start");
+    let post = chats.send_message(&send, &NO_FAULTS).expect("post");
+    let reaction = chats.set_reaction(&react, &NO_FAULTS).expect("reaction");
+    assert_eq!(opening.author_display_name, "Analisa");
+    assert_eq!(post.author_display_name, "Analisa");
+
+    // Fields in each request's hash order. A request with no attachments
+    // hashes their count, eight zero bytes.
+    let (name, none, no_attachments): (&[u8], &[u8], &[u8]) = (name.as_bytes(), b"", &[0; 8]);
+    let start_hash = recorded_hash(&[
+        b"thread",
+        b"opening",
+        b"channel",
+        none,
+        b"Opening",
+        b"human",
+        name,
+        none,
+        b"ana",
+        none,
+        b"0",
+        none,
+        no_attachments,
+        none,
+        none,
+        none,
+        none,
+        none,
+    ]);
+    let send_hash = recorded_hash(&[
+        b"thread",
+        b"post",
+        b"Hi",
+        b"human",
+        name,
+        none,
+        b"ana",
+        none,
+        none,
+        b"0",
+        none,
+        no_attachments,
+        none,
+        none,
+        none,
+        none,
+        none,
+    ]);
+    let react_hash = recorded_hash(&[
+        b"thread",
+        b"post",
+        "👍".as_bytes(),
+        b"ana",
+        b"ana",
+        b"human",
+        name,
+        b"added",
+    ]);
+    record_hash_as_before(&mut store, "start", &start_hash);
+    record_hash_as_before(&mut store, "post", &send_hash);
+    record_hash_as_before(&mut store, "react", &react_hash);
+
+    let mut chats = LinkedChatStore::new(&mut store);
+    let (_, retried_opening) = chats
+        .start_channel_thread(&start, &NO_FAULTS)
+        .expect("a retried start returns its saved result");
+    let retried_post = chats
+        .send_message(&send, &NO_FAULTS)
+        .expect("a retried post returns its saved result");
+    let retried_reaction = chats
+        .set_reaction(&react, &NO_FAULTS)
+        .expect("a retried reaction returns its saved result");
+    assert_eq!(retried_opening, opening);
+    assert_eq!(retried_post, post);
+    assert_eq!(retried_reaction, reaction);
+}
+
 #[test]
 fn decision_open_is_atomic_with_start_and_send() {
     let (_scratch, mut store) = store();

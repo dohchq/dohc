@@ -26,22 +26,40 @@ fn is_default_ignorable(ch: char) -> bool {
         | '\u{E0000}'..='\u{E0FFF}')
 }
 
-/// A character that can hide or reorder text: a control, format, line or
-/// paragraph separator, or default-ignorable character. This matches the
-/// desktop's `HIDDEN_TEXT` class for agent names.
-pub fn hides_text(ch: char) -> bool {
+/// A name without the characters that can hide or reorder text, or `None`
+/// when nothing visible is left. ZWNJ, ZWJ and variation selectors stay, so
+/// Persian names and emoji show as typed.
+pub fn shown_name(value: &str) -> Option<String> {
+    let mut visible = false;
+    let shown = value
+        .chars()
+        .filter(|&ch| {
+            let hidden = hides_text(ch);
+            visible |= !hidden && !ch.is_whitespace();
+            !hidden || joins_text(ch)
+        })
+        .collect();
+    visible.then_some(shown)
+}
+
+/// A control, format, line or paragraph separator, or default-ignorable
+/// character, the desktop's `HIDDEN_TEXT` class for agent names.
+fn hides_text(ch: char) -> bool {
     ch.is_control()
         || matches!(ch, '\u{2028}' | '\u{2029}')
         || is_default_ignorable(ch)
-        || is_format_outside_default_ignorable(ch)
+        // Format characters that are not default-ignorable.
+        || matches!(ch,
+            '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}')
 }
 
-fn is_format_outside_default_ignorable(ch: char) -> bool {
-    // General_Category=Cf code points that are not Default_Ignorable.
+/// ZWNJ, ZWJ and the Variation_Selector characters.
+fn joins_text(ch: char) -> bool {
     matches!(ch,
-        '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}'
-        | '\u{08E2}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
-        | '\u{13430}'..='\u{1343F}')
+        '\u{200C}' | '\u{200D}' | '\u{180B}'..='\u{180D}' | '\u{180F}'
+        | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
 }
 
 pub fn truncate_name(value: &str, max_bytes: usize) -> &str {
