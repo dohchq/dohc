@@ -1,0 +1,16 @@
+{
+  "namespace": "relay",
+  "source": {
+    "workspaceId": "workspace",
+    "objectId": "object",
+    "path": "docs/a.md",
+    "sourceMomentId": "head-moment",
+    "sourceDigest": "04165b999bc008eb4ae79578869b0984a2e229adec6d1c5dc5940db76339a297",
+    "sourceByteLength": 70
+  },
+  "identity": {
+    "replicationEpoch": "epoch-relay",
+    "streamIdentity": "stream-relay"
+  },
+  "originId": "service-host:first-open:f61d0c94097d52ddcfdce75f38572189a2e4f32616343951fb3a08b80a37426a"
+}

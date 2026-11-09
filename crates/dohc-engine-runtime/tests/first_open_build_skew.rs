@@ -17,6 +17,11 @@
 //! whose bytes are the file's quietly; the parent's base, which settles to
 //! other bytes, opens a conflict beside the file.
 //!
+//! The host pulls its hosted feed as a serving replica does: the ordinary
+//! write that made the file comes first, and the hosted commit makes the
+//! note ready. It holds the file before any base, so a winning parent base
+//! opens a conflict there too, and the conflict refuses the host's capture.
+//!
 //! Mutation checks: drop the untouched-seed rule in `preserve_base_sides_in_tx`
 //! and a desktop whose untouched seed lost writes its own projection over the
 //! file as a local moment and opens a conflict. Admit a write on a replaced
@@ -162,7 +167,7 @@ fn prepare(db: &Path, head: Option<&str>) {
     }
 }
 
-/// A hosted replica that hosts the note before any of it arrives.
+/// A hosted replica with no scope yet: its first pull takes the note's.
 fn prepare_host(db: &Path) {
     prepare(db, None);
     let mut store = EngineStore::open(db, 9_310).expect("open host");
@@ -176,42 +181,224 @@ fn prepare_host(db: &Path) {
         &NoFaults,
     )
     .expect("become a hosted replica");
+}
+
+/// The relay position of the ordinary write that made the note's source.
+/// The relayed log follows it.
+const SOURCE_RELAY_SEQ: i64 = 1;
+
+/// The ordinary write that made the note's source, as the relay serves it:
+/// the head the desktop holds and the first-open source names.
+fn source_write(markdown: &str) -> ReplicationEnvelope {
+    ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: WS.to_owned(),
+        origin_id: "origin-writer".to_owned(),
+        origin_seq: 0,
+        relay_seq: Some(SOURCE_RELAY_SEQ),
+        op_kind: "moment.append".to_owned(),
+        payload: serde_json::json!({
+            "momentId": HEAD_MOMENT, "versionId": "main", "objectId": OBJECT,
+            "objectCreatedAtMs": 1, "path": PATH, "recordedAtMs": 2, "operation": "write",
+            "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+            "payloadAfterBlobSha256": hex_sha256(markdown.as_bytes()), "payloadAfterPath": PATH,
+            "metadata": {"origin": "sync"}, "beforePresent": "absent"
+        }),
+        recorded_at_ms: 2,
+    }
+}
+
+/// The relay's hosted feed for a scope of the one note, which every row
+/// names.
+struct HostedFeed {
+    rows: Vec<ReplicationEnvelope>,
+    blobs: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+macro_rules! refused_relay_methods {
+    ($($method:ident($request:ty) -> $response:ty;)*) => {
+        $(fn $method(&self, _req: $request) -> Result<$response, dohc_engine_sync::RelayError> {
+            Err(dohc_engine_sync::RelayError::InvalidResponse)
+        })*
+    };
+}
+
+impl dohc_engine_sync::RelayTransport for HostedFeed {
+    fn pull_hosted(
+        &self,
+        req: dohc_engine_sync::HostedPullRequest,
+    ) -> Result<dohc_engine_sync::HostedPullResponse, dohc_engine_sync::RelayError> {
+        let scope = dohc_engine_sync::HostedScope {
+            token: "scope".to_owned(),
+            documents: vec![dohc_engine_sync::HostedScopeDocument {
+                object_id: OBJECT.to_owned(),
+                path: PATH.to_owned(),
+            }],
+        };
+        // A pull under another scope gets the scope and no rows.
+        let current = req.scope_token.as_deref() == Some(scope.token.as_str());
+        let ops: Vec<_> = self
+            .rows
+            .iter()
+            .filter(|op| current && op.relay_seq.expect("placed") > req.cursor)
+            .filter(|op| {
+                req.object_id
+                    .as_ref()
+                    .is_none_or(|object_id| op.payload["objectId"] == object_id.as_str())
+            })
+            .cloned()
+            .collect();
+        Ok(dohc_engine_sync::HostedPullResponse {
+            scope,
+            next_cursor: ops
+                .last()
+                .map_or(req.cursor, |op| op.relay_seq.expect("placed")),
+            ops,
+            has_more: false,
+        })
+    }
+
+    fn download_blobs(
+        &self,
+        req: dohc_engine_sync::BlobDownloadBatchRequest,
+    ) -> Result<dohc_engine_sync::BlobDownloadBatchResponse, dohc_engine_sync::RelayError> {
+        Ok(dohc_engine_sync::BlobDownloadBatchResponse {
+            results: req
+                .blobs
+                .iter()
+                .map(|blob| {
+                    self.blobs
+                        .get(&blob.sha256)
+                        .cloned()
+                        .map(|bytes| dohc_engine_sync::BlobDownloadResponse { bytes })
+                        .ok_or(dohc_engine_sync::RelayError::BlobMissing)
+                })
+                .collect(),
+        })
+    }
+
+    fn lookup_log_coordinate(
+        &self,
+        req: dohc_engine_sync::LogCoordinateRequest,
+    ) -> Result<dohc_engine_sync::LogCoordinateResponse, dohc_engine_sync::RelayError> {
+        Ok(self
+            .rows
+            .iter()
+            .find(|op| op.origin_id == req.origin_id && op.origin_seq == req.origin_seq)
+            .cloned()
+            .map_or(
+                dohc_engine_sync::LogCoordinateResponse::Absent,
+                dohc_engine_sync::LogCoordinateResponse::Present,
+            ))
+    }
+
+    refused_relay_methods! {
+        push(dohc_engine_sync::PushRequest) -> dohc_engine_sync::PushResponse;
+        pull(dohc_engine_sync::PullRequest) -> dohc_engine_sync::PullResponse;
+        probe(dohc_engine_sync::ProbeRequest) -> dohc_engine_sync::ProbeResponse;
+        claim_workspace(dohc_engine_sync::ClaimRequest) -> dohc_engine_sync::ClaimResponse;
+        rotate_epoch(dohc_engine_sync::EpochRequest) -> dohc_engine_sync::EpochResponse;
+        blobs_have(dohc_engine_sync::BlobHaveRequest) -> dohc_engine_sync::BlobHaveResponse;
+        upload_blob(dohc_engine_sync::BlobUploadRequest) -> ();
+        upload_key_envelope(dohc_engine_sync::KeyEnvelopeRequest) -> dohc_engine_sync::KeyEnvelopeResponse;
+        download_key_envelope(dohc_engine_sync::KeyEnvelopeDownloadRequest) -> dohc_engine_sync::KeyEnvelopeDownloadResponse;
+        shared_channel_pull(dohc_engine_sync::SharedChannelRequest) -> dohc_engine_sync::SharedChannelResponse;
+        share_log_push(dohc_engine_sync::ShareLogPushRequest) -> dohc_engine_sync::PushResponse;
+        share_view_pull(dohc_engine_sync::ShareViewRequest) -> dohc_engine_sync::ShareViewResponse;
+        share_blob(dohc_engine_sync::ShareBlobRequest) -> dohc_engine_sync::BlobDownloadResponse;
+        share_blob_upload(dohc_engine_sync::ShareBlobUploadRequest) -> ();
+        share_proposal_submit(dohc_engine_sync::ShareProposalSubmitRequest) -> dohc_engine_sync::ShareProposalSubmitResponse;
+        share_collection_write(dohc_engine_sync::ShareCollectionWriteRequest) -> dohc_engine_sync::ShareCollectionWriteResponse;
+    }
+}
+
+/// Pull the host's whole feed as the actor's relay coordinator does: a pass
+/// waiting on a released-tail validation or a Markdown proof runs again
+/// once it resolves, and each pass's cursor goes through the hosted commit,
+/// which alone makes the note ready.
+async fn host_pull(
+    store: &mut EngineStore,
+    feed: HostedFeed,
+    witness: &Arc<ReaderResolver>,
+    case: Case,
+) {
+    let client = dohc_engine_sync::RelaySyncClient::new(feed);
+    let mut cache = witnessed_cache(witness);
+    for _ in 0..16 {
+        let pass = match client.pull_hosted_workspace(
+            store,
+            &mut cache,
+            WS,
+            NAMESPACE,
+            &NoFaults,
+            &NoLiveLeases,
+        ) {
+            Ok(pass) => pass,
+            Err(dohc_engine_sync::RelayError::ValidationPending(pending)) => {
+                pending.validate().wait().expect("validation");
+                continue;
+            }
+            Err(error) => match client.take_pending_preparation() {
+                Some(pending) => {
+                    pending.resolve().await;
+                    continue;
+                }
+                None => panic!("{case:?}: hosted pull {error:?}"),
+            },
+        };
+        if let Some(cursor) = &pass.pending_cursor {
+            let committed = client
+                .commit_hosted_cursor(
+                    store,
+                    WS,
+                    cursor,
+                    &dohc_engine_collab::live_update_application::ReleasedTails::uncached(),
+                    &NoFaults,
+                )
+                .unwrap_or_else(|error| panic!("{case:?}: hosted commit {error:?}"));
+            assert!(
+                matches!(
+                    committed,
+                    dohc_engine_storage::TxnOutcome::Committed(dohc_engine_sync::HostedCommit {
+                        committed: true,
+                        ..
+                    })
+                ),
+                "{case:?}: {committed:?}"
+            );
+        }
+        if !pass.has_more {
+            return;
+        }
+    }
+    panic!("{case:?}: the host's pull never reached the end of its feed");
+}
+
+/// Whether the host's commit made the note ready.
+fn host_ready(store: &EngineStore) -> bool {
+    dohc_engine_sync::read_hosted_replica(store, WS)
+        .expect("read the host")
+        .expect("a hosted replica")
+        .documents
+        .get(OBJECT)
+        .is_some_and(|document| document.status == dohc_engine_sync::HostedDocumentStatus::Ready)
+}
+
+/// Where a pull through relay position `through` committed an ordinary
+/// replica's fetch.
+fn commit_fetch(db: &Path, through: i64) {
+    let mut store = EngineStore::open(db, 9_311).expect("open store");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
-                "INSERT INTO hosted_documents (workspace_id, object_id, path, state, scope_generation) \
-                 SELECT workspace_id, ?2, ?3, 'ready', scope_generation FROM hosted_replicas \
-                 WHERE workspace_id = ?1",
-                [WS, OBJECT, PATH],
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id, cursor, replication_epoch, stream_identity) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(workspace_id) DO UPDATE SET \
+                 cursor = excluded.cursor, replication_epoch = excluded.replication_epoch, \
+                 stream_identity = excluded.stream_identity",
+                rusqlite::params![WS, through.to_string(), RELAY_EPOCH, RELAY_STREAM],
             )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("host the note");
-}
-
-/// Where a pull of the first `through` relayed ops committed `db`'s fetch.
-fn commit_fetch(db: &Path, through: usize) {
-    let mut store = EngineStore::open(db, 9_311).expect("open store");
-    let hosted = dohc_engine_sync::is_hosted_replica(&store, WS).expect("replica type");
-    let through = i64::try_from(through).expect("cursor");
-    store
-        .write_with(&NoFaults, |tx| {
-            if hosted {
-                tx.execute(
-                    "UPDATE hosted_replicas SET main_cursor = ?2 WHERE workspace_id = ?1",
-                    rusqlite::params![WS, through],
-                )
-            } else {
-                tx.execute(
-                    "INSERT INTO sync_relay_cursors \
-                     (workspace_id, cursor, replication_epoch, stream_identity) \
-                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT(workspace_id) DO UPDATE SET \
-                     cursor = excluded.cursor, replication_epoch = excluded.replication_epoch, \
-                     stream_identity = excluded.stream_identity",
-                    rusqlite::params![WS, through.to_string(), RELAY_EPOCH, RELAY_STREAM],
-                )
-            }
             .map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
         })
@@ -329,29 +516,77 @@ fn is_base(envelope: &ReplicationEnvelope) -> bool {
     envelope.payload["isBaseState"] == serde_json::Value::Bool(true)
 }
 
-/// The origin the relay writes the note's first base under, as
-/// `firstOpenOrigin` in `storage/firstOpenEligibility.ts` derives it from the
-/// source it read.
-fn first_open_origin(markdown: &str) -> String {
-    let identity = serde_json::to_string(&[
-        "dohc-first-open-v1",
-        NAMESPACE,
-        WS,
-        "main",
-        OBJECT,
-        RELAY_EPOCH,
-        RELAY_STREAM,
-        PATH,
-        HEAD_MOMENT,
-        &hex_sha256(markdown.as_bytes()),
-    ])
-    .expect("identity");
-    let origin = format!(
-        "service-host:first-open:{}",
-        hex_sha256(identity.as_bytes())
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OriginSource {
+    workspace_id: String,
+    object_id: String,
+    path: String,
+    source_moment_id: String,
+    source_digest: String,
+    source_byte_length: usize,
+}
+
+#[derive(serde::Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OriginIdentity {
+    replication_epoch: String,
+    stream_identity: String,
+}
+
+/// The origin `firstOpenOrigin` in `storage/firstOpenEligibility.ts` gave
+/// for this note's source; `firstOpenBase.test.ts` checks the relay still
+/// derives it from these inputs.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PinnedOrigin {
+    namespace: String,
+    source: OriginSource,
+    identity: OriginIdentity,
+    origin_id: String,
+}
+
+/// The origin the relay writes the note's first base under, read from the
+/// fixture the relay's own derivation pins, for the source this race uses.
+fn pinned_first_open_origin(markdown: &str) -> String {
+    let pinned: PinnedOrigin = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/first-open-base/first-open-origin.json"
+    ))
+    .expect("parse the pinned origin");
+    assert_eq!(pinned.namespace, NAMESPACE);
+    assert_eq!(
+        pinned.source,
+        OriginSource {
+            workspace_id: WS.to_owned(),
+            object_id: OBJECT.to_owned(),
+            path: PATH.to_owned(),
+            source_moment_id: HEAD_MOMENT.to_owned(),
+            source_digest: hex_sha256(markdown.as_bytes()),
+            source_byte_length: markdown.len(),
+        },
+        "the pinned origin is this note's"
     );
-    assert!(origin.starts_with(dohc_engine_sync::SERVICE_HOST_ORIGIN_PREFIX));
-    origin
+    assert_eq!(
+        pinned.identity,
+        OriginIdentity {
+            replication_epoch: RELAY_EPOCH.to_owned(),
+            stream_identity: RELAY_STREAM.to_owned(),
+        }
+    );
+    // A service host's origin, ending in a SHA-256 digest.
+    let digest = pinned.origin_id.rsplit(':').next().expect("digest");
+    assert!(
+        pinned
+            .origin_id
+            .starts_with(dohc_engine_sync::SERVICE_HOST_ORIGIN_PREFIX)
+            && digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+        "{}",
+        pinned.origin_id
+    );
+    pinned.origin_id
 }
 
 /// The relay's first-open base, shaped like the desktop's.
@@ -552,7 +787,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     prepare(&d, Some(markdown));
     prepare(&p, None);
     prepare_host(&h);
-    let origin = first_open_origin(markdown);
+    let origin = pinned_first_open_origin(markdown);
     let witness = support::witness_reader(&d_scratch);
 
     // The desktop opens the note and seeds it under the client the engine names.
@@ -602,7 +837,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         [desktop_ops.clone(), vec![relayed]].concat()
     };
     for (seq, (envelope, _)) in log.iter_mut().enumerate() {
-        envelope.relay_seq = Some(seq as i64 + 1);
+        envelope.relay_seq = Some(SOURCE_RELAY_SEQ + 1 + seq as i64);
     }
     let winner = log[0].0.payload["lineageClaimId"]
         .as_str()
@@ -613,6 +848,10 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     // parent's base settles to the canonical text, so winning over today's
     // seed it opens a conflict beside the file.
     let conflict_opens = desktop_lost && !case.desktop_builds_parent;
+    // The host holds the file before any base arrives, so the same rule
+    // holds there: the parent's base, whichever device built it, opens a
+    // conflict beside the file when it wins.
+    let parent_wins = case.relay_base_first != case.desktop_builds_parent;
 
     // The desktop pushed, then pulls: it learns where its base landed and
     // applies the relay's base. Its own ops are not delivered back.
@@ -757,16 +996,41 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         "{case:?}: only an edit on the winner is journaled after delivery, once"
     );
     for (envelope, _) in &mut typed {
-        envelope.relay_seq = Some(log.len() as i64 + 1);
+        envelope.relay_seq = Some(SOURCE_RELAY_SEQ + 1 + log.len() as i64);
     }
     log.extend(typed);
+    let last_relay_seq = log.last().and_then(|(op, _)| op.relay_seq).expect("placed");
 
-    // A peer with no copy of the note and a host that serves it pull the
-    // whole log.
+    // A peer with no copy of the note pulls the whole log. The host that
+    // serves the note pulls its hosted feed: the write that made the file,
+    // then the log, each pass through the hosted commit.
     let mut p_store = EngineStore::open(&p, 9_303).expect("open peer");
     deliver(&mut p_store, &key, &log, false, &witness, case).await;
     let mut h_store = EngineStore::open(&h, 9_307).expect("open host");
-    deliver(&mut h_store, &key, &log, false, &witness, case).await;
+    let feed = HostedFeed {
+        rows: std::iter::once(source_write(markdown))
+            .chain(log.iter().map(|(op, _)| op.clone()))
+            .collect(),
+        blobs: log
+            .iter()
+            .map(|(_, blob)| blob.clone())
+            .chain([markdown.as_bytes().to_vec()])
+            .map(|bytes| (hex_sha256(&bytes), bytes))
+            .collect(),
+    };
+    host_pull(&mut h_store, feed, &witness, case).await;
+    assert!(
+        host_ready(&h_store),
+        "{case:?}: the hosted commit makes the note ready"
+    );
+    assert_eq!(
+        count(
+            &h_store,
+            "SELECT COUNT(*) FROM conflicts WHERE status='open'"
+        ),
+        i64::from(parent_wins),
+        "{case:?}: the host opens a conflict beside its file only when the parent's base wins"
+    );
 
     let d_store = EngineStore::open(&d, 9_304).expect("open desktop");
     for store in [&d_store, &p_store, &h_store] {
@@ -938,23 +1202,31 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         return;
     }
 
+    assert_eq!(
+        head(&EngineStore::open(&h, 9_308).expect("open host")),
+        markdown,
+        "{case:?}: the host's file keeps the note"
+    );
+
     // Each replica holding the winner's base as an import captures the
     // settled note as an activation of that one lineage, on that base, with
     // one Y.Doc state. The desktop holds an imported base only where the
-    // relay's won, and an open conflict refuses its capture.
+    // relay's won. An open conflict refuses a capture: the desktop's where
+    // the relay's parent base won, the host's wherever the parent's won.
     let base = &log[0].0;
     let mut captured = Vec::new();
-    for (name, db) in [("peer", &p), ("host", &h)] {
-        commit_fetch(db, log.len());
-        let activation = capture(db, &d_scratch, &key)
-            .await
-            .unwrap_or_else(|error| panic!("{case:?}: {name} capture {error:?}"));
-        captured.push((name, activation));
-    }
+    commit_fetch(&p, last_relay_seq);
+    let mut replicas = vec![
+        ("peer", p.as_path(), false),
+        ("host", h.as_path(), parent_wins),
+    ];
     if desktop_lost {
-        commit_fetch(&d, log.len());
-        let activation = capture(&d, &d_scratch, &key).await;
-        if conflict_opens {
+        commit_fetch(&d, last_relay_seq);
+        replicas.push(("desktop", d.as_path(), conflict_opens));
+    }
+    for (name, db, refused) in replicas {
+        let activation = capture(db, &d_scratch, &key).await;
+        if refused {
             assert!(
                 matches!(
                     activation,
@@ -964,12 +1236,12 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
                         }
                     ))
                 ),
-                "{case:?}: {activation:?}"
+                "{case:?}: {name} {activation:?}"
             );
         } else {
             let activation =
-                activation.unwrap_or_else(|error| panic!("{case:?}: desktop capture {error:?}"));
-            captured.push(("desktop", activation));
+                activation.unwrap_or_else(|error| panic!("{case:?}: {name} capture {error:?}"));
+            captured.push((name, activation));
         }
     }
     let state = captured[0].1.source.full_state_digest.clone();
@@ -1049,7 +1321,19 @@ async fn first_open_build_skew_keeps_one_lineage_in_both_arrival_orders() {
             }
         }
     }
+    // Report every case that fails, not only the first.
+    let mut failures = Vec::new();
     while let Some(raced) = races.join_next().await {
-        raced.expect("race");
+        if let Err(error) = raced {
+            let panic = error.into_panic();
+            failures.push(
+                panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                    .unwrap_or_else(|| "a race panicked".to_owned()),
+            );
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
