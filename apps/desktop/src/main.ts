@@ -198,6 +198,7 @@ import {
   chatDispatchNoticeOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
+  agentsListeningOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -562,7 +563,8 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { createAgentWaits } from "./agents/agentWaits";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -4971,8 +4973,8 @@ const chatWrites = createChatWrites({
     const { settings } = await readCachedUserSettingsFile(stateDir());
     return listAgents(settings).find(({ id }) => id === agentId)?.name ?? "Agent";
   },
-  agentIdsNamedIn: async (body) =>
-    agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),
+  agentIdsToWake: async (body, dmAgentId) =>
+    agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5030,6 +5032,13 @@ const moveAcceptedEdits = createMoveAcceptedEditsGuard({
   offline: (workspaceId) => activity.cloudSyncOffline(workspaceId),
   ownerCatchUp: (workspaceId, objectIds, signal) => desktopEngine.ownerCatchUp(workspaceId, objectIds, signal),
   relayCatchUp: (workspaceId, signal) => activity.catchUpCloudSync(workspaceId, signal),
+});
+
+// Settings › Agents shows an agent you run as listening while it holds a chat wait.
+const agentWaits = createAgentWaits((agentIds) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    sendIfOpen(window, CHANNELS.agentsListening, { agentIds });
+  }
 });
 
 const { startDesktopCliServer } = createDesktopCliServer({
@@ -5125,6 +5134,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
   chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
+  agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
+  agentWaiting: (agentId) => agentWaits.begin(agentId),
   listWorkspaces,
   openWorkspaceActivity,
   stopWorkspaceSync: async (operation, author) => {
@@ -7733,6 +7744,10 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchPauseOperations, {
     readChatDispatchPaused: () => ({ paused: chatDispatchService.isPaused() }),
     setChatDispatchPaused: ({ paused }) => chatDispatchService.setPaused(paused),
+  });
+
+  registerOperations(operationBoundary, agentsListeningOperations, {
+    readAgentsListening: () => ({ agentIds: agentWaits.listening() }),
   });
 
   registerOperations(operationBoundary, agentRunStateOperations, {

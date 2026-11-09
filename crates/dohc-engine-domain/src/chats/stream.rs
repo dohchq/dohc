@@ -59,7 +59,7 @@ pub struct StreamReplier {
     pub author_user_id: Option<String>,
     /// The share link a link holder replied through.
     pub link_author: Option<ChatMessageLinkAuthor>,
-    /// The agent that replied in one of its runs. Provenance only.
+    /// The agent in Settings that replied. Provenance only.
     pub author_agent_id: Option<String>,
     pub last_reply_at_ms: i64,
 }
@@ -72,7 +72,7 @@ pub struct StreamAgentReply {
     pub author_display_name: String,
     pub author_owner_display_name: Option<String>,
     pub author_user_id: Option<String>,
-    /// The agent that wrote the reply in one of its runs.
+    /// The agent in Settings that wrote the reply.
     pub author_agent_id: Option<String>,
     pub created_at_ms: i64,
     pub body_excerpt: String,

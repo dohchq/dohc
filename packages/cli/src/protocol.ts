@@ -42,9 +42,14 @@ const requestBase = {
   runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 };
 
+// An agent you run, by its id in Settings › Agents. The desktop refuses an
+// id its settings don't list as one.
+export const cliAgentIdSchema = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/);
+
 const argsBase = {
   cwd: z.string().min(1),
   actor: cliActorSchema,
+  agentId: cliAgentIdSchema.optional(),
 };
 
 const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();

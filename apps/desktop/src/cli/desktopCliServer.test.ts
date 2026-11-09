@@ -25,7 +25,7 @@ import { executeCli } from "@dohc/cli";
 import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { accessCliQueries, createAccessOwner } from "../access/accessOwner";
-import { createDesktopCliServer } from "./desktopCliServer";
+import { createDesktopCliServer, workspaceRequesters } from "./desktopCliServer";
 import { handleCliRequestLine } from "./cliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -125,7 +125,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
-    agentIdsNamedIn: async () => [],
+    agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -141,6 +141,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
+    agentYouRun: vi.fn(async (agentId: string) => agentId === "terminal" ? { name: "Terminal" } : null),
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
     activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), dispatchedRunSecret: vi.fn(() => null), agentWriteRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
@@ -182,6 +183,34 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("agents you run through the CLI", () => {
+  it("names an agent you run with its handle and the workspace's accounts for its person", async () => {
+    const f = fixture();
+    await f.create().startDesktopCliServer();
+    expect(await f.options().connectedAgent("workspace", "terminal")).toEqual({
+      agentId: "terminal", name: "Terminal", handle: "Terminal", requesters: ["owner"], unattributedCounts: true,
+    });
+    expect(await f.options().connectedAgent("workspace", "default")).toBeNull();
+    expect(await f.options().connectedAgent("missing", "terminal")).toBeNull();
+  });
+
+  it("counts the accounts this computer's person posts as, and posts with no account only where they own the work", () => {
+    const channel = { shareId: "s", channelWireId: "w", access: "read-write" as const, granterEmail: null, relayUrl: "https://relay.test" };
+    expect(workspaceRequesters({})).toEqual({ requesters: [], unattributedCounts: true });
+    expect(workspaceRequesters({ pausedRemote: { serverUrl: "https://cloud.test", ownerUserId: "owner" } }))
+      .toEqual({ requesters: ["owner"], unattributedCounts: true });
+    expect(workspaceRequesters({
+      remote: { serverUrl: "https://cloud.test", ownerUserId: "owner" },
+      sharedChannels: [{ ...channel, recipientUserId: "owner" }, { ...channel, recipientUserId: "other-account" }],
+    })).toEqual({ requesters: ["owner", "other-account"], unattributedCounts: true });
+    // In a received copy, the owner's posts are not yours.
+    const shareView = { shareId: "s", granterEmail: null, genericChatWritable: true, grantedSelector: { paths: [], versionId: null } } as unknown as NonNullable<RegistryEntry["shareView"]>;
+    expect(workspaceRequesters({ shareView: { ...shareView, recipientUserId: "me", granterUserId: "owner" } }))
+      .toEqual({ requesters: ["me"], unattributedCounts: false });
+    expect(workspaceRequesters({ shareView })).toEqual({ requesters: [], unattributedCounts: false });
+  });
+});
 
 describe("desktop CLI workspace context", () => {
   it("passes the physical attachment signal to the CLI context", async () => {

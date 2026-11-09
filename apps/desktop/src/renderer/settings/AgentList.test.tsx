@@ -3,13 +3,14 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AGENTS_RESTRICTED_MESSAGE, type AgentToolsResult } from "../../agents/agentToolCatalog";
-import type { ChatDispatchPausedEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
+import type { AgentsListeningEvent, ChatDispatchPausedEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AgentList, agentListRows } from "./AgentList";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
+let listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
 const bridgeMock = {
   getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
   readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
@@ -21,6 +22,11 @@ const bridgeMock = {
     return () => { pausedListener = null; };
   }),
   setChatDispatchPaused: vi.fn(async (_event: ChatDispatchPausedEvent) => undefined),
+  readAgentsListening: vi.fn(async (_payload: Record<string, never>): Promise<AgentsListeningEvent> => ({ agentIds: [] })),
+  onAgentsListening: vi.fn((listener: (event: AgentsListeningEvent) => void) => {
+    listeningListener = listener;
+    return () => { listeningListener = null; };
+  }),
   runnerSelfTest: vi.fn(async (_payload: { workspaceId: string; agentId: string }): Promise<RunnerSelfTestResult> => ({ ok: true, detail: "Runner self-test passed." })),
   detectAgentTools: vi.fn(async (_payload: { workspaceId: string }): Promise<AgentToolsResult> => ({
     workingDirectory: "C:\\Work",
@@ -43,6 +49,7 @@ const BROKEN: AgentProblem = { id: "codex-two", name: "codex", hue: "teal", posi
 beforeEach(() => {
   vi.clearAllMocks();
   pausedListener = null;
+  listeningListener = null;
 });
 afterEach(cleanup);
 
@@ -126,7 +133,8 @@ it("keeps an entry dohc could not use in its place, with its problem and a way t
     agentProblems: [BROKEN, { id: "Agent B", position: 4, problem: "dohc doesn't use `color`." }],
   });
   const rows = screen.getAllByTestId(/^agent-row/);
-  expect(rows.map((element) => element.dataset.agentId)).toEqual(["default", "codex-two", "codex", "terminal", "Agent B"]);
+  // An entry dohc could not use stays among the agents dohc starts.
+  expect(rows.map((element) => element.dataset.agentId)).toEqual(["default", "codex-two", "codex", "Agent B", "terminal"]);
   const broken = within(rows[1]!);
   expect(broken.getByText("codex")).toBeTruthy();
   expect(broken.getByTestId("agent-problem").textContent).toBe("Another agent has this name.");
@@ -137,7 +145,7 @@ it("keeps an entry dohc could not use in its place, with its problem and a way t
   await userEvent.click(broken.getByRole("button", { name: "Open settings file" }));
   expect(onOpenSettingsFile).toHaveBeenCalledTimes(1);
   // Without a name the row shows the id, and the key is set in monospace.
-  const nameless = within(rows[4]!);
+  const nameless = within(rows[3]!);
   expect(nameless.getByText("Agent B")).toBeTruthy();
   expect(nameless.getByText("color").tagName).toBe("CODE");
 });
@@ -244,6 +252,112 @@ it("pauses every agent dohc starts that is on, and leaves the rest as they are",
   expect(within(row("Claude in Terminal")).getByText("Through MCP")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Resume" }));
   expect(bridgeMock.setChatDispatchPaused).toHaveBeenLastCalledWith({ paused: false });
+});
+
+const ids = (testId: string) => within(screen.getByTestId(testId)).queryAllByTestId("agent-row").map((element) => element.dataset.agentId);
+
+it("puts the agents dohc starts and the agents you run in sections of their own, with Pause all on the first", () => {
+  renderList();
+  const started = within(screen.getByTestId("agents-started"));
+  const yours = within(screen.getByTestId("agents-yours"));
+  expect(started.getByRole("heading", { name: "Started by dohc" })).toBeTruthy();
+  expect(yours.getByRole("heading", { name: "You run on this computer" })).toBeTruthy();
+  expect(ids("agents-started")).toEqual(["default", "codex"]);
+  expect(ids("agents-yours")).toEqual(["terminal"]);
+  expect(started.getByRole("button", { name: "Pause all" })).toBeTruthy();
+  expect(yours.queryByRole("button", { name: "Pause all" })).toBeNull();
+  // The Add tiles for tools stay with the agents dohc starts.
+  expect(started.getByRole("button", { name: /^Add Codex/ })).toBeTruthy();
+  expect(yours.queryByRole("button", { name: /^Add Codex/ })).toBeNull();
+  // Each agent you run has its own Copy MCP config; the page has none of its own.
+  expect(screen.getAllByRole("button", { name: "Copy MCP config" })).toHaveLength(1);
+  expect(within(row("Claude in Terminal")).getByRole("button", { name: "Copy MCP config" })).toBeTruthy();
+});
+
+it("shows Pause all only while there is an agent dohc starts", () => {
+  renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly } } });
+  expect(screen.queryByRole("button", { name: "Pause all" })).toBeNull();
+  expect(ids("agents-yours")).toEqual(["terminal"]);
+});
+
+it("copies an MCP config that runs dohc's MCP server as the agent you run", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+  renderList({ config: { command: "dohc-mcp", args: ["--workspace", "Trip", "--home", "Home"], workspacePath: "Trip", home: "Home" } });
+  await user.click(within(row("Claude in Terminal")).getByRole("button", { name: "Copy MCP config" }));
+  expect(JSON.parse(writeText.mock.calls[0]![0])).toEqual({
+    mcpServers: { dohc: { command: "dohc-mcp", args: ["--workspace", "Trip", "--home", "Home", "--agent-id", "terminal"] } },
+  });
+  writeText.mockRestore();
+});
+
+it("can't copy an MCP config the workspace doesn't have, and says why", () => {
+  renderList({ config: { unavailable: true, message: "dohc's MCP server isn't installed." } });
+  expect((within(row("Claude in Terminal")).getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(within(screen.getByTestId("agents-yours")).getByTestId("mcp-unavailable").textContent).toBe("dohc's MCP server isn't installed.");
+});
+
+it("says an agent you run is listening while it waits for messages, and Through MCP once the wait ends", async () => {
+  bridgeMock.readAgentsListening.mockResolvedValueOnce({ agentIds: ["terminal"] });
+  renderList();
+  await vi.waitFor(() => expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Listening"));
+  act(() => listeningListener?.({ agentIds: [] }));
+  expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Through MCP");
+  act(() => listeningListener?.({ agentIds: ["terminal"] }));
+  expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Listening");
+  // An agent dohc starts never reads as listening.
+  act(() => listeningListener?.({ agentIds: ["terminal", "codex"] }));
+  expect(within(row("Codex")).queryByText("Listening")).toBeNull();
+});
+
+it("takes a pushed answer over the first read of who is listening", async () => {
+  const read = deferred<AgentsListeningEvent>();
+  bridgeMock.readAgentsListening.mockReturnValueOnce(read.promise);
+  renderList();
+  act(() => listeningListener?.({ agentIds: [] }));
+  await act(async () => read.resolve({ agentIds: ["terminal"] }));
+  expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Through MCP");
+});
+
+it("adds an agent you run as Agent, then Agent 2, each off, in the next free color, with nothing to check", async () => {
+  const teal = { ...SETTINGS, appearance: { ...SETTINGS.appearance, yourColor: "teal" as const } };
+  const { onSave, rerender } = renderList({ settings: teal });
+  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  const first = onSave.mock.calls[0]![0];
+  expect(Object.keys(first.agents)).toEqual(["default", "codex", "terminal", "agent"]);
+  // Olive, blue and rose are the agents', teal is yours, so plum is next.
+  expect(first.agents.agent).toEqual({ name: "Agent", hue: "plum", changesFiles: true, enabled: false, timeoutMinutes: 30 });
+  expect(first.agents.agent).not.toHaveProperty("launch");
+  rerender({ settings: first });
+  expect(ids("agents-yours")).toEqual(["terminal", "agent"]);
+  expect(within(row("Agent")).getByTestId("agent-state").textContent).toBe("Through MCP");
+  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  expect(onSave.mock.calls[1]![0].agents["agent-2"]).toMatchObject({ name: "Agent 2", hue: "rust", enabled: false });
+  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
+});
+
+it("gives an agent you run Rename, Details and Remove, and says in Details what it reaches", async () => {
+  renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename", "Details", "Remove"]);
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const details = within(within(row("Claude in Terminal")).getByTestId("agent-details"));
+  expect(details.getByText("Reaches every workspace dohc opens on this computer.")).toBeTruthy();
+  expect(details.getByRole("radiogroup", { name: "Color of Claude in Terminal" })).toBeTruthy();
+  expect(details.queryByText("Stops after")).toBeNull();
+});
+
+it("removes an agent you run, and Undo puts it back in its section", async () => {
+  const { onSave, onNotice, onOrder } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
+  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default", "codex"]);
+  const { default: claude, codex } = SETTINGS.agents;
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude!, codex: codex! } }, source: "stored" });
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["default", "codex", "terminal"], expect.any(String)));
+  expect(bridgeMock.setUserSettings.mock.lastCall![0].settings.agents.terminal).toEqual(mcpOnly);
 });
 
 it("turns an agent off from its switch", async () => {
@@ -377,6 +491,12 @@ it("gives the first agent you add the default id", async () => {
   await within(tile("Add Codex")).findByText("Ready");
   await userEvent.click(tile("Add Codex"));
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
+});
+
+it("never gives an agent you run the default id, which Chats sets up as one dohc starts", async () => {
+  const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
+  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["agent"]);
 });
 
 it("says on each tile that dohc couldn't look for tools, and looks again from the toast", async () => {

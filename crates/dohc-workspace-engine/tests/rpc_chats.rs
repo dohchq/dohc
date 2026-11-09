@@ -1306,6 +1306,7 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
         &mut id,
         "chats.agentReadState.markThreadRead",
         json!({
+            "reader": { "kind": "unnamed" },
             "threadId": "negative-thread",
             "upTo": { "createdAtMs": 0, "messageId": "after" },
         }),
@@ -3991,6 +3992,275 @@ async fn workspace_handle_overrides_a_spoofed_workspace_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-connected-reader").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.ensureAgent",
+        json!({
+            "channelId": "terminal-chat",
+            "agentId": "terminal",
+            "name": "Terminal",
+            "nowMs": 2,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "terminal-chat", "threadId": "dm", "messageId": "first",
+            "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+            "body": "first", "nowMs": 10,
+        }),
+    )
+    .await;
+    for (message, user, at) in [
+        ("second", "ada", 20),
+        ("third", "ada", 30),
+        ("bobs", "bob", 40),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "dm", "messageId": message, "authorKind": "human",
+                "authorDisplayName": "Ada", "authorUserId": user, "body": message,
+                "nowMs": at,
+            }),
+        )
+        .await;
+    }
+    let reader = json!({
+        "kind": "connected",
+        "agentId": "terminal",
+        "handle": "terminal",
+        "requesters": ["ada"],
+        "unattributedCounts": false,
+    });
+    let page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        page,
+        json!({
+            "requests": [{
+                "threadId": "dm",
+                "messageId": "first",
+                "channel": {
+                    "id": "terminal-chat",
+                    "kind": "agent",
+                    "name": "Terminal",
+                    "slug": "my-agent-terminal",
+                    "purpose": "",
+                },
+                "author": { "kind": "human", "displayName": "Ada" },
+                "body": "first",
+                "createdAtMs": 10,
+            }],
+            "more": true,
+        })
+    );
+    let rest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({
+            "reader": reader,
+            "threadId": "dm",
+            "after": { "createdAtMs": 10, "messageId": "first" },
+        }),
+    )
+    .await;
+    assert_eq!(rest["more"], json!(false));
+    assert_eq!(
+        rest["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .map(|request| request["messageId"].clone())
+            .collect::<Vec<_>>(),
+        [json!("second"), json!("third")],
+        "another person's post does not ask the agent you run."
+    );
+    let unnamed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadRequests",
+        json!({ "reader": { "kind": "unnamed" } }),
+    )
+    .await;
+    assert_eq!(unnamed["requests"], json!([]));
+
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadRequests",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    let cursor = first["nextCursor"].clone();
+    assert!(cursor.is_string());
+    let mut someone_else = reader.clone();
+    someone_else["requesters"] = json!(["bob"]);
+    let refused = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadRequests",
+        json!({ "reader": someone_else, "pageLimit": 1, "cursor": cursor }),
+    )
+    .await;
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::InvalidParams, "invalid-cursor"),
+        "a cursor from one reader is refused for another."
+    );
+    let unknown_field = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": { "kind": "unnamed", "agentId": "terminal" } }),
+    )
+    .await;
+    assert_eq!(unknown_field.code, ErrorCode::InvalidParams);
+}
+
+// The test loopback mirrors each case in chatsLiveAdapter.test.ts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_you_run_pages_trimmed_accounts_and_large_requests_after_its_place() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-connected-page-bytes").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.ensureAgent",
+        json!({
+            "channelId": "terminal-chat",
+            "agentId": "terminal",
+            "name": "Terminal",
+            "nowMs": 2,
+        }),
+    )
+    .await;
+    let body = "x".repeat(64 * 1024);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "terminal-chat", "threadId": "dm", "messageId": "read",
+            "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": " ada ",
+            "body": "read", "nowMs": 10,
+        }),
+    )
+    .await;
+    for n in 1..=5 {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "dm", "messageId": format!("ask-{n}"), "authorKind": "human",
+                "authorDisplayName": "Ada", "authorUserId": "ada", "body": body,
+                "nowMs": 10 + n * 10,
+            }),
+        )
+        .await;
+    }
+    let reader = json!({
+        "kind": "connected",
+        "agentId": "terminal",
+        "handle": "terminal",
+        "requesters": ["ada"],
+        "unattributedCounts": false,
+    });
+    let ids = |page: &Value| {
+        page["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .map(|request| request["messageId"].clone())
+            .collect::<Vec<_>>()
+    };
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        ids(&first),
+        [json!("read")],
+        "a post sent with a padded account asks the agent its account names."
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({
+            "reader": reader,
+            "threadId": "dm",
+            "upTo": { "createdAtMs": 10, "messageId": "read" },
+        }),
+    )
+    .await;
+    let page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader }),
+    )
+    .await;
+    assert_eq!(
+        ids(&page),
+        [json!("ask-1"), json!("ask-2"), json!("ask-3")],
+        "a page stops at 256 KiB and skips what the reader has read."
+    );
+    assert_eq!(page["more"], json!(true));
+    let rest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({
+            "reader": reader,
+            "after": { "createdAtMs": 40, "messageId": "ask-3" },
+        }),
+    )
+    .await;
+    assert_eq!(ids(&rest), [json!("ask-4"), json!("ask-5")]);
+    assert_eq!(rest["more"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -4052,7 +4322,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.agentReadState.listUnreadThreads",
-        json!({}),
+        json!({ "reader": { "kind": "unnamed" } }),
     )
     .await;
     assert_eq!(unread["threads"][0]["id"], json!("thread"));
@@ -4065,7 +4335,11 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.agentReadState.markThreadRead",
-        json!({ "threadId": "thread", "upTo": { "createdAtMs": 999, "messageId": "z" } }),
+        json!({
+            "reader": { "kind": "unnamed" },
+            "threadId": "thread",
+            "upTo": { "createdAtMs": 999, "messageId": "z" },
+        }),
     )
     .await;
     assert_eq!(
@@ -4075,15 +4349,19 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         ),
         (Some(10), Some("message"))
     );
-    // A caller names a run, never an agent, and only a running run moves its
-    // agent's place.
+    // A run reader names a run, never an agent, and only a running run moves
+    // its agent's place.
     let up_to = json!({ "createdAtMs": 999, "messageId": "z" });
     let named_agent = call_error(
         &transport,
         &handle,
         &mut id,
         "chats.agentReadState.markThreadRead",
-        json!({ "agentId": "codex", "threadId": "thread", "upTo": up_to }),
+        json!({
+            "reader": { "kind": "run", "runId": "run", "agentId": "codex" },
+            "threadId": "thread",
+            "upTo": up_to,
+        }),
     )
     .await;
     let unknown_run = call_error(
@@ -4091,19 +4369,33 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.agentReadState.markThreadRead",
-        json!({ "runId": "no-such-run", "threadId": "thread", "upTo": up_to }),
+        json!({
+            "reader": { "kind": "run", "runId": "no-such-run" },
+            "threadId": "thread",
+            "upTo": up_to,
+        }),
+    )
+    .await;
+    let no_reader = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "threadId": "thread", "upTo": up_to }),
     )
     .await;
     assert_eq!(
         (
             named_agent.code,
             unknown_run.code,
-            unknown_run.message.as_str()
+            unknown_run.message.as_str(),
+            no_reader.code
         ),
         (
             ErrorCode::InvalidParams,
             ErrorCode::InvalidParams,
-            "run-not-found"
+            "run-not-found",
+            ErrorCode::InvalidParams
         )
     );
 
@@ -5770,7 +6062,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         automation: None,
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
         now_ms: 40,
         request_id: Some("passive-start".into()),
     };
@@ -5791,7 +6083,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         automation: None,
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
         now_ms: 41,
         request_id: Some("passive-send".into()),
     };

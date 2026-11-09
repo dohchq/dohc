@@ -4,7 +4,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import { DEFAULT_AGENT_ID, firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
+import { agentIdDohcStarts, newAgentDefaults, withAgentDohcStarts, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand, launchCommandHint, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
@@ -43,7 +43,7 @@ export function AddAgentForm(props: {
   onCancel: () => void;
 }) {
   const { settings, onSave } = props;
-  const agent = firstAgent(settings);
+  const agent = settings.agents[agentIdDohcStarts(settings)];
   const savedProfile = agent?.launch ? launchProfile(agent.launch) : undefined;
   const savedCommand = agent?.launch && "command" in agent.launch ? agent.launch.command : "";
   const savedProfileCommand = savedProfile ? launchCommand(savedProfile) : "";
@@ -109,7 +109,7 @@ export function AddAgentForm(props: {
     setSaving(true);
     setError(null);
     try {
-      await onSave(withFirstAgent(settings, (current) => ({
+      await onSave(withAgentDohcStarts(settings, (current) => ({
         ...(current ?? newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue)),
         name: validAgentName,
         launch,
@@ -129,8 +129,8 @@ export function AddAgentForm(props: {
     if (!(await save()) || !requests.isCurrent(token)) return;
     setCheck({ status: "running" });
     try {
-      // The save above made the first agent when there was none.
-      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId, agentId: firstAgent(settings)?.id ?? DEFAULT_AGENT_ID });
+      // The save above made that agent when there was none.
+      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId, agentId: agentIdDohcStarts(settings) });
       if (!requests.isCurrent(token)) return;
       if (!result.ok) props.onError(result.logPath ? `${result.detail} Log: ${result.logPath}` : result.detail);
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });

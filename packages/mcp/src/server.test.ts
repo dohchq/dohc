@@ -600,6 +600,23 @@ it("names the run it works for on every chat write, over a run the caller names"
   expect(sent).toEqual([{ verb: "post", runId: "run_env" }, { verb: "reply", runId: "run_env" }, { verb: "fileChatStart", runId: "run_env" }]);
 });
 
+it("names the agent you run from --agent-id on every request", async () => {
+  expect(parseArgs(["--workspace", "/w", "--home", "/h", "--agent-id", "terminal"])).toMatchObject({ agentId: "terminal" });
+  expect(parseArgs(["--workspace", "/w", "--home", "/h"])).not.toHaveProperty("agentId");
+  expect(() => parseArgs(["--agent-id", "Terminal"])).toThrow(
+    '--agent-id must be an agent\'s id from Settings › Agents. Received: "Terminal".',
+  );
+  expect(() => parseArgs(["--agent-id"])).toThrow(/Received: no value/u);
+  const sent: Array<{ verb: string; agentId?: unknown }> = [];
+  const { client } = await connectedToolNames({ root: await workspaceRoot(), home: "/home", agentId: "terminal", request: async (request) => {
+    sent.push({ verb: request.verb, agentId: (request.args as { agentId?: unknown }).agentId });
+    return request.verb === "watch" ? { messages: [], cursor: "next" } : {};
+  } });
+  await client.callTool({ name: "dohc_start_group_chat", arguments: { group: "general", body: "Done." } });
+  await client.callTool({ name: "dohc_wait_for_messages", arguments: { timeoutMs: 0 } });
+  expect(sent).toEqual([{ verb: "post", agentId: "terminal" }, { verb: "watch", agentId: "terminal" }]);
+});
+
 
 describe("share copy profile admission", () => {
   const input = { shareId: "share", grantId: "grant" };

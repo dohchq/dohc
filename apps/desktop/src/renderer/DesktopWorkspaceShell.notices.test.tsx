@@ -10,6 +10,7 @@ import * as Y from "yjs";
 import * as shellError from "./shell/useShellError";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { DohcDesktopBridge, OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
@@ -4645,6 +4646,11 @@ describe("unavailable MCP launcher settings", () => {
         message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       }),
     );
+    // Copy MCP config sits on each agent you run.
+    bridge.getUserSettings = vi.fn(async () => ({
+      settings: { ...DEFAULT_USER_SETTINGS, agents: { terminal: { name: "Terminal", hue: "rose" as const, changesFiles: true, enabled: false, timeoutMinutes: 30 } } },
+      source: "default" as const,
+    }));
     const user = userEvent.setup();
     renderShell(bridge);
 

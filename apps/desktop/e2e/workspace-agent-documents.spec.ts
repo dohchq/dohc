@@ -29,11 +29,14 @@ import {
 // while the agent's edit arrives.
 
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
+// A verb's arguments without cwd and actor, kept apart for each form, such as
+// chat's by thread and by group.
+type AgentArgs<Args> = Args extends unknown ? Omit<Args, "cwd" | "actor"> : never;
 
 async function agentCli<Verb extends CliVerb>(
   temp: TempWorkspace,
   verb: Verb,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+  args: AgentArgs<Extract<CliRequestWithoutToken, { verb: Verb }>["args"]>,
 ): Promise<CliResultByVerb[Verb]> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,

@@ -133,6 +133,8 @@ const bridge = {
   readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
   setChatDispatchPaused: vi.fn(async () => undefined),
   onChatDispatchPaused: vi.fn(() => () => undefined),
+  readAgentsListening: vi.fn(async () => ({ agentIds: [] })),
+  onAgentsListening: vi.fn(() => () => undefined),
   getUpdateState: vi.fn(async (): Promise<SettingsUpdateState> => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -199,6 +201,11 @@ const savedSettings = () => bridge.setUserSettings.mock.lastCall?.[0].settings;
 
 const writeText = vi.fn(async (_text: string) => {});
 
+// Copy MCP config sits on each agent you run, so a test of the config lists one.
+const listAgentYouRun = () => bridge.getUserSettings.mockImplementation(async () => ({
+  settings: { ...DEFAULT_USER_SETTINGS, agents: { terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 30 } } },
+  source: "stored",
+}));
 const copyMcpConfig = () => screen.getByRole<HTMLButtonElement>("button", { name: "Copy MCP config" });
 // The config has loaded once its copy is on.
 const mcpConfigLoaded = () => waitFor(() => expect(copyMcpConfig().disabled).toBe(false));
@@ -224,6 +231,7 @@ beforeEach(() => {
   bridge.getWorkspaceSettings.mockImplementation(readWorkspaceSettings);
   bridge.setWorkspaceSettings.mockImplementation(writeWorkspaceSettings);
   bridge.resetWorkspaceSettings.mockImplementation(resetWorkspaceSettings);
+  bridge.getUserSettings.mockImplementation(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" }));
   document.documentElement.dataset.theme = "";
   vi.stubGlobal("dohcDesktop", bridge);
 });
@@ -1327,9 +1335,10 @@ describe("SettingsDialog", () => {
     });
   });
 
-  it("copies this workspace's MCP config from the title line", async () => {
+  it("copies this workspace's MCP config from an agent you run's row", async () => {
     const user = userEvent.setup();
     stubClipboard();
+    listAgentYouRun();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1345,10 +1354,13 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"')));
     expect(writeText.mock.calls.at(-1)?.[0]).toContain("dohc-mcp");
     expect(writeText.mock.calls.at(-1)?.[0]).toContain("/home/sam/dohc/personal");
+    const copied = JSON.parse(writeText.mock.calls.at(-1)?.[0] ?? "{}") as { mcpServers: { dohc: { args: string[] } } };
+    expect(copied.mcpServers.dohc.args.slice(-2)).toEqual(["--agent-id", "terminal"]);
   });
 
   it("does not call an active agent run a connected agent", async () => {
     runActive = true;
+    listAgentYouRun();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1363,7 +1375,7 @@ describe("SettingsDialog", () => {
     );
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
     // Connecting needs only the config; the run control lives in its own row,
-    // and the one copy sits on the title line.
+    // and the one copy sits on the agent you run's row.
     expect(screen.getAllByRole("button", { name: /^(Start|Stop) (agent )?run$/ })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: /^Copy/ })).toHaveLength(1);
     await mcpConfigLoaded();
@@ -1398,6 +1410,7 @@ describe("SettingsDialog", () => {
 
   it("does not move focus to Copy when the run row starts the run", async () => {
     const user = userEvent.setup();
+    listAgentYouRun();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     await mcpConfigLoaded();
     await user.click(screen.getByTestId("mcp-enable-toggle"));
@@ -1427,18 +1440,18 @@ describe("SettingsDialog", () => {
     }));
   });
 
-  it("gives an agent you run a command of its own, and leaves it off", async () => {
+  it("shows an agent you run no command, so it stays one you run", async () => {
     const user = userEvent.setup();
     const { launch: _launch, ...mcpOnly } = testAgent({ name: "Nova", enabled: false });
     bridge.getUserSettings.mockResolvedValueOnce({ settings: { ...DEFAULT_USER_SETTINGS, agents: { default: mcpOnly } }, source: "stored" });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     await user.click(await screen.findByRole("button", { name: "Nova actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Details" }));
-    // Without a way to start it, there is nothing to stop.
+    // dohc never starts it, so there is nothing to stop and no command to give.
+    expect(await screen.findByText("Reaches every workspace dohc opens on this computer.")).toBeTruthy();
     expect(screen.queryByText("Stops after")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Use your own command" }));
-    await user.type(screen.getByRole("textbox", { name: "Command that starts Nova" }), "node agent.mjs{Enter}");
-    await waitFor(() => expect(savedSettings()?.agents.default).toMatchObject({ launch: { command: "node agent.mjs" }, enabled: false }));
+    expect(screen.queryByText("Command")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use your own command" })).toBeNull();
   });
 
   it("keeps an agent's command when the field is left empty", async () => {
@@ -1852,6 +1865,7 @@ describe("SettingsDialog", () => {
   it("copies the config snippet to the clipboard", async () => {
     const user = userEvent.setup();
     stubClipboard();
+    listAgentYouRun();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1871,6 +1885,7 @@ describe("SettingsDialog", () => {
     const denied = new Error("Clipboard denied");
     writeText.mockRejectedValueOnce(denied);
     const report = vi.fn<ReportShellFailure>();
+    listAgentYouRun();
     render(
       <ShellErrorReporter.Provider value={report}>
         <SettingsDialog workspaceIsReady
@@ -1896,6 +1911,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
+    listAgentYouRun();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -2003,6 +2019,7 @@ describe("SettingsDialog", () => {
   it("retries only the read after a successful start", async () => {
     const user = userEvent.setup();
     const onError = vi.fn();
+    listAgentYouRun();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
     await mcpConfigLoaded();
     bridge.startAgentRun.mockImplementationOnce(async () => {
@@ -2023,6 +2040,7 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     bridge.startAgentRun.mockRejectedValueOnce(cause);
+    listAgentYouRun();
     render(
       <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
     );
@@ -2247,6 +2265,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     const configFailure = new Error("MCP config unavailable");
+    listAgentYouRun();
     try {
       bridge.startAgentRun.mockImplementationOnce(async () => {
         runActive = true;
@@ -2278,6 +2297,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     const statusFailure = new Error("status unavailable");
+    listAgentYouRun();
     bridge.startAgentRun.mockImplementationOnce(async () => {
       runActive = true;
       bridge.getAgentRunStatus
@@ -2305,6 +2325,7 @@ describe("SettingsDialog", () => {
 
   it("shows a refused stop's live status even when the MCP config becomes unavailable", async () => {
     runActive = true;
+    listAgentYouRun();
     const user = userEvent.setup();
     const onError = vi.fn();
     const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
@@ -2411,6 +2432,7 @@ describe("SettingsDialog", () => {
     // fails, the old config overwrites the one Copy MCP config copies.
     const user = userEvent.setup();
     stubClipboard();
+    listAgentYouRun();
     let resolveOldConfig = () => {};
     try {
       bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {

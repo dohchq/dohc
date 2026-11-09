@@ -521,6 +521,9 @@ function makeBaseBridge(
         chatDispatchPausedCallbacks.delete(listener);
       };
     }),
+    // No agent you run waits for messages until a test says one does.
+    readAgentsListening: vi.fn(async () => ({ agentIds: [] as string[] })),
+    onAgentsListening: vi.fn((_listener: (event: { agentIds: string[] }) => void) => () => undefined),
     registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({

@@ -972,7 +972,7 @@ it("attributes an owner's write to its agent at any depth from 0, through an app
 
 it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {
   type Caller = "owner" | "named" | "link" | "automation";
-  let caller: Caller = "owner", person: string | undefined, agent: { depth: number } | undefined;
+  let caller: Caller = "owner", person: string | undefined, agent: { depth: number; agentId?: string } | undefined;
   const callers = {
     owner: { kind: "owner", userId: "owner-key" },
     named: { kind: "named", userId: "user-ana", grantId: "member", access: "edit", helper: false },
@@ -996,6 +996,9 @@ it("names the person a commit is made for from the host's context, never the own
   expect(await commit("owner")).toEqual({ kind: "owner", userId: "user-ice" });
   agent = { depth: 0 };
   expect(await commit("agent")).toEqual({ kind: "agent", depth: 0, userId: "user-ice" });
+  // An agent the person runs themselves names its id.
+  agent = { depth: 0, agentId: "terminal" };
+  expect(await commit("agent-you-run")).toEqual({ kind: "agent", depth: 0, agentId: "terminal", userId: "user-ice" });
   agent = undefined;
   // An automation's commit names the person whose change started its run.
   caller = "automation";

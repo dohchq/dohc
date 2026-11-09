@@ -52,7 +52,7 @@ fn start_input(
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
         now_ms: at_ms,
         request_id: None,
     }
@@ -94,7 +94,7 @@ fn reply_input(thread_id: &str, message_id: &str, at_ms: i64) -> SendMessage {
         attachments: Vec::new(),
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
         now_ms: at_ms,
         request_id: None,
     }
@@ -815,7 +815,7 @@ fn a_message_that_names_two_agents_shows_each_agents_own_request() {
             author_kind: ChatActorKind::Human,
             author_display_name: "Ada".to_owned(),
             author_owner_display_name: None,
-            named_agent_ids: vec!["research".to_owned(), "default".to_owned()],
+            wake_agent_ids: vec!["research".to_owned(), "default".to_owned()],
             ..reply_input(&chat, "m-both", 11)
         },
     );

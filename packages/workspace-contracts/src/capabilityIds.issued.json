@@ -275,5 +275,6 @@
   "chat.message.link",
   "work.link.resolve",
   "share.link.agents.list",
-  "share.link.agent.disconnect"
+  "share.link.agent.disconnect",
+  "agent.listening.read"
 ]

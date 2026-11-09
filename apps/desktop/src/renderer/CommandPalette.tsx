@@ -24,6 +24,7 @@ export function CommandPalette(props: {
   // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes keep the simple substring filter.
   rank?: (query: string, commands: Command[]) => Command[];
+  emptyText?: (query: string) => string;
 }) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -136,7 +137,9 @@ export function CommandPalette(props: {
           className="m-0 max-h-72 list-none overflow-y-auto p-1"
         >
           {matches.length === 0 ? (
-            <li className="px-3 py-2.5 text-xs text-subtle">No matching commands</li>
+            <li className="px-3 py-2.5 text-xs text-subtle">
+              {props.emptyText?.(query) ?? "No matching commands"}
+            </li>
           ) : (
             matches.map((command, index) => (
               <li key={command.id} role="option" aria-selected={index === selected}>

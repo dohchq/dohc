@@ -409,6 +409,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       env.DOHC_RUN_ID,
       password,
     );
+    // Every verb names the agent you run, so each reads and writes as it.
+    if (command.agentId !== undefined) Object.assign(request.args, { agentId: command.agentId });
     while (true) {
       if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
       let result: CliResultByVerb[keyof CliResultByVerb];

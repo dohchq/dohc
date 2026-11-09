@@ -4624,11 +4624,11 @@ export function ChatsView(props: {
     const lane = groupLane;
     const setLane = setGroupLane;
     const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
-    // Only when the agent can't answer: what's wrong, and the fix.
+    // Only when the agent can't answer: what's wrong, and the fix. An agent
+    // you run has no launch; it answers whenever it's connected.
     const agentProblem = !agentDm || !props.agentSetup ? null
       : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
-      : !channelSettingsAgent.launch ? { words: `${channelSettingsAgent.name} isn't set up.`, action: "Set up" }
-      : !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+      : channelSettingsAgent.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
       : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
@@ -5207,6 +5207,8 @@ export function ChatsView(props: {
                 const agent = settingsAgents.find((candidate) => candidate.id === channel.agentId);
                 const { label, presentation } = agentChatIdentity(channel, settingsAgents);
                 const launch = agent?.enabled ? agent.launch : undefined;
+                // An agent you run has no launch and no state here; Settings shows whether it's listening.
+                const state = !agent ? "removed" : agent.launch && !agent.enabled ? "off" : null;
                 return (
                   <NavRow
                     key={channel.id}
@@ -5220,14 +5222,14 @@ export function ChatsView(props: {
                     labelTestId="chats-my-agent-name"
                     trailing={
                       <>
-                        {launch ? null : (
+                        {state ? (
                           <span
                             data-testid="chats-my-agent-state"
                             className="shrink-0 text-[10px] text-muted"
                           >
-                            {agent?.launch ? "off" : "not set up"}
+                            {state}
                           </span>
-                        )}
+                        ) : null}
                         <AgentPresenceHint
                           activity={agent ? agentActivity(agent.name) : null}
                           program={launch ? runnerProgram(launchCommand(launch)) : null}

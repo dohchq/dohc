@@ -8,6 +8,7 @@ import {
 import type { WorkspaceHandle } from "../protocol";
 import type {
   LinkedChatStore,
+  ChatAgentReader,
   ChatChannelType,
   ChatMessageAutomationInput,
   ChatReportedAgent,
@@ -246,7 +247,7 @@ export class ChatsLiveAdapter {
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
     authorReported?: ChatReportedAgent;
-    namedAgentIds?: string[];
+    wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     ownThread?: boolean;
@@ -295,8 +296,8 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
         ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
-        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
-          ? { namedAgentIds: input.namedAgentIds }
+        ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
+          ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
@@ -390,7 +391,7 @@ export class ChatsLiveAdapter {
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
     authorReported?: ChatReportedAgent;
-    namedAgentIds?: string[];
+    wakeAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -435,8 +436,8 @@ export class ChatsLiveAdapter {
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
         ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
-        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
-          ? { namedAgentIds: input.namedAgentIds }
+        ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
+          ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? messageId },
@@ -560,14 +561,14 @@ export class ChatsLiveAdapter {
 
   async markThreadReadByAgent(input: {
     workspaceId: string;
-    runId?: string;
+    reader: ChatAgentReader;
     threadId: string;
     upTo: { createdAtMs: number; messageId: string };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.agentReadMarkThreadRead, {
-      ...(input.runId !== undefined ? { runId: input.runId } : {}),
+      reader: input.reader,
       threadId: input.threadId,
       upTo: input.upTo,
       ...(input.expectedRevision !== undefined
@@ -576,7 +577,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string, runId?: string): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
+  async listAgentUnreadThreads(workspaceId: string, reader: ChatAgentReader): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
     this.assertWorkspace(workspaceId);
     const rows: Awaited<ReturnType<LinkedChatStore["listAgentUnreadThreads"]>> = [];
     let cursor: string | undefined;
@@ -584,7 +585,7 @@ export class ChatsLiveAdapter {
       const page = await this.request(
         CHATS_METHOD.agentReadListUnreadThreads,
         {
-          ...(runId !== undefined ? { runId } : {}),
+          reader,
           pageLimit: 500,
           ...(cursor !== undefined ? { cursor } : {}),
         },
@@ -595,14 +596,13 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
-  // Unread requests for a run's agent, or the shared outside-run reader.
-  async listAgentUnreadRequests(workspaceId: string, runId?: string): Promise<ChatAgentRequest[]> {
+  async listAgentUnreadRequests(workspaceId: string, reader: ChatAgentReader): Promise<ChatAgentRequest[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAgentRequest[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
-        ...(runId !== undefined ? { runId } : {}),
+        reader,
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -610,6 +610,24 @@ export class ChatsLiveAdapter {
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
     return rows;
+  }
+
+  async listAgentRequestsPage(input: {
+    workspaceId: string;
+    reader: ChatAgentReader;
+    channelId?: string;
+    threadId?: string;
+    after?: { createdAtMs: number; messageId: string };
+    limit?: number;
+  }): Promise<ChatsMethodResultMap[typeof CHATS_METHOD.agentReadListRequestsPage]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.agentReadListRequestsPage, {
+      reader: input.reader,
+      ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+      ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      ...(input.after !== undefined ? { after: input.after } : {}),
+      ...(input.limit !== undefined ? { pageLimit: input.limit } : {}),
+    });
   }
 
   async listMentionsForHandle(

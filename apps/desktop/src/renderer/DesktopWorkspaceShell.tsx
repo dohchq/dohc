@@ -1432,14 +1432,15 @@ export function DesktopWorkspaceShell(props: {
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
-  // Each agent that is on, by name: @ and its name's handle wakes it.
-  const setupAgents = agentSetup?.agents;
+  // Each agent that is on, and each agent you run, by name: @ and its
+  // name's handle reaches it.
+  const userSettings = props.userSettings;
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
-      ...agentMentionCandidates(setupAgents ?? []),
+      ...agentMentionCandidates(userSettings ? listAgents(userSettings.settings) : []),
       { id: "user:you", kind: "user", handle: "you", label: LOCAL_USER_LABEL, description: "you" },
     ],
-    [setupAgents],
+    [userSettings],
   );
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
