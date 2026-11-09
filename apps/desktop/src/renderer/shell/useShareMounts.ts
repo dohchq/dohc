@@ -122,13 +122,13 @@ export function useShareMounts(
   const refreshShareMountsRef = useRef<(announce?: boolean) => Promise<void>>(
     async () => undefined,
   );
-  // A refusal's row is its share's toast. A refresh the person starts toasts
-  // it every time; a polled refresh toasts it only when its row is new. The
-  // other rows of a refresh the person starts go into Notices unread, beside
-  // its summary. Every refresh reports its completed rebuilds, even if a
-  // later refresh has already finished.
+  // A share's refusal or warning row is its toast. A refresh the person
+  // starts toasts it every time; a polled refresh toasts it only when its row
+  // is new. Every refresh reports its completed rebuilds, even if a later
+  // refresh has already finished. Returns whether it filed a warning row.
   const reportCollisionRecords = useCallback(
     (results: RefreshShareMountsResult["results"], announce: boolean, newest: boolean) => {
+      let warned = false;
       for (const row of results) {
         if (newest && refusedOnItsRow(row)) {
           // The record keeps the person's own files apart while dohc can't
@@ -151,6 +151,7 @@ export function useShareMounts(
           if (paths.length === 0) {
             clearIdentity(keptPathsNotice(row.shareId));
           } else {
+            warned = true;
             reportShellFailure({
               message: shareUnjournalableNotice(paths.map(entry => ({
                 ...entry,
@@ -162,21 +163,22 @@ export function useShareMounts(
               retry: () => void refreshShareMountsRef.current(true),
               paths: shareNoticePaths(paths).map(path => `shared-with-me/${row.label}/${path}`),
               noDismiss: true,
-              ...(announce ? { quiet: true } : { repeat: true }),
+              ...(announce ? {} : { repeat: true }),
             });
           }
         }
         if (row.collisionRecordQuarantined) {
+          warned = true;
           reportShellFailure({
             message:
               `dohc could not read its record of your files with the same path as a file in ${row.label}. ` +
               "dohc keeps these files apart.",
             identity: collisionRecordSetAside(row.shareId),
             tone: "warning",
-            ...(announce ? { quiet: true } : {}),
           });
         }
       }
+      return warned;
     },
     [clearIdentity, reportShellFailure],
   );
@@ -194,7 +196,7 @@ export function useShareMounts(
         return;
       }
       const wroteRows = rowsToken === rowsRefreshToken.current;
-      reportCollisionRecords(results, announce, wroteRows);
+      const warned = reportCollisionRecords(results, announce, wroteRows);
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
       if (changed > 0) {
         setMountContentEpoch((epoch) => epoch + 1);
@@ -219,11 +221,17 @@ export function useShareMounts(
         reportShellError(summary, null, () => void refreshShareMountsRef.current(true), "share-refresh");
       } else if (results.some((row) => row.status === "damaged")) {
         reportShellError(summary, null, null, "share-refresh");
+      } else if (warned) {
+        // A warning row is this refresh's toast, so the summary goes into
+        // Notices without one. Ending the last summary first keeps its open
+        // toast from coming back after the warning's.
+        clearKind("share-refresh");
+        reportShellFailure({ message: summary, tone: "success", kind: "share-refresh", quiet: true });
       } else {
         showSuccessNotice(summary, undefined, "share-refresh");
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reloadShareMounts, reportCollisionRecords, clearKind],
+    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reportShellFailure, reloadShareMounts, reportCollisionRecords, clearKind],
   );
   refreshShareMountsRef.current = refreshShareMounts;
 

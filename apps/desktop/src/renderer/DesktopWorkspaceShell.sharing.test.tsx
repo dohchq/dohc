@@ -322,6 +322,50 @@ describe("refreshing shares added to this workspace", () => {
     expect(notices.textContent).not.toContain("could not refresh");
   });
 
+  // The warning is the press's toast, and its summary waits in Notices. The
+  // last press's open summary toast doesn't come back after the warning's.
+  it("answers a refresh the person starts with the set-aside row, not the summary", async () => {
+    const setAside =
+      "dohc could not read its record of your files with the same path as a file in alex. " +
+      "dohc keeps these files apart.";
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Refresh shares", id: "refresh-share-mount" }]);
+    const refresh = vi.fn<() => Promise<RefreshShareMountsResult>>()
+      .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] })
+      .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0 }] })
+      .mockResolvedValue({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0, collisionRecordQuarantined: true }] });
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+    // The refresh at open says nothing.
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    const press = async (times: number) => {
+      fireEvent.contextMenu((await screen.findAllByTestId("tree-row"))[0]!);
+      await user.click(await screen.findByTestId("explorer-menu-item-refresh-share-mount"));
+      await waitFor(() => expect(refresh).toHaveBeenCalledTimes(times));
+    };
+
+    // The failed press's summary is the toast, and stays open.
+    await press(2);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc could not refresh 1 share."));
+    await press(3);
+
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(setAside));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(within(screen.getByTestId("workspace-shell-notice")).getByRole("button", { name: "Dismiss workspace notice" }));
+    // No summary toast takes its place, not even one that fades.
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getByText(setAside)).toBeTruthy();
+    expect(within(notices).getByText("Shares refreshed — 0 files updated.")).toBeTruthy();
+    expect(notices.textContent).not.toContain("could not refresh");
+  });
+
   it("says a share's record was set aside when its refresh stops because the session expired", async () => {
     const setAside =
       "dohc could not read its record of your files with the same path as a file in alex. " +
