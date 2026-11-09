@@ -11,6 +11,10 @@ export const CRASH_REPORT_HEADER = "dohc crash report";
 // The desktop caps a report at 32,768 UTF-16 code units, which is at most
 // 96 KiB of UTF-8.
 export const CRASH_REPORT_MAX_BYTES = 96 * 1024;
+// Before a 413, the server reads and throws away the rest of an oversized
+// upload, until it has read this many bytes in all or for this long. See tooLarge.
+export const CRASH_REPORT_DRAIN_MAX_BYTES = 1024 * 1024;
+export const CRASH_REPORT_DRAIN_MAX_MS = 10_000;
 export const CRASH_REPORTS_PER_CLIENT_PER_HOUR = 10;
 export const CRASH_REPORTS_PER_HOUR = 1_000;
 // At most about 4.6 GiB at the largest report size, and far less in
@@ -115,8 +119,10 @@ export type CrashReportIntake = (request: Request) => Promise<CrashReportAnswer>
 export function createCrashReportIntake(deps: {
   store: CrashReportStore;
   nowMs?: () => number;
+  drainMaxMs?: number;
 }): CrashReportIntake {
   const nowMs = deps.nowMs ?? Date.now;
+  const drainMaxMs = deps.drainMaxMs ?? CRASH_REPORT_DRAIN_MAX_MS;
   // Accepted reports in the last hour, oldest first, and a count per client.
   const accepted: { atMs: number; client: string }[] = [];
   const perClient = new Map<string, number>();
@@ -160,8 +166,11 @@ export function createCrashReportIntake(deps: {
     const early = limited(client);
     if (early) return early;
     const declared = Number(request.headers.get("content-length") ?? "0");
-    if (declared > CRASH_REPORT_MAX_BYTES) return tooLarge();
-    const bytes = await readAtMost(request, CRASH_REPORT_MAX_BYTES);
+    if (declared > CRASH_REPORT_MAX_BYTES) {
+      if (declared <= CRASH_REPORT_DRAIN_MAX_BYTES && request.body) await drain(request.body.getReader(), 0, drainMaxMs);
+      return tooLarge();
+    }
+    const bytes = await readAtMost(request, CRASH_REPORT_MAX_BYTES, drainMaxMs);
     if (bytes === "too-large") return tooLarge();
     let body: string;
     try {
@@ -193,9 +202,10 @@ function refuse(status: number, error: string, headers?: Record<string, string>)
   return { status, body: { ok: false, error }, ...(headers ? { headers } : {}) };
 }
 
-// The rest of the body stays unread. Node sends this answer, then closes
-// the connection instead of reading on. Cancelling the body would reset the
-// connection before the client saw the answer.
+// Node sends this answer, then closes the connection. If the client is still
+// sending, closing with upload bytes unread makes the server's kernel reset
+// the connection, and the client's kernel can drop the 413 before the client
+// reads it. So drain() reads the rest of the upload first, within its limits.
 function tooLarge(): CrashReportAnswer {
   return refuse(413, "the report is too large", { connection: "close" });
 }
@@ -207,7 +217,7 @@ function isPlainText(value: string | null): boolean {
   return parameters.every((parameter) => !parameter.startsWith("charset=") || parameter === "charset=utf-8");
 }
 
-async function readAtMost(request: Request, maxBytes: number): Promise<Uint8Array | "too-large"> {
+async function readAtMost(request: Request, maxBytes: number, drainMaxMs: number): Promise<Uint8Array | "too-large"> {
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -217,7 +227,7 @@ async function readAtMost(request: Request, maxBytes: number): Promise<Uint8Arra
     if (done) break;
     total += value.byteLength;
     if (total > maxBytes) {
-      reader.releaseLock();
+      await drain(reader, total, drainMaxMs);
       return "too-large";
     }
     chunks.push(value);
@@ -229,6 +239,26 @@ async function readAtMost(request: Request, maxBytes: number): Promise<Uint8Arra
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+// Reads and throws away the rest of an upload until it ends, `total` reaches
+// CRASH_REPORT_DRAIN_MAX_BYTES, or `maxMs` runs out.
+async function drain(reader: ReadableStreamDefaultReader<Uint8Array>, total: number, maxMs: number): Promise<void> {
+  // Releasing the lock rejects the read in progress. A race against one
+  // promise that lasts the whole drain would keep every chunk until it ended.
+  const timer = setTimeout(() => reader.releaseLock(), maxMs);
+  try {
+    while (total < CRASH_REPORT_DRAIN_MAX_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      total += value.byteLength;
+    }
+  } catch {
+    // The time ran out, or the upload broke off.
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
 }
 
 function appVersion(body: string): string | null {
