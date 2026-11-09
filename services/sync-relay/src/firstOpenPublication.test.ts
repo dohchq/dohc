@@ -459,7 +459,9 @@ const priorAuthority: Change[] = [
     .run(WS, OBJECT, "a".repeat(64), "b".repeat(64), "a".repeat(64), new Uint8Array([0, 0]))],
   ["an ordinary activation basis", f => f.raw.prepare(`INSERT INTO sync_relay_live_document_ordinary_bases VALUES (?,'main',?,?,1,'owner-device',0,'old','old','docs/old.md',?,0,1)`)
     .run(WS, OBJECT, "a".repeat(64), "b".repeat(64))],
-  ["a retained service activation", f => f.raw.prepare(`INSERT INTO sync_relay_service_activations VALUES ('namespace','activation-1',?,'main',?,?,'{}','{}',?,?,?,'share-1',NULL,1)`)
+  ["a retained service activation", f => f.raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+    source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes)
+    VALUES ('namespace','activation-1',?,'main',?,?,'{}','{}',?,?,?,'share-1',NULL,1)`)
     .run(WS, OBJECT, "a".repeat(64), "d".repeat(64), new Uint8Array([0, 0]), OWNER)],
   ["a Stop/restore operation", f => f.raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,workspace_id,main_version_id,object_id,
     lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,invalidated_at_ms,fenced_at_ms,accounted_bytes)

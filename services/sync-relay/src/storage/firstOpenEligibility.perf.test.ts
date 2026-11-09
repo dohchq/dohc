@@ -80,7 +80,9 @@ it.skipIf(process.env.DOHC_FIRST_OPEN_MEASURE !== "1")("measures first-open prep
       .run(workspaceId, objectId, lineage, `docs/${objectId}.md`, "b".repeat(64), lineage, new Uint8Array([0, 0]));
     raw.prepare("INSERT INTO sync_relay_live_document_ordinary_bases VALUES (?,'main',?,?,1,'owner-device',0,'old-epoch','old-stream',?,?,0,1)")
       .run(workspaceId, objectId, lineage, `docs/${objectId}.md`, "b".repeat(64));
-    raw.prepare("INSERT INTO sync_relay_service_activations VALUES ('namespace',?,?,'main',?,?,'{}','{}',?,?,'owner-1','share-1',NULL,1)")
+    raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes)
+      VALUES ('namespace',?,?,'main',?,?,'{}','{}',?,?,'owner-1','share-1',NULL,1)`)
       .run(`activation-${workspaceId}-${objectId}`, workspaceId, objectId, lineage, "d".repeat(64), new Uint8Array([0, 0]));
     raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,
       intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,invalidated_at_ms,fenced_at_ms,accounted_bytes)
