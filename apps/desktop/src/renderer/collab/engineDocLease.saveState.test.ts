@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { liveStopError } from "../../ipc/liveEditingStop";
+import { LIVE_STOP_WAITING, liveStopError } from "../../ipc/liveEditingStop";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -120,9 +120,10 @@ beforeEach(() => {
 });
 
 it.each([
-  ["edits-pending", liveStopError({code: "edits-pending"}), "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."],
-  ...HOST_STOP_CASES.map(([code, sessionHost, words]) => [code, hostStopWireError(code, sessionHost, "untrusted relay text"), words] as const),
-] as const)("reopens editors and clears the recorded Stop after %s", async (_code, refusal, words) => {
+  ["edits-pending", liveStopError({code: "edits-pending"}), LIVE_STOP_WAITING],
+  ...HOST_STOP_CASES.map(([code, sessionHost, words]) =>
+    [code, hostStopWireError(code, sessionHost, "untrusted relay text"), code === "host-not-loaded" ? LIVE_STOP_WAITING : words] as const),
+] as const)("reopens editors after %s, and clears the recorded Stop unless it waits", async (_code, refusal, words) => {
   retainDocument();
   await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
   const previous = harness.sessionId()!;
@@ -139,9 +140,14 @@ it.each([
   });
   await waitFor(() => expect(harness.openCount()).toBe(2));
   expect(harness.sessionId()).not.toBe(previous);
-  expect(h.recorded()).toBeUndefined();
-  expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
-  expect(h.ownerLiveStop).toHaveBeenLastCalledWith({workspaceId: "ws-1"}, "clear", "notes/big.md", h.document);
+  if (words === LIVE_STOP_WAITING) {
+    expect(h.recorded()?.state).toBe("requested");
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
+  } else {
+    expect(h.recorded()).toBeUndefined();
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+    expect(h.ownerLiveStop).toHaveBeenLastCalledWith({workspaceId: "ws-1"}, "clear", "notes/big.md", h.document);
+  }
   act(() => editDocument());
   await waitFor(() => expect(harness.mainText()).toBe("seed!!"));
 });

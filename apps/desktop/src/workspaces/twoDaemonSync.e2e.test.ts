@@ -72,7 +72,7 @@ import { relayShareOperations } from "../ipc/shareOperations";
 import type { OwnerLiveDocumentsResult } from "../ipc/bridgeContract";
 import { registerOperations } from "../ipc/operationTable";
 import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
-import {LIVE_STOP_EDITS_PENDING, liveStopRelayError, readLiveStopRefusal} from "../ipc/liveEditingStop";
+import {LIVE_STOP_WAITING, liveStopRelayError} from "../ipc/liveEditingStop";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 import { MOVE_ACCEPTED_EDITS_WAIT_MS } from "./moveAcceptedEditsGuard";
@@ -1156,10 +1156,9 @@ it.skipIf(engine.missing).each([
         expect(await hostDocumentState()).toBe("ready");
         const refused = await stop().then(() => {throw new Error("Stop succeeded while the session host was held.");}, (error: unknown) => error);
         expect(stopRefusalStatus).toBe(409);
-        expect(readLiveStopRefusal(refused)).toEqual({code: "edits-pending"});
-        expect((refused as Error).message).toBe(LIVE_STOP_EDITS_PENDING);
-        // The refusal cleared this computer's Stop, so the next Stop starts afresh.
-        expect(await owedStops()).toEqual([]);
+        // The relay's edits-pending answer only means "not yet", so this computer keeps its Stop.
+        expect((refused as Error).message).toBe(LIVE_STOP_WAITING);
+        expect(await owedStops()).toMatchObject([{state: "requested", binding: document.binding}]);
         preStopFeed.release();
         try { await waitForHostedLog(preStopFeed, preStopFeed.delivered, "pre-Stop delivery"); }
         catch (error) {
