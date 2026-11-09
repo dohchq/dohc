@@ -2815,8 +2815,11 @@ async function openEditor(daemon: Pick<LiveDaemonCapture, "capture">, path: stri
   return { session, doc };
 }
 
-it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
-  "refuses synced deletion revival in fresh %s and keeps unrelated notes syncing both ways",
+// H2b: B keeps the deletion. H2c: B keeps its copy and types again, and A takes
+// both up with no choice. H2d: B edits the file by hand, and A keeps B's copy
+// while B's conflict is still open.
+it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
+  "settles a synced deletion in fresh %s and keeps notes syncing both ways",
   async scenario => {
     const workspaceId = `deletion-revival-${scenario}`;
     const path = "trip.txt";
@@ -2835,6 +2838,14 @@ it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
         await pull(a!);
         await pull(b!);
       }
+    };
+    const keepOtherCopyOnA = async () => {
+      const reviewA = (await a!.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+      expect(reviewA).toMatchObject({current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}});
+      await a!.capture.resolveConflict(reviewA.id, {kind: "apply-incoming"});
+      await rounds();
+      expect(await readFile(join(rootA, path), "utf8")).toBe("Paris\nTokyo\n");
+      for (const device of [a!, b!]) expect(await device.capture.countOpenConflicts()).toBe(0);
     };
     try {
       a = await openLiveDaemonCapture({workspaceId, rootPath: rootA, relay: connection});
@@ -2867,52 +2878,95 @@ it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
       a.capture.observeFileEvents([{path, operation: "delete"}]);
       const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
       expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
-      const editor = await openEditor(b, path);
-      try { await typeAtEnd(editor, "Tokyo\n"); }
-      finally { await editor.session.close(); }
+      if (scenario === "H2d") {
+        // A conflict opens on A only for a file change. An editor change waits there.
+        await writeAndCapture(b, rootB, path, "Paris\nTokyo\n");
+      } else {
+        const editor = await openEditor(b, path);
+        try { await typeAtEnd(editor, "Tokyo\n"); }
+        finally { await editor.session.close(); }
+      }
       expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
       await rounds();
       const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
       expect(reviewB).toMatchObject({current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}});
-      await b.capture.resolveConflict(reviewB.id, {kind: scenario === "H2b" ? "apply-incoming" : "keep-current"});
-      await rounds();
+      let kept = "Paris\nTokyo\n";
+      if (scenario === "H2d") {
+        await keepOtherCopyOnA();
+      } else {
+        await b.capture.resolveConflict(reviewB.id, {kind: scenario === "H2b" ? "apply-incoming" : "keep-current"});
+        if (scenario === "H2c") {
+          const editorB = await openEditor(b, path);
+          try { await typeAtEnd(editorB, "Rome\n"); }
+          finally { await editorB.session.close(); }
+          kept += "Rome\n";
+        }
+        await rounds();
+      }
       if (scenario === "H2b") {
         const deleted = (await b.capture.listMoments({limit: 100})).moments.find(row => row.path === path && row.operation === "delete")!;
         expect(deleted).toBeDefined();
         await expect(b.capture.restoreFileToBeforeMoment(deleted.id, {kind: "human", humanId: "guard-person"}))
           .rejects.toMatchObject({name: "SyncedDeletionRevivalError"});
         await expect(readFile(join(rootB, path))).rejects.toMatchObject({code: "ENOENT"});
-      } else {
-        const reviewA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
-        expect(reviewA).toMatchObject({current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}});
-        await expect(a.capture.resolveConflict(reviewA.id, {kind: "apply-incoming"}))
-          .rejects.toMatchObject({message: "synced-deletion-revival-refused"});
+        await expect(readFile(join(rootA, path))).rejects.toMatchObject({code: "ENOENT"});
+      } else if (scenario === "H2c") {
+        expect(await readFile(join(rootA, path), "utf8")).toBe(kept);
+        for (const device of [a, b]) expect(await device.capture.countOpenConflicts()).toBe(0);
       }
-      await expect(readFile(join(rootA, path))).rejects.toMatchObject({code: "ENOENT"});
       await writeAndCapture(b, rootB, "packing.md", "Packing: B later\n");
       await writeAndCapture(a, rootA, "budget.md", "Budget: A later\n");
       await rounds();
       expect(await readFile(join(rootA, "packing.md"), "utf8")).toBe("Packing: B later\n");
       expect(await readFile(join(rootB, "budget.md"), "utf8")).toBe("Budget: A later\n");
+      if (scenario !== "H2b") {
+        let expected = kept;
+        for (const [writer, writerRoot, readerRoot, line] of [[a, rootA, rootB, "A by hand\n"], [b, rootB, rootA, "B by hand\n"]] as const) {
+          expected += line;
+          await writeAndCapture(writer, writerRoot, path, expected);
+          await rounds();
+          expect(await readFile(join(readerRoot, path), "utf8")).toBe(expected);
+        }
+        // Both editors stay open, so each machine must see the other's live edits.
+        const editorA = await openEditor(a, path);
+        const editorB = await openEditor(b, path);
+        try {
+          expect(shown(editorA)).toBe(expected);
+          expect(shown(editorB)).toBe(expected);
+          expect(editorA.session.lineageClaimId).toBe(editorB.session.lineageClaimId);
+          await typeAtEnd(editorA, "A live\n");
+          await rounds();
+          await vi.waitFor(() => expect(shown(editorB)).toBe(`${expected}A live\n`), {timeout: REAL_DAEMON_DEADLINE_MS});
+          await typeAtEnd(editorB, "B live\n");
+          await rounds();
+          await vi.waitFor(() => expect(shown(editorA)).toBe(`${expected}A live\nB live\n`), {timeout: REAL_DAEMON_DEADLINE_MS});
+        } finally {
+          await Promise.allSettled([editorA.session.close(), editorB.session.close()]);
+        }
+        await rounds();
+        expected += "A live\nB live\n";
+        expect(await readFile(join(rootA, path), "utf8")).toBe(expected);
+        expect(await readFile(join(rootB, path), "utf8")).toBe(expected);
+        for (const device of [a, b]) expect(await device.capture.countOpenConflicts()).toBe(0);
+      }
       expect(await pull(a)).toMatchObject({fetched: 0});
       expect(await pull(b)).toMatchObject({fetched: 0});
     } finally {
       await Promise.allSettled([b?.close(), a?.close()]);
       await relay.stop();
     }
-  }, 90_000,
+  }, 150_000,
 );
 
 it.skipIf(engine.missing)(
-  "settles the synced deletion copy workaround with either both-deleted choice",
+  "settles a synced deletion both machines keep with either choice on the both-removed review, then copies its text out of History",
   async () => {
     for (const choice of ["keep-current", "apply-incoming"] as const) {
-      const workspaceId = `deletion-workaround-${choice}`;
+      const workspaceId = `deletion-both-kept-${choice}`;
       const path = "trip.txt";
       const copyPath = "trip copy.txt";
+      const aRemovedAgainstBEdit = {path, current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}};
       const bEditedAgainstARemoval = {path, current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}};
-      const aRemovedAgainstBKeptEdit = {path, current: {exists: false}, incoming: {exists: true, text: "Paris\nTokyo\n"}};
-      const bEditedAgainstAKeptRemoval = {path, current: {exists: true, text: "Paris\nTokyo\n"}, incoming: {exists: false}};
       const aBothDeletedReview = {path, current: {exists: false}, incoming: {exists: false}};
       const rootA = await createTestScratch("dohc-guard-a-");
       const rootB = await createTestScratch("dohc-guard-b-");
@@ -2969,23 +3023,26 @@ it.skipIf(engine.missing)(
         a.capture.observeFileEvents([{path, operation: "delete"}]);
         const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
         expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
-        const editor = await openEditor(b, path);
-        try { await typeAtEnd(editor, "Tokyo\n"); }
-        finally { await editor.session.close(); }
-        expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
-        await rounds([], [bEditedAgainstARemoval]);
-        const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
-        expect(reviewB).toMatchObject(bEditedAgainstARemoval);
-        await b.capture.resolveConflict(reviewB.id, {kind: "keep-current"});
-        await rounds([aRemovedAgainstBKeptEdit]);
+        // B changes the file by hand, so both machines review. An editor change would wait on A and open none there.
+        await writeAndCapture(b, rootB, path, "Paris\nTokyo\n");
+        await rounds([aRemovedAgainstBEdit], [bEditedAgainstARemoval]);
+        // Both keep the removal before either hears the other's choice.
         const reviewA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
-        expect(reviewA).toMatchObject(aRemovedAgainstBKeptEdit);
+        const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
         await a.capture.resolveConflict(reviewA.id, {kind: "keep-current"});
-        expect(await a.capture.countOpenConflicts()).toBe(0);
+        await b.capture.resolveConflict(reviewB.id, {kind: "apply-incoming"});
+        await rounds([aBothDeletedReview]);
+        const absentA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
+        await a.capture.resolveConflict(absentA.id, {kind: choice});
+        await rounds();
+        // History Restore stays refused, so B copies its text out of History into a new file.
+        const removal = (await b.capture.listMoments({limit: 100})).moments.find(row => row.path === path && row.operation === "delete")!;
+        await expect(b.capture.restoreFileToBeforeMoment(removal.id, {kind: "human", humanId: "guard-person"}))
+          .rejects.toMatchObject({name: "SyncedDeletionRevivalError"});
         let copied: string | null = null;
-        const history = (await a.capture.listMoments({limit: 100})).moments.filter(row => row.path === path);
+        const history = (await b.capture.listMoments({limit: 100})).moments.filter(row => row.path === path);
         for (const row of history) {
-          const detail = await a.capture.readMoment(row.id);
+          const detail = await b.capture.readMoment(row.id);
           if (!detail || detail.protected) continue;
           const ipcMoment = engineMomentDetailForIpc(detail, {
             agent: () => undefined, person: () => undefined, automation: () => null,
@@ -2996,19 +3053,11 @@ it.skipIf(engine.missing)(
             break;
           }
         }
-        expect(copied, "A's History still exposes B's text through readEngineMoment after Keep").toBe("Paris\nTokyo\n");
-        if (copied === null) throw new Error("B's text is missing from A's History after Keep");
-        await writeAndCapture(a, rootA, copyPath, copied);
-        await rounds([], [bEditedAgainstAKeptRemoval]);
-        expect(await readFile(join(rootB, copyPath), "utf8")).toBe(copied);
-        const removalB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
-        expect(removalB).toMatchObject(bEditedAgainstAKeptRemoval);
-        await b.capture.resolveConflict(removalB.id, {kind: "apply-incoming"});
-        await rounds([aBothDeletedReview]);
-        const absentA = (await a.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
-        expect(absentA).toMatchObject(aBothDeletedReview);
-        await a.capture.resolveConflict(absentA.id, {kind: choice});
+        expect(copied, "B's History still exposes its text through readEngineMoment after the removal").toBe("Paris\nTokyo\n");
+        if (copied === null) throw new Error("B's text is missing from its History after the removal");
+        await writeAndCapture(b, rootB, copyPath, copied);
         await rounds();
+        expect(await readFile(join(rootA, copyPath), "utf8")).toBe(copied);
         for (const [device, text] of [[b, "B later\n"], [a, "A later\n"]] as const) {
           const editor = await openEditor(device, copyPath);
           try { await typeAtEnd(editor, text); }
