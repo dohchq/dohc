@@ -51,6 +51,20 @@ type FirstOpenIntegrityCode = (typeof FIRST_OPEN_INTEGRITY_CODES)[number];
 
 /** The shape of the code a service host gives an `ordinary-activation-refused` answer, at most 128 characters. */
 export const FIRST_OPEN_ACTIVATION_CODE = /^[a-z0-9][a-z0-9-]{0,127}$/;
+/** The code an `ordinary-activation-refused` answer carries for an engine code that has no stable shape. */
+export const FIRST_OPEN_UNKNOWN_ACTIVATION_CODE = "unknown";
+
+/**
+ * The stable code for an engine's own refusal code, such as `LIMIT_EXCEEDED`:
+ * lowercase, with hyphens for underscores, or `unknown` when that still does
+ * not match `FIRST_OPEN_ACTIVATION_CODE`. Every refused activation's code
+ * passes through here, so no reader of Live documents or agent status meets
+ * another shape.
+ */
+export function firstOpenActivationCode(raw: string): string {
+  const code = raw.toLowerCase().replaceAll("_", "-");
+  return FIRST_OPEN_ACTIVATION_CODE.test(code) ? code : FIRST_OPEN_UNKNOWN_ACTIVATION_CODE;
+}
 
 /** A step that failed for a reason a later request can outlast. */
 export type FirstOpenFailure = "history-unavailable" | "worker-failed" | "storage-failed";
@@ -130,13 +144,13 @@ export function firstOpenRecovery(answer: Answer): FirstOpenRecovery {
   }
 }
 
-/** Throws for an `ordinary-activation-refused` code outside `FIRST_OPEN_ACTIVATION_CODE`, so no reader meets one. */
+/** Gives an `ordinary-activation-refused` answer the stable form of its code, through `firstOpenActivationCode`. */
 export function firstOpenOutcome(source: FirstOpenSourceIdentity, answer: Answer): FirstOpenOutcome {
-  if (answer.kind === "refused" && answer.reason === "ordinary-activation-refused" && answer.code !== undefined &&
-    !FIRST_OPEN_ACTIVATION_CODE.test(answer.code)) throw new Error("A refused activation code must be lowercase letters, digits and hyphens.");
+  const stable = answer.kind === "refused" && answer.reason === "ordinary-activation-refused" && answer.code !== undefined
+    ? {...answer, code: firstOpenActivationCode(answer.code)} : answer;
   const {workspaceId, objectId, path, sourceMomentId, sourceDigest} = source;
-  return Object.freeze({...answer, source: Object.freeze({workspaceId, objectId, path, sourceMomentId, sourceDigest}),
-    recovery: firstOpenRecovery(answer)}) as FirstOpenOutcome;
+  return Object.freeze({...stable, source: Object.freeze({workspaceId, objectId, path, sourceMomentId, sourceDigest}),
+    recovery: firstOpenRecovery(stable)}) as FirstOpenOutcome;
 }
 
 /**

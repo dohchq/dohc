@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  FIRST_OPEN_ACTIVATION_CODE,
   FIRST_OPEN_INTEGRITY_CODES,
   FIRST_OPEN_OWNER_NOTICE,
   FIRST_OPEN_REFUSAL_REASONS,
   FIRST_OPEN_TOO_LARGE_CODES,
   FIRST_OPEN_UNSUPPORTED_CAUSES,
+  firstOpenActivationCode,
   firstOpenOutcome,
   firstOpenRefusal,
   firstOpenReport,
@@ -53,14 +55,19 @@ describe("first-open reports", () => {
     expect([...FIRST_OPEN_REFUSAL_REASONS].sort()).toEqual(refusals.sort());
   });
 
-  // Proves: no refused activation carries a code the owner's IPC would reject,
-  // so one row can never fail its workspace's status.
-  it("refuses an activation code outside lowercase letters, digits and hyphens, up to 128 characters", () => {
-    for (const code of ["Native_Disagreement", "-leading", "", "a".repeat(129), "native disagreement"]) {
-      expect(() => firstOpenOutcome(source, { kind: "refused", reason: "ordinary-activation-refused", code })).toThrow();
-    }
-    expect(firstOpenReport(firstOpenOutcome(source, { kind: "refused", reason: "ordinary-activation-refused", code: "a".repeat(128) })))
-      .toMatchObject({ code: "a".repeat(128) });
+  // Proves: an engine's own code reaches the owner and their agents in one
+  // stable shape. Uppercase and underscores map to their lowercase, hyphenated
+  // form; anything else maps to one unknown code, so no refused activation
+  // carries a code the owner's IPC or the CLI would reject.
+  it.each([
+    ["LIMIT_EXCEEDED", "limit-exceeded"], ["CONFLICT", "conflict"], ["Native_Disagreement", "native-disagreement"],
+    ["live-application-conflict", "live-application-conflict"], ["a".repeat(128), "a".repeat(128)],
+    ["-leading", "unknown"], ["", "unknown"], ["a".repeat(129), "unknown"], ["native disagreement", "unknown"], ["É_TÉ", "unknown"],
+  ])("gives the activation code %j its stable form %j", (raw, code) => {
+    expect(firstOpenActivationCode(raw)).toBe(code);
+    expect(code).toMatch(FIRST_OPEN_ACTIVATION_CODE);
+    const outcome = firstOpenOutcome(source, { kind: "refused", reason: "ordinary-activation-refused", code: raw });
+    expect(firstOpenRefusal(outcome)).toStrictEqual({ reason: "ordinary-activation-refused", code, source, recovery: "report" });
   });
 
   it("names only the source fields the request named", () => {
