@@ -210,7 +210,7 @@ describe("workspace share handoff placement", () => {
 
     expect(
       await screen.findByText(
-        "dohc couldn't reach the server. Check your connection, then choose Try again.",
+        "dohc could not reach the server. Check your connection, then choose Try again.",
       ),
     ).toBeTruthy();
     await userEvent.setup().click(
