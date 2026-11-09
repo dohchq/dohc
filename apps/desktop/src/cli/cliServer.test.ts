@@ -6465,6 +6465,49 @@ describe("CLI socket server", () => {
     expect(await asks()).toEqual([]);
   });
 
+  it("marks a chat read only for the run's agent when its run reads it, whatever actor the run names", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      wakeAgentIds: ["codex"],
+      body: "@Codex can you check the plan?",
+    });
+    await store.sendMessage({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId: asked.thread.id,
+      author: { kind: "agent", displayName: "Nova" },
+      body: "A note you haven't read",
+    });
+    const target = cliThreadId(asked.thread.id);
+    const yourUnread = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "human" })).threads.map((thread) => thread.id);
+    const runAsks = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map((mention) => mention.messageId);
+    expect(await yourUnread()).toContain(target);
+
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "codex" });
+    if (claim?.run.agentId !== "codex") throw new Error("Expected Codex's run");
+    dispatchedRun = "codex";
+    dispatchedRunId = claim.run.runId;
+    expect(await runAsks()).toEqual([cliMessageId(asked.message.id)]);
+
+    // The run names a person, as a terminal without DOHC_CHAT_ACTOR does.
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target, peek: false });
+    expect(await yourUnread()).toContain(target);
+    expect(await runAsks()).toEqual([]);
+
+    // Your own terminal holds no run secret, so your read is still yours.
+    callerRunSecret = undefined;
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target, peek: false });
+    expect(await yourUnread()).not.toContain(target);
+  });
+
   it("toggles reactions with main-derived actor identity", async () => {
     const opened = await post({
       actor: "human",
