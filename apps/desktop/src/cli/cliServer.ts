@@ -2452,7 +2452,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       return path;
     },
     result(value: unknown, changeSnapshots = false): unknown {
-      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder"]);
+      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder", "sharedFile"]);
       const lists = new Set(["paths", "sourcePaths", "datasetPaths", "created", "written", "deleted", "withoutHistory"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
@@ -2507,7 +2507,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["notices", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);

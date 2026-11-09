@@ -1465,9 +1465,22 @@ describe("CLI socket server", () => {
       { to: "chat", thread: "th_1", run: "run-1" },
       { to: "file", path: "plans/day-1.md" },
     ]);
+    // From a subfolder, a path names the same file the way `document read` takes it there.
+    notices.mockResolvedValueOnce([
+      { id: "file", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
+        createdAtMs: 1, read: false, opens: { to: "file" as const, path: "plans/day-1.md" } },
+      { id: "switch", kind: "automation-switched-off", title: "Reminders stopped", body: "", sender: null,
+        createdAtMs: 0, read: false, opens: { to: "automation-controls" as const, automation: "reminders", sharedFile: "trip/automations.yaml" } },
+    ] as never);
+    await mkdir(join(workspaceRoot, "plans"), { recursive: true });
+    const nested = await invokeAny("notices", { cwd: join(workspaceRoot, "plans"), actor: "agent" });
+    expect(nested.notices.map(({ opens }) => opens)).toEqual([
+      { to: "file", path: "day-1.md" },
+      { to: "automation-controls", automation: "reminders", sharedFile: "../trip/automations.yaml" },
+    ]);
     const outside = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "notices", args: { cwd: tempRoot, actor: "agent" } });
     expect(outside).toMatchObject({ ok: false, error: expect.stringContaining("not inside a dohc workspace") });
-    expect(notices).toHaveBeenCalledTimes(1);
+    expect(notices).toHaveBeenCalledTimes(2);
   });
 
   it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
