@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
+import type { AgentNotice } from "../notices/agentNotices";
 import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
+import { createGroup } from "../workspaces/groupCreate";
+import { createFolder } from "../workspaces/workspaceFiles";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
 import { join, resolve } from "node:path";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
@@ -191,6 +194,8 @@ interface DesktopCliServerDependencies<State> {
   localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
   notifyNoticesChanged(): void;
+  // The signed-in person's Notices rows that open in one workspace.
+  notices(workspaceId: string): Promise<AgentNotice[]>;
   /** Runs a version change after the windows showing the workspace save their open edits (versionRounds.ts). */
   versionRound: ReturnType<typeof createVersionRounds<unknown>>["run"];
   syncSharedChannelsForChatTarget(
@@ -386,6 +391,14 @@ export function createDesktopCliServer<State>(
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      createGroup: (input) => withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
+        return await createGroup(store, async (folderPath) => {
+          await createFolder(operation.workspace.rootPath, folderPath);
+        }, { workspaceId: workspace.workspaceId, ...input });
+      }),
       fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
@@ -732,6 +745,7 @@ export function createDesktopCliServer<State>(
             readOnly: Boolean(sharedViewOf(workspaceId)),
           })),
       openWorkspace: openCliWorkspace,
+      notices: dependencies.notices,
       chatLinks: (workspace,input) => readLinks(workspace,current=>dependencies.chatLinks(current,input)),
       chatFileMentions: (workspace, input) => readLinks(workspace, current => dependencies.chatFileMentions(current, input)),
       links: {

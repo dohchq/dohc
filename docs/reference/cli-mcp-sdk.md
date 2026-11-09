@@ -272,6 +272,14 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 
 Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
+### `dohc_list_notices`
+
+List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it is read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing does not change whether rows are read.
+
+No arguments.
+
+Returns `{ notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
+
 ### `dohc_list_kept_copies`
 
 List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
@@ -550,7 +558,7 @@ Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, upda
 
 ### `dohc_wait_for_messages`
 
-Wait for this agent's unread requests without marking them read. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Without it, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.
+Wait for this agent's unread requests without marking them read. In a run dohc started, they are the run's own requests, including replies in threads its agent posted in, and the ones it returns start no new run. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Otherwise, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.
 
 The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.
 
@@ -579,6 +587,18 @@ List the workspace's Chats groups (including the default #general) with each gro
 No arguments.
 
 Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, threadCount, threads }[] } | { ok: false, reason }`.
+
+### `dohc_create_group`
+
+Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `name`: `string`. Required.
+- `purpose`: `string`
+- `type`: `"posts" | "chat" | "both"`
+
+Returns `{ ok: true, group: { id, name, slug, kind, purpose? } }`.
 
 ### `dohc_start_group_chat`
 
@@ -816,6 +836,22 @@ Resolve links from one document.
 
 With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
 
+### `dohc notices`
+
+Read this workspace's Notices.
+
+Listing does not change whether rows are read.
+
+#### `dohc notices list`
+
+```sh
+dohc notices list [options]
+```
+
+List this workspace's Notices, newest first: each row's title, text, sender, time, whether you have read it, and where it opens.
+
+With `--json`, prints `{ schemaVersion, notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
+
 ### `dohc sync`
 
 Stop syncing this workspace on this computer.
@@ -980,6 +1016,21 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
+#### `dohc document set-fields`
+
+```sh
+dohc document set-fields <record> [options]
+```
+
+Set fields on a Collection record.
+
+The change lands in the record's frontmatter, and record history attributes it to the agent. Use dohc_set_record_fields for a value that is not text.
+
+- `--field <name=value>`: Set this field to this text. Repeat for more fields.
+- `--agent <name>`: Record this agent name with the change.
+
+With `--json`, prints `{ schemaVersion, ok: true, recordPath }`.
+
 #### `dohc document chats`
 
 ```sh
@@ -1094,6 +1145,21 @@ List the Groups in this workspace.
 
 With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId? }[] }`.
 
+#### `dohc chat create-group`
+
+```sh
+dohc chat create-group <name> [options]
+```
+
+Create a Group and its folder, as New group does.
+
+The folder is the Group's name as a slug. A Group with the same name is refused.
+
+- `--purpose <text>`: Say what the Group is for, in up to 200 characters.
+- `--type <posts|chat|both>`: Choose what the Group holds. The default is both.
+
+With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? } }`.
+
 #### `dohc chat threads`
 
 ```sh
@@ -1111,6 +1177,8 @@ dohc chat watch [options]
 ```
 
 Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.
+
+In a run dohc started, watch returns the run's own requests, including replies to its posts. Those messages start no new run.
 
 - `--cursor <cursor>`: Continue from the cursor returned by watch.
 - `--group <group>`: Wait only for messages in this Group.

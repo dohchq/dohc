@@ -2624,14 +2624,19 @@ impl ActorHandle {
                     }
                     Err(error) => {
                         let result: Result<(), RuntimeError> = Err(error);
+                        // A pass that kept its progress goes on from the document
+                        // it waited for, so each of its waits settles one check.
+                        let kept = transport.continuation.is_kept();
                         if super::wait_for_reader(
                             &result,
-                            preparation_attempt,
+                            if kept { 0 } else { preparation_attempt },
                             self.markdown_recovery.clone(),
                         )
                         .await
                         {
-                            preparation_attempt += 1;
+                            if !kept {
+                                preparation_attempt += 1;
+                            }
                             continue;
                         }
                         return result.map(|()| unreachable!());

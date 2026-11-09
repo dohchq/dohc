@@ -15,7 +15,8 @@ import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
-import { appViewOperations, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
+import { appViewOperations, engineStoreRefusalRecovery, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
+import { stoppedWorkspaceCall } from "./ipc/stoppedWorkspaceCalls";
 import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLinks";
 import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
@@ -396,6 +397,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
+import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
@@ -4975,8 +4977,8 @@ const chatWrites = createChatWrites({
     const { settings } = await readCachedUserSettingsFile(stateDir());
     return listAgents(settings).find(({ id }) => id === agentId)?.name ?? "Agent";
   },
-  agentIdsToWake: async (body, dmAgentId) =>
-    agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId),
+  agentIdsToWake: async (body, dmAgentId, answeredAgentId) =>
+    agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId, answeredAgentId),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5048,6 +5050,7 @@ const agentWaits = createAgentWaits((agentIds) => {
 });
 
 const { startDesktopCliServer } = createDesktopCliServer({
+  notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
   ownerLiveDocuments: {
     list: operation => {
@@ -6302,9 +6305,19 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       if (counted) telemetry.track(counted);
       return result;
     } catch (error) {
-      throw ipcWireError(withPrivacyDenial(error));
+      throw ipcWireError(withPrivacyDenial(error), stoppedWorkspaceCall(channel, args[0], () => workspaceStoppedIn(event.sender)));
     }
   });
+}
+
+// The workspace a window shows its stop for in place of its workbench:
+// Forget left the window showing it, or its store needs a newer dohc.
+function workspaceStoppedIn(sender: WebContents): string | null {
+  const old = oldWindows.read(sender);
+  if (old) return old.workspaceId;
+  const session = rendererWorkspaceSessions.current(sender);
+  const refusal = session && activity.getStatus(session.workspaceId).engineStoreRefused;
+  return session && refusal != null && engineStoreRefusalRecovery(refusal) === "update" ? session.workspaceId : null;
 }
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
@@ -7676,6 +7689,7 @@ function registerIpcHandlers(): void {
       crashReports.dismiss(through);
       await crashReportPreview.remove();
     },
+    markCrashReportRead: ({ through }) => { crashReports.markRead(through); },
     // The renderer only opens the dialog. The answer comes from the person.
     sendCrashReport: async (_input, { event }) => ({
       sent: await crashReports.send(async (request) => {

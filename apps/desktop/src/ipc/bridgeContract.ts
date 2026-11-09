@@ -6619,6 +6619,9 @@ export const CrashReportView = z.object({
   // The last problem in this text. Dismiss removes up to it, so a newer
   // problem stays.
   through: z.number().int().positive(),
+  // The person read every problem in it, so its toast does not show again.
+  // The row stays in Notices until Dismiss or Send.
+  read: z.boolean(),
   // Where the newest problem happened. The notice names it.
   source: CrashReportSource,
   problems: z.number().int().positive(),
@@ -6646,6 +6649,14 @@ export const crashReportOperations = {
     capabilityId: "crash.dismiss",
     scope: "device",
     channel: "desktop:dismiss-crash-report",
+    payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
+  },
+  // Closing the toast or reading the row. Main saves it, so the toast does
+  // not show again after a restart.
+  markCrashReportRead: {
+    capabilityId: "crash.mark",
+    scope: "device",
+    channel: "desktop:mark-crash-report-read",
     payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
   },
   // Opens main's dialog. Sent is true only when the person confirmed there

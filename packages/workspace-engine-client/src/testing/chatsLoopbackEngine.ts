@@ -939,6 +939,7 @@ function allowedKeys(method: string): readonly string[] {
       return ["runId"];
     case CHATS_METHOD.dispatchRecentCount: return ["threadId", "sinceMs"];
     case CHATS_METHOD.dispatchFailPendingForThread: return ["threadId", "agentId", "reason"];
+    case CHATS_METHOD.dispatchCoverDelivered: return ["runId", "messageIds"];
     case CHATS_METHOD.dispatchRecordRunMessage: return ["messageId", "runId"];
     case CHATS_METHOD.dispatchSetThreadPaused: return ["threadId", "paused", "reason"];
     case CHATS_METHOD.dispatchRequeueFailedTrigger: return ["triggerMessageId", "runId"];
@@ -1195,6 +1196,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.recentCount(state, params);
       case CHATS_METHOD.dispatchFailPendingForThread:
         return this.failPending(state, params);
+      case CHATS_METHOD.dispatchCoverDelivered:
+        return this.coverDelivered(state, workspace, params);
       case CHATS_METHOD.dispatchRecordRunMessage:
         return this.recordRunMessage(state, workspace, params);
       case CHATS_METHOD.dispatchSetThreadPaused:
@@ -3322,6 +3325,28 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
     }
     return jsonResult(changed);
+  }
+
+  private coverDelivered(state: WorkspaceState, workspace: string, params: ChatsJsonObject): JsonValue {
+    const runId = requiredString(params, "runId");
+    const messageIds = params.messageIds;
+    if (!Array.isArray(messageIds) || messageIds.length > 100 || !messageIds.every((id) => typeof id === "string")) {
+      throw new Error("invalid-parameters");
+    }
+    const run = state.runs.get(runId);
+    if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
+    if (run.endedAtMs !== undefined) return jsonResult(0);
+    let covered = 0;
+    for (const messageId of messageIds as string[]) {
+      const dispatch = state.dispatches.get(dispatchKey(messageId, run.agentId));
+      if (dispatch?.state !== "pending") continue;
+      dispatch.state = "done";
+      dispatch.runId = runId;
+      dispatch.attemptCount += 1;
+      dispatch.updatedAtMs = this.tick();
+      covered += 1;
+    }
+    return jsonResult(covered);
   }
 
   private dispatchComplete(

@@ -79,6 +79,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_stop_workspace_sync: ["workspace.sync.stop"],
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
+  dohc_list_notices: ["notice.list"],
   dohc_save_kept_copy: ["file.kept.save"],
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
@@ -122,6 +123,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_wait_for_messages: ["chat.inbox.read"],
   dohc_read_chat: ["chat.read"],
   dohc_list_groups: ["group.list"],
+  dohc_create_group: ["group.create"],
   dohc_start_group_chat: ["chat.post"],
   dohc_start_file_chat: ["file.chat.start"],
   dohc_reply_to_chat: ["chat.reply"],
@@ -2072,6 +2074,17 @@ export async function listGroups(ctx: ToolContext) {
   return requestCli(ctx, "groupsFull", {});
 }
 
+// New group, as a person makes one: the group and its folder. A taken name
+// is refused; dohc_list_groups finds the group that has it.
+export async function createGroup(
+  ctx: ToolContext,
+  args: { name: string; purpose?: string; type?: "posts" | "chat" | "both" },
+) {
+  const result = await requestCli(ctx, "groupCreate", args);
+  if ("ok" in result) return result;
+  return { ok: true as const, group: { ...result.group, id: engineGroupId(result.group.id) } };
+}
+
 // Canonical chat verbs return CLI handles. MCP reads use engine ids, so
 // convert write results before returning them to the client.
 function engineId(id: string, handlePrefix: string, enginePrefix: string): string {
@@ -2336,6 +2349,12 @@ export async function createRecord(
     fields: fields.value,
     ...(args.recordId ? { recordId: args.recordId } : {}),
   });
+}
+
+// The person's Notices rows that open in this workspace, through the
+// resolver the desktop's Open uses. Listing marks nothing read.
+export async function listNotices(ctx: ToolContext) {
+  return requestCli(ctx, "notices", {});
 }
 
 // Files dohc moved aside while it saved, because another program changed them

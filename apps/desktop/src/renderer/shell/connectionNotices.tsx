@@ -156,6 +156,7 @@ export function ConnectionNotices(props: {
   crashReport?: CrashReportNotice | null;
   onSendCrashReport?: () => void;
   onDismissCrashReport?: () => void;
+  onReadCrashReport?: () => void;
 }) {
   if (props.notices.length === 0 && !props.crashReport) return null;
   return (
@@ -183,6 +184,7 @@ export function ConnectionNotices(props: {
         crashReport={props.crashReport ?? null}
         {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
         {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
+        {...(props.onReadCrashReport ? { onReadCrashReport: props.onReadCrashReport } : {})}
       />
       </ShellErrorReporter.Provider>
     </div>

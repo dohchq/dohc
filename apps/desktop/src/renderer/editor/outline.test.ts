@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { extractOutline, resolveActiveHeadingIndex } from "./outline";
-import { codeBlock, doc, heading, paragraph, schema } from "./testDocs";
+import { EditorState } from "@tiptap/pm/state";
+import { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { describe, expect, it, vi } from "vitest";
+import { extractOutline, resolveActiveHeadingIndex, updateOutline, type OutlineHeading } from "./outline";
+import { codeBlock, doc, heading, paragraph, randomEdit, schema, seededRandom } from "./testDocs";
 
 // Extraction over real ProseMirror documents (testDocs.ts). Positions are
 // hand-computed from node sizes: a textblock's nodeSize is text length + 2,
@@ -103,5 +105,61 @@ describe("resolveActiveHeadingIndex", () => {
 
     expect(resolveActiveHeadingIndex(long, 15_072)).toBe(753);
     expect(reads).toBeLessThanOrEqual(11);
+  });
+});
+
+describe("updateOutline", () => {
+  const quote = (...blocks: ProseMirrorNode[]) => schema.node("blockquote", null, blocks);
+
+  it("matches a full read after every edit", () => {
+    const random = seededRandom(2260);
+    let state = EditorState.create({
+      doc: doc(
+        heading(1, "Title"),
+        paragraph("intro copy"),
+        quote(heading(2, "Quoted"), paragraph("inside")),
+        heading(2, "Section"),
+        paragraph("body"),
+        heading(3, "Sub"),
+      ),
+    });
+    let outline: readonly OutlineHeading[] = extractOutline(state.doc);
+    for (let step = 0; step < 400; step += 1) {
+      const next = state.apply(randomEdit(state, random, ["Head", " ", "x", "\n"]));
+      outline = updateOutline(outline, state.doc, next.doc);
+      state = next;
+      expect(outline, `step ${step}`).toEqual(extractOutline(state.doc));
+    }
+  });
+
+  it("finds a paragraph that became a heading and drops a heading that lost its text", () => {
+    const before = doc(paragraph("Soon a heading"), heading(2, "Gone"), paragraph("after"));
+    let state = EditorState.create({ doc: before });
+    state = state.apply(state.tr.setBlockType(1, 1, schema.nodes.heading, { level: 3 }));
+    let outline = updateOutline(extractOutline(before), before, state.doc);
+    expect(outline).toEqual(extractOutline(state.doc));
+
+    const withText = state.doc;
+    state = state.apply(state.tr.delete(17, 21));
+    outline = updateOutline(outline, withText, state.doc);
+    expect(outline).toEqual([{ level: 3, text: "Soon a heading", pos: 0 }]);
+  });
+
+  it("reads only the edited heading when typing in a note with 2,000 headings", () => {
+    const before = doc(...Array.from({ length: 2000 }, (_, index) => heading(2, `Section ${index}`)));
+    const outline = extractOutline(before);
+    const state = EditorState.create({ doc: before });
+    const middle = outline[1000]!.pos + 2;
+    const after = state.apply(state.tr.insertText("x", middle)).doc;
+
+    const reads = vi.spyOn(ProseMirrorNode.prototype, "textContent", "get");
+    try {
+      const next = updateOutline(outline, before, after);
+      expect(reads.mock.calls.length).toBeLessThan(5);
+      expect(next[1000]!.text).toBe("Sxection 1000");
+      expect(next).toEqual(extractOutline(after));
+    } finally {
+      reads.mockRestore();
+    }
   });
 });

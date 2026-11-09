@@ -2120,15 +2120,13 @@ pub fn apply_committed_with_settlement_limit(
             if compaction_due
                 && matches!(&result, ApplicationResult::Applied(ack, _) if !ack.application_replayed)
             {
-                // The key is already evicted. As in self_bound_log, an injected
-                // fold crash keeps the committed ACK; a real error suppresses it.
-                durable::maybe_compact(
+                // The key is already evicted.
+                durable::compact_after_commit(
                     store,
                     &key,
-                    DEFAULT_COMPACTION_THRESHOLD,
                     faults,
                     event.metadata.accepted.received_at_ms,
-                )?;
+                );
             }
             Ok(result)
         }
@@ -3545,11 +3543,11 @@ mod tests {
                     100_000_000,
                     |_, _, _, _| Ok(()),
                 );
-                if cursor == 64 && fail_fold {
-                    assert!(matches!(result, Err(ApplicationError::Collab(_))));
-                } else {
-                    assert_eq!(ack(result.unwrap()).local_ydoc_sequence, cursor);
-                }
+                // The fold runs after the application commits. Its failure
+                // must not take back the committed acknowledgement.
+                let applied = ack(result.unwrap());
+                assert!(!applied.application_replayed);
+                assert_eq!(applied.local_ydoc_sequence, cursor);
                 deliveries.push(update);
             }
             assert_eq!(

@@ -62,7 +62,7 @@ dohc-linux-files = { path = "../dohc-linux-files" }
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).
 # The probe type exists in all builds; production builds must not enable this feature.
-harness = ["dohc-engine-runtime/fault-injection"]
+harness = ["dohc-engine-runtime/fault-injection", "dohc-engine-files/fault-injection"]
 
 [dev-dependencies]
 yrs = "=0.27.3"

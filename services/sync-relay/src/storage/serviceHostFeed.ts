@@ -4,7 +4,7 @@ import type {SqliteDb, SyncRelayLogRow} from "./types";
 import {rowToLogRow} from "./rows";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, pathVisibleThroughShare} from "../shareFilter";
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
-import {currentServiceHostEnrollments} from "./serviceHostEnrollment";
+import {currentServiceHostEnrollments, serviceHostOwnerRetains} from "./serviceHostEnrollment";
 import {hostedDocumentRows} from "./hostedDocumentIndex";
 import {listServiceActivationRetirements, type ServiceActivationRetirement} from "./serviceActivationRetirement";
 
@@ -73,7 +73,10 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
-    else if (row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
+    // The owner's restore that kept its live session keeps it shared.
+    else if (row.ownerStop === null && (selectors.some(selector => pathVisibleThroughShare(selector, row.path)) || serviceHostOwnerRetains(storage, row))) {
+      shared.set(row.objectId, row.path);
+    }
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");
   return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, settling, token});

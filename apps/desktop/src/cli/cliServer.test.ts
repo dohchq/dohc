@@ -1,4 +1,5 @@
-import { chatLinks as mcpChatLinks, listGroups as mcpListGroups } from "@dohc/mcp/tools";
+import { chatLinks as mcpChatLinks, createGroup as mcpCreateGroup, listGroups as mcpListGroups } from "@dohc/mcp/tools";
+import { createGroup } from "../workspaces/groupCreate";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
 import { createShareRosters } from "../automations/shareRoster";
 import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
@@ -707,7 +708,85 @@ describe("CLI socket server", () => {
     const posted = await post({ group: "general", actor: "human", body: "@agent a connected agent's message" });
     dispatchedRun = "codex";
     dispatchedRunId = "unrelated-run";
+    callerRunSecret = undefined;
     expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 })).messages.map(message => message.messageId)).toEqual([posted.messageId]);
+  });
+
+  it("gives a running run a reply to its post and keeps that reply from starting another run", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id, lane: "posts", author: { kind: "human", displayName: "Ice" }, body: "@agent pick up the card",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: asked.thread.id, triggerMessageId: asked.message.id, agentId: "default" });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
+    if (!claim) throw new Error("Expected a run");
+    holdRun(claim.run.runId);
+    const blocker = await post({ group: "general", actor: "agent", runId: claim.run.runId, body: "Which date?", needsDecision: true });
+    const threadId = blocker.threadId.replace(/^th_/u, "thread-");
+    const [opening] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+    const answer = await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId, parentMessageId: opening!.id,
+      author: { kind: "human", displayName: "Ice" }, body: "Friday",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: answer.threadId, triggerMessageId: answer.id, agentId: "default" });
+    // An automation's wake for the same agent waits for the run it starts,
+    // which can only reply.
+    const wake = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id, lane: "posts",
+      author: { kind: "automation", displayName: "Stamp the finish date" }, authorOwnerDisplayName: "Ice",
+      automation: { automationId: "collection:board#stamp", chainDepth: 1 }, body: "Stamp the card.",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: wake.thread.id, triggerMessageId: wake.message.id, agentId: "default" });
+
+    const watched = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
+    expect(watched.messages.map(message => message.messageId)).toContain(cliMessageId(answer.id));
+    expect(watched.messages.map(message => message.messageId)).not.toContain(cliMessageId(wake.message.id));
+    await dispatchStore.completeRun({ runId: claim.run.runId, exitCode: 0 });
+    const next = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
+    expect(next?.dispatch.triggerMessageId).toBe(wake.message.id);
+  });
+
+  it("leaves a reply for the next run when the watch times out before its read lands", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id, lane: "posts", author: { kind: "human", displayName: "Ice" }, body: "@agent pick up the card",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: asked.thread.id, triggerMessageId: asked.message.id, agentId: "default" });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
+    if (!claim) throw new Error("Expected a run");
+    holdRun(claim.run.runId);
+    const blocker = await post({ group: "general", actor: "agent", runId: claim.run.runId, body: "Which date?", needsDecision: true });
+    const threadId = blocker.threadId.replace(/^th_/u, "thread-");
+    const [opening] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+    const answer = await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId, parentMessageId: opening!.id,
+      author: { kind: "human", displayName: "Ice" }, body: "Friday",
+    });
+    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: answer.threadId, triggerMessageId: answer.id, agentId: "default" });
+
+    const gate = deferred<void>();
+    const read = deferred<void>();
+    const original = store.listAgentRequestsPage.bind(store);
+    const spy = vi.spyOn(store, "listAgentRequestsPage").mockImplementation(async (...args) => {
+      await gate.promise;
+      const rows = await original(...args);
+      read.resolve();
+      return rows;
+    });
+    try {
+      const watched = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 20 });
+      expect(watched.messages).toEqual([]);
+      gate.resolve();
+      await read.promise;
+      // Room for the stray read to finish whatever it would do with the reply.
+      await new Promise(settle => setTimeout(settle, 100));
+    } finally {
+      spy.mockRestore();
+    }
+    await dispatchStore.completeRun({ runId: claim.run.runId, exitCode: 0 });
+    expect(await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" })).not.toBeNull();
   });
 
   it("leaves an agent's chat to its agent outside a run", async () => {
@@ -1233,6 +1312,26 @@ describe("CLI socket server", () => {
     expect(object).toHaveBeenCalledOnce();
   });
 
+  it("creates a Group with its folder through the CLI and MCP, and refuses a taken name or a read-only workspace", async () => {
+    context.createGroup = async input => await createGroup(store!, async folder => { await mkdir(join(workspaceRoot, folder), { recursive: true }); }, { workspaceId: WORKSPACE_ID, ...input });
+    const created = await invoke("groupCreate", { cwd: workspaceRoot, actor: "agent", name: "needs-ice", purpose: "Decisions waiting for Ice", type: "posts" });
+    expect(created.group).toMatchObject({ name: "needs-ice", slug: "needs-ice", kind: "group", purpose: "Decisions waiting for Ice" });
+    expect((await stat(join(workspaceRoot, "needs-ice"))).isDirectory()).toBe(true);
+    expect((await invoke("groups", { cwd: workspaceRoot, actor: "agent" })).groups.map(group => group.slug)).toContain("needs-ice");
+    await expect(invoke("groupCreate", { cwd: workspaceRoot, actor: "agent", name: "needs-ice" })).rejects.toThrow("A group with that name already exists.");
+
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    const viaMcp = await mcpCreateGroup(ctx, { name: "Trip plans" });
+    if (!("group" in viaMcp)) throw Error(viaMcp.reason);
+    expect(viaMcp.group).toMatchObject({ name: "Trip plans", slug: "trip-plans" });
+    expect(viaMcp.group.id).toMatch(/^channel-/u);
+    expect((await stat(join(workspaceRoot, "trip-plans"))).isDirectory()).toBe(true);
+
+    context.readOnly = true; registryWorkspace.readOnly = true;
+    await expect(invoke("groupCreate", { cwd: workspaceRoot, actor: "agent", name: "Later" })).rejects.toThrow("chats are not available in a read-only shared view");
+    await expect(stat(join(workspaceRoot, "later"))).rejects.toThrow();
+  });
+
   it("keeps CLI and MCP group listings available when one wire lookup rejects", async () => {
     const listed = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
     const original = store!.getChannelWireId.bind(store);
@@ -1347,6 +1446,45 @@ describe("CLI socket server", () => {
     expect(recordSuccess).not.toHaveBeenCalled();
     recordSuccess.mockImplementationOnce(() => { throw new Error("measurement failed"); });
     expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
+  });
+
+  it("lists the caller's workspace's Notices with the ids show takes, and nothing outside a workspace", async () => {
+    const notices = vi.fn(async () => [
+      { id: "reply", kind: "agent-run", title: "Nova replied", body: "Done", sender: { kind: "agent" as const, label: "Nova" },
+        createdAtMs: 2, read: false, opens: { to: "chat" as const, thread: "thread-1", message: "message-2" } },
+      { id: "run", kind: "agent-run", title: "Nova stopped", body: "", sender: null,
+        createdAtMs: 1, read: true, opens: { to: "chat" as const, thread: "thread-1", run: "run-1" } },
+      { id: "file", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
+        createdAtMs: 0, read: false, opens: { to: "file" as const, path: "plans/day-1.md" } },
+    ]);
+    serverOptions.notices = notices;
+    const listed = await invokeAny("notices", { cwd: workspaceRoot, actor: "agent" });
+    expect(notices).toHaveBeenCalledExactlyOnceWith(WORKSPACE_ID);
+    expect(listed.notices.map(({ opens }) => opens)).toEqual([
+      { to: "chat", thread: "th_1", message: "msg_2" },
+      { to: "chat", thread: "th_1", run: "run-1" },
+      { to: "file", path: "plans/day-1.md" },
+    ]);
+    // From a subfolder, a path names the same file the way `document read` takes it there.
+    notices.mockResolvedValueOnce([
+      { id: "file", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
+        createdAtMs: 1, read: false, opens: { to: "file" as const, path: "plans/day-1.md" } },
+      { id: "done", kind: "mention", title: "Bea mentioned you in done", body: "When done, close the window.", sender: null,
+        createdAtMs: 1, read: false, opens: { to: "file" as const, path: "done" } },
+      { id: "switch", kind: "automation-switched-off", title: "Reminders stopped", body: "", sender: null,
+        createdAtMs: 0, read: false, opens: { to: "automation-controls" as const, automation: "reminders", sharedFile: "trip/automations.yaml" } },
+    ] as never);
+    await mkdir(join(workspaceRoot, "plans"), { recursive: true });
+    const nested = await invokeAny("notices", { cwd: join(workspaceRoot, "plans"), actor: "agent" });
+    expect(nested.notices.map(({ opens }) => opens)).toEqual([
+      { to: "file", path: "day-1.md" },
+      { to: "file", path: "../done" },
+      { to: "automation-controls", automation: "reminders", sharedFile: "../trip/automations.yaml" },
+    ]);
+    expect(nested.notices[1]?.body).toBe("When done, close the window.");
+    const outside = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "notices", args: { cwd: tempRoot, actor: "agent" } });
+    expect(outside).toMatchObject({ ok: false, error: expect.stringContaining("not inside a dohc workspace") });
+    expect(notices).toHaveBeenCalledTimes(2);
   });
 
   it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
@@ -6364,6 +6502,49 @@ describe("CLI socket server", () => {
     expect(await asks()).toEqual([cliMessageId(asked.message.id)]);
     await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
     expect(await asks()).toEqual([]);
+  });
+
+  it("marks a chat read only for the run's agent when its run reads it, whatever actor the run names", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      wakeAgentIds: ["codex"],
+      body: "@Codex can you check the plan?",
+    });
+    await store.sendMessage({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId: asked.thread.id,
+      author: { kind: "agent", displayName: "Nova" },
+      body: "A note you haven't read",
+    });
+    const target = cliThreadId(asked.thread.id);
+    const yourUnread = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "human" })).threads.map((thread) => thread.id);
+    const runAsks = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map((mention) => mention.messageId);
+    expect(await yourUnread()).toContain(target);
+
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "codex" });
+    if (claim?.run.agentId !== "codex") throw new Error("Expected Codex's run");
+    dispatchedRun = "codex";
+    dispatchedRunId = claim.run.runId;
+    expect(await runAsks()).toEqual([cliMessageId(asked.message.id)]);
+
+    // The run names a person, as a terminal without DOHC_CHAT_ACTOR does.
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target, peek: false });
+    expect(await yourUnread()).toContain(target);
+    expect(await runAsks()).toEqual([]);
+
+    // Your own terminal holds no run secret, so your read is still yours.
+    callerRunSecret = undefined;
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target, peek: false });
+    expect(await yourUnread()).not.toContain(target);
   });
 
   it("toggles reactions with main-derived actor identity", async () => {

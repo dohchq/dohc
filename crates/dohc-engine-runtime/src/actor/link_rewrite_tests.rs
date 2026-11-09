@@ -133,7 +133,36 @@ fn write(ws: &str, object: &str, path: &str, body: &str, moment: &str) -> WriteT
     }
 }
 impl Fixture {
-    fn new(sources: usize, files: usize) -> Self {
+    /// Returns once the link index covers every file the fixture wrote. The
+    /// index seeds in the background, and a pass that starts before it
+    /// finishes reports the unindexed sources as unchecked.
+    async fn new(sources: usize, files: usize) -> Self {
+        let f = Self::open(sources, files);
+        tokio::time::timeout(Duration::from_secs(120), async {
+            // Ticks leave the actor's turns to the seeding worker.
+            let mut tick = tokio::time::interval(Duration::from_millis(2));
+            loop {
+                let ws = f.ws.clone();
+                let indexed = f.actor.run(move |store, _| {
+                    Ok(store.read_with(|conn| conn.query_row(
+                        "SELECT coalesce((SELECT seed_phase='ready' AND parser_generation=?2 FROM link_index_state WHERE workspace_id=?1 AND version_id='main'),0)
+                         AND NOT EXISTS(SELECT 1 FROM link_pending WHERE workspace_id=?1)
+                         AND NOT EXISTS(SELECT 1 FROM link_sources WHERE workspace_id=?1 AND (status='unindexed' OR parser_generation<>?2))",
+                        params![ws, crate::links::PARSER_GENERATION],
+                        |r| r.get::<_, bool>(0),
+                    )).map_err(StorageError::corrupt_public)?)
+                });
+                if indexed.await.unwrap() {
+                    break;
+                }
+                tick.tick().await;
+            }
+        })
+        .await
+        .expect("the link index did not finish seeding the fixture");
+        f
+    }
+    fn open(sources: usize, files: usize) -> Self {
         let root = ScratchDir::new().unwrap();
         let ws = format!("rewrite-{}", hex_sha256(root.to_string_lossy().as_bytes()));
         let mut store = EngineStore::open(&engine_db_path(&root).unwrap(), 1).unwrap();
@@ -351,7 +380,7 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let key = DocKey::new(&f.ws, "main", "source-0002").unwrap();
     let lease = f.leases.acquire(&key).unwrap();
     let result = f.pass("rewrite-request", Arc::new(NoFaults)).await.unwrap();
@@ -413,7 +442,7 @@ async fn closed_rewrites_skip_open_and_replay_the_bound_payload() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_opened_after_read_is_unchecked_and_never_written() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let leases = f.leases.clone();
     let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
     let held = Arc::new(Mutex::new(None));
@@ -432,7 +461,7 @@ async fn a_session_opened_after_read_is_unchecked_and_never_written() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_alias_change_during_parse_stops_the_remaining_sources() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let ws = f.ws.clone();
     probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
         if object == "source-0000" {
@@ -466,7 +495,7 @@ async fn an_alias_change_during_parse_stops_the_remaining_sources() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn disk_mismatch_is_unchecked_and_the_reply_is_bounded() {
-    let f = Fixture::new(55, 55);
+    let f = Fixture::new(55, 55).await;
     for i in 0..55 {
         std::fs::write(f.root.join(format!("source-{i:04}.md")), "external edit").unwrap();
     }
@@ -511,7 +540,7 @@ async fn a_passive_handle_cannot_originate_link_rewrites() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capture_hold_acquired_during_parse_makes_the_source_unchecked() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let ws = f.ws.clone();
     probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
         conn.execute("INSERT INTO capture_file_holds(workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested)
@@ -590,7 +619,7 @@ async fn middle_source_state(f: &Fixture) -> (Vec<u8>, i64, i64, i64) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let body = "- parent [[old]]\n  - child\n";
     seed_middle_lineage(&f, body).await;
     let before = middle_source_state(&f).await;
@@ -693,7 +722,7 @@ async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
 async fn an_unrelated_invalid_ydoc_input_still_stops_the_link_pass() {
     use yrs::{Map, ReadTxn, StateVector, Transact, updates::decoder::Decode};
 
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     seed_middle_lineage(&f, BODY).await;
     let ws = f.ws.clone();
     f.actor
@@ -740,7 +769,7 @@ async fn an_unrelated_invalid_ydoc_input_still_stops_the_link_pass() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     f.pass("rewrite", Arc::new(NoFaults)).await.unwrap();
     f.edit(
         "source-0000",
@@ -785,7 +814,7 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn history_excluded_sources_and_received_mounts_are_never_written() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     std::fs::write(
         f.root.join(".dohc/files.toml"),
         "version = 1\n[[rule]]\npath = \"source-0000.md\"\ntracked = false\n",
@@ -821,7 +850,7 @@ async fn history_excluded_sources_and_received_mounts_are_never_written() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_target_edit_refuses_the_whole_undo_without_changes() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     f.pass("rewrite", Arc::new(NoFaults)).await.unwrap();
     f.edit(
         "source-0000",
@@ -886,7 +915,7 @@ impl FaultInjector for CrashNth {
 #[tokio::test(flavor = "multi_thread")]
 async fn moved_sources_undo_at_the_current_path_and_removed_sources_refuse() {
     for removed in [false, true] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         f.pass("rewrite", Arc::new(NoFaults)).await.unwrap();
         f.publish().await;
         let ws = f.ws.clone();
@@ -955,7 +984,7 @@ async fn moved_sources_undo_at_the_current_path_and_removed_sources_refuse() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_heads_byte_bounds_and_unfinished_seed_are_reported() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let _hold = f.actor.hold_link_drain();
     f.edit(
         "source-0000",
@@ -1001,7 +1030,7 @@ async fn pending_heads_byte_bounds_and_unfinished_seed_are_reported() {
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
     for scenario in ["folder", "peer", "undone", "unknown"] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         if scenario == "undone" {
             f.undo().await.unwrap();
         }
@@ -1080,7 +1109,7 @@ async fn crashes_keep_the_write_and_request_progress_atomic_and_resume_once() {
         FaultPoint::StorageBeforePersist,
         FaultPoint::StorageAfterCommitBeforeAck,
     ] {
-        let mut f = Fixture::new(3, 3);
+        let mut f = Fixture::new(3, 3).await;
         let faults = Arc::new(CrashAfterDocuments {
             store: Mutex::new(
                 EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap(),
@@ -1143,7 +1172,7 @@ async fn crash_after_one_write_inverse_resumes_the_remaining_write_members() {
     crash_during_undo(3, std::time::Duration::ZERO).await;
 }
 async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
-    let mut f = Fixture::new(3, 3);
+    let mut f = Fixture::new(3, 3).await;
     let fault = Arc::new(CrashAfterDocuments {
         store: Mutex::new(EngineStore::open_read_only(&engine_db_path(&f.root).unwrap()).unwrap()),
         request: "partial".into(),
@@ -1222,7 +1251,7 @@ async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_completed_reply_replays_the_exact_result_without_more_writes() {
-    let mut f = Fixture::new(3, 3);
+    let mut f = Fixture::new(3, 3).await;
     let key = DocKey::new(&f.ws, "main", "source-0002").unwrap();
     let lease = f.leases.acquire(&key).unwrap();
     // Only the completed receipt identifies the lost reply across retries.
@@ -1260,7 +1289,7 @@ async fn a_lost_completed_reply_replays_the_exact_result_without_more_writes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn case_only_and_delete_only_operations_refuse() {
     for delete in [false, true] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         let ws = f.ws.clone();
         f.actor
             .run(move |store, _| {
@@ -1335,7 +1364,7 @@ async fn case_only_and_delete_only_operations_refuse() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
-    let mut f = Fixture::new(2000, 4999);
+    let mut f = Fixture::new(2000, 4999).await;
     // Measure forward and Undo turns here; publication has its own bulk proof.
     let _publication = f.capture.clone().lock_owned().await;
     let initial_hold = f.actor.hold_link_drain();
@@ -1586,7 +1615,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
-    let f = Fixture::new(20, 20);
+    let f = Fixture::new(20, 20).await;
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(std::sync::Barrier::new(2));
     let (sent, wait) = (reached.clone(), release.clone());
@@ -1621,7 +1650,7 @@ async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_competing_request_binding_cannot_be_overwritten_with_source_progress() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(|conn, _| {
         conn.execute("UPDATE engine_requests SET kind='another-method',payload_hash='another-binding' WHERE request_id='competing-request'", []).unwrap();
     }));
@@ -1649,7 +1678,7 @@ async fn a_competing_request_binding_cannot_be_overwritten_with_source_progress(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unrelated_undo_and_file_creation_do_not_stop_the_pass() {
-    let f = Fixture::new(20, 21);
+    let f = Fixture::new(20, 21).await;
     let ws = f.ws.clone();
     f.actor
         .run(move |store, _| {
@@ -1732,7 +1761,7 @@ async fn unrelated_undo_and_file_creation_do_not_stop_the_pass() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_head_edit_after_read_is_unchecked_and_preserved() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let ws = f.ws.clone();
     probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, object| {
         let tx = conn.unchecked_transaction().unwrap();
@@ -1762,7 +1791,7 @@ async fn a_peer_head_edit_after_read_is_unchecked_and_preserved() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_rewrites_cancel_in_the_inverse_transaction_and_external_edits_still_refuse() {
     for external in [false, true] {
-        let f = Fixture::new(2, 2);
+        let f = Fixture::new(2, 2).await;
         let _capture = f.capture.clone().lock_owned().await;
         f.pass("pending", Arc::new(NoFaults)).await.unwrap();
         assert_eq!(
@@ -1825,7 +1854,7 @@ async fn pending_rewrites_cancel_in_the_inverse_transaction_and_external_edits_s
 #[tokio::test(flavor = "multi_thread")]
 async fn competing_alias_families_stop_and_resume_without_a_workspace_revision() {
     for name in ["secondary/OLD.markdown", "secondary/NEW.mdx"] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         let name = name.to_owned();
         probes().lock().unwrap().get_mut(&f.ws).unwrap().hook = Some(Arc::new(move |conn, _| {
             conn.execute("INSERT INTO path_aliases(workspace_id,version_id,path,object_id) SELECT workspace_id,version_id,?1,object_id FROM path_aliases WHERE path='new.md'",[&name]).unwrap();
@@ -1862,7 +1891,7 @@ async fn competing_alias_families_stop_and_resume_without_a_workspace_revision()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let guard = f.actor.link_rewrites.gate.clone().lock_owned().await;
     let reply = tokio::time::timeout(
         Duration::from_secs(5),
@@ -1889,7 +1918,7 @@ async fn unrelated_undo_waits_for_the_actor_turn_and_not_the_forward_pass_gate()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let _capture = f.capture.clone().lock_owned().await;
     f.pass("chain-forward", Arc::new(NoFaults)).await.unwrap();
     let edited = format!("{} typed after rename", f.text("source-0000.md").await);
@@ -1950,7 +1979,7 @@ async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let original = format!("{}{BODY}{}", "a".repeat(8192), "b".repeat(8192));
     let (ws, body) = (f.ws.clone(), original.clone());
     f.actor

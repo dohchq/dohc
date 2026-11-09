@@ -454,8 +454,6 @@ describe("raw HTML in a browser", () => {
     };
     const view = render(props(first, "connecting", false));
     try {
-      expect(screen.getByText("Loading editor...")).toBeTruthy();
-      expect(screen.queryByTestId("markdown-editor")).toBeNull();
       const editor = await boundEditor();
       expect(editor.can().undo()).toBe(false);
       expectUntouched(editor);

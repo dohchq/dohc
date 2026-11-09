@@ -70,7 +70,11 @@ import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
 } from "./editor/MarkdownEditor";
-import { LazyMarkdownEditor, preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
+import {
+  LazyMarkdownEditor,
+  preloadMarkdownEditor,
+  useLiveEditorSettled,
+} from "./editor/LazyMarkdownEditor";
 import type { WorkspaceLinkTarget } from "./linkActivation";
 import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
@@ -127,6 +131,18 @@ const LazyPropertiesPanel = lazy(() =>
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
+
+// How long Copy and Export wait for a note's source proof. After that they
+// use dohc's own Markdown, so a slow or stuck proof cannot hold them up. The
+// proof keeps running, and the next request reuses its answer.
+export const SOURCE_PROOF_WAIT_MS = 2_000;
+
+function sourceProofWithin(doc: Y.Doc): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("The source proof took too long.")), SOURCE_PROOF_WAIT_MS);
+    projectArtifactSource(doc).then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
 
 function loadImportExport(): Promise<typeof import("./editor/import-export")> {
   importExportPromise ??= import("./editor/import-export");
@@ -381,7 +397,11 @@ export function MarkdownView(props: {
   // editor — writable, autosaving straight TO disk — while the session about
   // to bind seeded from the engine head. Keystrokes in that window took a path
   // that session never sees. Nothing here is writable until the open answers.
-  const opening = engine.opening || props.lossyNote === "checking";
+  // The read view's text stays until the live editor can replace it in one
+  // frame, never with loading rows between them.
+  const editorSettled = useLiveEditorSettled(engine.doc !== null);
+  const awaitingEditor = engine.doc !== null && !editorSettled;
+  const opening = engine.opening || props.lossyNote === "checking" || awaitingEditor;
   // What the user sees, as against `mode`, which is what the user CHOSE. An
   // opening document reads; its chosen mode is kept and restored, so a
   // document that would have opened straight into the editor still does.
@@ -710,9 +730,11 @@ export function MarkdownView(props: {
     return () => doc.destroy();
   }, [endedSnapshot]);
   const readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
-  // A large note's session can bind before its check answers. Until then it
-  // stays in read mode, as it opened, and its editor mounts once, editable.
-  const displayDoc = props.lossyNote === "checking" ? null : engine.doc ?? readOnlyCopy;
+  // A large note's session can bind before its check answers, or before its
+  // editor's code has loaded. Until both, it stays in read mode, as it opened,
+  // and its editor mounts once, editable.
+  const displayDoc =
+    props.lossyNote === "checking" || awaitingEditor ? null : engine.doc ?? readOnlyCopy;
 
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
@@ -860,7 +882,7 @@ export function MarkdownView(props: {
     if (displayDoc) {
       if (wysiwygRef.current === null || displayDoc.isDestroyed) return null;
       if (canPreserveMarkdownSource(displayDoc.getMap('meta').get('dohcMarkdownSource'))) {
-        try {return await projectArtifactSource(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
+        try {return await sourceProofWithin(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
       }
       const {yDocToMarkdown} = await loadImportExport();
       return displayDoc.isDestroyed ? null : yDocToMarkdown(displayDoc);
@@ -958,6 +980,7 @@ export function MarkdownView(props: {
     ),
     [onMarkdownRendered, props.path, props.reopenKey, props.workspaceId, savedBody],
   );
+  const openThisNote = props.onOpenPath ? () => props.onOpenPath?.(props.path) : undefined;
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
@@ -1129,6 +1152,43 @@ export function MarkdownView(props: {
   // The engine branch's scroller. It holds the top-matter (title, properties)
   // above the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
+  // Where the person is in the read view, as of its last scroll. The editor
+  // that replaces it opens at the same place.
+  const readScroll = useRef<{ key: string | undefined; top: number } | null>(null);
+  const engineShown = displayDoc !== null;
+  useLayoutEffect(() => {
+    const handover = readScroll.current;
+    readScroll.current = null;
+    const pane = engineDocPaneRef.current;
+    if (!engineShown || !pane || !handover || handover.key !== props.documentKey) return;
+    const land = () => {
+      if (pane.scrollHeight - pane.clientHeight < handover.top) return false;
+      pane.scrollTop = handover.top;
+      return true;
+    };
+    if (land()) return;
+    // The editor's content can grow after its first frame, as its nodes and
+    // images render. The position waits for it, unless the person moves first.
+    // Editor controls stop their own presses from bubbling, so presses and
+    // keys are caught on their way in.
+    const moves = ["wheel", "keydown", "pointerdown"] as const;
+    const stop = () => {
+      observer.disconnect();
+      pane.removeEventListener("scroll", stop);
+      for (const move of moves) pane.removeEventListener(move, stop, true);
+    };
+    const observer = new ResizeObserver(() => {
+      if (land()) stop();
+    });
+    // The editor's wrapper fills the pane, so its document, which grows with
+    // the note, is watched as well.
+    for (const content of [...Array.from(pane.children), pane.querySelector(".ProseMirror")]) {
+      if (content) observer.observe(content);
+    }
+    pane.addEventListener("scroll", stop);
+    for (const move of moves) pane.addEventListener(move, stop, true);
+    return stop;
+  }, [engineShown, props.documentKey]);
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
   >(null);
@@ -2179,7 +2239,8 @@ export function MarkdownView(props: {
               }}
               menu={{
                 workspaceId: props.workspaceId,
-                reportError: props.onButtonError,
+                onOpen: openThisNote,
+                path: props.path,
                 suggestedName: filenameStem(props.path),
                 // Read the live Y.Doc at the action. The hidden mounted editor
                 // supplies the readiness guard while source view is shown.
@@ -2338,7 +2399,8 @@ export function MarkdownView(props: {
                 ? null
                 : {
                     workspaceId: props.workspaceId,
-                    reportError: props.onButtonError,
+                    path: props.path,
+                    onOpen: openThisNote,
                     suggestedName: filenameStem(props.path),
                     // The same rule the engine branch answers to: emit the
                     // document, or refuse. This branch shows the disk, and until
@@ -2495,6 +2557,9 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          onScroll={(event) => {
+            readScroll.current = { key: props.documentKey, top: event.currentTarget.scrollTop };
+          }}
         >
           <div className="group/topmatter">
             {/* Title, icon and properties autosave through the same disk write

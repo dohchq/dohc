@@ -357,7 +357,7 @@ export function makeBlockControlsPlugin({
           onInsertRef,
           onOpenMenuRef,
           ghostSlot,
-          mapWidgetOwners(old, tr.mapping),
+          mapWidgetOwners(old.find(), tr.mapping),
           nextOwnerKey,
         );
       },

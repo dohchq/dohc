@@ -31,6 +31,7 @@ mod settlement_publication;
 pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
+pub use settlement_publication::rollback_waits_for_publication_in_tx;
 mod path_policy;
 mod references;
 mod refusal_notices;
@@ -100,7 +101,9 @@ pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
     MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope, SettlementAdmission,
 };
-pub use moment_apply::open_artifacts::{OpenArtifactDrain, drain_open_document_artifacts};
+pub use moment_apply::open_artifacts::{
+    OpenArtifactDrain, drain_open_document_artifacts, retry_reader_recovery_failures,
+};
 pub use moment_apply::{
     MomentApplyResult, MomentMaterializationChange, apply_moment_envelope,
     apply_moment_envelope_detailed,

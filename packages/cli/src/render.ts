@@ -11,6 +11,7 @@ import { formatStoredBytes } from "./account";
 type GroupsResult = CliResultByVerb["groups"];
 type ThreadsResult = CliResultByVerb["threads"];
 type InboxResult = CliResultByVerb["inbox"];
+type NoticesResult = CliResultByVerb["notices"];
 export type ShowResult = CliResultByVerb["show"];
 type PostResult = CliResultByVerb["post"];
 type ReplyResult = CliResultByVerb["reply"];
@@ -119,6 +120,32 @@ export function renderThreads(result: ThreadsResult): string {
     );
   }
   return lines.join("\n");
+}
+
+// One row per notice, then its text and where it opens: a path, the message
+// or thread to show, or an automation. A row with nowhere to go says why.
+export function renderNotices(result: NoticesResult): string {
+  return result.notices.map((notice) => {
+    const sender = notice.sender?.label ? ` · ${lineSafe(notice.sender.label)}` : "";
+    const lines = [`${notice.read ? "[read]" : "[unread]"} · ${dateOnly(notice.createdAtMs)}${sender} · ${lineSafe(notice.title)}`];
+    if (notice.body) lines.push(`  ${lineSafe(notice.body)}`);
+    if (notice.opens) lines.push(`  opens: ${noticeOpensLabel(notice.opens)}`);
+    else if (notice.note) lines.push(`  ${lineSafe(notice.note)}`);
+    return lines.join("\n");
+  }).join("\n");
+}
+
+function noticeOpensLabel(opens: NonNullable<NoticesResult["notices"][number]["opens"]>): string {
+  switch (opens.to) {
+    case "file":
+    case "folder":
+      return lineSafe(opens.path);
+    case "chat":
+      return opens.message ?? opens.thread;
+    case "automation":
+    case "automation-controls":
+      return `automation ${lineSafe(opens.automation)}`;
+  }
 }
 
 export function renderInbox(result: InboxResult): string {
@@ -384,6 +411,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!document.ok) throw new DohcCliError(document.reason);
       return document.markdown;
     }
+    case "collectionSetFields":
+      return `Updated ${lineSafe((result as Extract<CliResultByVerb["collectionSetFields"], { ok: true }>).recordPath)}`;
     case "documentEdit":
     case "documentCreate": {
       const document = result as CliResultByVerb["documentEdit" | "documentCreate"];
@@ -424,6 +453,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
+    case "groupCreate":
+      return renderGroups({ groups: [(result as CliResultByVerb["groupCreate"]).group] });
     case "threads":
       return renderThreads(result as CliResultByVerb["threads"]);
     case "watch": {
@@ -432,6 +463,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "inbox":
       return renderInbox(result as CliResultByVerb["inbox"]);
+    case "notices":
+      return renderNotices(result as NoticesResult);
     case "show":
       return renderShowMarkdown(result as CliResultByVerb["show"]);
     case "post":

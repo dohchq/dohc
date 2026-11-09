@@ -68,7 +68,7 @@ export function automationRecordDelivery(options: {
     }
   }
 
-  /** Delivers the record's queued updates. False when it found no outbox to deliver them from. */
+  /** Delivers the record's queued updates. False when it found no outbox, or the queue is set aside with updates waiting. */
   async function drain(binding: LiveObjectBinding, signal: AbortSignal, knownOutboxId?: string): Promise<boolean> {
     let outboxId = knownOutboxId;
     if (!outboxId) {
@@ -144,7 +144,8 @@ export function automationRecordDelivery(options: {
     try {
       for (let count = 0; count < 128; count++) {
         const result = await drainer.drainOnce();
-        if (result === "empty" || result === "frozen") return true;
+        if (result === "empty") return true;
+        if (result === "frozen") return false;
         if (result === "retry") throw new AutomationRunWait("The shared file update is waiting for acceptance. Try again.", "busy");
       }
       throw new Error("The shared file still has updates waiting for acceptance. Try again.");

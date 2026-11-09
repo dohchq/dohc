@@ -11,19 +11,19 @@ import type {
 } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import {
-  ACCESS_ENDED_NOTE,
   NO_OWN_WORKSPACE_NOTE,
   NOT_HERE_NOTE,
   SHARE_LOOKUP_FAILED_NOTE,
   useSentNoticeProps,
 } from "./useSentNoticeProps";
 import {
+  ACCESS_ENDED_NOTE,
   AUTOMATION_LOOKUP_FAILED_NOTE,
   AUTOMATION_NOT_HERE_NOTE,
   CHAT_NOT_FOUND_NOTE,
   RUN_THREAD_LOOKUP_FAILED_NOTE,
   type NoticeTarget,
-} from "./noticeTarget";
+} from "../../notices/noticeTarget";
 import { findNoticeChat } from "./findNoticeChat";
 import type { SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";

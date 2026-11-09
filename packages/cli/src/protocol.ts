@@ -62,10 +62,20 @@ export const documentAgentNameSchema = z
 const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
+// The name and purpose limits are the New group dialog's.
+const groupCreateArgsSchema = z
+  .object({
+    ...argsBase,
+    name: z.string().min(1).max(80),
+    purpose: z.string().max(200).optional(),
+    type: z.enum(["posts", "chat", "both"]).optional(),
+  })
+  .strict();
 const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
+const noticesArgsSchema = z.object(argsBase).strict();
 export const CHAT_WATCH_TIMEOUT_MS = 25_000;
 export const CHAT_WATCH_MAX_TIMEOUT_MS = 25_000;
 export const chatWatchInputSchema = z.object({
@@ -546,9 +556,11 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("groupCreate"), args: groupCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("notices"), args: noticesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("reply"), args: replyArgsSchema }).strict(),
@@ -659,9 +671,11 @@ export const CLI_CAPABILITIES = {
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
+  groupCreate: ["group.create"],
   threads: ["chat.threads.list"],
   watch: ["chat.inbox.read"],
   inbox: ["chat.inbox.read"],
+  notices: ["notice.list"],
   show: ["chat.show"],
   post: ["chat.post"],
   reply: ["chat.reply"],
@@ -851,6 +865,30 @@ const threadsResultSchema = z
     threads: z.array(cliThreadSummarySchema),
   })
   .strict();
+// The caller's workspace's Notices rows, newest first. `opens` is where the
+// desktop's Open goes: a file or folder path, a thread and message to show, or
+// an automation. A row with nowhere to go has none, and `note` says why.
+const cliNoticeOpensSchema = z.discriminatedUnion("to", [
+  z.object({ to: z.literal("file"), path: z.string().min(1) }).strict(),
+  z.object({ to: z.literal("folder"), path: z.string().min(1) }).strict(),
+  z.object({ to: z.literal("chat"), thread: z.string().min(1), message: z.string().min(1).optional(), run: z.string().min(1).optional() }).strict(),
+  z.object({ to: z.literal("automation"), automation: z.string().min(1), run: z.string().min(1).optional() }).strict(),
+  z.object({ to: z.literal("automation-controls"), automation: z.string().min(1), sharedFile: z.string().min(1).optional() }).strict(),
+]);
+const noticesResultSchema = z.object({
+  notices: z.array(z.object({
+    id: z.string().min(1),
+    kind: z.string().min(1),
+    title: z.string(),
+    body: z.string(),
+    sender: z.object({ kind: z.enum(["person", "agent", "automation"]), label: z.string().nullable() }).strict().nullable(),
+    createdAtMs: z.number().int().nonnegative(),
+    read: z.boolean(),
+    opens: cliNoticeOpensSchema.nullable(),
+    note: z.string().optional(),
+  }).strict()),
+}).strict();
+export type CliNoticeOpens = z.infer<typeof cliNoticeOpensSchema>;
 const inboxResultSchema = z
   .object({
     threads: z.array(cliInboxThreadSchema),
@@ -1830,9 +1868,11 @@ export const cliResultSchemas = {
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
   groups: groupsResultSchema,
+  groupCreate: z.object({ group: cliGroupSchema }).strict(),
   threads: threadsResultSchema,
   watch: z.object({ messages: z.array(cliInboxMentionSchema), cursor: z.string().min(1).max(1_048_576) }).strict(),
   inbox: inboxResultSchema,
+  notices: noticesResultSchema,
   show: showResultSchema,
   post: postResultSchema,
   reply: replyResultSchema,

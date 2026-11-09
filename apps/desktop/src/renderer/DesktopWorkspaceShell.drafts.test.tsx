@@ -197,6 +197,9 @@ describe("workspace switch admission", () => {
 
   describe("saved tabs after a failed read", () => {
     const refused = () => new Error("dohc has not finished opening this workspace.");
+    const stoppedRead = () => new Error(
+      "Error invoking remote method 'desktop:get-workspace-ui-state': Error [stopped=read]: This workspace is no longer open in this window.",
+    );
     const notices = () => screen.getByTestId("notice-center-toggle").getAttribute("aria-label");
     // With no saved layout read, the Explorer opens on Home, as a new workspace does.
     const showFiles = async (user: ReturnType<typeof userEvent.setup>) => {
@@ -287,6 +290,65 @@ describe("workspace switch admission", () => {
         expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(SAVED_TABS_WAITED);
       } finally {
         vi.useRealTimers();
+      }
+    });
+
+    it("stops waiting for them once a read fails because the window stopped using the workspace", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        bridge.getWorkspaceUiState
+          .mockRejectedValueOnce(refused())
+          .mockRejectedValueOnce(new Error(
+            "Error invoking remote method 'desktop:get-workspace-ui-state': Error [stopped=read]: This workspace is no longer open in this window.",
+          ));
+        renderShell(bridge);
+        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+        await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS + 1_000));
+        act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+
+        expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+        expect(notices()).toBe("Notices");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("says nothing about them when the read that waited out the open failed because the window stopped", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      const now = Date.now.bind(Date);
+      bridge.getWorkspaceUiState.mockImplementationOnce(() => {
+        vi.spyOn(Date, "now").mockImplementation(() => now() + LAYOUT_READ_WAIT_LIMIT_MS);
+        return Promise.reject(stoppedRead());
+      });
+      // The window stays stopped, so every later read fails the same way.
+      bridge.getWorkspaceUiState.mockRejectedValue(stoppedRead());
+      try {
+        renderShell(bridge);
+        await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
+        await act(async () => {});
+
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+        expect(notices()).toBe("Notices");
+      } finally {
+        vi.mocked(Date.now).mockRestore();
+      }
+    });
+
+    it("takes back the 4-minute row once a later read fails because the window stopped", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      waitOutTheOpen(bridge);
+      bridge.getWorkspaceUiState.mockRejectedValueOnce(stoppedRead());
+      try {
+        renderShell(bridge);
+        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+        await act(async () => {});
+
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+        expect(notices()).toBe("Notices");
+      } finally {
+        vi.mocked(Date.now).mockRestore();
       }
     });
 

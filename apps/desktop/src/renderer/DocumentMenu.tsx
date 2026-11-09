@@ -3,7 +3,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { Menu } from "./ui/Menu";
 import { bridge } from "./bridge";
 import { CustomizeContext } from "./settings/customize";
-import type { ReportButtonError } from "./collections/useAutomationButtons";
+import { ShellErrorReporter, ShellNoticeClear } from "./shell/useShellError";
 
 // The document's "…" menu in its tab row (ViewActions): copy the raw markdown, export
 // it as a .md file, or export a self-contained HTML/PDF render. The Menu part
@@ -29,6 +29,13 @@ const CUSTOMIZE_ITEM = { id: "customize", label: "Customize…" } as const;
 // mirrors the code-block copy button's "copy" → "copied" swap
 // (editor/codeBlockChrome.tsx).
 export const FEEDBACK_MS = 1200;
+// How long a Copy runs before its row says it is still working.
+export const PROGRESS_DELAY_MS = 150;
+
+function writeClipboard(markdown: string): Promise<void> {
+  if (!navigator.clipboard) return Promise.reject(new Error("The clipboard is not available."));
+  return navigator.clipboard.writeText(markdown);
+}
 
 // What every action says when the document has no serializer: the editor is
 // not showing this document, so there is nothing honest to copy or export.
@@ -39,8 +46,40 @@ export const FEEDBACK_MS = 1200;
 // is stated below the items.
 const REFUSAL_LABEL = "Document not open";
 
-export function DocumentMenu(props: {
+type CopiedNote = { workspaceId: string; path: string; name: string; open?: () => void };
+
+// The notes whose menus are showing, so a notice's Try again finds its note
+// after the menu that filed it is gone, and finds it again once it reopens.
+const openNotes = new Map<string, Set<{ current: DocumentMenuProps }>>();
+// Each note's newest Copy, from any of its menus or notices. Only that Copy
+// reports a failure for the note or takes its notice back.
+const newestCopies = new Map<string, number>();
+
+function noteKey(note: CopiedNote): string {
+  return JSON.stringify([note.workspaceId, note.path]);
+}
+
+function nextCopy(note: CopiedNote): () => boolean {
+  const key = noteKey(note);
+  const copy = (newestCopies.get(key) ?? 0) + 1;
+  newestCopies.set(key, copy);
+  return () => newestCopies.get(key) === copy;
+}
+
+function copyNoticeIdentity(note: CopiedNote): string {
+  return `copy-markdown:${noteKey(note)}`;
+}
+
+class NoteNotOpen extends Error {
+  constructor() {
+    super(REFUSAL_LABEL);
+  }
+}
+
+type DocumentMenuProps = {
   workspaceId: string;
+  // The note's path in its workspace. A notice finds its note by it.
+  path: string;
   documentKey?: string;
   // Filename stem (no extension) — becomes the export dialog's suggested
   // name and, absent a `title` frontmatter key, the document's title.
@@ -54,14 +93,32 @@ export function DocumentMenu(props: {
   // copy or an export that silently produces nothing is a file the user
   // believes is their document.
   getMarkdown: () => string | null | Promise<string | null>;
-  // The shell's error hook. A copy that fails after the menu has closed has
-  // no row left to say so, and reaches the person through this instead.
-  reportError?: ReportButtonError;
+  // Opens this note, for a notice that names it after it closed.
+  onOpen?: () => void;
   // The document will not open here, such as after a failed read: the
   // trigger keeps its place and does nothing.
   disabled?: boolean;
-}) {
+};
+
+export function DocumentMenu(props: DocumentMenuProps) {
   const customize = useContext(CustomizeContext)?.customize;
+  // A failure reaches the person through the shell's notices, since a copy
+  // can fail after its menu has closed.
+  const report = useContext(ShellErrorReporter);
+  const clearNotice = useContext(ShellNoticeClear);
+  const latest = useRef(props);
+  useEffect(() => {
+    latest.current = props;
+  });
+  useEffect(() => {
+    const key = noteKey(currentNote());
+    const menus = openNotes.get(key) ?? new Set();
+    openNotes.set(key, menus.add(latest));
+    return () => {
+      menus.delete(latest);
+      if (menus.size === 0 && openNotes.get(key) === menus) openNotes.delete(key);
+    };
+  }, [props.workspaceId, props.path]);
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
   const [open, setOpen] = useState(false);
   // The transient half: an item's label swaps for 1.2s to say what happened.
@@ -141,26 +198,48 @@ export function DocumentMenu(props: {
     what: string,
     action: number,
     attempt: number,
+    newest: () => boolean = () => true,
   ): Promise<{ markdown: string | null } | null> {
     try {
       return { markdown: await props.getMarkdown() };
     } catch (error) {
       console.error(`${what} failed`, error);
-      if (actions.isCurrent(action) && attempts.isCurrent(attempt)) showFeedback(id, failureLabel);
+      const speaks = actions.isCurrent(action) && attempts.isCurrent(attempt);
+      if (speaks) showFeedback(id, failureLabel);
+      // A closed menu cancelled this Copy, so only an open one reports.
+      if (id === "copy-markdown" && speaks && newest()) reportCopyFailure(error);
       return null;
     }
   }
 
   async function copyAsMarkdown(attempt: number, action: number) {
+    const newest = nextCopy(currentNote());
+    // Reading a large note can take a moment, and closing the menu cancels
+    // the Copy, so the row says it is still working. A quick Copy answers
+    // first, so its row never flashes. The answer's label clears this timer.
+    feedbackTimer.current = setTimeout(
+      () => setFeedback({ "copy-markdown": "Copying…" }),
+      PROGRESS_DELAY_MS,
+    );
     const serialized = await serializeOrFail(
       "copy-markdown",
       "Couldn't copy",
       "Copy as Markdown",
       action,
       attempt,
+      newest,
     );
     // Copy stays open for feedback; dismissal cancels pending serialization.
-    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
+    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt) || !newest()) {
+      // The document changed under an open menu, or a notice copied the note
+      // since. A failed serialization already answered, so only these cases
+      // take back the working label.
+      if (serialized && attempts.isCurrent(attempt)) {
+        if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+        setFeedback({});
+      }
+      return;
+    }
     const markdown = serialized.markdown;
     if (markdown === null) {
       showFeedback(
@@ -170,45 +249,68 @@ export function DocumentMenu(props: {
       );
       return;
     }
-    const write = navigator.clipboard?.writeText(markdown);
-    if (!write) return;
     let failure: unknown = null;
     try {
-      await write;
+      await writeClipboard(markdown);
     } catch (error) {
       failure = error ?? new Error("clipboard write failed");
     }
     if (attempts.isCurrent(attempt)) {
       showFeedback("copy-markdown", failure ? "Couldn't copy" : "Copied");
-      return;
     }
-    // A later attempt already answered. Its answer is what the menu shows,
-    // and this one describes a click the user has moved past. If instead the
-    // menu closed under this write, a failure still reaches the person.
-    if (failure && actions.isCurrent(action)) reportCopyFailure(failure);
+    // The write took this note's text, so its outcome is the note's, even
+    // after the menu closed, another action ran or another note opened. Only
+    // the note's newest Copy reports a failure or takes its notice back.
+    if (!newest()) return;
+    if (failure) reportCopyFailure(failure);
+    else clearNotice?.(copyNoticeIdentity(currentNote()));
   }
 
-  function reportCopyFailure(failure: unknown): void {
-    props.reportError?.("dohc could not copy this document.", failure, copyAgain);
+  // A notice outlives the menu and the document shown beside it, so it names
+  // its note, and its Try again acts on that note only. One notice stands for
+  // each note: a newer failure replaces it, and a later copy takes it back.
+  function reportCopyFailure(failure: unknown, note: CopiedNote = currentNote()): void {
+    const notOpen = failure instanceof NoteNotOpen;
+    report?.({
+      message: notOpen
+        ? `dohc could not copy ${note.name} as Markdown, because ${note.name} is not open.`
+        : `dohc could not copy ${note.name} as Markdown.`,
+      cause: failure,
+      retry: () => copyAgain(note),
+      identity: copyNoticeIdentity(note),
+      target: { to: "file", path: note.path },
+      ...(notOpen && note.open ? { action: { label: "Open note", run: note.open, reads: true } } : {}),
+    });
   }
 
-  // Try again on the toast or the Notices row: the same copy, from the
-  // document as it is now, with no menu to answer on. Only a failure speaks,
-  // and not after a later action or the document's view has moved on.
-  function copyAgain(): void {
-    const action = actions.next();
+  function currentNote(): CopiedNote {
+    return {
+      workspaceId: props.workspaceId,
+      path: props.path,
+      name: props.suggestedName,
+      ...(props.onOpen ? { open: props.onOpen } : {}),
+    };
+  }
+
+  // Try again on the toast or the Notices row: the named note's text as it is
+  // now, with no menu to answer on. When another note is showing, or none,
+  // it copies nothing and says so. Only the note's newest Copy speaks.
+  function copyAgain(note: CopiedNote): void {
+    const newest = nextCopy(note);
     void (async () => {
       let failure: unknown;
       try {
-        const markdown = await props.getMarkdown();
-        if (!actions.isCurrent(action)) return;
-        if (markdown === null) throw new Error(REFUSAL_LABEL);
-        await navigator.clipboard?.writeText(markdown);
+        const [menu] = openNotes.get(noteKey(note)) ?? [];
+        const markdown = menu ? await menu.current.getMarkdown() : null;
+        if (!newest()) return;
+        if (markdown === null) throw new NoteNotOpen();
+        await writeClipboard(markdown);
+        if (newest()) clearNotice?.(copyNoticeIdentity(note));
         return;
       } catch (error) {
         failure = error ?? new Error("clipboard write failed");
       }
-      if (actions.isCurrent(action)) reportCopyFailure(failure);
+      if (newest()) reportCopyFailure(failure, note);
     })();
   }
 

@@ -54,7 +54,8 @@ export async function waitForRecovery(operationId: string, signal?: AbortSignal,
   try { await Promise.race([pending, retired]); }
   finally { retirement[Symbol.dispose](); }
 }
-const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
+// The delete dialog's words on every platform, so both name one place.
+const systemTrash = "system trash";
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
 // A record lists each untracked path a delete took, so a large folder makes a large record.
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;

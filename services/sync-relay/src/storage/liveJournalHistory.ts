@@ -20,6 +20,9 @@ export function liveJournalHistoryNamespace(storage: StorageContext): string {
   return current.namespace;
 }
 
+/** The attached history's namespace, for reads that change nothing. Undefined while none is attached. */
+export const attachedLiveJournalHistoryNamespace = (storage: StorageContext): string | undefined => attached.get(storage)?.namespace;
+
 /** Private provisioning; the caller owns history continuity outside the relay backup. */
 export function createLiveJournalHistoryAuthority(input: {
   namespace: string;

@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomUUID, X509Certificate } from 'node:crypto';
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { BlockList, isIP } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { defineSequenceTag, load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings } from '../../tools/self-host/bootstrap.mjs';
-import { composeArgs, validateSettings } from '../../tools/self-host/config.mjs';
+import { cloudflareApps, composeArgs, validateSettings } from '../../tools/self-host/config.mjs';
 import { parseCloudflareRanges, refreshCloudflareRanges } from './refresh-cloudflare-ranges.mjs';
 
 const read = path => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
@@ -172,9 +174,208 @@ test('refresh validates both successful HTTP responses before replacing the prev
 test('release ships every Cloudflare runtime and maintenance file and test:repo runs these guards', () => {
   const release = read('tools/self-host/release.mjs');
   for (const file of ['tools/self-host/Caddyfile.cloudflare', 'tools/self-host/compose.cloudflare.yml',
-    'tools/self-host/cloudflare-proxies.caddy', 'scripts/self-host/refresh-cloudflare-ranges.mjs']) {
+    'tools/self-host/cloudflare-proxies.caddy', 'scripts/self-host/refresh-cloudflare-ranges.mjs',
+    'tools/self-host/Caddyfile.cloudflare-apps', 'tools/self-host/compose.cloudflare-apps.yml']) {
     assert.ok(release.includes("'" + file + "'"), file);
     read(file);
   }
   assert.ok(JSON.parse(read('package.json')).scripts['test:repo'].includes('scripts/self-host/cloudflare.test.mjs'));
+});
+
+const apps = () => ({ ...settings(), DOHC_BEHIND_CLOUDFLARE: '1', DOHC_SHARE_WEB_APP_DOMAIN: 'team-apps.invalid',
+  DOHC_APP_TLS_CERT_FILE: '/etc/dohc/app-tls/cert.pem', DOHC_APP_TLS_KEY_FILE: '/etc/dohc/app-tls/key.pem' });
+const appsOverlay = 'tools/self-host/compose.cloudflare-apps.yml';
+
+test('the app overlay follows the Cloudflare overlay, and only behind Cloudflare with an app domain', () => {
+  const args = composeArgs('.env.self-host', { ...apps(), DOHC_DATA_DIRECTORY: '/mnt/disk/dohc', DOHC_POSTGRES_HOST: 'db.provider.invalid',
+    DOHC_SNAPSHOT_S3_BUCKET: 'dohc-snapshots' }, 'up');
+  assert.deepEqual(args.slice(3), ['-f', 'docker-compose.self-host.yml', '-f', 'tools/self-host/compose.data-disk.yml',
+    '-f', 'tools/self-host/compose.external-postgres.yml', '-f', 'tools/self-host/compose.cloudflare.yml', '-f', appsOverlay,
+    '--profile', 'snapshots', 'up']);
+  // Direct and private access keep their gateways, even with an app domain served by the operator's own proxy.
+  for (const changed of [{ DOHC_BEHIND_CLOUDFLARE: '0' }, { DOHC_BEHIND_CLOUDFLARE: undefined }, { DOHC_SHARE_WEB_APP_DOMAIN: '' },
+    { DOHC_SHARE_WEB_APP_DOMAIN: undefined }, { DOHC_SERVER_NETWORK_ACCESS: 'private', DOHC_BEHIND_CLOUDFLARE: '0' }]) {
+    const value = { ...apps(), ...changed };
+    assert.equal(cloudflareApps(value), false, JSON.stringify(changed));
+    assert.ok(!composeArgs('.env.self-host', value, 'up').includes(appsOverlay), JSON.stringify(changed));
+  }
+  assert.deepEqual(composeArgs('.env.self-host', { ...settings(), DOHC_SHARE_WEB_APP_DOMAIN: 'team-apps.invalid' }, 'up'),
+    composeArgs('.env.self-host', settings(), 'up'));
+});
+
+test('the app overlay refuses a partial configuration before any Docker action', () => {
+  assert.deepEqual(validateSettings(apps()), []);
+  assert.equal(settings().DOHC_APP_TLS_CERT_FILE, '');
+  assert.equal(settings().DOHC_APP_TLS_KEY_FILE, '');
+  for (const name of ['DOHC_APP_TLS_CERT_FILE', 'DOHC_APP_TLS_KEY_FILE']) {
+    for (const value of [undefined, '', 'cert.pem', './cert.pem', '/etc/../cert.pem', '/etc/dohc/app tls/cert.pem', 'C:/cert.pem']) {
+      assert.ok(validateSettings({ ...apps(), [name]: value }).some(error => error.includes(`Set ${name} to the absolute path`)), `${name}=${value}`);
+    }
+    // A certificate that no gateway would use is refused too, so a forgotten setting does not look configured.
+    const other = name === 'DOHC_APP_TLS_CERT_FILE' ? 'DOHC_APP_TLS_KEY_FILE' : 'DOHC_APP_TLS_CERT_FILE';
+    for (const changed of [{ DOHC_BEHIND_CLOUDFLARE: '0' }, { DOHC_SHARE_WEB_APP_DOMAIN: '' }]) {
+      assert.ok(validateSettings({ ...apps(), ...changed, [other]: '' }).some(error => error.includes('used only behind Cloudflare with an app domain')),
+        `${name} ${JSON.stringify(changed)}`);
+    }
+  }
+  // Caddy substitutes the domain into its configuration, so only a plain lowercase host name passes.
+  for (const domain of ['Apps.invalid', 'https://apps.invalid', 'apps.invalid:443', '*.apps.invalid', 'apps', 'apps.invalid.',
+    'apps.invalid {', 'apps .invalid', '-apps.invalid', 'apps.invalid\n}']) {
+    assert.ok(validateSettings({ ...apps(), DOHC_SHARE_WEB_APP_DOMAIN: domain }).some(error => error.includes('DOHC_SHARE_WEB_APP_DOMAIN to a lowercase domain')),
+      JSON.stringify(domain));
+  }
+  // The wildcard site must never capture the server's own host.
+  for (const domain of ['dohc.team.invalid', 'team.invalid']) {
+    assert.ok(validateSettings({ ...apps(), DOHC_SHARE_WEB_APP_DOMAIN: domain }).some(error => error.includes('Keep DOHC_PUBLIC_HOST outside')), domain);
+  }
+  assert.deepEqual(validateSettings({ ...apps(), DOHC_BEHIND_CLOUDFLARE: '0', DOHC_APP_TLS_CERT_FILE: '', DOHC_APP_TLS_KEY_FILE: '' }), []);
+});
+
+test('the app overlay adds only the app domain, the gateway configuration and read-only certificate mounts that Docker never creates', () => {
+  const text = read(appsOverlay), overlay = load(text, { schema: YAML11_SCHEMA });
+  assert.deepEqual(Object.keys(overlay), ['services']);
+  assert.deepEqual(Object.keys(overlay.services), ['gateway']);
+  assert.deepEqual(overlay.services.gateway.environment, { DOHC_SHARE_WEB_APP_DOMAIN: '${DOHC_SHARE_WEB_APP_DOMAIN:?Set DOHC_SHARE_WEB_APP_DOMAIN}' });
+  const bind = (source, target) => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
+  assert.deepEqual(overlay.services.gateway.volumes, [
+    bind('./tools/self-host/Caddyfile.cloudflare-apps', '/etc/caddy/Caddyfile'),
+    bind('./tools/self-host/Caddyfile.cloudflare', '/etc/caddy/Caddyfile.cloudflare'),
+    bind('${DOHC_APP_TLS_CERT_FILE:?Set DOHC_APP_TLS_CERT_FILE}', '/etc/caddy/app-tls/cert.pem'),
+    bind('${DOHC_APP_TLS_KEY_FILE:?Set DOHC_APP_TLS_KEY_FILE}', '/etc/caddy/app-tls/key.pem'),
+  ]);
+  // Compose merges mounts by container path, so the trust file and the certificate volumes of compose.cloudflare.yml stay.
+  assert.doesNotMatch(text, /!override|!reset|cloudflare-proxies|dohc_self_host_/);
+  assert.doesNotMatch(text, /relay-snapshot|networks:|DOHC_SNAPSHOT_/);
+});
+
+test('the app route imports the Cloudflare gateway first, sends only app hosts to share-web, and keeps the viewer hosts exact', () => {
+  const caddy = read('tools/self-host/Caddyfile.cloudflare-apps');
+  assert.match(caddy, /^import \/etc\/caddy\/Caddyfile\.cloudflare\n/);
+  assert.deepEqual([...caddy.matchAll(/^(\S.*) \{$/gm)].map(match => match[1]), ['*.{$DOHC_SHARE_WEB_APP_DOMAIN}']);
+  assert.match(caddy, /\{\n  tls \/etc\/caddy\/app-tls\/cert\.pem \/etc\/caddy\/app-tls\/key\.pem\n/);
+  assert.match(caddy, /@internal path \/internal\/\*\s+handle @internal \{\s+respond 404\s+\}/);
+  assert.ok(caddy.indexOf('handle @internal') < caddy.indexOf('handle {'));
+  const proxies = [...caddy.matchAll(/reverse_proxy (\S+) \{\s+header_up X-Forwarded-For \{client_ip\}\s+header_up X-Forwarded-Host \{host\}\s+header_up X-Forwarded-Proto https\s+\}/g)]
+    .map(match => match[1]);
+  assert.deepEqual(proxies, ['share-web:1790']);
+  assert.equal((caddy.match(/reverse_proxy /g) ?? []).length, 1);
+  // Caddy keeps the incoming Host header. Nothing here rewrites it or reaches sign-in or the relay.
+  assert.doesNotMatch(caddy, /workspace-api|sync-relay|header_up Host|DOHC_PUBLIC_HOST/);
+  assert.match(read('tools/self-host/Caddyfile.cloudflare'), /^\{\$DOHC_PUBLIC_HOST\} \{$/m);
+  const compose = load(read('docker-compose.self-host.yml'), { schema: YAML11_SCHEMA });
+  assert.equal(compose.services['share-web'].environment.DOHC_SHARE_WEB_PUBLIC_HOSTS, '${DOHC_PUBLIC_HOST:?Set DOHC_PUBLIC_HOST}');
+  assert.equal(compose.services['sync-relay'].environment.DOHC_RELAY_NAMED_LIVE_HOSTS, '${DOHC_PUBLIC_HOST:?Set DOHC_PUBLIC_HOST},sync-relay:1788');
+});
+
+// Not run by test:repo: it needs a Linux Docker host, the pinned Caddy and Node images, and openssl.
+const gatewaySkip = process.env.DOHC_GATEWAY_DOCKER_TEST === '1' ? false : 'Set DOHC_GATEWAY_DOCKER_TEST=1 on a Linux host with Docker and openssl.';
+const nodeImage = 'node:24.16.0-bookworm-slim';
+const echoServer = "const http=require('node:http');for(const [port,service] of [[1786,'workspace-api'],[1788,'sync-relay'],[1790,'share-web']])" +
+  "http.createServer((q,s)=>{s.setHeader('content-type','application/json');s.end(JSON.stringify({service,path:q.url,host:q.headers.host," +
+  "xff:q.headers['x-forwarded-for'],xfh:q.headers['x-forwarded-host'],xfp:q.headers['x-forwarded-proto']}));}).listen(port);";
+// Sends each request with its own SNI and Host, trusting only the local CA and Caddy's internal root. The first request waits for the gateway.
+const gatewayClient = "const https=require('node:https'),fs=require('node:fs');const [address,spec]=process.argv.slice(1);" +
+  "const ca=[fs.readFileSync('/certs/ca.pem'),fs.readFileSync('/certs/viewer-root.pem')];" +
+  "const one=r=>new Promise(done=>{const q=https.request({host:address,port:443,path:r.path,servername:r.host,headers:{host:r.host,...r.headers},ca,agent:false},s=>{" +
+  "const cert=s.socket.getPeerCertificate().fingerprint256;let body='';s.on('data',d=>body+=d);s.on('end',()=>{let echo;try{echo=JSON.parse(body)}catch{}" +
+  "done({status:s.statusCode,location:s.headers.location,echo,cert})})});q.on('error',e=>done({error:e.code||e.message}));q.end();});" +
+  "(async()=>{const out=[];const deadline=Date.now()+60000;for(const [i,r] of JSON.parse(spec).entries()){let result=await one(r);" +
+  "while(i===0&&result.error&&Date.now()<deadline){await new Promise(next=>setTimeout(next,250));result=await one(r);}out.push(result);}" +
+  "console.log(JSON.stringify(out));})();";
+
+test('the pinned Caddy image loads the app gateway and routes app hosts, viewer paths and client addresses', { skip: gatewaySkip, timeout: 600_000 }, () => {
+  const owner = `dohc-gateway-${randomUUID().slice(0, 8)}`, scratch = mkdtempSync(join(tmpdir(), `${owner}-`));
+  const containers = [], network = `${owner}-net`, subnet = `10.236.${100 + Math.floor(Math.random() * 100)}`;
+  const run = (command, args, allowFailure = false) => {
+    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+    if (!allowFailure) assert.equal(result.status, 0, `${command} ${args.slice(0, 3).join(' ')}: ${result.stderr}`);
+    return result;
+  };
+  const docker = (args, allowFailure) => run('docker', args, allowFailure);
+  let networkCreated = false;
+  try {
+    // A local CA signs the app certificate, and clients trust that CA explicitly.
+    const file = name => join(scratch, name);
+    run('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '2', '-subj', '/CN=dohc gateway test CA',
+      '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign', '-keyout', file('ca.key'), '-out', file('ca.pem')]);
+    run('openssl', ['req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-subj', '/CN=*.apps.test', '-keyout', file('app.key'), '-out', file('app.csr')]);
+    writeFileSync(file('app.ext'), 'subjectAltName=DNS:*.apps.test\nextendedKeyUsage=serverAuth\n');
+    run('openssl', ['x509', '-req', '-in', file('app.csr'), '-CA', file('ca.pem'), '-CAkey', file('ca.key'), '-CAcreateserial', '-days', '2',
+      '-extfile', file('app.ext'), '-out', file('app.pem')]);
+    const appCertificate = new X509Certificate(readFileSync(file('app.pem'))).fingerprint256;
+
+    const values = { ...settings(), DOHC_DEPLOYMENT_NAME: owner, DOHC_PUBLIC_ORIGIN: 'https://viewer.localhost', DOHC_PUBLIC_HOST: 'viewer.localhost',
+      DOHC_BEHIND_CLOUDFLARE: '1', DOHC_SHARE_WEB_APP_DOMAIN: 'apps.test', DOHC_APP_TLS_CERT_FILE: file('app.pem'), DOHC_APP_TLS_KEY_FILE: file('app.key') };
+    assert.deepEqual(validateSettings(values), []);
+    const envFile = (name, content) => {
+      writeFileSync(file(name), Object.entries(content).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}\n`).join(''), { mode: 0o600 });
+      return file(name);
+    };
+    // Compose itself refuses the overlay without the key file setting.
+    const partial = docker(composeArgs(envFile('partial', { ...values, DOHC_APP_TLS_KEY_FILE: undefined }), values, 'config', '--format', 'json'), true);
+    assert.notEqual(partial.status, 0);
+    assert.match(partial.stderr, /Set DOHC_APP_TLS_KEY_FILE/);
+    const config = JSON.parse(docker(composeArgs(envFile('settings', values), values, 'config', '--format', 'json')).stdout);
+    const gateway = config.services.gateway, mounts = Object.fromEntries(gateway.volumes.map(volume => [volume.target, volume]));
+    assert.equal(gateway.environment.DOHC_SHARE_WEB_APP_DOMAIN, 'apps.test');
+    assert.equal(config.services['share-web'].environment.DOHC_SHARE_WEB_PUBLIC_HOSTS, 'viewer.localhost');
+    assert.deepEqual(Object.keys(mounts).sort(), ['/config', '/data', '/etc/caddy/Caddyfile', '/etc/caddy/Caddyfile.cloudflare',
+      '/etc/caddy/app-tls/cert.pem', '/etc/caddy/app-tls/key.pem', '/etc/caddy/cloudflare-proxies.caddy']);
+    assert.equal(mounts['/etc/caddy/Caddyfile'].source, join(process.cwd(), 'tools/self-host/Caddyfile.cloudflare-apps'));
+    for (const [target, mount] of Object.entries(mounts)) {
+      if (!target.startsWith('/etc/')) assert.equal(mount.type, 'volume', target);
+      else assert.deepEqual([mount.type, mount.read_only, mount.bind?.create_host_path === true], ['bind', true, false], target);
+    }
+
+    // Only the test edge's address is a trusted proxy here. The shipped range list stays unchanged.
+    writeFileSync(file('trusted.caddy'), `trusted_proxies static ${subnet}.10/32\n`);
+    const gatewayArgs = [...gateway.volumes.flatMap(volume => volume.type !== 'bind' ? ['--tmpfs', volume.target] : ['--mount',
+      `type=bind,source=${volume.target === '/etc/caddy/cloudflare-proxies.caddy' ? file('trusted.caddy') : volume.source},target=${volume.target},readonly`]),
+    ...Object.entries(gateway.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`])];
+    docker(['run', '--rm', '--network', 'none', ...gatewayArgs, gateway.image, 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile']);
+
+    docker(['network', 'create', '--subnet', `${subnet}.0/24`, network]);
+    networkCreated = true;
+    const start = (name, args) => { containers.push(`${owner}-${name}`); docker(['run', '-d', '--name', `${owner}-${name}`, '--network', network, ...args]); };
+    start('upstream', ['--ip', `${subnet}.3`, ...['workspace-api', 'sync-relay', 'share-web'].flatMap(alias => ['--network-alias', alias]),
+      nodeImage, 'node', '-e', echoServer]);
+    start('gateway', ['--ip', `${subnet}.2`, ...gatewayArgs, gateway.image]);
+    // Caddy writes its internal root when it issues the viewer's local certificate.
+    const deadline = Date.now() + 60_000;
+    let root;
+    do { root = docker(['exec', `${owner}-gateway`, 'cat', '/data/caddy/pki/authorities/local/root.crt'], true); }
+    while (root.status !== 0 && Date.now() < deadline);
+    assert.equal(root.status, 0, 'Caddy wrote no internal root for the viewer host.');
+    writeFileSync(file('viewer-root.pem'), root.stdout);
+    const send = (ip, requests) => JSON.parse(docker(['run', '--rm', '--network', network, '--ip', ip, '--mount', `type=bind,source=${scratch},target=/certs,readonly`,
+      nodeImage, 'node', '-e', gatewayClient, `${subnet}.2`, JSON.stringify(requests)]).stdout);
+
+    const app = `${'0123456789abcdef'.repeat(3)}.apps.test`;
+    const forged = { 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '198.51.100.1', 'x-forwarded-host': 'forged.invalid', 'x-forwarded-proto': 'http' };
+    const edge = send(`${subnet}.10`, [
+      { host: app, path: '/launch?grant=1', headers: forged }, { host: app, path: '/internal/state' }, { host: app, path: '/api/auth/get-session' },
+      { host: app, path: '/sync/ready' }, { host: 'viewer.localhost', path: '/api/auth/get-session', headers: forged },
+      { host: 'viewer.localhost', path: '/sync/ready' }, { host: 'viewer.localhost', path: '/s/link' }, { host: 'viewer.localhost', path: '/' },
+      { host: 'viewer.localhost', path: '/internal/state' }, { host: `a.${app}`, path: '/' }, { host: 'apps.test', path: '/' },
+    ]);
+    assert.deepEqual(edge[0], { status: 200, cert: appCertificate,
+      echo: { service: 'share-web', path: '/launch?grant=1', host: app, xff: '203.0.113.9', xfh: app, xfp: 'https' } });
+    assert.deepEqual([edge[1].status, edge[1].echo], [404, undefined]);
+    assert.deepEqual(edge.slice(2, 4).map(result => [result.echo?.service, result.echo?.host]), [['share-web', app], ['share-web', app]]);
+    assert.deepEqual(edge.slice(4, 7).map(result => result.echo?.service), ['workspace-api', 'sync-relay', 'share-web']);
+    assert.equal(edge[4].echo.xff, '203.0.113.9');
+    assert.notEqual(edge[4].cert, appCertificate);
+    assert.deepEqual([edge[7].status, edge[7].location], [302, '/account']);
+    assert.deepEqual([edge[8].status, edge[8].echo], [404, undefined]);
+    // No site serves a deeper host or the app domain's apex, so the TLS handshake fails.
+    assert.ok(edge[9].error && edge[10].error, JSON.stringify(edge.slice(9)));
+    // From an untrusted peer, Caddy ignores every client-address header and forwards the peer's own address.
+    const stranger = send(`${subnet}.11`, [{ host: app, path: '/', headers: forged }, { host: 'viewer.localhost', path: '/api/auth/get-session', headers: forged }]);
+    assert.deepEqual(stranger.map(result => [result.echo?.service, result.echo?.xff, result.echo?.xfh]),
+      [['share-web', `${subnet}.11`, app], ['workspace-api', `${subnet}.11`, 'viewer.localhost']]);
+  } finally {
+    if (containers.length) docker(['rm', '-f', ...containers], true);
+    if (networkCreated) docker(['network', 'rm', network], true);
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });

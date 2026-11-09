@@ -1119,6 +1119,10 @@ impl EngineService {
                 self.chats_dispatch_recent_count(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.dispatch.coverDelivered" => {
+                self.chats_dispatch_cover_delivered(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.dispatch.failPendingForThread" => {
                 self.chats_dispatch_fail_pending_for_thread(&ctx, request.workspace, request.params)
                     .await?
@@ -1677,6 +1681,7 @@ mod tests {
             "chats.decisions.resolve",
             "chats.dispatch.claimNextPending",
             "chats.dispatch.complete",
+            "chats.dispatch.coverDelivered",
             "chats.dispatch.enqueue",
             "chats.dispatch.fail",
             "chats.dispatch.failPendingForThread",

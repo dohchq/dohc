@@ -1747,7 +1747,7 @@ describe("table controls grips", () => {
 
   // jsdom has no layout, so model the browser's: the first geometry read after
   // a style write lays out the whole document again.
-  it("sizes the append strips of many tables with one layout on pointer entry and on edits", () => {
+  it("sizes the append strips of many tables with one layout on pointer entry, and only an edited table's on edits", () => {
     let dirty = true;
     let layouts = 0;
     const style = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "style")!.get!;
@@ -1781,9 +1781,21 @@ describe("table controls grips", () => {
       dom.dispatchEvent(new MouseEvent("mouseenter"));
       expect(layouts).toBe(1);
 
+      // An edit outside the tables changes none of their boxes.
       dirty = true;
       layouts = 0;
       editor.view.dispatch(editor.state.tr.insertText("x", 1));
+      expect(layouts).toBe(0);
+
+      // An edit in one table sizes its strips with one layout.
+      let cell = -1;
+      editor.state.doc.descendants((node, pos) => {
+        if (cell < 0 && node.type.name === "tableCell") cell = pos;
+        return cell < 0;
+      });
+      dirty = true;
+      layouts = 0;
+      editor.view.dispatch(editor.state.tr.insertText("x", cell + 2));
       expect(layouts).toBe(1);
     } finally {
       for (const spy of spies) spy.mockRestore();

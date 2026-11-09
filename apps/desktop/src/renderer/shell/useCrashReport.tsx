@@ -29,6 +29,9 @@ export function useCrashReport(notify: CrashReportNotify): {
   // the notice offers Copy only.
   onSendCrashReport?: () => void;
   onDismissCrashReport: () => void;
+  // Closing the toast or reading the row. Main saves it, so the toast does
+  // not show again after a restart.
+  onReadCrashReport: () => void;
 } {
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
@@ -78,11 +81,37 @@ export function useCrashReport(notify: CrashReportNotify): {
       });
   }, [report, reload]);
 
+  const markRead = useCallback(() => {
+    if (!report || report.read) return;
+    const { through } = report;
+    // The toast closes at once. A read that started before this one would
+    // show it again, so it no longer counts.
+    readToken.current += 1;
+    setState((current) => current.report?.through === through
+      ? { ...current, report: { ...current.report, read: true } }
+      : current);
+    void bridge()
+      .markCrashReportRead({ through })
+      .then(
+        () => reload(),
+        (error: unknown) => {
+          notifyRef.current.reportError(
+            "dohc could not save that you read the crash report.",
+            new Error(ipcErrorMessage(error)),
+            () => markRead(),
+          );
+          return reload();
+        },
+      )
+      .catch(() => undefined);
+  }, [report, reload]);
+
   const crashReport = useMemo<CrashReportNotice | null>(
     () =>
       report
         ? {
             revision: report.revision,
+            read: report.read,
             title: CRASH_REPORT_TITLES[report.source],
             body: report.problems > 1 ? `This report holds ${report.problems} problems.` : "",
             text: report.text,
@@ -96,5 +125,6 @@ export function useCrashReport(notify: CrashReportNotify): {
     crashReport,
     ...(report && state.sendTo && !sending ? { onSendCrashReport: () => void send() } : {}),
     onDismissCrashReport: dismiss,
+    onReadCrashReport: markRead,
   };
 }

@@ -690,8 +690,10 @@ export interface SyncRelayStorage {
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
-  serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
+  /** Whether an Edit grant of its owner, or the owner's restore that kept its live session, keeps the enrolled document live. */
+  serviceHostEnrollmentCovered(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">): boolean;
+  /** With `restoring`, the owner's unfinished restore that kept the live session also counts. Live admission never passes it. */
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
   /** Whether the document has a restore that has neither resumed nor been declined. */
@@ -703,6 +705,8 @@ export interface SyncRelayStorage {
   /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */
   retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
     {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
+  /** Opens the retirement of a live session the owner's restore kept, once nothing covers its document. Returns whether it opened one. */
+  endLapsedServiceHostRun(enrollment: import("./serviceHostEnrollment").ServiceHostEnrollment, nowMs: number): boolean;
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   readPushSubscription(installationId: string): import("./pushSubscriptions").PushSubscriptionRow | null;
   bindPushSubscription(input: import("./pushSubscriptions").BindPushSubscriptionInput): import("./pushSubscriptions").PushSubscriptionRow;

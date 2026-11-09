@@ -24,6 +24,7 @@ import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import type {StorageContext} from "./storage/context.js";
 import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement.js";
+import {SyncRelayQuotaExceededError} from "./storage/errors.js";
 import {ServiceHostRetirementConflict, type ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment.js";
 import {preparedStop} from "./liveTickets.test-helper.js";
 import {ServiceActivationStore} from "./storage/serviceActivation.js";
@@ -33,6 +34,7 @@ import {nativeRestoreFence} from "./storage/liveRestoreOperation.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {liveValidation} from "./liveValidation.js";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes.js";
+import {startSelfHostedLiveHost} from "./selfHostedLiveHost.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {SERVICE_KEPT_EDITS_PAGE, type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
 import {liveEditors} from "./liveEditors.js";
@@ -63,15 +65,17 @@ vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {vi.unstubAllEnvs(); vi.mocked(rm).mockReset(); for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset();});
 
-async function fixture() {
+// `selfHosted` provisions the host ID the self-host supervisor provisions, so the supervisor can run this host.
+async function fixture({selfHosted = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const deploymentConfig = join(root, "deployment.json");
   initializeRelayDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
   // First-open history reads in this process, as firstOpenPublication.test.ts reads it.
   const deployment = openRelayDeployment(deploymentConfig, {firstOpenHistory: async read => readFirstOpenHistoryFile(read)});
-  deployment.storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard() {} });
-  const config = { version: 1, engineExecutable: process.execPath, hostId: "service", instanceId: "instance",
+  const hostId = selfHosted ? `self-host-${deployment.history.namespace}` : "service";
+  deployment.storage.provisionLiveHostControl({ mode: "service", hostId, updatedAtMs: 1, guard() {} });
+  const config = { version: 1, engineExecutable: process.execPath, hostId, instanceId: "instance",
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
     ingress: { aggregateBytes: 200_000_000, applicationWorkingReserveBytes: 50_000_000, maxUploads: 2, uploadDeadlineMs: 1000 },
     client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 1000, requestDeadlineMs: 1000 } };
@@ -89,7 +93,7 @@ function clientFrom(options: { env: Record<string, string> }) {
   const client = { sendRequest: vi.fn(async (request?: {method: string}) => request?.method === "sync.createHostedReplica" ? {result: {hosted: true}} : ({
     result: { relayNamespace: config.relayNamespace, host: config.host,
       workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
-    close: vi.fn(), waitForExit: vi.fn(async () => {}) };
+    close: vi.fn(), waitForExit: vi.fn(async () => {}), onEvent: vi.fn(() => () => {}) };
   return { client, config, nativePath };
 }
 
@@ -611,9 +615,9 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
 // With `firstOpen`, the host asks the relay to start documents with no lineage through its `fetch`.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}} = {}) {
+  maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}; selfHosted?: boolean; restore?: boolean} = {}) {
   const adopted = options.adopted ?? true;
-  const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
+  const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
     maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
@@ -649,7 +653,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
 
   // Complete the activation under the earlier connection: adoption, seed, native application. Without `adopted` it is only prepared.
-  const earlier = {mode: "service" as const, hostId: "service", hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
+  const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
   const actor = {kind: "owner" as const, userId: "owner", shareId: "share"}, store = f.storage.createServiceActivationStore(f.history);
   await store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
@@ -678,6 +682,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.maxApplications) Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: options.maxApplications}});
+  if (options.restore) Object.assign(f.config, {restore: RESTORE});
   if (options.empty) f.config.workspaces = [];
   await f.save();
 
@@ -1316,7 +1321,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}} = {}) {
+  limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}; selfHosted?: boolean; restore?: boolean} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -1585,16 +1590,26 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 });
 
 // An empty host with the document shared with Edit, enrolled and ready.
-async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits} = {}) {
-  const o = await emptyServiceHost({frameChanges, maxApplications, limits});
+// With `supervised`, the self-host supervisor runs the host as its daemon,
+// configured for restore, and sends it every membership update.
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8, limits = {} as DrainLimits, supervised = false} = {}) {
+  const o = await emptyServiceHost({frameChanges, maxApplications, limits, selfHosted: supervised, restore: supervised});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
-  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const errors: unknown[] = [];
+  let supervisor: Awaited<ReturnType<typeof startSelfHostedLiveHost>> | undefined;
+  if (supervised) {
+    const data = join(o.f.root, "self-host"); await mkdir(data);
+    supervisor = await startSelfHostedLiveHost({trustedAccount: o.f.trustedAccount, storage: o.f.storage, history: o.f.history, root: data,
+      engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: createNamedFrameChanges(16),
+      startHost: async () => o.host, onError: error => errors.push(error)});
+    cleanup.push(() => supervisor!.close());
+  } else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
   const binding = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
   if (binding.kind !== "current") throw new Error("Missing live binding.");
   const calls = (from: number) => o.ownerCalls().slice(from).map(([method]) => method as string);
-  return {...o, binding: binding.binding, calls,
+  return {...o, binding: binding.binding, calls, supervisor, errors,
     // The owner's Stop, which fences the document at once.
     stop() {
       expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
@@ -2828,8 +2843,8 @@ it("keeps a released document hosted while its retirement waits for a restore", 
   expect(retiredRow(o).retired).toBe(true);
 });
 
-// Proves: a restore whose revocation of the last Edit grant opens its
-// document's retirement keeps its route through the host until it ends. While
+// Proves: a retirement the owner's Pause opens during their restore keeps the
+// restore's route through the host until the restore ends. While
 // it is unfinished, retirement passes send the engine nothing and keep the
 // document's activation target, which a restarted host rebuilds, so the
 // restore fences and is declined through the host. The engine then releases
@@ -2842,7 +2857,7 @@ it.each([
   {restart: false, seeded: false, fenceCommitted: false}, {restart: true, seeded: false, fenceCommitted: false},
   {restart: false, seeded: true, fenceCommitted: false}, {restart: true, seeded: true, fenceCommitted: false},
   {restart: false, seeded: true, fenceCommitted: true}, {restart: true, seeded: true, fenceCommitted: true},
-])("holds a retirement its restore opened until the restore ends, keeping the restore's route, after a restart: $restart, frozen seed: $seeded, fence committed: $fenceCommitted", async ({restart, seeded, fenceCommitted}) => {
+])("holds a retirement opened during a restore until the restore ends, keeping the restore's route, after a restart: $restart, frozen seed: $seeded, fence committed: $fenceCommitted", async ({restart, seeded, fenceCommitted}) => {
   const o = await enrolledServiceHost();
   o.engine.fenceCommitted = fenceCommitted;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2852,7 +2867,8 @@ it.each([
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
   if (seeded) {keptEdits(o); o.keptOutbox.appendKey = "owner-adoption:seed";}
   o.beginRestore();
-  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, requestedAtMs: 40});
+  o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION, requestedAtMs: 60});
   await o.depart();
   await passed();
   expect(retiring()).toEqual([]);
@@ -2925,28 +2941,30 @@ const anotherEditGrant = (o: Enrolled) => o.raw.exec(`INSERT INTO sync_relay_sha
   created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('editor-grant','share','user','editor',NULL,'edit',1,'active',0,NULL,NULL)`);
 // The owner's restore fences the document. The document then moves from its
 // enrolled path, and the host restarts, with `replacement` hosted at the old
-// path when it is given. The restore's revocation opens the document's
-// retirement, unless another Edit grant still covers it: then `paused` opens it
-// by the owner's Pause after the restore began, and `covered` leaves none open.
+// path when it is given. Unless `covered` leaves the document covered by
+// another Edit grant, or `live` leaves the owner's live session the restore
+// kept, each with no retirement open, the owner's Pause after the restore
+// began opens its retirement. `paused` has another Edit grant cover it too,
+// so the restore's revocation keeps nothing.
 // `kept` first records an edit the server refused. Unless `stopped` is false,
 // the restore's first step runs before the restart. `pending` has the relay
 // accept an edit after the adoption cut that no activation pass delivers.
 // `admitted` has the relay admit the restore before the document moves, and
 // configures restore preparation on the restarted host.
-const movedDuringRestore = async ({replacement = false, paused = false, covered = false, kept = false, stopped = true, pending = false, admitted = false} = {}) => {
+const movedDuringRestore = async ({replacement = false, paused = false, covered = false, live = false, kept = false, stopped = true, pending = false,
+  admitted = false} = {}) => {
   const o = await enrolledServiceHost(), k = kept ? keptEdits(o) : undefined;
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const passed = () => vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
   if (paused || covered) anotherEditGrant(o);
   if (pending) {o.passes.deliver = false; o.acceptEdit("pending");}
   o.beginRestore();
-  if (paused) o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
-  // A covered document opens no retirement, so it stays hosted until the restart.
-  if (covered) expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
-  else {
+  // A covered or kept document opens no retirement, so it stays hosted until the restart.
+  if (!covered && !live) {
+    o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
     await o.depart();
     await passed();
-  }
+  } else expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   o.f.storage.advanceStopRestoreFence(stopLookup, 50);
   if (stopped) await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
   const admission = admitted ? await admitMovedRestore(o) : undefined;
@@ -2979,7 +2997,12 @@ const jsonHash = (value: unknown) => sha256(Buffer.from(JSON.stringify(value)));
 // records and admits. Admission moves the open retirement's accepted-through
 // to the restore's own cursor; `before` is the retirement's key before it.
 const admitMovedRestore = async (o: Enrolled) => {
-  const before = retirementKey(o), store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
+  const before = retirementKey(o);
+  return {proposalDigest: await admitRestore(o), before};
+};
+// The relay admits the owner's restore as `admitMovedRestore` does, and returns its proposal's digest.
+const admitRestore = async (o: Enrolled) => {
+  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
   const input = {...stopLookup, host: o.host.coordinate, maxBytes: RESTORE.maxBytes, maxEvents: RESTORE.maxEvents};
   const fence = {operation: store.pendingStopRestoreFence(input).operation, localHeadSequence: 11, recordedAtMs: 100};
   store.acknowledgeStopRestoreFence(input, fence);
@@ -3012,7 +3035,7 @@ const admitMovedRestore = async (o: Enrolled) => {
   } finally {point.destroy(); head.destroy();}
   const {proposalDigest} = await store.recordStopRestoreProposal(input, encoded, restoreValidation, 200);
   await store.admitStopRestoreProposal(input, proposalDigest, restoreValidation, 201);
-  return {proposalDigest, before};
+  return proposalDigest;
 };
 // The engine's side of the admitted restore's end, on `host`, after the
 // document moved. It answers apply, settle and resume from the admission the
@@ -3178,6 +3201,282 @@ it("completes a moved document's retirement after a restart that follows its adm
   expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
 });
 
+// The enrolled document's owner, as the relay checks whether it stays live for them.
+const ownerCovers = (o: Enrolled) => o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: "object", ownerUserId: "owner",
+  shareId: "share", path: o.sibling.path});
+const activations = (o: Enrolled) => o.raw.prepare("SELECT activation_id FROM sync_relay_service_activations ORDER BY rowid").all().map(row => row.activation_id);
+const ownerBinding = (o: Enrolled) => o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+// The owner's restore request, as `beginRestore` sends it.
+const restoreRequest = (o: Enrolled) => o.f.storage.readStopRestorePlan({document: o.document, ownerUserId: "owner", operationId: "restore", shareId: "share",
+  grantId: "grant", restorePointCursor: 0, restorePointReceiptDigest: o.document.lineageClaimId, maxOutputBytes: 1_000_000}).intent;
+// The workspace's stored bytes, as the relay charges them against its quota.
+const usage = (o: Enrolled) => Number(o.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+// The note's text in the relay's accepted journal, applied in order. The mocked engine applies no text, so this is not the native file's.
+const journalText = (o: Enrolled) => {
+  const read = o.f.storage.readLiveUpdateJournalCut({document: o.document});
+  if (read.kind !== "cut") throw new Error("Missing live journal.");
+  const doc = new Y.Doc();
+  for (const bytes of [read.cut.checkpoint.bytes, ...read.cut.suffix.map(row => row.bytes)]) Y.applyUpdate(doc, bytes);
+  const text = yDocToMarkdown(doc); doc.destroy();
+  return text;
+};
+// The note restored to its first version, with the owner's later `edit`.
+const restoredText = (edit?: string) => {
+  const doc = markdownToYDoc("Original");
+  if (edit !== undefined) doc.getMap("frontmatter").set("edit", edit);
+  const text = yDocToMarkdown(doc); doc.destroy();
+  return text;
+};
+// Closes the relay database and opens the same file again, as a relay restart does. The fixture's closures read `o.f`, so they use the reopened store.
+const reopenRelay = (o: Enrolled) => {
+  o.f.closeStorage();
+  const reopened = openRelayDeployment(join(o.f.root, "deployment.json"));
+  let closed = false;
+  const closeStorage = () => { if (!closed) { reopened.storage.close(); closed = true; } };
+  cleanup.push(async () => closeStorage());
+  Object.assign(o.f, {...reopened, closeStorage});
+};
+// Closes `previous` and the relay database, reopens the database, and starts a host on it, configured for restore, that hosts the note.
+const hostingAgain = async (o: Enrolled, previous: Awaited<ReturnType<typeof startServiceLiveHost>>) => {
+  await previous.close();
+  reopenRelay(o);
+  Object.assign(o.f.config, {restore: RESTORE}); await o.f.save();
+  const host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => host.close());
+  await host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  return host;
+};
+// The owner edits the note live again: the kept activation, with no retirement or successor, at the restored fence, for the owner alone.
+const ownerEditsAgain = async (o: Enrolled, host: Awaited<ReturnType<typeof startServiceLiveHost>>, fence: number) => {
+  await vi.waitFor(() => expect(host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(activations(o)).toEqual([ACTIVATION]);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(ownerBinding(o)).toMatchObject({kind: "current", binding: {restoreFenceGeneration: fence}});
+  expect(o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "named", userId: "reader", grantId: "grant"}}).kind).toBe("refused");
+  expect(o.f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+};
+// The delivery IDs the current daemon was sent, in order.
+const delivered = (o: Enrolled) => o.client().sendLiveApplication.mock.calls
+  .map(([, event]) => (event as {metadata: {accepted: {receipt: {deliveryId: string}}}}).metadata.accepted.receipt.deliveryId);
+// The owner's live edit: the relay admits it once, the kept session is sent it once, and a settlement then ends at it.
+const editOnce = async (o: Enrolled, host: Awaited<ReturnType<typeof startServiceLiveHost>>, value: string) => {
+  const edit = o.acceptEdit(value, host.coordinate);
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true), {timeout: 10_000});
+  expect(await host.settle(o.document)).toMatchObject({terminalCursor: edit.journalCursor, materialized: true});
+  expect(o.ownerCalls().filter(([method]) => method === "liveApplication.settle").at(-1)?.[1])
+    .toMatchObject({terminalReceipt: {deliveryId: edit.deliveryId, journalCursor: edit.journalCursor}});
+  expect(delivered(o).filter(id => id === edit.deliveryId)).toHaveLength(1);
+  expect(o.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_update_journal WHERE delivery_id=?").get(edit.deliveryId)!.count).toBe(1);
+  expect(journalText(o)).toBe(restoredText(value));
+};
+
+// Proves: the owner keeps editing a note after restoring it, when the restore
+// ended its last Edit grant. The restore keeps the owner's live session: its
+// activation never retires and no successor starts. Once the restore resumed,
+// that session registers at the restored fence, the relay's journal holds the
+// restored text, and the owner's next edit is sent once and settled. A relay
+// restart that reopens its database while the restore is unfinished, and
+// another after it resumed, change none of this. A begin or a completion
+// retried after a lost reply records and charges nothing more.
+it("keeps the owner editing a note after restoring it, when the restore ended its last Edit grant", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const fence = o.binding.restoreFenceGeneration + 1;
+  const intent = () => String(o.raw.prepare("SELECT intent_json FROM sync_relay_live_restore_operations WHERE operation_id='restore'").get()!.intent_json);
+  const request = restoreRequest(o), begun = o.f.storage.beginStopRestore(request, 40), charged = usage(o), marked = intent();
+  // The same request again, after its reply was lost, writes nothing.
+  expect(o.f.storage.beginStopRestore(request, 40)).toEqual(begun);
+  expect(usage(o)).toBe(charged);
+  expect(intent()).toBe(marked);
+  expect(o.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_restore_operations").get()!.count).toBe(1);
+  expect(marked.split('"keptRun"')).toHaveLength(2);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(JSON.parse(marked)).toMatchObject({keptRun: {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION}});
+  expect(ownerCovers(o)).toBe(true);
+  expect(ownerBinding(o).kind).toBe("refused");
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const proposalDigest = await admitRestore(o);
+  // A restart while the restore is unfinished keeps the note with its host, and the restore finishes there.
+  let host = await hostingAgain(o, o.host);
+  expect(ownerCovers(o)).toBe(true);
+  expect(activations(o)).toEqual([ACTIVATION]);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  const {publish} = restoreEngine(o, host);
+  const resumed = await host.completeRestore(stopLookup, proposalDigest);
+  expect(resumed).toMatchObject({kind: "resumed", proposalDigest});
+  const completed = usage(o), recorded = intent();
+  expect(await host.completeRestore(stopLookup, proposalDigest)).toEqual(resumed);
+  expect(usage(o)).toBe(completed);
+  expect(intent()).toBe(recorded);
+  expect(recorded.split('"keptRun"')).toHaveLength(2);
+  await publish();
+  await ownerEditsAgain(o, host, fence);
+  const registered = o.ownerCalls().filter(([method]) => method === "liveApplication.register").map(([, params]) => params);
+  expect(registered.at(-1)).toMatchObject({activationId: ACTIVATION, binding: {restoreFenceGeneration: fence}});
+  expect(journalText(o)).toBe(restoredText());
+  await editOnce(o, host, "after");
+  // A restart after the restore resumed continues the same session.
+  host = await hostingAgain(o, host);
+  await ownerEditsAgain(o, host, fence);
+  expect(delivered(o)).not.toContain("edit-after");
+  expect(journalText(o)).toBe(restoredText("after"));
+  await editOnce(o, host, "again");
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+});
+
+// Proves: a restore the owner declines, or cancels, ends the live session it
+// kept. Ending it opens the retirement the restore's revocation skipped, at
+// the fence the note is left at, and the relay refuses the owner's live
+// editing. Once the host lets the note go, the activation retires.
+it.each([
+  {when: "before its fence", fenced: false, fenceCommitted: false},
+  {when: "after its fence", fenced: true, fenceCommitted: false},
+  {when: "after its native fence committed", fenced: true, fenceCommitted: true},
+])("ends live editing a restore kept when the owner declines it $when", async ({fenced, fenceCommitted}) => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.engine.fenceCommitted = fenceCommitted;
+  o.beginRestore();
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  if (fenced) {
+    o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+    await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+    expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+    await expect(o.host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  } else expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("declined");
+  expect(o.f.storage.serviceActivationRetirement(o.document))
+    .toMatchObject({activationId: ACTIVATION, restoreFenceGeneration: o.binding.restoreFenceGeneration + (fenceCommitted ? 1 : 0)});
+  expect(ownerCovers(o)).toBe(false);
+  expect(ownerBinding(o).kind).toBe("refused");
+  if (fenceCommitted) return;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(retiredRow(o).retired).toBe(true);
+  expect(ownerCovers(o)).toBe(false);
+  expect(ownerBinding(o).kind).toBe("refused");
+});
+
+// The owner moves the note to `path`: its object's newest moment names that path.
+const moveNote = (o: Enrolled, path: string, relaySeq: number) => o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,
+  moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) SELECT workspace_id,object_id,?,?,version_id,?,blob_sha256,content_kind,byte_length,?
+  FROM sync_relay_object_moments WHERE object_id='object' ORDER BY relay_seq DESC LIMIT 1`).run(relaySeq, `moved-${relaySeq}`, path, relaySeq);
+// The retiring host's push of the restored note, which puts the restore in the relay's ordinary history, and the
+// successor's native capture after it: the restored state, sourced from the restore's settlement moment.
+const pushRestoredNote = (o: Enrolled): NativeOwnerActivation => {
+  const ordinary = new Y.Doc({gc: false}), restored = new Y.Doc({gc: false});
+  for (const bytes of [o.engine.capture.baselineBytes, o.engine.capture.fullState]) Y.applyUpdate(ordinary, bytes);
+  // The state at the journal's last cursor, as the restore's settlement settled it.
+  Y.applyUpdate(restored, o.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1")
+    .get()!.validation_checkpoint_bytes as Uint8Array);
+  const update = Buffer.from(Y.encodeStateAsUpdate(restored, Y.encodeStateVector(ordinary))), fullState = Buffer.from(Y.encodeStateAsUpdate(restored));
+  ordinary.destroy(); restored.destroy();
+  o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(sha256(update), update.length, update);
+  o.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)")
+    .run(JSON.stringify({versionId: "main", objectId: "object", path: o.sibling.path, contentKind: "richdoc", isBaseState: false,
+      lineageClaimId: o.document.lineageClaimId, updateBlobSha256: sha256(update)}));
+  const moment = o.raw.prepare("SELECT moment_id,blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='restore-publication'").get()!;
+  const head = Number(o.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head);
+  return {...o.engine.capture, activationId: SUCCESSOR, fullState, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION,
+    committedCursor: head, sourceMomentId: String(moment.moment_id), sourceDigest: String(moment.blob_sha256), sourceByteLength: Number(moment.byte_length),
+    fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
+};
+
+// Proves: when the owner renames a note after a restore kept their live
+// session and resumed, the self-host supervisor retires that session through
+// its host. The host reconciles, settles and releases the activation, and
+// never unloads the note as an ordinary departure. When the owner moves the
+// note back and shares it again with Edit, the same daemon starts a successor
+// activation, and the note is ready again.
+it("retires a restored note's kept session through its host once the note is renamed, and starts a successor when it is shared again", async () => {
+  const o = await enrolledServiceHost({supervised: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const fence = o.binding.restoreFenceGeneration + 1;
+  o.beginRestore();
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const proposalDigest = await admitRestore(o), {publish} = restoreEngine(o, o.host);
+  await expect(o.host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  await publish();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(ownerBinding(o)).toMatchObject({kind: "current", binding: {restoreFenceGeneration: fence}});
+  expect(ownerCovers(o)).toBe(true);
+  // The owner renames the note, so the restore no longer keeps its session.
+  const sent = o.ownerCalls().length, membership = o.membership.length;
+  const complete = vi.spyOn(ServiceActivationStore.prototype, "completeRetirement");
+  moveNote(o, "docs/renamed.md", 1_000_000);
+  o.supervisor!.reconcile();
+  // The supervisor releases the enrollment once the host let the note go.
+  await vi.waitFor(() => expect(o.raw.prepare("SELECT retired,host_drained_at_ms IS NOT NULL AS drained FROM sync_relay_service_host_enrollments").get())
+    .toEqual({retired: 1, drained: 1}), {timeout: 10_000});
+  expect(o.membership.slice(membership).filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+  expect(o.calls(sent)).toEqual(expect.arrayContaining(retirement));
+  expect(retiredRow(o).retired).toBe(true);
+  expect(complete.mock.results.at(-1)?.value).toMatchObject({status: "retired"});
+  expect(ownerBinding(o).kind).toBe("refused");
+  // The owner moves the note back and shares it again with Edit, on the same daemon.
+  o.engine.capture = pushRestoredNote(o);
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  moveNote(o, o.sibling.path, 1_000_001);
+  anotherEditGrant(o);
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 400, guard() {}});
+  o.supervisor!.reconcile();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(o.raw.prepare("SELECT activation_id,predecessor_activation_id,completion_json IS NOT NULL AS completed FROM sync_relay_service_activations ORDER BY rowid").all())
+    .toEqual([{activation_id: ACTIVATION, predecessor_activation_id: null, completed: 1}, {activation_id: SUCCESSOR, predecessor_activation_id: ACTIVATION, completed: 1}]);
+  expect(o.spawned()).toBe(1);
+  expect(o.errors).toEqual([]);
+});
+
+// Proves: a restore request cannot name a live session for the relay to keep.
+// The relay records only the session its revocation kept, under the current
+// run, owner and share, and none when another Edit grant still covers the note.
+it.each([false, true])("records only the live session the restore kept, never one its request names, another Edit grant: %s", async covered => {
+  const o = await enrolledServiceHost();
+  if (covered) anotherEditGrant(o);
+  const request = restoreRequest(o), named = {runToken: 99, ownerUserId: "owner", shareId: "named-share", activationId: "named-activation"};
+  o.f.storage.beginStopRestore({...request, keptRun: named} as typeof request, 40);
+  const stored: {keptRun?: unknown} = JSON.parse(String(o.raw.prepare("SELECT intent_json FROM sync_relay_live_restore_operations").get()!.intent_json));
+  expect(stored.keptRun).toEqual(covered ? undefined : {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION});
+  expect(o.f.storage.readStopRestore(stopLookup)?.intent).toEqual(request);
+});
+
+// Proves: the owner's restore is charged for the record it stores, and no
+// more. A restore that keeps nothing fits in exactly the room it needs, and one
+// byte less refuses it. Keeping the owner's live session adds only the bytes of
+// its marker. A refused restore records nothing and leaves the Edit grant active.
+it("charges the owner's restore for the record it stores, and no more", async () => {
+  const o = await enrolledServiceHost(), storage = o.f.storage as StorageContext;
+  // The bytes a restore would add, read from its refusal with no room left.
+  const charge = () => {
+    storage.options.workspaceQuotaBytes = usage(o);
+    const refused = (() => { try { o.beginRestore(); } catch (error) { return error; } })();
+    expect(refused).toBeInstanceOf(SyncRelayQuotaExceededError);
+    const measured = /: (\d+) bytes would exceed/.exec((refused as Error).message);
+    expect(measured).not.toBeNull();
+    return Number(measured![1]) - usage(o);
+  };
+  anotherEditGrant(o);
+  const plain = charge();
+  o.raw.exec("DELETE FROM sync_relay_share_grants WHERE grant_id='editor-grant'");
+  const kept = charge();
+  expect(o.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_restore_operations").get()!.count).toBe(0);
+  expect(o.f.storage.getShareGrant("grant")).toMatchObject({status: "active"});
+  anotherEditGrant(o);
+  storage.options.workspaceQuotaBytes = usage(o) + plain - 1;
+  expect(() => o.beginRestore()).toThrow(SyncRelayQuotaExceededError);
+  storage.options.workspaceQuotaBytes = usage(o) + plain;
+  o.beginRestore();
+  expect(usage(o)).toBe(storage.options.workspaceQuotaBytes);
+  const row = o.raw.prepare("SELECT intent_json,accounted_bytes FROM sync_relay_live_restore_operations").get()!, stored = String(row.intent_json);
+  expect(row.accounted_bytes).toBe(plain);
+  expect(JSON.parse(stored)).not.toHaveProperty("keptRun");
+  const marked = JSON.stringify({...JSON.parse(stored), keptRun: {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION}});
+  expect(kept - plain).toBe(Buffer.byteLength(JSON.stringify(marked)) - Buffer.byteLength(JSON.stringify(stored)));
+});
+
 // Each way an owner ends a document's live editing: deleting its share, Pause, or Stop.
 const endLiveEditing = {
   unshare: (o: Enrolled) => expect(o.f.storage.revokeShare("share", 30)).toBe(true),
@@ -3336,6 +3635,23 @@ it("keeps a moved document's route for a restore that opened no retirement until
   expect(leaving(o)).toContain("liveApplication.unloadDocument");
 });
 
+// Proves: a moved note whose restore kept the owner's live session, with no
+// Pause and no other Edit grant, takes its route from the unfinished restore,
+// not from a retirement: none is open. The owner's Decline reaches the engine
+// through that route, and ending the kept session then opens the retirement.
+it("keeps a moved note's route through the unfinished restore that kept the owner's live session", async () => {
+  const {o, host} = await movedDuringRestore({live: true});
+  expect(JSON.parse(String(o.raw.prepare("SELECT intent_json FROM sync_relay_live_restore_operations").get()!.intent_json)))
+    .toMatchObject({keptRun: {runToken: 10, ownerUserId: "owner", shareId: "share", activationId: ACTIVATION}});
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(o.ownerCalls().map(([method]) => method)).toContain("liveApplication.cancelRestoreFence");
+  expect(o.f.storage.serviceActivationRetirement(o.document))
+    .toMatchObject({activationId: ACTIVATION, restoreFenceGeneration: o.binding.restoreFenceGeneration});
+});
+
 // Proves: when the restarted host's first restore step captures the moved
 // document through its route, so the route has an owner, the route still ends
 // with the restore after the owner's Decline. The engine unloads what the route
@@ -3440,6 +3756,50 @@ it("keeps a no-retirement restore route for a document that moves back and away 
   await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(leaving(o)).toContain("liveApplication.unloadDocument");
+});
+
+// Proves (#2965): a running host gives a restore a route when the document moves
+// and departs before its hosted target loaded. That departure removes the target,
+// which a later restore step would otherwise need. Declining the restore still
+// reaches the engine without a restart, and the route ends with the restore once
+// the engine unloaded what it loaded.
+it("keeps a restore route for a document that moves and departs before its hosted target loaded", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  // Another Edit grant keeps the document covered, so no retirement opens and only the restore keeps the route.
+  anotherEditGrant(o);
+  o.beginRestore();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  await o.host.close(); log.mockClear();
+  // The next daemon hosts the document, but its target never loads.
+  const activate = ServiceActivationDriver.prototype.activate, held: string[] = [];
+  let driver: ServiceActivationDriver | undefined;
+  vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(async function (this: ServiceActivationDriver, ...args) {
+    driver = this;
+    if (args[0].path !== o.sibling.path) return activate.apply(this, args);
+    held.push(args[0].path);
+    return {kind: "pending" as const, reason: "The test holds this activation."};
+  });
+  const host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => host.close());
+  await host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(held.length).toBeGreaterThan(0), {timeout: 10_000});
+  const hostedTargets = () => driver!.targets.filter(target => target.path === o.sibling.path);
+  expect(hostedTargets()).toHaveLength(1);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  moveAway(o);
+  await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(hostedTargets()).toEqual([]), {timeout: 10_000});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(o.ownerCalls().map(([method]) => method)).toContain("liveApplication.cancelRestoreFence");
+  await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
 });
 
 // Proves: activation reads that name an object, as departure recovery's do for
@@ -3604,7 +3964,7 @@ for (const c of [
     departedAt.set(row.objectId, {settlement: settlements.mock.calls.length, request: requests().length});
     move(row, `elsewhere/${row.objectId}.md`);
     expect(o.f.storage.serviceHostDocumentEnabled(row)).toBe(true);
-    expect(o.f.storage.serviceHostEnrollmentHasEditGrant({workspaceId: row.workspaceId, ownerUserId: "owner", path: row.path})).toBe(true);
+    expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: row.workspaceId, objectId: row.objectId, ownerUserId: "owner", shareId: row.shareId, path: row.path})).toBe(true);
     expect(o.f.storage.serviceActivationRetirement(row)).toBeNull();
     await o.host.update({workspaces, documents: documents.slice(index + 1), departing: documents.slice(0, index + 1)});
     await vi.waitFor(() => expect(o.host.isDocumentReady(documentFor(row))).toBe(false));
@@ -3711,7 +4071,8 @@ it("keeps accepted edits and queued edits when another device removes an enrolle
   expect(currentFile(), "The removed document must no longer be available as a saved file.").toBeUndefined();
   expect(o.f.storage.objectMoment({workspaceId: "workspace", objectId: o.sibling.objectId, versionId: "main"})).toMatchObject({path: null});
   expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(true);
-  expect(o.f.storage.serviceHostEnrollmentHasEditGrant({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path})).toBe(true);
+  expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: o.sibling.objectId, ownerUserId: "owner", shareId: o.sibling.shareId,
+    path: o.sibling.path})).toBe(true);
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   await o.depart();
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
@@ -6186,8 +6547,9 @@ it("hears a departed list reaching thousands of waiting documents in linear time
   await o.nextPull();
   expect(o.host.pulledAfterDeparture(departing.at(-1)!)).toBe(true);
   expect(o.host.retains(departing[0]!)).toBe(true);
-  // A lookup in the list for each would compare hundreds of millions of IDs.
-  expect(Math.max(...heard.slice(seen))).toBeLessThan(250);
+  // A lookup in the list for each would compare hundreds of millions of IDs: over 20 s on a fast desktop CPU. The
+  // page takes about 20 ms there and has taken over 500 ms on a busy runner.
+  expect(Math.max(...heard.slice(seen))).toBeLessThan(2500);
 });
 
 // Opus's review: a page whose newly held list may leave some out drops every

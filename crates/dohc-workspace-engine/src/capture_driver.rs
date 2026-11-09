@@ -785,6 +785,13 @@ const MAX_RESTART_ATTEMPTS: u32 = 8;
 /// having to close and reopen the workspace.
 const TERMINAL_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How often the driver starts another degraded rescan cycle (up to
+/// `DEGRADED_RESCAN_BACKOFF` scans) while paths sit in the quarantine. The
+/// controller stops rescanning them after a few identical failures, and the
+/// watcher ignores the engine's own writes, so a failure that clears without
+/// a file event (a lock released, a restored store) needs this retry.
+const QUARANTINE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// How long to wait before the next files-layer start attempt, given the
 /// number of consecutive failures so far. Pure so the schedule is testable
 /// without waiting out a real minute of backoff.
@@ -1345,6 +1352,7 @@ impl CaptureDriver {
                 first_import: None,
                 carried: None,
                 rules: None,
+                quarantine_retry_at: None,
             };
             let run = drive_loop(
                 &mut env,
@@ -2293,6 +2301,25 @@ fn answer_flush(
     }
 }
 
+/// Record the quarantine a converged pass left, and rescan on
+/// [`QUARANTINE_RETRY_INTERVAL`] while it is not empty.
+fn retry_quarantine(
+    retry_at: &mut Option<tokio::time::Instant>,
+    files: &FilesHandle,
+    quarantined: usize,
+) {
+    let now = tokio::time::Instant::now();
+    *retry_at = match *retry_at {
+        _ if quarantined == 0 => None,
+        Some(due) if now < due => Some(due),
+        Some(_) => {
+            files.request_rescan();
+            Some(now + QUARANTINE_RETRY_INTERVAL)
+        }
+        None => Some(now + QUARANTINE_RETRY_INTERVAL),
+    };
+}
+
 /// The real filesystem-backed environment.
 struct RealEnv {
     initial_links_hold: Option<dohc_engine_runtime::actor::LinkDrainHold>,
@@ -2328,6 +2355,8 @@ struct RealEnv {
     /// The rules the last pass captured under, or the layer was built with.
     /// A pass under other rules records as a rescan.
     rules: Option<Arc<PolicyState>>,
+    /// When the driver next rescans for quarantined paths, while any remain.
+    quarantine_retry_at: Option<tokio::time::Instant>,
 }
 
 impl RealEnv {
@@ -2817,8 +2846,18 @@ impl DriverEnv for RealEnv {
                 .await;
                 if self.status.degraded() {
                     match layer.files.handle().stats().await {
-                        Ok(stats) if stats.quarantined > 0 => TickIo::Applied { clean: false },
-                        Ok(_) => TickIo::Converged,
+                        Ok(stats) => {
+                            retry_quarantine(
+                                &mut self.quarantine_retry_at,
+                                &files,
+                                stats.quarantined,
+                            );
+                            if stats.quarantined > 0 {
+                                TickIo::Applied { clean: false }
+                            } else {
+                                TickIo::Converged
+                            }
+                        }
                         // Same as the Applied arm: a dead actor is reported
                         // as itself, not laundered into an unclean-but-
                         // healthy tick that resets the backoff.
@@ -2856,9 +2895,16 @@ impl DriverEnv for RealEnv {
                 // round-trip.
                 if clean && self.status.degraded() {
                     match layer.files.handle().stats().await {
-                        Ok(stats) => TickIo::Applied {
-                            clean: stats.quarantined == 0,
-                        },
+                        Ok(stats) => {
+                            retry_quarantine(
+                                &mut self.quarantine_retry_at,
+                                &files,
+                                stats.quarantined,
+                            );
+                            TickIo::Applied {
+                                clean: stats.quarantined == 0,
+                            }
+                        }
                         // The actor died after the reconcile round-trip. An
                         // unclean-but-HEALTHY tick would still reset the
                         // failure streak and re-claim `running` for a dead

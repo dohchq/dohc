@@ -11,7 +11,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
-import type { NoticeTarget } from "./shell/noticeTarget";
+import type { NoticeTarget } from "../notices/noticeTarget";
 
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
 const shellCommits = vi.hoisted(() => ({ onCommit: null as ((workspace: Workspace) => void) | null }));

@@ -118,6 +118,7 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
+export const NOTICES_RESULTS: Record<string, CliSocketVerb> = { list: "notices" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy", agents: "shareAgents", disconnect: "shareDisconnect" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
@@ -140,7 +141,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", edit: "documentEdit", create: "documentCreate", chats: "fileChats", comment: "fileChatStart",
+  read: "documentRead", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "live-status": "liveDocuments", "retry-live": "retryLiveDocument",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
 };
@@ -162,6 +163,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   links: [["chat","links","general","--cursor","sealed"]],
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
+  "create-group": [["chat", "create-group", "needs-ice", "--purpose", "Questions for Ice", "--type", "posts"]],
   threads: [["chat", "threads", "general"]],
   watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
   inbox: [["chat", "inbox"]],
@@ -210,6 +212,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
   dohc_list_kept_copies: { cli: "keptCopies" },
+  dohc_list_notices: { cli: "notices" },
   dohc_save_kept_copy: { cli: "saveKeptCopy" },
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
@@ -236,6 +239,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_wait_for_messages: { cli: "watch" },
   dohc_read_chat: { cli: "chat" },
   dohc_list_groups: { cli: "groupsFull" },
+  dohc_create_group: "`{ ok: true, group: { id, name, slug, kind, purpose? } }`",
   dohc_start_group_chat: "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
   dohc_start_file_chat: { cli: "fileChatStart" },
   dohc_reply_to_chat: "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`",
@@ -477,6 +481,13 @@ function shellBlock(line: string): string {
   return "```sh\n" + line + "\n```";
 }
 
+// The chat commands whose socket verb has another name.
+export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
+  links: "chatLinks",
+  "file-mentions": "chatFileMentions",
+  "create-group": "groupCreate",
+};
+
 // What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
@@ -484,14 +495,14 @@ function verbReturns(command: string, name: string): string {
   const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
     ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
     : command === "chat"
-    ? name === "links" ? "chatLinks" : name === "file-mentions" ? "chatFileMentions" : name
+    ? CHAT_SOCKET_VERBS[name] ?? name
     : command === "history"
       ? HISTORY_RESULTS[name]
       : command === "document"
         ? DOCUMENT_RESULTS[name]
         : command === "automation" ? AUTOMATION_RESULTS[name]
           : command === "access" ? ACCESS_RESULTS[name]
-            : command === "sync" ? SYNC_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
+            : command === "sync" ? SYNC_RESULTS[name] : command === "notices" ? NOTICES_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
               : command === "version" ? VERSION_RESULTS[name]
               : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {

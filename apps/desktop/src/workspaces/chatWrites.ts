@@ -31,8 +31,9 @@ import {
 // `reported` is what the agent said about itself: its MCP client's product
 // and version, and the model it stated. It sits beside the author's name and
 // never replaces it.
-// A person's own message in the app wakes its DM's agent and each of their
-// agents it names, except the agents they run.
+// A person's own message in the app wakes its DM's agent, each of their
+// agents it names, except the agents they run, and the agent dohc starts that
+// it answers.
 export type ChatWriter =
   | { via: "renderer" }
   | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string; reported?: ChatReportedAgent }
@@ -44,7 +45,7 @@ export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
 
 export type ChatWriteStore = ChatRelayIdentityStore & Pick<LinkedChatStore,
   "createThread" | "sendMessage" | "startChannelThread" | "resolveChatDecision" |
-  "listReactions" | "setReaction" | "getMessage" | "listChannelThreads">;
+  "listReactions" | "setReaction" | "getMessage" | "listChannelThreads" | "getThread" | "listMessagesPage">;
 
 export interface ChatWritePlace {
   workspaceId: string;
@@ -92,8 +93,9 @@ export function createChatWrites(dependencies: {
   localUserDisplayName(): string;
   // The name of the person's agent with this id.
   agentDisplayName(agentId: string): Promise<string>;
-  // The agents a person's message wakes, from its body and its DM's agent.
-  agentIdsToWake(body: string, dmAgentId: string | null): Promise<string[]>;
+  // The agents a person's message wakes, from its body, its DM's agent and
+  // the agent it answers.
+  agentIdsToWake(body: string, dmAgentId: string | null, answeredAgentId: string | null): Promise<string[]>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -239,8 +241,32 @@ export function createChatWrites(dependencies: {
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
   }
 
+  // The agent a reply answers: the author of the message it replies under,
+  // or the agent that started the post or file chat it is in. A Group's
+  // running conversation has no starter, so there only a reply under an
+  // agent's message answers one. An agent id is a settings id, so only a
+  // message this device wrote, which alone keeps its actor key, names one of
+  // this person's agents; another person's agent may share the id.
+  async function answeredAgentIdOf(place: ChatWritePlace, threadId: string, parentMessageId: string | undefined): Promise<string | null> {
+    const { workspaceId, store } = place;
+    // A thread or parent this cannot read is the write's own refusal to make,
+    // and a reply it cannot place wakes no one rather than the wrong agent.
+    try {
+      if (parentMessageId) {
+        const parent = await store.getMessage({ workspaceId, messageId: parentMessageId });
+        if (parent?.authorAgentId && parent.authorActorKey !== undefined) return parent.authorAgentId;
+      }
+      const { thread } = await store.getThread({ workspaceId, threadId });
+      if (thread.lane === "chat") return null;
+      const [opening] = (await store.listMessagesPage({ workspaceId, threadId, limit: 1 })).messages;
+      return opening?.authorAgentId && opening.authorActorKey !== undefined ? opening.authorAgentId : null;
+    } catch {
+      return null;
+    }
+  }
+
   // Admits the message and does its async work. The caller commits the row.
-  async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput) {
+  async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput & { parentMessageId?: string }) {
     const body = normalizeChatMessageBody(input.body);
     // Before admission, whose identity checks refuse a signed-out write to
     // a joined Group: an automation waits for a session there instead.
@@ -260,7 +286,11 @@ export function createChatWrites(dependencies: {
     }
     const actor = await actorFor(input.writer);
     const wakeAgentIds = input.writer.via === "renderer"
-      ? await agentIdsToWake(body, await dmAgentIdOf(place, admission))
+      ? await agentIdsToWake(
+        body,
+        await dmAgentIdOf(place, admission),
+        "threadId" in target ? await answeredAgentIdOf(place, target.threadId, input.parentMessageId) : null,
+      )
       : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({

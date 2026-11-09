@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoticeRow, SyncStatusResult } from "../../ipc/bridgeContract";
-import type { NoticeTarget } from "../shell/noticeTarget";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type NoticeCopy, type SentNotice, type WorkspaceErrorNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
@@ -2296,7 +2296,7 @@ describe("failed run notices", () => {
 
 it("puts the crash report toast's Send report in a row under its title", async () => {
   const onSendCrashReport = vi.fn();
-  renderNotices({ crashReport: { revision: 1, title: "dohc quit unexpectedly", body: "", text: "report", atMs: 0 }, onSendCrashReport });
+  renderNotices({ crashReport: { revision: 1, read: false, title: "dohc quit unexpectedly", body: "", text: "report", atMs: 0 }, onSendCrashReport });
   expectActionRow(screen.getByTestId("crash-report-toast"), ["Send report", "Details"]);
   await userEvent.click(screen.getByTestId("crash-report-toast-send"));
   expect(onSendCrashReport).toHaveBeenCalledOnce();
@@ -3314,7 +3314,7 @@ describe("Details", () => {
 
   it("puts Details after Send report on a crash notice's toast and row", async () => {
     renderNotices({
-      crashReport: { revision: 1, title: "dohc quit unexpectedly", body: "", text: "Crash: renderer gone\nReason: oom", atMs: 1 },
+      crashReport: { revision: 1, read: false, title: "dohc quit unexpectedly", body: "", text: "Crash: renderer gone\nReason: oom", atMs: 1 },
       onSendCrashReport: vi.fn(),
     });
     expectActionRow(screen.getByTestId("crash-report-toast"), ["Send report", "Details"]);
