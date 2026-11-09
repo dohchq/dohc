@@ -599,13 +599,17 @@ async fn terminal_status_distinguishes_success_from_supersession_including_equal
                     reconciled.2, "[]",
                     "success must not credit accepted authors twice"
                 );
+                assert_eq!(interval(&store, &state.key), "[]");
                 assert!(reconciled.4.is_some());
             } else {
                 assert_eq!(
                     reconciled.1, None,
                     "older job completed after the superseding write"
                 );
-                assert!(reconciled.2.contains("alice"));
+                assert!(
+                    interval(&store, &state.key).contains("alice"),
+                    "an undone settlement returns its author"
+                );
                 assert_eq!(reconciled.4, None);
             }
         }
