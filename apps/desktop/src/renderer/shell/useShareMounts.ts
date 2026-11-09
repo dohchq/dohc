@@ -3,9 +3,10 @@ import type {
   RefreshShareMountsResult,
   WorkspaceSummary,
 } from "../../ipc/bridgeContract";
-import { shareNoticePaths, shareUnjournalableNotice, shareUnjournalableTitle } from "../shareUnjournalableNotice";
+import { shareNoticePaths, shareUnjournalableRow, shareUnjournalableTitle } from "../shareUnjournalableNotice";
+import type { ErrorDetailField } from "./copyDetails";
 import { bridge } from "../bridge";
-import type { ShellErrorKind } from "./useShellError";
+import { SHELL_ERROR_MAX_CHARS, type ShellErrorKind } from "./useShellError";
 import type { PendingTreeChange } from "../workbench/file-tree-optimistic";
 import {
   goneMountProjections,
@@ -43,6 +44,7 @@ export function useShareMounts(
   reportShellFailure: (failure: {
     title?: string;
     message: string;
+    details?: ReadonlyArray<ErrorDetailField>;
     tone?: "success" | "warning";
     paths?: readonly string[];
     retry?: (() => void) | null;
@@ -153,13 +155,11 @@ export function useShareMounts(
             clearIdentity(keptPathsNotice(row.shareId));
           } else {
             warned = true;
+            const { message, details } = shareUnjournalableRow(paths, SHELL_ERROR_MAX_CHARS);
             reportShellFailure({
               title: shareUnjournalableTitle(paths, row.label),
-              message: shareUnjournalableNotice(paths.map(entry => ({
-                ...entry,
-                path: `shared-with-me/${row.label}/${entry.path}`,
-                ...(entry.owner === undefined ? {} : { owner: `shared-with-me/${row.label}/${entry.owner}` }),
-              }))),
+              message,
+              ...(details.length ? { details } : {}),
               identity: keptPathsNotice(row.shareId),
               tone: "warning",
               retry: () => void refreshShareMountsRef.current(true),

@@ -1,4 +1,5 @@
 import type { RefreshSharedViewResult } from "../ipc/bridgeContract";
+import type { ErrorDetailField } from "./shell/copyDetails";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -26,9 +27,33 @@ export function shareUnjournalableTitle(paths: readonly UnjournalableSharePath[]
   return `dohc skipped ${sharedFiles(new Set(paths.map(entry => entry.path)).size)} from ${label}`;
 }
 
-export function shareUnjournalableNotice(
+export function shareUnjournalableNotice(paths: readonly UnjournalableSharePath[]): string {
+  return shareUnjournalableLines(paths).join(" ");
+}
+
+// A Notices row's text, as many whole reasons as `budget` holds, then a
+// count of the rest. Details holds every reason when some are left out.
+export function shareUnjournalableRow(
   paths: readonly UnjournalableSharePath[],
-): string {
+  budget: number,
+): { message: string; details: ErrorDetailField[] } {
+  const lines = shareUnjournalableLines(paths);
+  const text = (shown: readonly string[]) => {
+    const rest = lines.length - shown.length;
+    return [...shown, ...(rest > 0 ? [`Details has ${rest === 1 ? "1 more reason" : `${rest} more reasons`}.`] : [])].join(" ");
+  };
+  const shown: string[] = [];
+  for (const line of lines) {
+    if ([...text([...shown, line])].length > budget) break;
+    shown.push(line);
+  }
+  return {
+    message: text(shown),
+    details: shown.length < lines.length ? lines.map(line => ["Reason", line] as const) : [],
+  };
+}
+
+function shareUnjournalableLines(paths: readonly UnjournalableSharePath[]): string[] {
   const groups = new Map<
     UnjournalableSharePath["reason"],
     UnjournalableSharePath[]
@@ -96,5 +121,5 @@ export function shareUnjournalableNotice(
       );
     }
   }
-  return lines.join(" ");
+  return lines;
 }
