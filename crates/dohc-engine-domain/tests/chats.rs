@@ -2994,14 +2994,17 @@ fn dispatch_claim_is_single_writer_idempotent() {
         .expect("agent");
     chats
         .start_channel_thread(
-            &start_thread(
-                "agent-1",
-                "t1",
-                "m0",
-                "@agent do it",
-                ChatActorKind::Human,
-                20,
-            ),
+            &StartChannelThread {
+                wake_agent_ids: vec!["default".to_owned()],
+                ..start_thread(
+                    "agent-1",
+                    "t1",
+                    "m0",
+                    "@agent do it",
+                    ChatActorKind::Human,
+                    20,
+                )
+            },
             &NO_FAULTS,
         )
         .expect("start");

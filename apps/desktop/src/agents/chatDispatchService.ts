@@ -1223,10 +1223,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (failedCount === 0) continue;
       notifyRunUpdated(workspace, threadId);
       const agent = agents.find(({ id }) => id === agentId);
+      // An agent you run reads its requests itself, so nothing is wrong to tell.
+      if (agent && !agent.launch) continue;
       const message = !agent
         ? "That agent isn't set up on this computer. Set it up in Settings → Agents."
-        : agent.launch ? `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`
-          : `${clip(agent.name)} has no chat runner set up. Set one up in Settings → Agents.`;
+        : `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`;
       try {
         options.onDispatchNotice?.(workspace, { reason: "no-runner", threadId, message });
       } catch (error) {
@@ -1372,12 +1373,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  // Each agent dohc can start has its own chat. A background pass must not
-  // create a chat for an agent that is off. One agent's chat that cannot be
-  // made does not keep the others from theirs, and a later scan tries again.
+  // Each agent dohc starts and each agent you run has its own chat. A
+  // background pass must not create a chat for an agent dohc starts that is
+  // off. One agent's chat that cannot be made does not keep the others from
+  // theirs, and a later scan tries again.
   async function ensureAgentChats(workspace: ChatDispatchWorkspace): Promise<void> {
     for (const agent of await options.readDispatchAgents()) {
-      if (!agent.enabled || !agent.launch) continue;
+      if (agent.launch && !agent.enabled) continue;
       try {
         await options.chatStoreFor(workspace).ensureAgentChannel({
           workspaceId: workspace.workspaceId,

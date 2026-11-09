@@ -13,8 +13,9 @@ import {
   firstAgentCommand,
   firstAgentWithLaunch,
   agentHandle,
-  agentIdsNamedIn,
+  agentIdsToWake,
   agentMentionCandidates,
+  agentYouRun,
   agentNameTaken,
   agentProblem,
   automationAgent,
@@ -166,9 +167,11 @@ describe("desktop user settings model", () => {
     for (const timeoutMinutes of [0, 1441, 1.5]) {
       expect(AgentsSettings.safeParse({ default: { ...agent, timeoutMinutes } }).success).toBe(false);
     }
-    for (const id of ["Nova", "1st", "-a", "a_b", "a".repeat(65), "codex-", "code--review"]) {
+    for (const id of ["Nova", "1st", "-a", "a_b", "a".repeat(65), "codex-", "code--review", "p-terminal", "p-1"]) {
       expect(AgentsSettings.safeParse({ [id]: agent }).success, id).toBe(false);
     }
+    // A personal agent's id starts with p-; an id that only starts with p is yours.
+    expect(AgentsSettings.safeParse({ planner: agent, p1: { ...agent, name: "P1" } }).success).toBe(true);
     expect(AgentsSettings.safeParse({ default: { ...agent, launch: { command: " 	 " } } }).success).toBe(false);
     const { launch: _launch, ...noLaunch } = agent;
     expect(AgentsSettings.safeParse({ default: noLaunch }).success).toBe(false);
@@ -189,7 +192,7 @@ describe("desktop user settings model", () => {
     expect(AgentsSettings.safeParse({ default: { ...agent, name: "Nova", nameBeforeMigration: "Nova" } }).success).toBe(true);
   });
 
-  it("names each agent dohc can start that a message names, by its name without spaces, outside code", () => {
+  it("wakes each agent dohc can start that a message names, by its name without spaces, outside code", () => {
     const { launch: _launch, ...unset } = testAgent({ name: "Scout", enabled: false });
     const settings = { agents: {
       default: testAgent({ name: "Nova" }),
@@ -197,18 +200,57 @@ describe("desktop user settings model", () => {
       codex: testAgent({ name: "Codex", enabled: false }),
       scout: unset,
     } };
-    expect(agentIdsNamedIn(settings, "@nova and @claudecode, then @CODEX")).toEqual(["default", "claude-code", "codex"]);
-    // An agent with no way to start, a name inside code, and @agent name nobody.
-    expect(agentIdsNamedIn(settings, "@Scout `@Nova` @agent")).toEqual([]);
-    expect(agentIdsNamedIn(settings, "Claude Code, please")).toEqual([]);
+    expect(agentIdsToWake(settings, "@nova and @claudecode, then @CODEX", null)).toEqual(["default", "claude-code", "codex"]);
+    // An agent you run, a name inside code, and @agent wake nobody.
+    expect(agentIdsToWake(settings, "@Scout `@Nova` @agent", null)).toEqual([]);
+    expect(agentIdsToWake(settings, "Claude Code, please", null)).toEqual([]);
+  });
+
+  it("wakes a DM's agent unless you run it or it is a personal agent", () => {
+    const { launch: _launch, ...terminal } = testAgent({ name: "Terminal", enabled: false });
+    const settings = { agents: {
+      default: testAgent({ name: "Nova" }),
+      codex: testAgent({ name: "Codex", enabled: false }),
+      terminal,
+    } };
+    // A launched agent that is off still gets a run, so dispatch says it is off.
+    expect(agentIdsToWake(settings, "hello", "codex")).toEqual(["codex"]);
+    // An agent this computer doesn't list gets one too, so its notice says to set it up.
+    expect(agentIdsToWake(settings, "hello", "elsewhere")).toEqual(["elsewhere"]);
+    expect(agentIdsToWake(settings, "hello @Terminal", "terminal")).toEqual([]);
+    expect(agentIdsToWake(settings, "hello", "p-a1b2")).toEqual([]);
+    // Naming the DM's own agent wakes it once.
+    expect(agentIdsToWake(settings, "@Nova and @Codex", "default")).toEqual(["default", "codex"]);
+    expect(agentIdsToWake(settings, "@Nova", "terminal")).toEqual(["default"]);
+  });
+
+  it("finds an agent you run only among entries dohc never starts", () => {
+    const { launch: _launch, ...terminal } = testAgent({ name: "Terminal", enabled: false });
+    const settings = { agents: { default: testAgent({ name: "Nova" }), terminal } };
+    expect(agentYouRun(settings, "terminal")).toMatchObject({ id: "terminal", name: "Terminal" });
+    for (const id of ["default", "unknown", "constructor", "__proto__"]) {
+      expect(agentYouRun(settings, id), id).toBeNull();
+    }
+  });
+
+  it("offers each agent you run after @, beside each agent dohc starts that is on", () => {
+    const { launch: _launch, ...terminal } = testAgent({ name: "Terminal", enabled: false });
+    const settings = { agents: {
+      default: testAgent({ name: "Nova" }),
+      codex: testAgent({ name: "Codex", enabled: false }),
+      terminal,
+    } };
+    expect(agentMentionCandidates(listAgents(settings)).map(({ id, handle }) => [id, handle])).toEqual([
+      ["agent:default", "Nova"], ["agent:terminal", "Terminal"],
+    ]);
   });
 
   it("names no agent inside a file link, as the sent message shows", () => {
     const settings = { agents: { default: testAgent({ name: "Nova" }) } };
     for (const body of ["see @[trip @Nova notes.md]", "see @[notes @Nova.md]", "see @[trip/@Nova.md#Day 1]"]) {
-      expect(agentIdsNamedIn(settings, body), body).toEqual([]);
+      expect(agentIdsToWake(settings, body, null), body).toEqual([]);
     }
-    expect(agentIdsNamedIn(settings, "@[trip @Nova notes.md] for @Nova")).toEqual(["default"]);
+    expect(agentIdsToWake(settings, "@[trip @Nova notes.md] for @Nova", null)).toEqual(["default"]);
   });
 
   it("gives each agent the handle a message reads back in full, so a name with punctuation wakes its own agent", () => {
@@ -222,9 +264,9 @@ describe("desktop user settings model", () => {
       bear: testAgent({ name: "🐻" }),
     } };
     expect(AgentsSettings.safeParse(settings.agents).success).toBe(true);
-    expect(agentIdsNamedIn(settings, "@CodexWork, look")).toEqual(["codex-work"]);
-    expect(agentIdsNamedIn(settings, "@codex.")).toEqual(["codex"]);
-    expect(agentIdsNamedIn(settings, "@R2-D2- and @🦊")).toEqual(["droid"]);
+    expect(agentIdsToWake(settings, "@CodexWork, look", null)).toEqual(["codex-work"]);
+    expect(agentIdsToWake(settings, "@codex.", null)).toEqual(["codex"]);
+    expect(agentIdsToWake(settings, "@R2-D2- and @🦊", null)).toEqual(["droid"]);
     // Only an agent with a handle is offered after @.
     expect(agentMentionCandidates(listAgents(settings)).map(({ id, handle }) => [id, handle])).toEqual([
       ["agent:codex", "Codex"], ["agent:codex-work", "CodexWork"], ["agent:droid", "R2-D2"],

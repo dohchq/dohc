@@ -83,10 +83,10 @@ fn normalize_dispatch_agent_id(agent_id: &str) -> Result<String, DomainError> {
     }
 }
 
-/// Record a pending request for each agent a person's message wakes: the
-/// agent whose chat holds it, and each agent in `wake_agent_ids`. The
-/// message's sender records them in the message's own write, so only that
-/// computer runs them. A message from the CLI wakes no agent.
+/// Record a pending request for each agent in `wake_agent_ids`, which the
+/// sender lists in full, its DM's agent included. The sender records them in
+/// the message's own write, so only that computer runs them. A message from
+/// the CLI wakes no agent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_message_triggers(
     tx: &Transaction<'_>,
@@ -101,18 +101,7 @@ pub(super) fn record_message_triggers(
     if author_kind != ChatActorKind::Human || origin == Some("cli") {
         return Ok(());
     }
-    let chat_agent: Option<String> = tx
-        .query_row(
-            "SELECT c.agent_id FROM chat_threads t JOIN chat_channels c \
-               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-             WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
-            params![workspace_id, thread_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?
-        .flatten();
-    for agent_id in chat_agent.iter().chain(wake_agent_ids) {
+    for agent_id in wake_agent_ids {
         tx.execute(
             "INSERT OR IGNORE INTO chat_dispatch_ledger \
              (workspace_id, trigger_message_id, agent_id, thread_id, state, run_id, \

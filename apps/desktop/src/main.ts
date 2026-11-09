@@ -562,7 +562,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, automationAgent, listAgents, isOwnAgentId, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsToWake, agentYouRun, automationAgent, listAgents, isOwnAgentId, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -4964,8 +4964,8 @@ const chatWrites = createChatWrites({
     const { settings } = await readCachedUserSettingsFile(stateDir());
     return listAgents(settings).find(({ id }) => id === agentId)?.name ?? "Agent";
   },
-  agentIdsNamedIn: async (body) =>
-    agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),
+  agentIdsToWake: async (body, dmAgentId) =>
+    agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId),
   isOwnAgentId: async (name) => isOwnAgentId((await readCachedUserSettingsFile(stateDir())).settings, name),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
@@ -5119,6 +5119,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   chatLinks: (workspace, input) => workspaceChatLinks(workspace.workspaceId, input),
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
+  agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
   listWorkspaces,
   openWorkspaceActivity,
   stopWorkspaceSync: async (operation, author) => {

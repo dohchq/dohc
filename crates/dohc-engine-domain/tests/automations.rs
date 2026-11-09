@@ -2301,7 +2301,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                 automation: None,
                 author_agent_id: None,
                 author_reported: None,
-                wake_agent_ids: Vec::new(),
+                wake_agent_ids: vec!["default".to_owned()],
                 now_ms: 17,
                 request_id: None,
             },

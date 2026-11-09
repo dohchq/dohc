@@ -25,6 +25,7 @@ import {
   type CliVerb,
 } from "@dohc/cli/protocol";
 import type {
+  ChatAgentRequestDetail,
   LinkedChatStore,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -58,6 +59,7 @@ import {
   CLI_ENDPOINT_FILE,
   CLI_SOCKET_FILE,
   RUN_MESSAGE_LINK_RECOVERY_FILE,
+  WATCH_BATCH_MAX_BYTES,
   cliMessageId,
   cliThreadId,
   disposeCliServerRuntime,
@@ -74,8 +76,10 @@ import {
   type CliVersionsPort,
   type CliWorkspaceContext,
 } from "./cliServer";
-import { agentWriteAuthor } from "./desktopCliServer";
+import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { agentHandle, agentYouRun, type DesktopUserSettings } from "../settings/userSettings";
+import { testAgent } from "../testing/agentSettings";
 
 // Another spelling of one real folder, as Linux keeps it for a folder that
 // ignores capitals: a lookup through `spelled` reaches `stored`, stat gives
@@ -264,6 +268,9 @@ describe("CLI socket server", () => {
   let dispatchedRunId: string | null;
   // The run the fixture workspace's agent writes name, when a test set one.
   let agentWriteRunId: string | null;
+  // This computer's agents: Nova and Codex, which dohc starts, and Terminal,
+  // which you run.
+  let agentSettings: Pick<DesktopUserSettings, "agents">;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -483,6 +490,8 @@ describe("CLI socket server", () => {
     dispatchedRun = null;
     dispatchedRunId = null;
     agentWriteRunId = null;
+    const { launch: _launch, ...terminal } = testAgent({ name: "Terminal" });
+    agentSettings = { agents: { default: testAgent({ name: "Nova" }), codex: testAgent({ name: "Codex" }), terminal } };
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -507,7 +516,7 @@ describe("CLI socket server", () => {
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
-        agentIdsNamedIn: async () => [],
+        agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
         isOwnAgentId: async () => false,
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
@@ -525,6 +534,12 @@ describe("CLI socket server", () => {
       dispatchedRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRunId : null),
       agentWriteRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? agentWriteRunId : null),
       agentRunWorkspace: () => undefined,
+      // As the desktop finds one: an agent you run in these settings, with
+      // the accounts the fixture workspace records for its person.
+      async connectedAgent(workspaceId, agentId) {
+        const agent = workspaceId === WORKSPACE_ID ? agentYouRun(agentSettings, agentId) : null;
+        return agent ? { agentId, name: agent.name, handle: agentHandle(agent.name), ...workspaceRequesters(chatRow) } : null;
+      },
       async onWrite() {
         calls.writes += 1;
       },
@@ -581,13 +596,10 @@ describe("CLI socket server", () => {
 
   it("bounds the cursor to unread candidates across many batches", async () => {
     const first = await post({ group: "general", actor: "human", body: "@agent first" });
-    const thread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(row => cliThreadId(row.id) === first.threadId)!;
-    const [template] = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
-    let candidates: NonNullable<typeof template>[] = [];
-    const messages = vi.spyOn(store!, "listMessages").mockImplementation(async input => input.threadId === thread.id ? candidates : []);
-    const mentions = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async () => candidates.map(row => ({
-      threadId: thread.id, messageId: row.id, authorKind: "human" as const, createdAtMs: row.createdAtMs,
-    })));
+    const [template] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
+    expect(cliThreadId(template!.threadId)).toBe(first.threadId);
+    let candidates: ChatAgentRequestDetail[] = [];
+    const requests = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async () => ({ requests: candidates, more: false }));
     let cursor: string | undefined;
     const watch = async () => {
       const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({
@@ -600,25 +612,28 @@ describe("CLI socket server", () => {
     };
     try {
       for (let batchIndex = 0; batchIndex < 100; batchIndex += 1) {
-        candidates = Array.from({ length: 10 }, (_, index) => ({ ...template!, id: `message-${batchIndex}-${index}` }));
-        expect((await watch()).messages.map(row => row.messageId)).toEqual(candidates.map(row => cliMessageId(row.id)));
+        candidates = Array.from({ length: 10 }, (_, index) => ({
+          ...template!, messageId: `message-${batchIndex}-${index}`, createdAtMs: batchIndex * 10 + index,
+        }));
+        expect((await watch()).messages.map(row => row.messageId)).toEqual(candidates.map(row => cliMessageId(row.messageId)));
         expect((await watch()).messages).toEqual([]);
-        expect(JSON.parse(Buffer.from(cursor!, "base64url").toString("utf8")).seen).toEqual(candidates.map(row => row.id));
+        expect(JSON.parse(Buffer.from(cursor!, "base64url").toString("utf8")).seen)
+          .toEqual(candidates.map(row => [row.createdAtMs, row.messageId]));
         expect(cursor!.length).toBeLessThan(1_000);
       }
       candidates = [];
       expect((await watch()).messages).toEqual([]);
       expect(JSON.parse(Buffer.from(cursor!, "base64url").toString("utf8")).seen).toEqual([]);
-    } finally { messages.mockRestore(); mentions.mockRestore(); }
+    } finally { requests.mockRestore(); }
   });
 
   it("wakes a wait when a local message arrives", async () => {
     const queried = deferred<void>();
-    const list = store!.listAgentUnreadRequests.bind(store!);
-    const spy = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async (...args) => {
-      const rows = await list(...args);
+    const list = store!.listAgentRequestsPage.bind(store!);
+    const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
+      const page = await list(...args);
       queried.resolve();
-      return rows;
+      return page;
     });
     try {
       const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent" });
@@ -631,9 +646,9 @@ describe("CLI socket server", () => {
   it("wakes for replies after the agent posts and preserves unread state", async () => {
     const root = await post({ group: "general", actor: "agent", body: "My discussion" });
     const queried = deferred<void>();
-    const original = store!.listAgentUnreadRequests.bind(store!);
-    const spy = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async (...args) => {
-      const rows = await original(...args); queried.resolve(); return rows;
+    const original = store!.listAgentRequestsPage.bind(store!);
+    const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
+      const page = await original(...args); queried.resolve(); return page;
     });
     try {
       const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId });
@@ -668,7 +683,7 @@ describe("CLI socket server", () => {
     expect(batch.messages.map(message => message.messageId)).toEqual([mentioned.messageId]);
     const other = await invoke("watch", { cwd: workspaceRoot, actor: "agent", thread: ordinary.threadId, timeoutMs: 0 });
     expect(other.messages).toEqual([]);
-    // An agent's chat belongs to its agent, so a wait outside a run skips it.
+    // An agent's chat belongs to its agent, so an unnamed agent's wait skips it.
     expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", thread: dm.threadId, timeoutMs: 0 })).messages).toEqual([]);
     const changedScope = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor, timeoutMs: 0 } });
     expect(changedScope).toMatchObject({ ok: false, error: expect.stringContaining("cursor") });
@@ -694,17 +709,16 @@ describe("CLI socket server", () => {
     if (kind === "posted-thread reply") await invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: first.threadId, body: "Joining the thread", attachments: [], needsDecision: false });
     const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
     const queried = deferred<void>();
-    const original = store!.listAgentUnreadRequests.bind(store!);
-    const spy = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async (...args) => {
-      const rows = await original(...args); queried.resolve(); return rows;
+    const original = store!.listAgentRequestsPage.bind(store!);
+    const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
+      const page = await original(...args); queried.resolve(); return page;
     });
     try {
       const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor });
       await queried.promise;
-      const threads = await store!.listThreads({ workspaceId: WORKSPACE_ID });
-      const thread = threads.find(thread => cliThreadId(thread.id) === first.threadId)!;
-      const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
-      const older = { ...messages[0]!, id: "synced-message", createdAtMs: 0, body: kind === "mention" ? "@agent synced" : "A synced reply" };
+      const [current] = (await original({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
+      expect(cliThreadId(current!.threadId)).toBe(first.threadId);
+      const older = { ...current!, messageId: "synced-message", createdAtMs: 0, body: kind === "mention" ? "@agent synced" : "A synced reply" };
       const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
       const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
       const end = source.indexOf("\n    // Recorded durably before each pull", start);
@@ -724,7 +738,6 @@ describe("CLI socket server", () => {
       const afterSuccessfulPull = new Function("dependencies",
         `const { ${Object.keys(dependencies).join(", ")} } = dependencies; return ${callback}.afterSuccessfulPull;`,
       )(dependencies) as NonNullable<Parameters<typeof createRelaySyncEngine>[0]["afterSuccessfulPull"]>;
-      const messageSpy = vi.spyOn(store!, "listMessages");
       const sync = createRelaySyncEngine({
         rootDir: workspaceRoot, relay: { baseUrl: "https://relay.test", token: "token" }, onChange: vi.fn(),
         capture: { runRelaySync: async task => task(async () => undefined) } as WorkspaceEngineCapture,
@@ -733,8 +746,10 @@ describe("CLI socket server", () => {
           push: async () => ({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
           recoverOrigin: async () => { throw new Error("Unexpected recovery"); },
           pull: async () => {
-            messageSpy.mockImplementation(async input => input.threadId === thread.id ? [...messages, older] : []);
-            spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, authorKind: "human" as const, createdAtMs: 0 }]);
+            spy.mockImplementation(async (...args) => {
+              const page = await original(...args);
+              return { ...page, requests: [older, ...page.requests] };
+            });
             return { fetched: 1, applied: 1, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 1, sharingDeclined: [] };
           },
         },
@@ -744,8 +759,233 @@ describe("CLI socket server", () => {
         await sync.start();
         expect(sync.snapshot().syncFailure).toBeNull();
         expect((await pending).messages.map(message => message.text)).toEqual([older.body]);
-      } finally { await sync.stop(); messageSpy.mockRestore(); }
+      } finally { await sync.stop(); }
     } finally { spy.mockRestore(); }
+  });
+
+  describe("an agent you run", () => {
+    const terminalArgs = () => ({ cwd: workspaceRoot, actor: "agent" as const, agentId: "terminal" });
+    const cli = (...messages: Array<{ id: string }>) => messages.map(message => cliMessageId(message.id));
+    const seenIn = (cursor: string): unknown => (JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { seen: unknown }).seen;
+
+    // A person's message from the app, stamped with the owner's account
+    // unless another account, or none, is named.
+    async function personPosts(channelId: string, body: string, authorUserId: string | null = "verified-user-id", wakeAgentIds?: string[]) {
+      return await store!.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId, author: { kind: "human", displayName: "Sam" },
+        ...(authorUserId === null ? {} : { authorUserId }), ...(wakeAgentIds ? { wakeAgentIds } : {}), body,
+      });
+    }
+
+    async function personReplies(threadId: string, body: string, authorUserId: string | null = "verified-user-id") {
+      return await store!.sendMessage({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, threadId, author: { kind: "human", displayName: "Sam" },
+        ...(authorUserId === null ? {} : { authorUserId }), body,
+      });
+    }
+
+    // One wait that returns at once: the agent you run with this id, or the
+    // unnamed agents with null.
+    async function waitFor(agentId: string | null, cursor?: string) {
+      const batch = await invoke("watch", {
+        cwd: workspaceRoot, actor: "agent", timeoutMs: 0,
+        ...(agentId === null ? {} : { agentId }), ...(cursor === undefined ? {} : { cursor }),
+      });
+      return { ids: batch.messages.map(row => row.messageId), cursor: batch.cursor };
+    }
+
+    async function authorAgentIdOf(sent: { threadId: string; messageId: string }) {
+      const thread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(row => cliThreadId(row.id) === sent.threadId)!;
+      const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
+      return messages.find(row => cliMessageId(row.id) === sent.messageId)?.authorAgentId;
+    }
+
+    it("is named only by an agent, without a run, from this computer's agents you run", async () => {
+      const send = (verb: "inbox" | "post", args: Record<string, unknown>) =>
+        rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: workspaceRoot, ...args } });
+      const posted = { actor: "agent", group: "general", attachments: [], needsDecision: false, body: "Hello" };
+      await expect(send("inbox", { actor: "agent", agentId: "terminal" })).resolves.toMatchObject({ ok: true });
+      // Nova and Codex are agents dohc starts.
+      for (const agentId of ["codex", "default", "unknown"]) {
+        await expect(send("inbox", { actor: "agent", agentId }), agentId).resolves.toMatchObject({
+          ok: false, error: expect.stringContaining("No agent you run has this id in Settings › Agents."),
+        });
+      }
+      await expect(send("inbox", { actor: "human", agentId: "terminal" })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("Only an agent works as an agent you run."),
+      });
+      await expect(send("post", { ...posted, agentId: "terminal", runId: "run-elsewhere" })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("An agent you run is not a run."),
+      });
+      await expect(send("post", { ...posted, agentId: "terminal" })).resolves.toMatchObject({ ok: true });
+      // A name with no letter or digit has no handle, so @ can't reach it.
+      const { launch: _launch, ...blank } = testAgent({ name: "!!!" });
+      agentSettings = { agents: { ...agentSettings.agents, blank } };
+      await expect(send("inbox", { actor: "agent", agentId: "blank" })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("Give this agent a name with a letter or digit"),
+      });
+    });
+
+    it("reads its chat, a mention of its name, and replies where it posted, from its person in the app", async () => {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const chat = await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "terminal", name: "Terminal" });
+      const codexChat = await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+      const inChat = await personPosts(chat.id, "Hello");
+      const mention = await personPosts(general.id, "Could @Terminal check this?");
+      await post({ actor: "human", body: "@Terminal from the CLI" });
+      await personPosts(codexChat.id, "Only for Codex");
+      const codexMention = await personPosts(codexChat.id, "@Terminal, Codex is stuck");
+      const own = await invoke("post", { ...terminalArgs(), group: "general", attachments: [], needsDecision: false, body: "My discussion" });
+      expect(await authorAgentIdOf(own)).toBe("terminal");
+      const ownThread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(row => cliThreadId(row.id) === own.threadId)!;
+      const reply = await personReplies(ownThread.id, "A plain reply");
+      await personReplies(ownThread.id, "From another account", "other-account");
+
+      expect((await waitFor("terminal")).ids).toEqual(cli(inChat.message, mention.message, codexMention.message, reply));
+      expect((await waitFor(null)).ids).toEqual([]);
+      const inbox = await invoke("inbox", terminalArgs());
+      expect(inbox.threads.map(thread => thread.id)).toEqual([cliThreadId(inChat.thread.id)]);
+      expect(inbox.mentions.map(row => row.messageId).sort()).toEqual(cli(mention.message, codexMention.message, reply).sort());
+    });
+
+    it("shares a plain @agent with an agent you run named Agent, each with its own read place", async () => {
+      const { launch: _launch, ...helper } = testAgent({ name: "Agent" });
+      agentSettings = { agents: { ...agentSettings.agents, helper } };
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const asked = await personPosts(general.id, "Could @agent check this?");
+      const target = cliThreadId(asked.thread.id);
+      expect((await waitFor("helper")).ids).toEqual(cli(asked.message));
+      expect((await waitFor(null)).ids).toEqual(cli(asked.message));
+
+      await invoke("show", { cwd: workspaceRoot, actor: "agent", agentId: "helper", target, peek: false });
+      expect((await waitFor("helper")).ids).toEqual([]);
+      expect((await waitFor(null)).ids).toEqual(cli(asked.message));
+      await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
+      expect((await waitFor(null)).ids).toEqual([]);
+    });
+
+    it("counts a post with no account only in your own workspace", async () => {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const yours = await personPosts(general.id, "@Terminal from you");
+      const beforeSync = await personPosts(general.id, "@Terminal before sync", null);
+      await personPosts(general.id, "@Terminal from another account", "other-account");
+      expect((await waitFor("terminal")).ids).toEqual(cli(yours.message, beforeSync.message));
+
+      // In a workspace shared with you, only your account's posts count.
+      chatRow = { shareView: { recipientUserId: "verified-user-id" } as unknown as NonNullable<RegistryEntry["shareView"]> };
+      expect((await waitFor("terminal")).ids).toEqual(cli(yours.message));
+    });
+
+    it("returns an earlier request first, so a reply passes only requests it was shown", async () => {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const signedIn = await personPosts(general.id, "@Terminal first");
+      const signedOut = await personPosts(general.id, "@Terminal second", null);
+      expect((await waitFor("terminal")).ids).toEqual(cli(signedIn.message, signedOut.message));
+      await invoke("reply", { ...terminalArgs(), thread: cliThreadId(signedOut.thread.id), body: "On it", attachments: [], needsDecision: false });
+      expect((await waitFor("terminal")).ids).toEqual(cli(signedIn.message));
+      await invoke("show", { ...terminalArgs(), target: cliThreadId(signedIn.thread.id), peek: false });
+      expect((await waitFor("terminal")).ids).toEqual([]);
+
+      // In one thread, too.
+      const asked = await personPosts(general.id, "@Terminal third");
+      const later = await personReplies(asked.thread.id, "@Terminal and a fourth", null);
+      expect((await waitFor("terminal")).ids).toEqual(cli(asked.message, later));
+      await invoke("reply", { ...terminalArgs(), thread: cliThreadId(asked.thread.id), body: "Both done", attachments: [], needsDecision: false });
+      expect((await waitFor("terminal")).ids).toEqual([]);
+    });
+
+    it("keeps its own name and read place while a run dohc dispatched holds the workspace", async () => {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const asked = await personPosts(general.id, "@Codex and @Terminal, can you both check?", "verified-user-id", ["codex"]);
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "codex" });
+      if (claim?.run.agentId !== "codex") throw new Error("Expected Codex's run");
+      dispatchedRun = "codex";
+      dispatchedRunId = claim.run.runId;
+
+      const replied = await invoke("reply", { ...terminalArgs(), thread: cliThreadId(asked.thread.id), body: "Checked", attachments: [], needsDecision: false });
+      expect(await authorAgentIdOf(replied)).toBe("terminal");
+      // An unnamed agent's write during the run is the run's agent's.
+      expect(await authorAgentIdOf(await post({ actor: "agent", body: "From the run" }))).toBe("codex");
+      // The reply moved its own place, not the run's.
+      expect((await waitFor("terminal")).ids).toEqual([]);
+      expect((await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map(row => row.messageId)).toEqual(cli(asked.message));
+
+      const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
+      context.stopSync = stop;
+      // In a chain an automation started, it writes at the chain's depth, and
+      // a person named through the socket is still the run's agent.
+      agentRunDepth = 2;
+      await invoke("stopSync", terminalArgs());
+      expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "terminal", onBehalfOf: "person-local", depth: 2 });
+      await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
+      expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2 });
+    });
+
+    it("refuses a cursor from another reader", async () => {
+      const unnamed = await waitFor(null);
+      const own = await waitFor("terminal");
+      expect((await waitFor("terminal", own.cursor)).ids).toEqual([]);
+      expect((await waitFor(null, unnamed.cursor)).ids).toEqual([]);
+      for (const args of [{ ...terminalArgs(), cursor: unnamed.cursor }, { cwd: workspaceRoot, actor: "agent", cursor: own.cursor }]) {
+        expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { ...args, timeoutMs: 0 } }))
+          .toMatchObject({ ok: false, error: expect.stringContaining("This chat cursor is invalid for this agent") });
+      }
+    });
+
+    it("returns the 101st request at once after a full batch", async () => {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const asked = await personPosts(general.id, "@Terminal number 1");
+      const replies: Array<{ id: string }> = [];
+      for (let index = 2; index <= 101; index += 1) replies.push(await personReplies(asked.thread.id, `@Terminal number ${index}`));
+      const expected = cli(asked.message, ...replies);
+      const first = await waitFor("terminal");
+      expect(first.ids).toEqual(expected.slice(0, 100));
+      expect((await waitFor("terminal", first.cursor)).ids).toEqual(expected.slice(100));
+    });
+
+    it("cuts a batch at its size and keeps seen requests past the cut", async () => {
+      await post({ actor: "human", body: "@agent template" });
+      const [template] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
+      const request = (messageId: string, createdAtMs: number, bytes = 10): ChatAgentRequestDetail =>
+        ({ ...template!, messageId, createdAtMs, body: "x".repeat(bytes) });
+      let candidates = [request("a", 10), request("b", 11)];
+      const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async () => ({ requests: candidates, more: false }));
+      try {
+        const first = await waitFor(null);
+        expect(first.ids).toEqual([cliMessageId("a"), cliMessageId("b")]);
+        // Two large requests arrive with older times. Together they pass the
+        // size, so the second waits for the next call.
+        const large = Math.ceil(WATCH_BATCH_MAX_BYTES * 0.6);
+        candidates = [request("x", 1, large), request("y", 2, large), request("a", 10), request("b", 11)];
+        const second = await waitFor(null, first.cursor);
+        expect(second.ids).toEqual([cliMessageId("x")]);
+        expect(seenIn(second.cursor)).toEqual([[10, "a"], [11, "b"], [1, "x"]]);
+        const third = await waitFor(null, second.cursor);
+        expect(third.ids).toEqual([cliMessageId("y")]);
+        expect((await waitFor(null, third.cursor)).ids).toEqual([]);
+      } finally { spy.mockRestore(); }
+    });
+
+    it("resolves a Group filter once, not on each wake", async () => {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const queried = deferred<void>();
+      const original = store!.listAgentRequestsPage.bind(store!);
+      const requests = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
+        const page = await original(...args); queried.resolve(); return page;
+      });
+      const channels = vi.spyOn(store!, "listChannels");
+      const threads = vi.spyOn(store!, "listThreads");
+      try {
+        const pending = invoke("watch", { ...terminalArgs(), group: "general" });
+        await queried.promise;
+        const listed = channels.mock.calls.length + threads.mock.calls.length;
+        const asked = await personPosts(general.id, "@Terminal a new message");
+        chatWriteSignals.signalChatWrite(WORKSPACE_ID);
+        expect((await pending).messages.map(row => row.messageId)).toEqual(cli(asked.message));
+        expect(requests.mock.calls.length).toBeGreaterThan(1);
+        expect(channels.mock.calls.length + threads.mock.calls.length).toBe(listed);
+      } finally { requests.mockRestore(); channels.mockRestore(); threads.mockRestore(); }
+    });
   });
 
   it("removes a socket wait's subscription when its client disconnects", async (ctx) => {

@@ -1796,6 +1796,7 @@ describe("chatDispatchService", () => {
           channelId: channel.id,
           author: { kind: "human", displayName: "Sam" },
           authorUserId: "user_local",
+          wakeAgentIds: ["default"],
           body: "Remote tray-only task.",
         });
       },
@@ -1902,10 +1903,39 @@ describe("chatDispatchService", () => {
     releaseFirst?.();
   });
 
+  it("fails a request for an agent you run without a notice", async () => {
+    const fixture = await createFixture({ runner: { enabled: false, command: "" } });
+    // Only a request recorded before the agent became one you run can be here.
+    const trigger = await createAgentThread(fixture, { body: "Read this yourself.", authorUserId: "user_local" });
+
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(await fixture.dispatch.listPending(WORKSPACE_ID)).toEqual([]);
+    expect(fixture.readDispatch(trigger.messageId, trigger.threadId))
+      .toMatchObject({ state: "failed", failureReason: "no-runner" });
+    expect(fixture.dispatchNotices).toEqual([]);
+    expect(fixture.spawnCalls).toEqual([]);
+  });
+
+  it("makes the chat of an agent you run, and none for an agent dohc starts that is off", async () => {
+    const { launch: _launch, ...terminal } = testAgent({ name: "Terminal", enabled: false });
+    const fixture = await createFixture({
+      runner: { enabled: false },
+      agents: [{ id: "terminal", ...terminal }],
+    });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    const agentChats = (await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID }))
+      .filter((channel) => channel.kind === "agent")
+      .map((channel) => channel.agentId);
+    expect(agentChats).toEqual(["terminal"]);
+  });
+
   it.each([
     { runner: { enabled: false }, reason: "disabled" },
-    { runner: { enabled: true, command: "" }, reason: "unconfigured" },
-  ] as const)("reports $reason dispatch without writing an agent message", async ({ runner, reason }) => {
+  ] as const)("reports $reason dispatch without writing an agent message", async ({ runner }) => {
     const fixture = await createFixture({ runner });
     const trigger = await createAgentThread(fixture, {
       body: "Needs a runner.",
@@ -1926,9 +1956,7 @@ describe("chatDispatchService", () => {
     }))).toEqual(messageIds(original));
     expect(fixture.dispatchNotices).toEqual([{ workspace: fixture.workspace, notice: {
       reason: "no-runner", threadId: trigger.threadId,
-      message: reason === "disabled"
-        ? "Nova's chat runner is off. Turn it on in Settings → Agents."
-        : "Nova has no chat runner set up. Set one up in Settings → Agents.",
+      message: "Nova's chat runner is off. Turn it on in Settings → Agents.",
     } }]);
     expect(fixture.postedWorkspaces).toEqual([]);
     expect(fixture.spawnCalls).toEqual([]);
@@ -2172,6 +2200,7 @@ describe("chatDispatchService", () => {
         channelId: channel.id,
         author: { kind: "human", displayName: "Sam" },
         authorUserId: "user_local",
+        wakeAgentIds: ["default"],
         body: "One more thing.",
       });
       await activate(fixture);
@@ -2208,6 +2237,7 @@ describe("chatDispatchService", () => {
         threadId: wake.thread.id,
         author: { kind: "human", displayName: "Sam" },
         authorUserId: "user_local",
+        wakeAgentIds: ["default"],
         body: `Reply ${index}`,
       });
       for (let index = 0; index < CHAT_DISPATCH_BUDGET_MAX; index += 1) {
@@ -3861,7 +3891,7 @@ describe("chatDispatchService", () => {
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
-        agentIdsNamedIn: async () => [],
+        agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
         isOwnAgentId: async () => false,
         localInstallationId: () => "install-local",
         projectChatBookmarks: () => undefined,

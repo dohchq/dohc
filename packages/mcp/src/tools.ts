@@ -151,6 +151,9 @@ export interface ToolContext {
   // The local agent run this server works for, from DOHC_RUN_ID. A chat
   // write that names no run names this one.
   runId?: string;
+  // The agent you run that this server speaks for, from --agent-id. Every
+  // request names it, and the desktop refuses an id its settings don't list.
+  agentId?: string;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
   request?: (request: CliRequestWithoutToken, options?: { signal?: AbortSignal }) => Promise<unknown>;
@@ -1924,7 +1927,7 @@ function cliFailureReason(error: unknown, verb: CliVerb): string {
 async function requestCli<Verb extends CliVerb>(
   ctx: ToolContext,
   verb: Verb,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor" | "agentId">,
   signal?: AbortSignal,
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
@@ -1934,6 +1937,7 @@ async function requestCli<Verb extends CliVerb>(
     args: {
       cwd: ctx.root,
       actor: "agent" as const,
+      ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
       ...args,
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
@@ -2027,7 +2031,7 @@ export async function dataset(ctx: ToolContext, input: unknown) {
 
 export async function waitForMessages(
   ctx: ToolContext,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: "watch" }>["args"], "cwd" | "actor">,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: "watch" }>["args"], "cwd" | "actor" | "agentId">,
   signal?: AbortSignal,
 ) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Chat waits require the owning workspace." };

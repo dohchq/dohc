@@ -176,7 +176,11 @@ fn unnamed_reader_skips_agent_chats_that_a_run_still_reads() {
     chats
         .ensure_agent_channel(WS, "channel", "default", "Agent", 2, &NO_FAULTS)
         .expect("agent chat");
-    start(&mut chats, "thread", "first", ChatActorKind::Human, 10);
+    let mut first = start_input("thread", "first", ChatActorKind::Human, 10);
+    first.wake_agent_ids = vec!["default".to_owned()];
+    chats
+        .start_channel_thread(&first, &NO_FAULTS)
+        .expect("start");
     send(
         &mut chats,
         "thread",
@@ -185,14 +189,10 @@ fn unnamed_reader_skips_agent_chats_that_a_run_still_reads() {
         Some("first"),
         20,
     );
-    send(
-        &mut chats,
-        "thread",
-        "later @agent",
-        ChatActorKind::Human,
-        Some("own"),
-        30,
-    );
+    let mut later = send_input("thread", "later @agent", ChatActorKind::Human, 30);
+    later.parent_message_id = Some("own".to_owned());
+    later.wake_agent_ids = vec!["default".to_owned()];
+    chats.send_message(&later, &NO_FAULTS).expect("send");
     assert!(
         outside_requests(&chats).is_empty(),
         "an agent chat belongs to its agent, even where an unnamed agent posted."

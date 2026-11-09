@@ -1688,7 +1688,7 @@ export const ActorPresentation = z.object({
   group: z.string(),
   hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
-  // The Settings agent that wrote your agent's message in one of its runs. Its Settings color wins over `hue`.
+  // The Settings agent that wrote your agent's message. Its Settings color wins over `hue`.
   agentId: z.string().min(1).max(64).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
@@ -2098,7 +2098,7 @@ export const ChatMessageRecord = z.object({
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
   authorReported: ChatReportedAgentRecord.optional(),
-  // The agent that wrote it in one of its runs, which only main records.
+  // The agent in Settings that wrote it, which only main records.
   authorAgentId: AgentId.optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),

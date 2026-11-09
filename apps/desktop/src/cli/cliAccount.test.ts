@@ -21,6 +21,7 @@ function options(serverAccount?: CliServerOptions["serverAccount"]) {
     dispatchedRunId: () => null,
     agentWriteRunId: () => null,
     agentRunWorkspace: () => undefined,
+    connectedAgent: async () => null,
     ...(serverAccount ? { serverAccount } : {}),
   };
   return { value, listWorkspaces, openWorkspace };

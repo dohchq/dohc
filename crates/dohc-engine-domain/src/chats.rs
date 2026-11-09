@@ -400,7 +400,7 @@ pub struct ChatMessage {
     pub automation: Option<ChatMessageAutomation>,
     /// Set on, and only on, a link message.
     pub link_author: Option<ChatMessageLinkAuthor>,
-    /// The agent that wrote the message in one of its runs. Provenance only.
+    /// The agent in Settings that wrote the message. Provenance only.
     pub author_agent_id: Option<String>,
     /// What the agent reported about itself. Only an agent message has one.
     pub author_reported: Option<ChatReportedAgent>,
@@ -705,7 +705,7 @@ pub struct ChannelOpeningMessage {
     pub automation: Option<ChatMessageAutomation>,
     pub link_author: Option<ChatMessageLinkAuthor>,
     pub author_reported: Option<ChatReportedAgent>,
-    /// The agent that wrote the message in one of its runs.
+    /// The agent in Settings that wrote the message.
     pub author_agent_id: Option<String>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
@@ -922,13 +922,12 @@ pub struct StartChannelThread {
     pub attachments: Vec<LocalAttachmentInput>,
     /// Required for, and only for, an automation author.
     pub automation: Option<ChatMessageAutomation>,
-    /// The agent writing in one of its runs. Only an agent author has one.
+    /// The agent in Settings writing. Only an agent author has one.
     pub author_agent_id: Option<String>,
     /// What the agent reported about itself. Only an agent author has one.
     pub author_reported: Option<ChatReportedAgent>,
-    /// The author's own agents the message wakes, besides the agent whose
-    /// chat this is. Only a person's message wakes agents, and the ids stay
-    /// on this computer.
+    /// Every agent the message wakes, its DM's agent included. Only a
+    /// person's message wakes agents, and the ids stay on this computer.
     pub wake_agent_ids: Vec<String>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with

@@ -335,8 +335,22 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal, hidden = "Histor
   };
 }
 
+// An agent you run, as this computer's settings and the workspace's registry
+// entry describe it: its name and handle, the accounts its person posts as,
+// and whether a post with no account is theirs.
+export interface CliConnectedAgent {
+  agentId: string;
+  name: string;
+  handle: string;
+  requesters: string[];
+  unattributedCounts: boolean;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   signal?: AbortSignal;
+  // The agent you run that the request named, checked against this
+  // computer's settings. Absent for every other caller.
+  connected?: CliConnectedAgent;
   stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   shareLinkAgents?: {
@@ -429,14 +443,17 @@ export interface CliServerOptions {
   dispatchedAgent(workspaceId: string): string | null;
   // The engine's id for that run when dohc dispatched it as agent work, or
   // null. The engine reads the run's agent from it, so a read moves only that
-  // agent's place, whatever the command line says. Without a run, reads are
-  // those of agents outside a run.
+  // agent's place, whatever the command line says. An agent you run reads as
+  // itself; without a run, other reads are the unnamed agents'.
   dispatchedRunId(workspaceId: string): string | null;
   // The run an agent's writes name while a run dohc dispatched, or one
   // started from Settings, holds the workspace's run slot, or null. It is
   // read with the depth, so a write names the run it was made in.
   agentWriteRunId(workspaceId: string): string | null;
   agentRunWorkspace(runId: string): string | undefined;
+  // The agent you run with this id in this computer's settings, as it reads
+  // and writes in the workspace, or null when no agent you run has the id.
+  connectedAgent(workspaceId: string, agentId: string): Promise<CliConnectedAgent | null>;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -562,7 +579,7 @@ export const FILES_GROUP: CliGroup = {
   kind: "group",
 };
 
-function groupForCli(channel: ChatChannelSummary): CliGroup {
+function groupForCli(channel: Pick<ChatChannelSummary, "id" | "kind" | "name" | "slug" | "purpose">): CliGroup {
   return {
     id: cliChannelId(channel.id),
     name: channel.kind === "agent" ? channel.slug : channel.name,
@@ -761,20 +778,22 @@ function chatWriteActor(
   return options.dispatchedAgent(context.workspaceId) === null ? writeActor(actor, context, options) : "agent";
 }
 
-// The agent writing through this socket: its handshake or --agent name. A
-// run dohc dispatched is its agent, by id, whatever name a write claims, so
-// the run's file edits and replies are one actor.
+// The agent writing through this socket: its handshake or --agent name. An
+// agent you run is its id, even while a run holds the workspace. A run dohc
+// dispatched is its agent, by id, whatever name a write claims, so the run's
+// file edits and replies are one actor.
 function claimedAgentName(
   agent: string | undefined,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): string | undefined {
-  return options.dispatchedAgent(context.workspaceId) ?? agent;
+  return context.connected?.agentId ?? options.dispatchedAgent(context.workspaceId) ?? agent;
 }
 
-// Who a chat write through this socket is. An agent's message during a run
-// dohc dispatched is that run's agent's. What an agent reported about itself
-// rides beside its name; a person's write carries none.
+// Who a chat write through this socket is. An agent you run writes as itself.
+// Any other agent's message during a run dohc dispatched is that run's
+// agent's. What an agent reported about itself rides beside its name; a
+// person's write carries none.
 function cliChatWriter(
   actor: CliActor,
   context: CliWorkspaceContext,
@@ -782,17 +801,18 @@ function cliChatWriter(
   agentName?: string,
   reported?: CliReportedAgent,
 ): PersonWriter {
-  const runAgentId = actor === "agent" ? options.dispatchedAgent(context.workspaceId) : null;
+  const agentId = actor !== "agent" ? null : context.connected?.agentId ?? options.dispatchedAgent(context.workspaceId);
   return {
     via: "cli",
     actor,
-    ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}),
+    ...(agentId ? { agentId } : agentName ? { agentName } : {}),
     ...(actor === "agent" && reported ? { reported } : {}),
   };
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
-// traffic carries its claimed name, or `dohc-mcp` when unnamed,
+// traffic carries the id of the agent you run, else its claimed name, or
+// `dohc-mcp` when unnamed,
 // acting on behalf of the local owner, at the depth of the
 // agent run in progress and naming that run; a human write is attributed as
 // this device's local author under the workspace display name.
@@ -1351,16 +1371,26 @@ async function buildShowResult(
   };
 }
 
-// A run dohc dispatched reads as its agent. Any other agent reads as an
-// unnamed one.
-function agentReader(runId: string | null): ChatAgentReader {
+// Which agent reads: an agent you run as itself, then the agent of `runId`,
+// a run dohc dispatched, then the unnamed agents.
+function chatAgentReader(context: CliWorkspaceContext, runId: string | null): ChatAgentReader {
+  const { connected } = context;
+  if (connected) {
+    return {
+      kind: "connected",
+      agentId: connected.agentId,
+      handle: connected.handle,
+      requesters: connected.requesters,
+      unattributedCounts: connected.unattributedCounts,
+    };
+  }
   return runId === null ? { kind: "unnamed" } : { kind: "run", runId };
 }
 
 async function markShownThreadRead(
   context: CliWorkspaceContext,
   actor: CliActor,
-  runId: string | null,
+  reader: ChatAgentReader,
   threadId: string,
   messages: readonly ChatMessage[],
 ): Promise<void> {
@@ -1373,7 +1403,7 @@ async function markShownThreadRead(
         : current);
     await context.store.markThreadReadByAgent({
       workspaceId: context.workspaceId,
-      reader: agentReader(runId),
+      reader,
       threadId,
       upTo: { createdAtMs: latest.createdAtMs, messageId: latest.id },
     });
@@ -3512,7 +3542,7 @@ async function dispatchWorkspace(
         ? new Set(
             (await context.store.listAgentUnreadThreads(
               context.workspaceId,
-              agentReader(options.dispatchedRunId(context.workspaceId)),
+              chatAgentReader(context, options.dispatchedRunId(context.workspaceId)),
             )).map(
               (thread) => thread.id,
             ),
@@ -3581,20 +3611,21 @@ async function dispatchWorkspace(
       const loadedById = new Map(
         loadedThreads.map((thread) => [thread.thread.id, thread]),
       );
-      // Inside a run dohc dispatched, the inbox is that run's agent's unread
-      // work: its chat, and each message elsewhere that asked it. Outside a
-      // run, unnamed agents share plain @agent mentions and replies in
+      // An agent you run, and the agent of a run dohc dispatched, each read
+      // their own unread work: their chat, and each message elsewhere that
+      // asked them. Unnamed agents share plain @agent mentions and replies in
       // threads they posted in. Agent chats belong to their agents.
-      const runId = options.dispatchedRunId(context.workspaceId);
-      const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
-      const reader = agentReader(runId);
+      const reader = chatAgentReader(context, options.dispatchedRunId(context.workspaceId));
+      const readerAgentId = reader.kind === "connected"
+        ? reader.agentId
+        : reader.kind === "run" ? options.dispatchedAgent(context.workspaceId) : null;
       const mentionRows = await context.store.listAgentUnreadRequests(context.workspaceId, reader);
-      const unread = runId === null
+      const unread = reader.kind === "unnamed"
         ? [...new Set(mentionRows.map(row => row.threadId))].map(id => ({ id }))
         : await context.store.listAgentUnreadThreads(context.workspaceId, reader);
       const agentChannelIds = new Set(
         channels
-          .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
+          .filter(({ engine }) => engine.kind === "agent" && (readerAgentId === null || engine.agentId === readerAgentId))
           .map(({ engine }) => engine.id),
       );
       const inboxThreads = await Promise.all(
@@ -3690,7 +3721,7 @@ async function dispatchWorkspace(
         await markShownThreadRead(
           context,
           request.args.actor,
-          options.dispatchedRunId(context.workspaceId),
+          chatAgentReader(context, options.dispatchedRunId(context.workspaceId)),
           target.thread.thread.id,
           messages,
         );
@@ -3744,7 +3775,8 @@ async function dispatchWorkspace(
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : actor === "agent"
-          ? await askingThreadParent(context, threadId, messages, request.args.runId ?? options.dispatchedRunId(context.workspaceId), options.onError)
+          // An agent you run answers no run.
+          ? await askingThreadParent(context, threadId, messages, context.connected ? null : request.args.runId ?? options.dispatchedRunId(context.workspaceId), options.onError)
           : undefined;
       let decisionMessage: ChatMessage | undefined;
       if (request.args.resolve) {
@@ -3807,7 +3839,7 @@ async function dispatchWorkspace(
         try {
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
-            reader: agentReader(options.dispatchedRunId(context.workspaceId)),
+            reader: chatAgentReader(context, options.dispatchedRunId(context.workspaceId)),
             threadId,
             upTo: { createdAtMs: message.createdAtMs, messageId: message.id },
           });
@@ -4036,6 +4068,17 @@ async function workspaceContextForRequest(
 ): Promise<CliWorkspaceContext> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  // An agent you run is named once, here. A person is never one, and a run
+  // never names one.
+  const { agentId } = request.args;
+  let connected: CliConnectedAgent | null = null;
+  if (agentId !== undefined) {
+    if (request.args.actor !== "agent") throw new CliCommandError("Only an agent works as an agent you run. Send actor \"agent\" with its id.");
+    if ("runId" in request.args && request.args.runId) throw new CliCommandError("An agent you run is not a run. Send its id without a run id.");
+    connected = await options.connectedAgent(workspace.workspaceId, agentId);
+    if (!connected) throw new CliCommandError("No agent you run has this id in Settings › Agents.");
+    if (!connected.handle) throw new CliCommandError("Give this agent a name with a letter or digit in Settings › Agents, so @ can reach it.");
+  }
   if ("runId" in request.args && request.args.runId) {
     const runWorkspaceId = options.agentRunWorkspace(request.args.runId);
     if (runWorkspaceId !== undefined) {
@@ -4069,7 +4112,8 @@ async function workspaceContextForRequest(
           : "chats are not available in a read-only shared view",
     );
   }
-  const context = await options.openWorkspace(workspace);
+  const opened = await options.openWorkspace(workspace);
+  const context = connected ? { ...opened, connected } : opened;
   if (isChatReadVerb(request.verb)) {
     await notifyRead(options, context, chatReadTarget(request));
   }
@@ -4077,13 +4121,29 @@ async function workspaceContextForRequest(
 }
 
 const chatWaiters = new WeakMap<CliServerOptions, ChatMessageWaiters>();
+// A wait walks its reader's requests this many at a time, and returns at
+// most WATCH_BATCH of them.
+const WATCH_PAGE = 200;
+const WATCH_BATCH = 100;
+// The most message bytes one answer carries, so it fits an MCP client's tool
+// result. A first message past it still comes alone.
+export const WATCH_BATCH_MAX_BYTES = 96 * 1024;
+const MAX_WATCH_SEEN = 50_000;
+// `reader` is the id of the agent you run, or null for unnamed agents. Each
+// seen request is its time and message id.
 const watchCursorSchema = z.object({
-  version: z.literal(1),
+  v: z.literal(2),
   workspaceId: z.string(),
   group: z.string().nullable(),
   thread: z.string().nullable(),
-  seen: z.array(z.string().min(1).max(500)).max(50_000),
+  reader: z.string().nullable(),
+  seen: z.array(z.tuple([z.number().int().nonnegative(), z.string().min(1).max(500)])).max(MAX_WATCH_SEEN),
 }).strict();
+type WatchSeen = [createdAtMs: number, messageId: string];
+
+function compareWatchSeen([leftAt, leftId]: WatchSeen, [rightAt, rightId]: WatchSeen): number {
+  return leftAt - rightAt || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0);
+}
 
 async function watchMessages(
   request: Extract<CliRequest, { verb: "watch" }>,
@@ -4093,22 +4153,43 @@ async function watchMessages(
   if (request.args.actor !== "agent") throw new CliCommandError("Chat watch is for agents. Use chat inbox for your unread threads.");
   connectionSignal?.throwIfAborted();
   const context = await workspaceContextForRequest(request, options);
-  const scope = { version: 1 as const, workspaceId: context.workspaceId, group: request.args.group ?? null, thread: request.args.thread ?? null };
-  let seen: string[] = [];
+  // A wait never reads as a run's agent, even while a run holds the workspace.
+  const reader = chatAgentReader(context, null);
+  const scope = {
+    v: 2 as const,
+    workspaceId: context.workspaceId,
+    group: request.args.group ?? null,
+    thread: request.args.thread ?? null,
+    reader: context.connected?.agentId ?? null,
+  };
+  let seen: WatchSeen[] = [];
   if (request.args.cursor !== undefined) {
     try {
       const cursor = watchCursorSchema.parse(JSON.parse(Buffer.from(request.args.cursor, "base64url").toString("utf8")));
-      if (cursor.workspaceId !== scope.workspaceId || cursor.group !== scope.group || cursor.thread !== scope.thread) throw new Error("scope");
+      if (cursor.workspaceId !== scope.workspaceId || cursor.group !== scope.group || cursor.thread !== scope.thread || cursor.reader !== scope.reader) throw new Error("scope");
       seen = cursor.seen;
-    } catch { throw new CliCommandError("This chat cursor is invalid for this workspace or filter. Use its original workspace and filters."); }
+    } catch { throw new CliCommandError("This chat cursor is invalid for this agent, workspace or filter. Use its original agent, workspace and filters."); }
   }
-  const encode = (ids: string[]) => {
-    const cursor = Buffer.from(JSON.stringify({ ...scope, seen: ids })).toString("base64url");
-    if (ids.length > 50_000 || cursor.length > 1_048_576) throw new CliCommandError("The chat cursor is full. Mark processed threads read, then watch without a cursor.");
+  const encode = (entries: WatchSeen[]) => {
+    const cursor = Buffer.from(JSON.stringify({ ...scope, seen: entries })).toString("base64url");
+    if (entries.length > MAX_WATCH_SEEN || cursor.length > 1_048_576) throw new CliCommandError("The chat cursor is full. Mark processed threads read, then watch without a cursor.");
     return cursor;
   };
+  // The Group and thread filters resolve once, before the wait.
+  let channelId: string | undefined;
+  let threadId: string | undefined;
+  if (request.args.group !== undefined || request.args.thread !== undefined) {
+    const { channels, provisioned } = await loadChannels(context);
+    if (provisioned) await notifyWrite(options, context);
+    if (request.args.group !== undefined) {
+      const group = exactChannel(request.args.group, channels);
+      if (!group) throw new CliCommandError("Group not found. Use chat groups to choose a Group.");
+      channelId = group.engine.id;
+    }
+    if (request.args.thread !== undefined) threadId = resolveThread(request.args.thread, await loadThreads(context, channels)).thread.id;
+  }
   const empty = { messages: [], cursor: request.args.cursor ?? encode([]) };
-  const seenIds = new Set(seen);
+  const seenIds = new Set(seen.map(([, messageId]) => messageId));
   let waiters = chatWaiters.get(options);
   if (!waiters) chatWaiters.set(options, waiters = new ChatMessageWaiters());
   const signals = [connectionSignal, context.signal].filter((value): value is AbortSignal => value !== undefined);
@@ -4117,48 +4198,56 @@ async function watchMessages(
     timeoutMs: request.args.timeoutMs ?? CHAT_WATCH_TIMEOUT_MS,
     empty,
     subscribe: listener => subscribeChatWrites(context.workspaceId, listener),
-    refresh: () => { void notifyRead(options, context, request.args.thread ? { threadId: request.args.thread } : undefined); },
+    refresh: () => { void notifyRead(options, context, threadId ? { threadId } : undefined); },
+    // Walk the reader's requests from the start, skipping the seen ones,
+    // until the batch is full or the walk reaches the end. A late arrival
+    // with an older time is still met.
     query: async () => {
-      const { channels, provisioned } = await loadChannels(context);
-      if (provisioned) await notifyWrite(options, context);
-      const threads = await loadThreads(context, channels);
-      const selectedGroup = request.args.group === undefined ? undefined : exactChannel(request.args.group, channels);
-      if (request.args.group !== undefined && !selectedGroup) throw new CliCommandError("Group not found. Use chat groups to choose a Group.");
-      const selectedThread = request.args.thread === undefined ? undefined : resolveThread(request.args.thread, threads);
-      const admitted = (thread: LoadedThread) =>
-        (!selectedGroup || thread.thread.channelId === selectedGroup.engine.id) &&
-        (!selectedThread || thread.thread.id === selectedThread.thread.id);
-      const byId = new Map(threads.filter(admitted).map(thread => [thread.thread.id, thread]));
-      const candidates = new Set<string>();
-      const messages = new Map<string, CliResultByVerb["watch"]["messages"][number]>();
-      const cache = new Map<string, ChatMessage[]>();
-      const read = async (threadId: string) => {
-        let rows = cache.get(threadId);
-        if (!rows) {
-          rows = await context.store.listMessages({ workspaceId: context.workspaceId, threadId });
-          cache.set(threadId, rows);
-        }
-        return rows;
-      };
-      const add = (thread: LoadedThread, message: ChatMessage) => {
-        candidates.add(message.id);
-        if (seenIds.has(message.id)) return;
-        messages.set(message.id, {
-          threadId: cliThreadId(thread.thread.id), messageId: cliMessageId(message.id),
-          group: thread.group, author: authorForCli(message), createdAtMs: message.createdAtMs,
-          text: message.body,
+      const messages: CliResultByVerb["watch"]["messages"] = [];
+      const returned: WatchSeen[] = [];
+      const met = new Set<string>();
+      let bytes = 0;
+      let stoppedAt: WatchSeen | null = null;
+      let after: { createdAtMs: number; messageId: string } | undefined;
+      walk: for (;;) {
+        const page = await context.store.listAgentRequestsPage({
+          workspaceId: context.workspaceId,
+          reader,
+          ...(channelId === undefined ? {} : { channelId }),
+          ...(threadId === undefined ? {} : { threadId }),
+          ...(after === undefined ? {} : { after }),
+          limit: WATCH_PAGE,
         });
-      };
-      // Keep the outside-run inbox's reach even while dohc has a run open.
-      for (const mention of await context.store.listAgentUnreadRequests(context.workspaceId, { kind: "unnamed" })) {
-        const thread = byId.get(mention.threadId);
-        if (!thread) continue;
-        const message = (await read(mention.threadId)).find(row => row.id === mention.messageId);
-        if (message) add(thread, message);
+        for (const unread of page.requests) {
+          if (seenIds.has(unread.messageId)) {
+            met.add(unread.messageId);
+            continue;
+          }
+          const message = {
+            threadId: cliThreadId(unread.threadId),
+            messageId: cliMessageId(unread.messageId),
+            group: unread.channel ? groupForCli(unread.channel) : FILES_GROUP,
+            author: { kind: unread.author.kind, displayName: unread.author.displayName },
+            createdAtMs: unread.createdAtMs,
+            text: unread.body,
+          };
+          const size = Buffer.byteLength(JSON.stringify(message));
+          if (messages.length === WATCH_BATCH || (messages.length > 0 && bytes + size > WATCH_BATCH_MAX_BYTES)) {
+            stoppedAt = [unread.createdAtMs, unread.messageId];
+            break walk;
+          }
+          messages.push(message);
+          returned.push([unread.createdAtMs, unread.messageId]);
+          bytes += size;
+        }
+        const last = page.requests.at(-1);
+        if (!page.more || !last) break;
+        after = { createdAtMs: last.createdAtMs, messageId: last.messageId };
       }
-      const batch = [...messages.entries()].sort(([leftId, left], [rightId, right]) =>
-        left.createdAtMs - right.createdAtMs || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0)).slice(0, 100);
-      return { messages: batch.map(([, message]) => message), cursor: encode([...seen.filter(id => candidates.has(id)), ...batch.map(([id]) => id)]) };
+      // A seen request the walk met is still unread. One past where it
+      // stopped was not reached. Any other is read now, so it drops.
+      const kept = seen.filter((entry) => met.has(entry[1]) || (stoppedAt !== null && compareWatchSeen(entry, stoppedAt) >= 0));
+      return { messages, cursor: encode([...kept, ...returned]) };
     },
   });
 }

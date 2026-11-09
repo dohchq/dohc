@@ -198,7 +198,7 @@ export const CAPABILITIES = {
   "work.link.resolve": capability("Find the message a work link names, in the window's workspace or another on the link's server.", {ipc: ["resolveWorkLink"]}),
   "group.list": capability("List the Groups in this workspace.", {ipcReason: "No IPC channel carries this capability.", mcp: {owner: ["dohc_list_groups"], view: ["dohc_list_groups"], comment: ["dohc_list_groups"], edit: ["dohc_list_groups"]}}),
   "chat.threads.list": capability("List the threads in a Group.", {ipc: ["listChannelThreads"]}),
-  "chat.inbox.read": capability("List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.", {ipc: ["listPersonalChatFeed"], mcp: {owner: ["dohc_wait_for_messages"]}}),
+  "chat.inbox.read": capability("List unread threads. For an agent, also list its unread requests: mentions of it, its DMs, and replies in threads it posted in.", {ipc: ["listPersonalChatFeed"], mcp: {owner: ["dohc_wait_for_messages"]}}),
   "chat.show": capability("Show a thread or message and mark the thread read.", {ipcReason: "CLI-only action with no IPC channel."}),
   "chat.post": capability("Start a thread in a Group.", {ipc: ["startChannelThread"], mcp: {owner: ["dohc_start_group_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "chat.reply": capability("Reply in a thread.", {ipc: ["sendChatMessage"], mcp: {owner: ["dohc_reply_to_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),

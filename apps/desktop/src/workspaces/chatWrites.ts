@@ -5,6 +5,7 @@ import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/wo
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
+import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
@@ -26,12 +27,13 @@ import {
 // handshake name. It is provenance, like a document edit's author; without
 // it the message is from "Agent". A name that is one of the person's agents'
 // ids is dropped, so no other agent takes that agent's place.
-// `agentId` names the agent of a run dohc dispatched, which main knows; the
-// message carries that agent's id and settings name.
+// `agentId` names an agent you run, or the agent of a run dohc dispatched.
+// Main knows both; the message carries that agent's id and settings name.
 // `reported` is what the agent said about itself: its MCP client's product
 // and version, and the model it stated. It sits beside the author's name and
 // never replaces it.
-// A person's own message in the app wakes each of their agents it names.
+// A person's own message in the app wakes its DM's agent and each of their
+// agents it names, except the agents they run.
 export type ChatWriter =
   | { via: "renderer" }
   | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string; reported?: ChatReportedAgent }
@@ -91,8 +93,8 @@ export function createChatWrites(dependencies: {
   localUserDisplayName(): string;
   // The name of the person's agent with this id.
   agentDisplayName(agentId: string): Promise<string>;
-  // The person's agents a message names.
-  agentIdsNamedIn(body: string): Promise<string[]>;
+  // The agents a person's message wakes, from its body and its DM's agent.
+  agentIdsToWake(body: string, dmAgentId: string | null): Promise<string[]>;
   // Whether a name is one of the person's agents' ids.
   isOwnAgentId(name: string): Promise<boolean>;
   // The stable per-install id a signed-out reaction is authored under.
@@ -111,7 +113,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, agentIdsNamedIn, isOwnAgentId, localInstallationId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, agentIdsToWake, isOwnAgentId, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
@@ -140,6 +142,15 @@ export function createChatWrites(dependencies: {
     return channelId
       ? await place.store.getChannelWireId({ workspaceId: place.workspaceId, channelId })
       : null;
+  }
+
+  // The agent whose DM the target is in, or null. The write keeps the wire
+  // id, so its final check needs no second lookup.
+  async function dmAgentIdOf(place: ChatWritePlace, admission: Admission): Promise<string | null> {
+    if (admission.channelWireId === undefined) {
+      admission.channelWireId = await lookUpWireId(place, admission.target);
+    }
+    return admission.channelWireId === null ? null : agentIdForChannelWireId(admission.channelWireId);
   }
 
   // Synchronous: it reads the registry and the session as they are now, and
@@ -259,7 +270,9 @@ export function createChatWrites(dependencies: {
     }
     const writer = await admittedWriter(input.writer);
     const actor = await actorFor(writer);
-    const wakeAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
+    const wakeAgentIds = input.writer.via === "renderer"
+      ? await agentIdsToWake(body, await dmAgentIdOf(place, admission))
+      : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,

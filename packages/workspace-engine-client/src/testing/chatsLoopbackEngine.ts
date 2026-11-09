@@ -1923,12 +1923,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
     }
     state.messages.set(messageId, message);
-    // The engine's rule: a person's message requests the agent whose chat
-    // holds it and each agent it wakes, in the message's own write.
+    // The engine's rule: a person's message requests each agent its sender
+    // lists, its DM's agent included, in the message's own write.
     if (authorKind === "human" && origin !== "cli") {
-      const thread = state.threads.get(threadId);
-      const chatAgent = thread?.channelId ? state.channels.get(thread.channelId)?.agentId : undefined;
-      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...wakeAgentIds]) {
+      for (const agentId of wakeAgentIds) {
         const key = dispatchKey(messageId, agentId);
         if (state.dispatches.has(key)) continue;
         state.dispatches.set(key, {

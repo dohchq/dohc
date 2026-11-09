@@ -19,7 +19,7 @@ import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/works
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { chatWatchInputSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
+import { chatWatchInputSchema, cliAgentIdSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -85,12 +85,14 @@ export function parseArgs(argv: string[]): ToolContext {
   let root = nonEmptyArg(process.cwd(), "workspace root");
   let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
   let shareAccess: ShareAccess | undefined;
+  let agentId: string | undefined;
   const tools = new Set<keyof typeof MCP_TOOL_CAPABILITIES>();
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
     else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
     else if (argv[i] === "--tool") tools.add(toolArg(argv[++i]));
+    else if (argv[i] === "--agent-id") agentId = agentIdArg(argv[++i]);
   }
   const runId = process.env.DOHC_RUN_ID?.trim();
   return {
@@ -99,7 +101,16 @@ export function parseArgs(argv: string[]): ToolContext {
     ...(shareAccess ? { shareAccess } : {}),
     ...(tools.size > 0 ? { tools } : {}),
     ...(runId ? { runId } : {}),
+    ...(agentId ? { agentId } : {}),
   };
+}
+
+// A malformed id is refused, never dropped: without it the agent would work
+// unnamed and miss its own messages.
+function agentIdArg(value: string | undefined): string {
+  if (cliAgentIdSchema.safeParse(value).success) return value!;
+  const received = value === undefined ? "no value" : JSON.stringify(value);
+  throw new Error(`--agent-id must be an agent's id from Settings › Agents. Received: ${received}.`);
 }
 
 function nonEmptyArg(value: string, name: string): string {
@@ -582,7 +593,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   register("dohc_wait_for_messages", {
-    description: "Wait for the outside-run agent inbox without marking messages read. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
+    description: "Wait for this agent's unread requests without marking them read. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Without it, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
     inputSchema: chatWatchInputSchema.shape,
   }, async (args, extra) => {
     if (waits >= 4) return text({ ok: false, reason: "Too many chat waits. Finish an existing wait and try again." });

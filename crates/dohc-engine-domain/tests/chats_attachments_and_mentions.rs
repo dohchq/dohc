@@ -99,6 +99,33 @@ fn start_message(
     body: &str,
     now_ms: i64,
 ) {
+    start_waking(
+        store,
+        channel_id,
+        thread_id,
+        message_id,
+        kind,
+        author_user_id,
+        origin,
+        &[],
+        body,
+        now_ms,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_waking(
+    store: &mut EngineStore,
+    channel_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    kind: ChatActorKind,
+    author_user_id: Option<&str>,
+    origin: Option<&str>,
+    wake_agent_ids: &[&str],
+    body: &str,
+    now_ms: i64,
+) {
     LinkedChatStore::new(store)
         .start_channel_thread(
             &StartChannelThread {
@@ -121,7 +148,7 @@ fn start_message(
                 attachments: Vec::new(),
                 author_agent_id: None,
                 author_reported: None,
-                wake_agent_ids: Vec::new(),
+                wake_agent_ids: wake_agent_ids.iter().map(|id| (*id).to_owned()).collect(),
                 now_ms,
                 request_id: None,
             },
@@ -948,7 +975,7 @@ fn requests(store: &EngineStore) -> Vec<(String, String, String, i64, i64)> {
 }
 
 #[test]
-fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
+fn a_message_in_an_agent_chat_wakes_only_the_agents_its_sender_lists() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     LinkedChatStore::new(&mut store)
@@ -958,10 +985,26 @@ fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
         &mut store,
         "research-chat",
         "agent-thread",
+        "unlisted",
+        ChatActorKind::Human,
+        None,
+        None,
+        "hello",
+        19,
+    );
+    assert!(
+        requests(&store).is_empty(),
+        "an agent you run gets no request for its DM, so the sender lists none."
+    );
+    start_waking(
+        &mut store,
+        "research-chat",
+        "listed-thread",
         "direct",
         ChatActorKind::Human,
         None,
         None,
+        &["research"],
         "hello",
         20,
     );
@@ -996,7 +1039,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     LinkedChatStore::new(&mut store)
         .ensure_agent_channel(WS, "research-chat", "research", "Research", 11, &NO_FAULTS)
         .expect("agent chat");
-    start_message(
+    start_waking(
         &mut store,
         "research-chat",
         "agent-thread",
@@ -1004,6 +1047,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
         ChatActorKind::Human,
         None,
         None,
+        &["research"],
         "hello",
         20,
     );

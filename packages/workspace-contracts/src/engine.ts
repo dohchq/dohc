@@ -433,7 +433,8 @@ export interface ChatMessageAppendPayload {
   linkPrincipalId?: string;
   // The agent connection that wrote a link message. Only the relay sets it.
   agentConnectionId?: string;
-  // The agent that wrote an agent message in one of its runs.
+  // The agent in Settings that wrote an agent message: one you run, or the
+  // agent of a run.
   authorAgentId?: string;
   // What an agent reported about itself.
   authorReported?: ChatReportedAgent;
@@ -849,7 +850,7 @@ export interface ChannelThreadSummary {
     bodySnippet: string;
     automation?: ChatMessageAutomation;
     authorReported?: ChatReportedAgent;
-    // The agent that wrote the message in one of its runs. Provenance only.
+    // The agent in Settings that wrote the message. Provenance only.
     authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
@@ -952,7 +953,7 @@ export interface ChatMessage {
   body: string;
   createdAtMs: number;
   automation?: ChatMessageAutomation;
-  // The agent that wrote the message in one of its runs. Provenance only.
+  // The agent in Settings that wrote the message. Provenance only.
   authorAgentId?: string;
   // What the agent reported about itself. Only an agent message has one.
   authorReported?: ChatReportedAgent;
@@ -1210,13 +1211,12 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    // The agent writing in one of its runs. Only an agent author has one.
+    // The agent in Settings writing. Only an agent author has one.
     authorAgentId?: string;
     // What the agent reported about itself. Only an agent author has one.
     authorReported?: ChatReportedAgent;
-    // The agents this message wakes, resolved on this computer from the
-    // author's own agents it names. The agent whose chat this is also wakes.
-    // Never journaled.
+    // Every agent this message wakes, resolved from this computer's settings:
+    // its DM's agent and each agent dohc starts that it names. Never journaled.
     wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
@@ -1289,13 +1289,12 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    // The agent writing in one of its runs. Only an agent author has one.
+    // The agent in Settings writing. Only an agent author has one.
     authorAgentId?: string;
     // What the agent reported about itself. Only an agent author has one.
     authorReported?: ChatReportedAgent;
-    // The agents this message wakes, resolved on this computer from the
-    // author's own agents it names. The agent whose chat this is also wakes.
-    // Never journaled.
+    // Every agent this message wakes, resolved from this computer's settings:
+    // its DM's agent and each agent dohc starts that it names. Never journaled.
     wakeAgentIds?: string[];
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
