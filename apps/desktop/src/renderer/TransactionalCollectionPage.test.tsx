@@ -468,7 +468,8 @@ describe("transactional Collection page", () => {
     expect(input.closest("td")!.contains(error)).toBe(true);
     expect([input.value, input.disabled, input.getAttribute("aria-describedby")]).toEqual(["Alicia", true, error.id]);
     expect(save.disabled).toBe(false); expect(document.activeElement).toBe(save);
-    expect(onError).not.toHaveBeenCalled();
+    // The failure also takes a toast and a row in Notices, whose Try again sends the same change.
+    expect(onError).toHaveBeenCalledWith("dohc could not confirm this change.", expect.objectContaining({ message: "Connection ended after commit" }), expect.any(Function));
     expect(screen.queryByText("Change not confirmed")).toBeNull();
     expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(save);
@@ -602,7 +603,7 @@ describe("transactional Collection page", () => {
     const input = screen.getByLabelText<HTMLInputElement>("Name");
     expect([input.value, input.disabled, input.getAttribute("aria-invalid")]).toEqual(["Alicia", false, "true"]);
     expect(document.activeElement).toBe(input);
-    expect(onError).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith("The collection refused this change.", expect.objectContaining({ code: "operation_refused" }), null);
     expect(screen.queryByText("Change not confirmed")).toBeNull();
   });
 

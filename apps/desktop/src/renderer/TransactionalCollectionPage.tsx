@@ -377,8 +377,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         const words = refused ? "The collection refused this change." : "dohc could not confirm this change.";
         if (refused) { mutation.current = null; setPending(null); }
         // A cell still open keeps its value and says why under its input. Its check mark tries the same change again.
-        if (change.cell !== undefined && openCell.current === change.cell) { focusInvalid.current = true; setInvalid({ [change.cell]: words }); return; }
-        if (!refused) closeEditor();
+        if (change.cell !== undefined && openCell.current === change.cell) { focusInvalid.current = true; setInvalid({ [change.cell]: words }); }
+        else if (!refused) closeEditor();
         onError(words, cause, refused ? null : () => { if (alive.current) void currentExecute.current(change); });
       }
     } finally { if (alive.current && !change.invalidated) { locked.current = false; setBusy(false); } }
