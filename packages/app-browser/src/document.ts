@@ -82,12 +82,12 @@ const LINK_SCRIPT = 'addEventListener("click",e=>{const a=e.target instanceof El
 const COLOR_SCHEME_SCRIPT = '{const dark=matchMedia("(prefers-color-scheme: dark)");let sent;const report=()=>{' +
   'let value=getComputedStyle(document.documentElement).colorScheme;' +
   'if(value==="normal")value=document.querySelector("meta[name=color-scheme]")?.content??"";' +
-  'const schemes=value.split(" ").filter(name=>name==="light"||name==="dark"),wanted=dark.matches?"dark":"light";' +
+  'const schemes=value.split(/\\s+/).filter(name=>name==="light"||name==="dark"),wanted=dark.matches?"dark":"light";' +
   'const scheme=schemes.includes(wanted)?wanted:schemes[0]??"light";' +
   'if(scheme!==sent){sent=scheme;parent.postMessage({kind:"dohc-color-scheme",scheme},"*");}};' +
   'dark.addEventListener("change",report);addEventListener("DOMContentLoaded",report);addEventListener("load",report);' +
   'const watch=new MutationObserver(report);watch.observe(document.documentElement,{attributes:true});' +
-  'watch.observe(document.head,{childList:true,subtree:true,attributes:true});report();}';
+  'watch.observe(document.head,{childList:true,subtree:true,attributeFilter:["content"]});report();}';
 const FRAME_SCRIPT = LINK_SCRIPT + COLOR_SCHEME_SCRIPT;
 
 /**
