@@ -21,6 +21,7 @@ class TestWindow extends EventEmitter {
     send: vi.fn(),
   });
   isFullScreen = () => false;
+  isFocused = () => false;
   setIgnoreMouseEvents = vi.fn();
   show = vi.fn();
   loadFile = vi.fn();
