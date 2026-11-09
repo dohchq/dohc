@@ -8263,6 +8263,18 @@ mod tests {
     /// Apply one of the other machine's editor changes to `doc.md` here.
     fn apply_peer_ydoc(
         store: &mut EngineStore,
+        sender: (&str, i64, i64),
+        claim: &str,
+        bytes: &[u8],
+        is_base_state: bool,
+    ) {
+        apply_peer_ydoc_in(store, "main", sender, claim, bytes, is_base_state);
+    }
+
+    /// The editor change above, to `doc.md` in `version`.
+    fn apply_peer_ydoc_in(
+        store: &mut EngineStore,
+        version: &str,
         (origin, seq, relay): (&str, i64, i64),
         claim: &str,
         bytes: &[u8],
@@ -8273,7 +8285,7 @@ mod tests {
             seq,
             "ydoc.update",
             json!({
-                "versionId": "main", "objectId": "object-a", "path": "doc.md",
+                "versionId": version, "objectId": "object-a", "path": "doc.md",
                 "contentKind": "plaintext", "updateBlobSha256": sha,
                 "lineageClaimId": claim, "isBaseState": is_base_state,
             }),
@@ -8304,6 +8316,25 @@ mod tests {
         updates: &[(&str, i64, &[u8])],
         applied: usize,
     ) -> (ScratchDir, EngineStore, DocKey) {
+        let (scratch, mut store) = store_with_doc();
+        let claim = dohc_engine_storage::hex_sha256(base);
+        apply_peer_ydoc(&mut store, ("peer", 0, 1), &claim, base, true);
+        for (index, (origin, seq, update)) in updates.iter().enumerate() {
+            if index == applied {
+                delete_doc(&mut store);
+            }
+            let relay = i64::try_from(index).unwrap() + 2;
+            apply_peer_ydoc(&mut store, (*origin, *seq, relay), &claim, update, false);
+        }
+        if applied == updates.len() {
+            delete_doc(&mut store);
+        }
+        let key = DocKey::new("ws", "main", "object-a").unwrap();
+        (scratch, store, key)
+    }
+
+    /// This machine stored "base text" in `doc.md` in `main`.
+    fn store_with_doc() -> (ScratchDir, EngineStore) {
         let scratch = ScratchDir::new().unwrap();
         let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
         let mut store = EngineStore::open(&path, 1_000).unwrap();
@@ -8330,20 +8361,7 @@ mod tests {
                 &NoFaults,
             )
             .unwrap();
-        let claim = dohc_engine_storage::hex_sha256(base);
-        apply_peer_ydoc(&mut store, ("peer", 0, 1), &claim, base, true);
-        for (index, (origin, seq, update)) in updates.iter().enumerate() {
-            if index == applied {
-                delete_doc(&mut store);
-            }
-            let relay = i64::try_from(index).unwrap() + 2;
-            apply_peer_ydoc(&mut store, (*origin, *seq, relay), &claim, update, false);
-        }
-        if applied == updates.len() {
-            delete_doc(&mut store);
-        }
-        let key = DocKey::new("ws", "main", "object-a").unwrap();
-        (scratch, store, key)
+        (scratch, store)
     }
 
     /// This machine deletes `doc.md`, which retires its editor history.
@@ -8353,11 +8371,16 @@ mod tests {
 
     /// The deletion above, recorded as `moment_id` at `now_ms`.
     fn delete_doc_as(store: &mut EngineStore, moment_id: &str, now_ms: i64) {
+        delete_doc_in(store, "main", moment_id, now_ms);
+    }
+
+    /// The deletion above, in `version`.
+    fn delete_doc_in(store: &mut EngineStore, version: &str, moment_id: &str, now_ms: i64) {
         VersionedTextStore::new(store)
             .delete_text_file(
                 &DeleteTextFile {
                     workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
+                    version_id: version.to_owned(),
                     path: "doc.md".to_owned(),
                     moment_id: moment_id.to_owned(),
                     request_id: None,
@@ -8372,7 +8395,7 @@ mod tests {
             .unwrap();
         store
             .write_with(&NoFaults, |tx| {
-                crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")
+                crate::retire_ydoc_lineage_in_tx(tx, "ws", version, "object-a")
             })
             .unwrap();
     }
@@ -8418,15 +8441,15 @@ mod tests {
             .unwrap();
     }
 
-    /// Roll back the change `moment_id` to `doc.md` as the runtime's rollback
-    /// does: check that it may go back, then reconcile the editor history
-    /// with the text it brings back.
-    fn roll_back_doc_change(store: &mut EngineStore, moment_id: &str) {
+    /// Roll back the change `moment_id` to `doc.md` in `version` as the
+    /// runtime's rollback does: check that it may go back, then reconcile the
+    /// editor history with the text it brings back, if any.
+    fn roll_back_doc_change(store: &mut EngineStore, version: &str, moment_id: &str) {
         VersionedTextStore::new(store)
             .rollback_text_file_mutation_with(
                 &dohc_engine_domain::RollbackTextFileMutation {
                     workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
+                    version_id: version.to_owned(),
                     path: "doc.md".to_owned(),
                     mutation_moment_id: moment_id.to_owned(),
                     request_id: None,
@@ -8445,7 +8468,7 @@ mod tests {
                     crate::reconcile_local_resulting_head_in_tx(
                         tx,
                         "ws",
-                        "main",
+                        version,
                         object_id,
                         resulting,
                         None,
@@ -8529,7 +8552,7 @@ mod tests {
             conflict_id: "conflict-1".to_owned(),
             chosen_from: ResolveChoiceV1::Current,
             resolution: ResolutionV1::KeptCurrent,
-            target_version_id: "main".to_owned(),
+            target_version_id: key.version_id.clone(),
             source_version_id: "peer".to_owned(),
             paths: vec!["doc.md".to_owned()],
             current: head("moment-peer-edit", 25),
@@ -8873,19 +8896,10 @@ mod tests {
     fn a_kept_copy_over_a_deletion_asks_when_this_machine_rolled_back_the_first_deletion() {
         let (base, first, _, _) = peer_editor_history();
         let (_scratch, mut store, key) = deleter_with_retired_history(&base, &[], 0);
-        roll_back_doc_change(&mut store, "moment-deleted");
+        roll_back_doc_change(&mut store, "main", "moment-deleted");
         assert_eq!(text_keep_head(&mut store).text, "base text");
         delete_doc_as(&mut store, "moment-deleted-again", 35);
-        let deletions: i64 = store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM moments WHERE object_id='object-a' AND operation='delete'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .unwrap();
-        assert_eq!(deletions, 1);
+        assert_eq!(removals_and_creations(&store, "main").0, 1);
         let claim = dohc_engine_storage::hex_sha256(&base);
         apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
         import_peer_kept_copy(&mut store, &key, (&base, &first), "base text\nTokyo");
@@ -8893,6 +8907,84 @@ mod tests {
         assert_eq!(text_keep_open_rows(&store), 1);
         let head = VersionedTextStore::new(&mut store)
             .read_text("ws", "main", "doc.md")
+            .unwrap();
+        assert!(head.is_none(), "{head:?}");
+    }
+
+    /// The rows for `doc.md`'s note in `version` that remove it, and those
+    /// that write it where it was absent.
+    fn removals_and_creations(store: &EngineStore, version: &str) -> (i64, i64) {
+        let sql = "SELECT COALESCE(SUM(operation='delete'),0), \
+                   COALESCE(SUM(operation='write' AND before_present IN (0,1)),0) \
+                   FROM moments WHERE version_id=?1 AND object_id='object-a'";
+        store
+            .read_with(|conn| conn.query_row(sql, [version], |row| Ok((row.get(0)?, row.get(1)?))))
+            .unwrap()
+    }
+
+    /// This machine rolled back its deletion, then rolled back that rollback,
+    /// which removes the note again. The other machine reviewed only the
+    /// first deletion, so its kept copy opens a review here and the note
+    /// stays removed.
+    #[test]
+    fn a_kept_copy_over_a_deletion_asks_when_this_machine_rolled_back_its_rollback() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, key) = deleter_with_retired_history(&base, &[], 0);
+        roll_back_doc_change(&mut store, "main", "moment-deleted");
+        assert_eq!(text_keep_head(&mut store).text, "base text");
+        let undone =
+            dohc_engine_domain::rollback_compensating_moment_id("ws", "main", "moment-deleted");
+        roll_back_doc_change(&mut store, "main", &undone);
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "doc.md")
+            .unwrap();
+        assert!(head.is_none(), "{head:?}");
+        assert_eq!(removals_and_creations(&store, "main"), (1, 1));
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
+        import_peer_kept_copy(&mut store, &key, (&base, &first), "base text\nTokyo");
+
+        assert_eq!(text_keep_open_rows(&store), 1);
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "doc.md")
+            .unwrap();
+        assert!(head.is_none(), "{head:?}");
+    }
+
+    /// A named version took the note over from `main`, so it holds no row
+    /// for the note's creation. There, this machine rolled back its deletion
+    /// and removed the note again. The kept copy opens a review in that
+    /// version and the note stays removed there.
+    #[test]
+    fn a_kept_copy_over_a_deletion_asks_in_a_forked_version_after_a_rolled_back_deletion() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store) = store_with_doc();
+        VersionedTextStore::new(&mut store)
+            .create_named_version(
+                &dohc_engine_domain::CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    new_version_id: "feature".to_owned(),
+                    name: "Feature".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    now_ms: 12,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        apply_peer_ydoc_in(&mut store, "feature", ("peer", 0, 1), &claim, &base, true);
+        delete_doc_in(&mut store, "feature", "moment-deleted", 25);
+        roll_back_doc_change(&mut store, "feature", "moment-deleted");
+        delete_doc_in(&mut store, "feature", "moment-deleted-again", 35);
+        assert_eq!(removals_and_creations(&store, "feature"), (1, 1));
+        apply_peer_ydoc_in(&mut store, "feature", ("peer", 1, 2), &claim, &first, false);
+        let key = DocKey::new("ws", "feature", "object-a").unwrap();
+        import_peer_kept_copy(&mut store, &key, (&base, &first), "base text\nTokyo");
+
+        assert_eq!(text_keep_open_rows(&store), 1);
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "feature", "doc.md")
             .unwrap();
         assert!(head.is_none(), "{head:?}");
     }
