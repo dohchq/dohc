@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertTriangle, Archive, CalendarDays, Check, CheckSquare, ChevronLeft, ChevronRight, Clock, Download, Expand, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, SlidersHorizontal, Square, Table2, Trash2, Undo2, X } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
@@ -408,11 +408,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     } catch (cause) { if (alive.current) onError("dohc could not confirm deletion.", cause, null); }
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
-  // An edit of a field this page of the table shows opens in its cell.
-  const cellEdit = editor?.kind === "edit" && !visual && page !== null && fields.some(field => field.fieldId === editor.field.fieldId) && page.rows.some(row => sameRecord(row, editor.row)) ? editor : null;
-  openCell.current = cellEdit?.field.fieldId ?? null;
+  // An edit started in record details opens in its field there. Any other edit of a field this page of the table shows opens in its cell.
+  const detailsEdit = editor?.kind === "edit" && details !== null && sameRecord(details, editor.row) ? editor : null;
+  const cellEdit = !detailsEdit && editor?.kind === "edit" && !visual && page !== null && fields.some(field => field.fieldId === editor.field.fieldId) && page.rows.some(row => sameRecord(row, editor.row)) ? editor : null;
+  const openEdit = detailsEdit ?? cellEdit;
+  openCell.current = openEdit?.field.fieldId ?? null;
   // The open cell's own change that could not be confirmed: the cell says so, and its check mark and × stay usable.
-  const cellPending = pending?.cell !== undefined && pending.cell === cellEdit?.field.fieldId;
+  const cellPending = pending?.cell !== undefined && pending.cell === openEdit?.field.fieldId;
   const disabled = busy || visualBusy || pending !== null || resourceBusy;
   const cellDisabled = busy || visualBusy || resourceBusy || (pending !== null && !cellPending);
   const readDisabled = busy || visualBusy || resourceBusy;
@@ -457,6 +459,20 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       resourceLock.current = pendingResources.current.size > 0; setResourceBusy(resourceLock.current);
     }} /> : field.type === "relation" && props.resolveRelation ? <CollectionRelationInput {...input} scope={scope} resolve={props.resolveRelation} onError={onError} /> : <ValueInput {...input} />;
   };
+  // An open cell, in the table or in record details: its form, its Cancel and Save, and its keys.
+  // Escape works from the input and from Cancel and Save, which sit outside the form.
+  const editForm = (field: TransactionalField, className: string) => <form ref={editorForm} id={`${errorIds}-cell`} aria-label={`Edit ${field.name}`} className={`flex flex-col gap-1 wrap-anywhere ${className}`} onSubmit={event => { event.preventDefault(); submitEditor(); }}>{valueInput(field)}{fieldError(field)}</form>;
+  const editButtons = <>
+    <IconButton title="Cancel" aria-label="Cancel" disabled={cellDisabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
+    <IconButton ref={cellSave} type="submit" form={`${errorIds}-cell`} title="Save" aria-label="Save" disabled={cellDisabled}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
+  </>;
+  const editKeys = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.defaultPrevented || isComposingKey(event)) return;
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!cellDisabled) closeEditor(); }
+    else if (event.key === "Enter" && (event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement && event.target.type !== "file")) { event.preventDefault(); event.target.form?.requestSubmit(); }
+  };
+  // An open input keeps the value's text where it was. A checkbox or a list of choices keeps its own place.
+  const inPlace = (field: TransactionalField) => field.type !== "checkbox" && field.type !== "multi-select";
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
   const savedPages = props.copy && "coverage" in props.copy && props.copy.coverage === "saved-pages";
   const hasManagement = props.onCustomize || props.onReviewSchema || props.onManageAccess || props.onExportRecovery || props.onTransferCsv || props.onHistory || props.onPendingResponses || props.onArchive;
@@ -525,23 +541,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         // The row with an open cell aligns its cells to the top, so an error under the input pushes only the rows below.
         const editing = cellEdit !== null && sameRecord(row, cellEdit.row);
         const rest = editing ? "px-3 pt-2.5 pb-2 align-top" : "px-3 py-2";
-        // Escape works from the input and from the row's Cancel and Save, which sit outside the cell's form.
-        return <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover" onKeyDown={editing ? event => {
-          if (event.defaultPrevented || isComposingKey(event)) return;
-          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!cellDisabled) closeEditor(); }
-          else if (event.key === "Enter" && (event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement && event.target.type !== "file")) { event.preventDefault(); event.target.form?.requestSubmit(); }
-        } : undefined}>{fields.map(field => {
+        return <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover" onKeyDown={editing ? editKeys : undefined}>{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const open = editing && cellEdit?.field.fieldId === field.fieldId;
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
-        // An open cell's input keeps the value's text where it was.
-        return <td key={field.fieldId} className={`${open && field.type !== "checkbox" && field.type !== "multi-select" ? "px-px py-[3px] align-top" : rest} text-ink`}>{attachment && !open ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} hidden={open} className="block w-full truncate rounded text-left" onClick={event => {
+        return <td key={field.fieldId} className={`${open && inPlace(field) ? "px-px py-[3px] align-top" : rest} text-ink`}>{attachment && !open ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} hidden={open} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation: edit, row, field });
-        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="block truncate text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}{open ? <form ref={editorForm} id={`${errorIds}-cell`} aria-label={`Edit ${field.name}`} className="flex flex-col gap-1 wrap-anywhere" onSubmit={event => { event.preventDefault(); submitEditor(); }}>{valueInput(field)}{fieldError(field)}</form> : null}</td>;
-      })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className={rest}>{props.buttons!.render(field, row)}</td>)}<td className={editing ? "px-3 py-2 align-top" : "px-3 py-2"}><div className="flex justify-end gap-2">{editing ? <>
-        <IconButton title="Cancel" aria-label="Cancel" disabled={cellDisabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
-        <IconButton ref={cellSave} type="submit" form={`${errorIds}-cell`} title="Save" aria-label="Save" disabled={cellDisabled}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
-      </> : null}{/* The record actions stay while hidden, so focus can return to the one that opened details. */}<IconButton hidden={editing} title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton hidden={editing} title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>;
+        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="block truncate text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}{open ? editForm(field, "") : null}</td>;
+      })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className={rest}>{props.buttons!.render(field, row)}</td>)}<td className={editing ? "px-3 py-2 align-top" : "px-3 py-2"}><div className="flex justify-end gap-2">{editing ? editButtons : null}{/* The record actions stay while hidden, so focus can return to the one that opened details. */}<IconButton hidden={editing} title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton hidden={editing} title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>;
       })}
       {page.rows.length === 0 && (query.search || !canCreate) ? <tr><td colSpan={columns} className="px-3 py-2 text-muted">{query.search ? "No records match. Try a shorter search." : "No records yet. Refresh to check for new submissions."}</td></tr> : null}
       {createInRow ? <tr ref={createRow} aria-label="New record" className="border-b border-line" onKeyDown={event => {
@@ -556,11 +563,15 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </tbody>
     </table></div> : null}
     {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="tabular-nums">{page.rows.length} {page.rows.length === 1 ? "record" : "records"}{previous.length > 0 || page.nextCursor !== null ? " on this page" : ""}</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
-    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
-      onClose={() => setDetails(null)}
-      onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation, row: details, field }); }}
+    {/* While a field is open in details, its other controls wait. Closing details closes the field, as Cancel does. */}
+    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled || detailsEdit !== null} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
+      editing={detailsEdit ? { fieldId: detailsEdit.field.fieldId, content: <div data-edit-in-place className="flex min-w-0 flex-1 items-start gap-2" onKeyDown={editKeys}>
+        {editForm(detailsEdit.field, `min-w-0 flex-1${inPlace(detailsEdit.field) ? " -mt-[7px] -mb-[2.5px] -ml-[11px]" : ""}`)}<span className="flex shrink-0 gap-2">{editButtons}</span>
+      </div> } : undefined}
+      onClose={() => { setDetails(null); if (detailsEdit) closeEditor(); }}
+      onEdit={(field, operation, opener) => { trigger.current = opener; setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation, row: details, field }); }}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}
-    {editor && !createInRow && !cellEdit ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
+    {editor && !createInRow && !openEdit ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
       <div className="flex flex-wrap gap-3">{editorFields.map(field => <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{valueInput(field)}{fieldError(field)}</div>)}</div>
       <div className="mt-3 flex justify-end gap-2"><SecondaryButton disabled={disabled} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={disabled}>{editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
     </form> : null}

@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, type ReactNode } from "react";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import { Check, Pencil, Square } from "lucide-react";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
@@ -24,7 +24,10 @@ export interface TransactionalRecordDetailsDialogProps extends Pick<CollectionRe
   /** The fields switched-on automations set, by name, with those automations' names. */
   fieldMarks?: FieldMarks;
   canEdit(field: TransactionalField): boolean;
-  onEdit(field: TransactionalField, operation: DatasetOperation): void;
+  /** Opens a field for editing here. `opener` is its pencil, which takes focus back when the edit closes. */
+  onEdit(field: TransactionalField, operation: DatasetOperation, opener: HTMLElement): void;
+  /** The field open for editing, and what shows in its place: the page's input, any error, Cancel and Save. */
+  editing?: { fieldId: string; content: ReactNode };
   onAction?(operation: DatasetOperation): void;
   onClose(): void;
   onError: CollectionResourceError;
@@ -57,9 +60,11 @@ function ScopedRecordDetails(props: TransactionalRecordDetailsDialogProps) {
         const value = props.row.values[field.fieldId];
         const edit = props.canEdit(field) ? edits.find(operation => operation.fieldIds.includes(field.fieldId)) : undefined;
         const attachment = field.type === "attachment" && typeof value === "string" && props.readFile && !props.offline;
+        const open = edit !== undefined && props.editing?.fieldId === field.fieldId;
         return <div key={field.fieldId} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-start gap-4 border-b border-line py-2 last:border-0"><dt className="flex min-w-0 items-center gap-2 text-[12px] font-medium text-muted"><FieldTypeIcon type={field.type} className="shrink-0" /><span className="break-words">{field.name}</span>{props.fieldMarks?.has(field.name) ? <AutomationFieldMark automations={props.fieldMarks.get(field.name)!} /> : null}</dt><dd className="m-0 flex min-w-0 items-start justify-between gap-2 break-words text-[13px] text-ink">
-          {attachment ? <CollectionAttachmentCell key={value} scope={props.scope} fieldName={field.name} fileId={value} disabled={props.disabled ?? false} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value }] } } }, signal)} onError={props.onError} /> : field.type === "select" && typeof value === "string" && value ? <Pill>{value}</Pill> : field.type === "multi-select" && Array.isArray(value) && value.length > 0 ? <span className="flex flex-wrap gap-1">{value.map((item, index) => <Pill key={index}>{valueText(item)}</Pill>)}</span> : <span className="flex min-w-0 items-center gap-1.5 whitespace-pre-wrap">{field.type === "checkbox" && typeof value === "boolean" ? value ? <Check size={14} strokeWidth={1.9} aria-hidden className="text-success" /> : <Square size={14} strokeWidth={1.9} aria-hidden className="text-muted" /> : null}{field.type === "attachment" && value ? props.offline ? "File available when online" : "Attached file" : field.type === "checkbox" ? value === true ? "Yes" : value === false ? "No" : "—" : valueText(value)}</span>}
-          {edit ? <IconButton className="shrink-0" aria-label={`Edit ${field.name}`} title={`Edit ${field.name}`} disabled={props.disabled} onClick={() => props.onEdit(field, edit)}><Pencil size={14} strokeWidth={1.9} aria-hidden /></IconButton> : null}
+          {open ? props.editing!.content : attachment ? <CollectionAttachmentCell key={value} scope={props.scope} fieldName={field.name} fileId={value} disabled={props.disabled ?? false} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value }] } } }, signal)} onError={props.onError} /> : field.type === "select" && typeof value === "string" && value ? <Pill>{value}</Pill> : field.type === "multi-select" && Array.isArray(value) && value.length > 0 ? <span className="flex flex-wrap gap-1">{value.map((item, index) => <Pill key={index}>{valueText(item)}</Pill>)}</span> : <span className="flex min-w-0 items-center gap-1.5 whitespace-pre-wrap">{field.type === "checkbox" && typeof value === "boolean" ? value ? <Check size={14} strokeWidth={1.9} aria-hidden className="text-success" /> : <Square size={14} strokeWidth={1.9} aria-hidden className="text-muted" /> : null}{field.type === "attachment" && value ? props.offline ? "File available when online" : "Attached file" : field.type === "checkbox" ? value === true ? "Yes" : value === false ? "No" : "—" : valueText(value)}</span>}
+          {/* The pencil stays while hidden, so focus can return to it when the edit closes. */}
+          {edit ? <IconButton className="shrink-0" hidden={open} aria-label={`Edit ${field.name}`} title={`Edit ${field.name}`} disabled={props.disabled} onClick={event => props.onEdit(field, edit, event.currentTarget)}><Pencil size={14} strokeWidth={1.9} aria-hidden /></IconButton> : null}
         </dd></div>;
       })}
     </dl>

@@ -320,24 +320,43 @@ describe("transactional Collection page", () => {
     expect(details.getByText("Alice")).toBeTruthy();
     expect(details.queryByText("Private note")).toBeNull();
     fireEvent.click(details.getByRole("button", { name: "Edit Name" }));
-    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-    expect(document.activeElement).toBe(screen.getByLabelText("Name"));
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(document.activeElement).toBe(details.getByLabelText("Name"));
+    fireEvent.change(details.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(details.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
     expect(result.invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } });
   });
 
-  it("edits a field from details in its table cell, and Escape returns focus to the row's details button", async () => {
-    setup(); await screen.findByText("Alice");
+  it("edits a field in place in record details: Escape closes only the field, Enter saves, and focus returns to its pencil", async () => {
+    const { invoke } = setup(); await screen.findByText("Alice");
     const open = screen.getByRole("button", { name: "Open record 1" });
-    fireEvent.click(open);
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Record details" })).getByRole("button", { name: "Edit Name" }));
-    const input = screen.getByLabelText("Name");
-    expect(input.closest("td")).toBeTruthy(); expect(document.activeElement).toBe(input);
+    open.focus(); fireEvent.click(open);
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    const pencil = within(dialog).getByRole("button", { name: "Edit Name" });
+    fireEvent.click(pencil);
+    // The input opens where the value was, with the caret after it, and Cancel and Save take the pencil's place.
+    const input = within(within(dialog).getByRole("form", { name: "Edit Name" })).getByLabelText<HTMLInputElement>("Name");
+    expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 5]);
+    expect(within(input.closest("dd")!).getAllByRole("button").map(button => button.getAttribute("aria-label"))).toEqual(["Cancel", "Save"]);
+    expect(input.closest("td")).toBeNull();
+    fireEvent.change(input, { target: { value: "Alicia" } });
     fireEvent.keyDown(input, { key: "Escape" });
-    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
-    expect(document.activeElement).toBe(open);
+    expect(within(dialog).queryByRole("form", { name: "Edit Name" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    expect(within(dialog).getByText("Alice")).toBeTruthy();
+    expect(document.activeElement).toBe(pencil);
+
+    fireEvent.click(pencil);
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.keyDown(within(dialog).getByLabelText("Name"), { key: "Enter" });
+    await waitFor(() => expect(invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
+    await waitFor(() => expect(document.activeElement).toBe(pencil));
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    // The next Escape closes details, and focus returns to the row.
+    fireEvent.keyDown(pencil, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(open));
   });
 
   it("closes details on Escape and returns keyboard focus to the row", async () => {

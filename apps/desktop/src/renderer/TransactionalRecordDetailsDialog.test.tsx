@@ -33,7 +33,7 @@ describe("record details", () => {
     expect(dialog.queryByText("Hidden value")).toBeNull();
     expect(dialog.queryByRole("button", { name: "Open Other table action" })).toBeNull();
     fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-    expect(base.onEdit).toHaveBeenCalledWith(base.fields[0], base.operations[0]);
+    expect(base.onEdit).toHaveBeenCalledWith(base.fields[0], base.operations[0], dialog.getByRole("button", { name: "Edit Name" }));
     fireEvent.click(dialog.getByRole("button", { name: "Open Approve" }));
     expect(base.onAction).toHaveBeenCalledWith(base.operations[1]);
   });
