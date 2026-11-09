@@ -5,7 +5,7 @@ description: Triage dohc's nightly verification run, run one by hand, or fix the
 
 # Triage verification runs
 
-The verification queue service runs every PR gate on this host. Its root is `C:\w\_verification`.
+The verification queue service runs local PR gates on this host. Its root is `C:\w\_verification`.
 Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full run of main's head.
 Read [the verification procedure](../../../docs/engineering/verify-agent-work.md) for the queue, flaky tests, the nightly run, and test times.
 
@@ -13,7 +13,7 @@ Both procedures follow these rules:
 
 - Follow `AGENTS.md`. Keep one concern per PR.
 - Create worktrees with `~/dev/garage/tools/worktree.mjs`. Remove your worktrees and processes when you finish.
-- Verify each PR with `pnpm verify:pr --base origin/main` through the queue.
+- Verify each PR with `pnpm verify:pr --base origin/main` through the queue, unless passing PR checks cover its head.
 - Owners take turns in the queue. You may move a waiting request with `pnpm verify:queue move` and a `--reason`: `--before` to order one owner's requests, and `--first` only to unblock other work, as [the procedure](../../../docs/engineering/verify-agent-work.md#move-a-waiting-request) describes.
 - Do not cancel, kill, or edit another request, or its files under `C:\w\_verification` or `C:\w\_locks`.
 - Do not stop another agent's run.
