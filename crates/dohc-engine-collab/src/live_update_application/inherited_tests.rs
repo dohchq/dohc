@@ -105,12 +105,13 @@ fn applies(f: &mut Fixture, event: AdmittedLiveUpdate) -> LiveUpdateHostApplicat
 }
 
 /// Everything an application could write.
-const APPLICATION_WRITES: [&str; 12] = [
+const APPLICATION_WRITES: [&str; 13] = [
     "live_device_update_applications",
     "live_device_application_first_seen",
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "ydoc_updates",
+    "ydoc_native_authors",
     "ydoc_docs",
     "ydoc_snapshots",
     "binary_blobs",

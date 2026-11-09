@@ -112,6 +112,15 @@ fn coverage(db: &Path) -> (i64, Option<i64>, String, Option<i64>) {
         .map_err(StorageError::persist_public)).expect("coverage")
 }
 
+/// The authors the next settlement would name.
+fn interval(db: &Path, key: &DocKey) -> Value {
+    let store = EngineStore::open(db, 4).expect("inspect store");
+    let authors = store
+        .read_with(|conn| author_coverage::interval_in(conn, key, i64::MAX))
+        .expect("interval authors");
+    serde_json::from_str(&authors.json()).expect("author list")
+}
+
 fn authors(db: &Path) -> Vec<Value> {
     let store = EngineStore::open(db, 4).expect("inspect store");
     store
@@ -204,18 +213,16 @@ async fn compaction_deletion_undo_noop_and_close_keep_interval_authors() {
     }
     let before = coverage(&db);
     assert_eq!(before.0, 128);
-    assert_eq!(
-        ids(&serde_json::from_str(&before.2).expect("pending")),
-        ["alice", "bob"]
-    );
+    let covered = interval(&db, &state.key);
+    assert_eq!(ids(&covered), ["alice", "bob"]);
     let started = Instant::now();
     settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
         .await
         .expect("settle");
     println!(
-        "AUTHOR_MEASURE settlement_128_updates_us={} pending_metadata_bytes={}",
+        "AUTHOR_MEASURE settlement_128_updates_us={} interval_author_bytes={}",
         started.elapsed().as_micros(),
-        before.2.len()
+        covered.to_string().len()
     );
     assert_eq!(ids(&authors(&db)[0]), ["alice", "bob"]);
     assert_eq!(coverage(&db), (128, Some(128), "[]".into(), None));
@@ -377,7 +384,7 @@ async fn terminal_job_commit_before_compensation_recovers_with_concurrent_arriva
             );
             assert_eq!(recovered.3, None);
             assert_eq!(
-                ids(&serde_json::from_str(&recovered.2).expect("pending")),
+                ids(&interval(&db, &state.key)),
                 if status == "complete" {
                     vec!["carol"]
                 } else {

@@ -24,6 +24,14 @@ fn coverage(store: &EngineStore, key: &DocKey) -> Coverage {
         .map_err(StorageError::persist_public)).expect("coverage")
 }
 
+/// The authors the next settlement would name.
+fn interval(store: &EngineStore, key: &DocKey) -> String {
+    store
+        .read_with(|conn| author_coverage::interval_in(conn, key, i64::MAX))
+        .expect("interval authors")
+        .json()
+}
+
 async fn open(actor: &ActorHandle) -> YdocOpenState {
     actor
         .ydoc_open_state(
@@ -483,7 +491,8 @@ async fn reset_cannot_leave_an_attempt_or_authors_on_a_replacement_lineage() {
         .expect("fold arrivals");
     let before = coverage(&store, &state.key);
     assert!(before.3.is_some());
-    assert_ne!(before.2, "[]");
+    let folded = interval(&store, &state.key);
+    assert!(folded.contains("carol"));
     let retained = store.write_with(&NoFaults, |tx| {
         author_coverage::reset_in(tx, &state.key, true)
     });
@@ -496,6 +505,7 @@ async fn reset_cannot_leave_an_attempt_or_authors_on_a_replacement_lineage() {
         before,
         "content-retaining reset must wait for materialization"
     );
+    assert_eq!(interval(&store, &state.key), folded);
     store.write_with(&NoFaults,|tx| {
         author_coverage::reset_in(tx,&state.key,false)?;
         tx.execute("DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -512,6 +522,7 @@ async fn reset_cannot_leave_an_attempt_or_authors_on_a_replacement_lineage() {
     let reset = coverage(&store, &state.key);
     assert_eq!(reset.1, None);
     assert_eq!(reset.2, "[]");
+    assert_eq!(interval(&store, &state.key), "[]");
     assert_eq!(reset.3, None);
     assert_eq!(reset.4, None);
     let pending: i64 = store
@@ -618,7 +629,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
     drop(actor);
     let mut store = EngineStore::open(&db, 4).expect("store");
     dohc_engine_collab::maybe_compact(&mut store, &state.key, 0, &NoFaults, 5).expect("fold");
-    assert!(coverage(&store, &state.key).2.contains("bob"));
+    assert!(interval(&store, &state.key).contains("bob"));
     store
         .write_with(&NoFaults, |tx| {
             project_and_write_in_tx(
@@ -636,6 +647,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
         })
         .expect("projection");
     assert_eq!(coverage(&store, &state.key).2, "[]");
+    assert_eq!(interval(&store, &state.key), "[]");
     let authors:String=store.read_with(|conn| conn.query_row(
         "SELECT m.author_json FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.object_id=?2",
         rusqlite::params![WS,state.key.object_id],|row|row.get(0)).map_err(StorageError::persist_public)).expect("authors");

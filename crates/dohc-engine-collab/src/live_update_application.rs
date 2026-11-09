@@ -1985,6 +1985,15 @@ pub fn apply_committed_with_settlement_limit(
                 true,
                 event.metadata.accepted.received_at_ms,
             )?;
+            // This update's own row no longer holds an author its admitted
+            // snapshot names.
+            crate::author_coverage::accept_native_in(
+                tx,
+                &key,
+                &b.lineage_claim_id,
+                &event.metadata.accepted.receipt.update_digest,
+                &authors,
+            )?;
             // Keep canonical snapshot names in coverage instead of synthesizing
             // native authors. Only the field rows created by this append change.
             if own.is_none() && native_actor.is_none() {
@@ -5564,6 +5573,291 @@ mod tests {
             .unwrap();
         assert_eq!(stored.len(), 3);
         assert!(stored.iter().all(|json| !json.contains("agentRunId")));
+    }
+
+    /// The person this computer records while nobody is signed in.
+    const SIGNED_OUT: &str = "installation-person";
+
+    /// An agent working for `person` in run `run-1`.
+    fn agent_for(person: &str) -> dohc_engine_domain::ChangeAttribution {
+        dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+            on_behalf_of: Some(person.into()),
+            depth: 1,
+            run: None,
+            agent_run_id: Some("run-1".into()),
+        }
+    }
+
+    /// A person's own edit.
+    fn person_edit(person: &str) -> dohc_engine_domain::ChangeAttribution {
+        dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Human,
+            on_behalf_of: Some(person.into()),
+            depth: 0,
+            run: None,
+            agent_run_id: None,
+        }
+    }
+
+    /// Journals `bytes` as this computer's own edit by `actor`, then queues its
+    /// delivery with the source and declaration an adopted append derives from
+    /// that journal row. Returns the delivery.
+    fn native_edit(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        bytes: &[u8],
+        actor: &str,
+        attribution: &dohc_engine_domain::ChangeAttribution,
+    ) -> String {
+        let TxnOutcome::Committed(appended) = durable::record_local_update(
+            store,
+            cache,
+            &key(),
+            bytes,
+            durable::LocalAppend {
+                actor_origin_id: Some(actor),
+                attribution: Some(attribution),
+                ..Default::default()
+            },
+            &NoFaults,
+            1,
+            |_, _, _| Ok(()),
+        )
+        .unwrap() else {
+            panic!("native edit interrupted")
+        };
+        let draft = crate::owner_outbox::append(
+            store,
+            "workspace-1",
+            crate::owner_outbox::OwnerOutboxAppendInput {
+                binding: binding(),
+                base_update: Ydoc::wire().encode_full_state(),
+                append_key: hex_sha256(bytes),
+                update: bytes.to_vec(),
+                limits: crate::owner_outbox::OwnerOutboxLimits {
+                    max_pending_bytes: 100_000,
+                    max_pending_age_ms: 100_000,
+                },
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+        let source = crate::owner_outbox::OwnerOutboxNativeSource {
+            binding: binding(),
+            adoption_id: "adoption-1".into(),
+            native_sequence: appended.seq,
+            update_digest: draft.update_digest.clone(),
+            origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                actor_origin_id: Some(actor.into()),
+                actor_kind: Some(attribution.actor_kind.as_str().into()),
+                on_behalf_of: attribution.on_behalf_of.clone(),
+                chain_depth: Some(i64::from(attribution.depth)),
+                recorded_at_ms: 1,
+                agent_run_id: attribution.agent_run_id.clone(),
+            },
+        };
+        let agent = attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Agent;
+        let declaration = agent.then(|| {
+            serde_json::to_string(&AgentDeclaration {
+                agent_id: actor.into(),
+                on_behalf_of: attribution.on_behalf_of.clone(),
+                depth: attribution.depth,
+            })
+            .unwrap()
+        });
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET native_source_json=?1, agent_declaration_json=?3 WHERE delivery_id=?2",
+                    params![
+                        serde_json::to_string(&source).unwrap(),
+                        draft.delivery_id,
+                        declaration
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        draft.delivery_id
+    }
+
+    /// The relay accepts this computer's own delivery from the server account,
+    /// naming `authors`.
+    fn accept_own(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        handle: &ApplicationHandle,
+        (delivery, cursor, bytes): (&str, i64, Vec<u8>),
+        authors: &[LiveAuthorEntry],
+    ) {
+        let mut update = event(delivery, cursor, bytes);
+        snapshot(&mut update.metadata, None);
+        update.metadata.author_snapshot = Some(authors.to_vec());
+        ack(apply(store, cache, handle, update));
+    }
+
+    /// The server account's person and that person's agent.
+    fn account_with_agent() -> Vec<LiveAuthorEntry> {
+        vec![
+            account_person(),
+            LiveAuthorEntry::from(declared("trip-agent").unwrap()),
+        ]
+    }
+
+    fn account_person() -> LiveAuthorEntry {
+        LiveAuthorEntry::Human {
+            human_id: "owner-1".into(),
+            human_name: "Ana".into(),
+        }
+    }
+
+    /// The authors of `kind` the next settlement names, as `[id, onBehalfOf,
+    /// agentRunId]`.
+    fn history(store: &EngineStore, kind: &str) -> Vec<Value> {
+        let interval: Value = serde_json::from_str(
+            &store
+                .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+                .unwrap()
+                .json(),
+        )
+        .unwrap();
+        let id = format!("{kind}Id");
+        interval
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|author| author["kind"] == kind)
+            .map(|author| {
+                serde_json::json!([author[&id], author["onBehalfOf"], author["agentRunId"]])
+            })
+            .collect()
+    }
+
+    fn compact(store: &mut EngineStore) {
+        durable::maybe_compact(store, &key(), 0, &NoFaults, 2).unwrap();
+        assert_eq!(count(store, "ydoc_updates"), 0);
+    }
+
+    #[test]
+    fn signed_out_agent_edit_accepted_after_sign_in_is_one_history_author() {
+        for fold in ["sign-in", "compaction"] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let bytes = Ydoc::wire().frontmatter_set("status", "booked").unwrap();
+            let agent = agent_for(SIGNED_OUT);
+            let delivery = native_edit(&mut store, &mut cache, &bytes, "trip-agent", &agent);
+            // Enrolling at sign-in keeps the journal's authors before it
+            // replaces the journal; compaction keeps them before it prunes it.
+            if fold == "sign-in" {
+                store
+                    .write_with(&NoFaults, |tx| {
+                        crate::author_coverage::reset_in(tx, &key(), true)
+                    })
+                    .unwrap();
+            } else {
+                compact(&mut store);
+            }
+            assert_eq!(
+                history(&store, "agent"),
+                [serde_json::json!(["trip-agent", SIGNED_OUT, "run-1"])],
+                "{fold}"
+            );
+            let accepted = (delivery.as_str(), 1, bytes);
+            let authors = account_with_agent();
+            accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+            assert_eq!(
+                history(&store, "agent"),
+                [serde_json::json!(["trip-agent", "owner-1", "run-1"])],
+                "{fold}: the accepted snapshot names the edit's agent and run"
+            );
+            assert_eq!(history(&store, "human").len(), 1, "{fold}");
+        }
+    }
+
+    #[test]
+    fn native_author_stays_when_its_acceptance_does_not_name_it() {
+        let someone_else = LiveAuthorEntry::Human {
+            human_id: "guest-1".into(),
+            human_name: "Ben".into(),
+        };
+        for (case, authors) in [
+            ("empty", vec![]),
+            ("person only", vec![account_person()]),
+            ("someone else", vec![someone_else]),
+        ] {
+            for folded in [false, true] {
+                let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+                let bytes = Ydoc::wire().frontmatter_set("status", "booked").unwrap();
+                let agent = agent_for(SIGNED_OUT);
+                let delivery = native_edit(&mut store, &mut cache, &bytes, "trip-agent", &agent);
+                if folded {
+                    compact(&mut store);
+                }
+                let accepted = (delivery.as_str(), 1, bytes);
+                accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+                assert_eq!(
+                    history(&store, "agent"),
+                    [serde_json::json!(["trip-agent", SIGNED_OUT, "run-1"])],
+                    "{case}, folded {folded}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_accepted_update_keeps_the_author_of_another_from_the_same_agent() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let agent = agent_for(SIGNED_OUT);
+        let first = source.frontmatter_set("status", "booked").unwrap();
+        let delivery = native_edit(&mut store, &mut cache, &first, "trip-agent", &agent);
+        let second = source.frontmatter_set("status", "paid").unwrap();
+        native_edit(&mut store, &mut cache, &second, "trip-agent", &agent);
+        compact(&mut store);
+        let accepted = (delivery.as_str(), 1, first);
+        let authors = account_with_agent();
+        accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+        // The second update was not accepted, so it still names the agent
+        // under the person this computer recorded.
+        assert_eq!(
+            history(&store, "agent"),
+            [
+                serde_json::json!(["trip-agent", SIGNED_OUT, "run-1"]),
+                serde_json::json!(["trip-agent", "owner-1", "run-1"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn own_person_edit_accepted_by_the_relay_is_one_history_author() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let authors = [account_person()];
+        let signed_in = source.frontmatter_set("status", "booked").unwrap();
+        let person = person_edit("owner-1");
+        let delivery = native_edit(&mut store, &mut cache, &signed_in, "owner-1", &person);
+        let accepted = (delivery.as_str(), 1, signed_in);
+        accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+        assert_eq!(
+            history(&store, "human"),
+            [serde_json::json!(["owner-1", null, null])],
+            "the accepted snapshot names the edit's person"
+        );
+        // A signed-out edit names this computer's person, which the accepted
+        // snapshot does not name, so it keeps that person.
+        let signed_out = source.frontmatter_set("status", "paid").unwrap();
+        let person = person_edit(SIGNED_OUT);
+        let delivery = native_edit(&mut store, &mut cache, &signed_out, SIGNED_OUT, &person);
+        let accepted = (delivery.as_str(), 2, signed_out);
+        accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+        assert_eq!(
+            history(&store, "human"),
+            [
+                serde_json::json!([SIGNED_OUT, SIGNED_OUT, null]),
+                serde_json::json!(["owner-1", null, null]),
+            ]
+        );
     }
 
     #[test]

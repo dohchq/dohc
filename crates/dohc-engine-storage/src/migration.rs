@@ -3653,6 +3653,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_personal_agent_connection.sql"),
         sets_user_version: None,
     },
+    // Each live update keeps its own author until a settlement or its
+    // accepted delivery names that author.
+    Migration {
+        ordinal: 91,
+        id: "v2-ydoc-native-authors",
+        sql: include_str!("ydoc_native_authors.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5668,6 +5676,10 @@ mod tests {
             (
                 "v2-chat-personal-agent-connection",
                 "d8165d91ddd8da01b9448db5be3279cfb3f8d3986423b19edbbaa23211b1d71d",
+            ),
+            (
+                "v2-ydoc-native-authors",
+                "b7c4cf4f7d343109ab44f0492312cd39991eec69b24583faf0a4395f9182cbd4",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

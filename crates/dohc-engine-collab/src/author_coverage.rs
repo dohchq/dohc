@@ -174,6 +174,93 @@ pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabE
     .map_err(sql)
 }
 
+/// Keep an attributed update's author until a settlement names it, or an
+/// accepted delivery of the same update names the same author.
+pub(crate) fn record_native_in(
+    conn: &Connection,
+    key: &DocKey,
+    lineage_claim_id: Option<&str>,
+    update_digest: &str,
+    seq: i64,
+    actor_origin_id: &str,
+    attribution: &ChangeAttribution,
+) -> Result<(), CollabError> {
+    conn.prepare_cached(
+        "INSERT OR IGNORE INTO ydoc_native_authors (workspace_id, version_id, object_id, \
+         lineage_claim_id, update_digest, seq, actor_origin_id, actor_kind, on_behalf_of, \
+         chain_depth, agent_run_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )
+    .map_err(sql)?
+    .execute(params![
+        key.workspace_id,
+        key.version_id,
+        key.object_id,
+        lineage_claim_id.unwrap_or_default(),
+        update_digest,
+        seq,
+        actor_origin_id,
+        attribution.actor_kind.as_str(),
+        attribution.on_behalf_of,
+        i64::from(attribution.depth),
+        attribution.agent_run_id,
+    ])
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// An accepted delivery of a native update names its authors. The update no
+/// longer owes an author the delivery names by the same kind, identity and
+/// run, so one edit is not listed again under another scope. An author the
+/// delivery does not name stays.
+pub(crate) fn accept_native_in(
+    conn: &Connection,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    update_digest: &str,
+    authors: &[String],
+) -> Result<(), CollabError> {
+    let mut statement = conn
+        .prepare_cached(
+            "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+             AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5 \
+             AND actor_kind=?6 AND actor_origin_id=?7 AND agent_run_id IS ?8",
+        )
+        .map_err(sql)?;
+    for json in authors {
+        let entries: Vec<Value> = serde_json::from_str(json)
+            .map_err(|_| corrupt("accepted coverage is not an author list"))?;
+        for author in entries {
+            let kind = author.get("kind").and_then(Value::as_str);
+            let field = match kind {
+                Some("agent") => "agentId",
+                Some("automation") => "automationId",
+                Some("human") => "humanId",
+                _ => continue,
+            };
+            let Some(id) = author.get(field).and_then(Value::as_str) else {
+                continue;
+            };
+            let run = author
+                .get("agentRunId")
+                .and_then(Value::as_str)
+                .filter(|_| kind == Some("agent"));
+            statement
+                .execute(params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    lineage_claim_id,
+                    update_digest,
+                    kind,
+                    id,
+                    run
+                ])
+                .map_err(sql)?;
+        }
+    }
+    Ok(())
+}
+
 /// Read only authors above the settled boundary, including rows a fold already
 /// consumed and authors that accepted deliveries admitted.
 /// `through` bounds native rows; pending coverage, including the marker, is interval-wide.
@@ -188,18 +275,29 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .map_err(sql)?;
     let mut authors = Authors::default();
     authors.union_json(&pending)?;
-    if accepted_only_in(conn, key)? {
-        return Ok(authors);
-    }
     // Actorless edits and accepted snapshots retain coverage at admission.
-    // Admission caps the named identities retained above the boundary.
+    // Admission caps the named identities retained above the boundary. A
+    // folded update's author stays interval-wide, like pending coverage.
+    let held = accepted_only_in(conn, key)?;
+    union_native_in(conn, key, boundary, through, held, &mut authors)?;
+    Ok(authors)
+}
+
+/// Adds the authors of this document's folded updates, and unless `held`, of
+/// its other updates in `(boundary, through]`.
+fn union_native_in(
+    conn: &Connection,
+    key: &DocKey,
+    boundary: Option<i64>,
+    through: i64,
+    held: bool,
+    authors: &mut Authors,
+) -> Result<(), CollabError> {
     let mut stmt = conn
         .prepare_cached(
-            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth), agent_run_id FROM ydoc_updates \
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-         AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
-         AND actor_kind IN ('human','agent','automation') AND actor_origin_id IS NOT NULL \
-         GROUP BY actor_kind, on_behalf_of, actor_origin_id, agent_run_id",
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, chain_depth, agent_run_id \
+             FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+             AND (folded=1 OR (NOT ?6 AND seq>COALESCE(?4,-1) AND seq<=?5))",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -209,14 +307,15 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
                 key.version_id,
                 key.object_id,
                 boundary,
-                through
+                through,
+                held
             ],
             |row| {
                 Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<u32>>(3)?,
+                    row.get::<_, u32>(3)?,
                     row.get::<_, Option<String>>(4)?,
                 ))
             },
@@ -224,36 +323,56 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .map_err(sql)?;
     for row in rows {
         let (actor, kind, on_behalf_of, depth, agent_run_id) = row.map_err(sql)?;
-        let attribution = kind
-            .as_deref()
-            .and_then(ChangeActorKind::parse)
-            .map(|actor_kind| ChangeAttribution {
-                actor_kind,
-                on_behalf_of,
-                depth: depth.unwrap_or(0),
-                run: None,
-                agent_run_id,
-            });
+        let attribution = ChangeAttribution {
+            actor_kind: ChangeActorKind::parse(&kind)
+                .ok_or_else(|| corrupt("native author has an unknown kind"))?,
+            on_behalf_of,
+            depth,
+            run: None,
+            agent_run_id,
+        };
         if let Some(json) =
-            dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())
+            dohc_engine_domain::moment_author_json(Some(actor.as_str()), Some(&attribution))
         {
             authors.union_json(&json)?;
         }
     }
-    Ok(authors)
+    Ok(())
 }
 
+/// Keep the authors of updates through `through` interval-wide once their
+/// journal rows go. A held lineage's private updates keep their own rows
+/// outside its interval until their acceptance names them.
 pub fn fold_in(conn: &Connection, key: &DocKey, through: i64) -> Result<(), CollabError> {
-    let authors = interval_in(conn, key, through)?;
+    if accepted_only_in(conn, key)? {
+        return Ok(());
+    }
     conn.execute(
-        "UPDATE ydoc_docs SET pending_authors_json=?4 \
-        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            authors.json()
-        ],
+        "UPDATE ydoc_native_authors SET folded=1 WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND folded=0 AND seq<=?4 AND seq>COALESCE((SELECT settled_update_seq \
+         FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),-1)",
+        params![key.workspace_id, key.version_id, key.object_id, through],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// A seed restates the file, so it names no author.
+pub(crate) fn forget_seed_in(conn: &Connection, key: &DocKey, seq: i64) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND folded=0 AND seq=?4",
+        params![key.workspace_id, key.version_id, key.object_id, seq],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// Forget every update author of this document.
+pub(crate) fn clear_native_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
     Ok(())
@@ -261,6 +380,15 @@ pub fn fold_in(conn: &Connection, key: &DocKey, through: i64) -> Result<(), Coll
 
 /// Include the unresolved moment's reserved identities before admitting another author.
 pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
+    let mut authors = unresolved_authors_in(conn, key)?;
+    for author in interval_in(conn, key, i64::MAX)?.0.into_values() {
+        authors.insert(author)?;
+    }
+    Ok(authors)
+}
+
+/// The authors the unresolved settlement's moment names.
+fn unresolved_authors_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
     let mut authors = Authors::default();
     let reserved: Option<String> = conn
         .query_row(
@@ -284,9 +412,6 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
             }
         }
     }
-    for author in interval_in(conn, key, i64::MAX)?.0.into_values() {
-        authors.insert(author)?;
-    }
     Ok(authors)
 }
 
@@ -301,9 +426,12 @@ pub fn shared_json(author: &SharedChangeAuthor) -> Result<String, CollabError> {
 }
 
 /// History recovery keeps native authors too. Accepted settlement deliberately
-/// excludes the owner's private tail; its outbox retains compacted provenance.
+/// excludes the owner's private tail, so its updates keep their own authors,
+/// and its outbox keeps them for updates no delivery applied yet. An applied
+/// delivery's snapshot already replaced each author it named.
 pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
     let mut authors = reserved_in(conn, key)?;
+    union_native_in(conn, key, None, i64::MAX, false, &mut authors)?;
     let mut statement = conn
         .prepare(
             "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e
@@ -311,7 +439,8 @@ pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
          JOIN ydoc_docs d ON d.workspace_id=o.workspace_id AND d.version_id=o.main_version_id
            AND d.object_id=o.object_id AND d.lineage_claim_id=o.lineage_claim_id
          WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3
-           AND e.pending=1 AND e.native_source_json IS NOT NULL",
+           AND e.pending=1 AND e.native_source_json IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id)",
         )
         .map_err(sql)?;
     let sources = statement
@@ -630,6 +759,19 @@ fn advance(
         ],
     )
     .map_err(sql)?;
+    // The settlement names the folded authors. An accepted prefix leaves the
+    // private tail's own authors above the native boundary.
+    conn.execute(
+        "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND (folded=1 OR NOT ?4)",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            keep_boundary
+        ],
+    )
+    .map_err(sql)?;
     clear_provisional_author_in(conn, key)?;
     Ok(())
 }
@@ -698,7 +840,18 @@ pub fn compensate_in(
             return Ok(());
         }
     }
-    let authors = reserved_in(conn, key)?;
+    // The consumed updates' authors return through the moment. Later updates
+    // keep their own authors.
+    let mut authors = unresolved_authors_in(conn, key)?;
+    let pending: String = conn
+        .query_row(
+            "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(sql)?;
+    authors.union_json(&pending)?;
     conn.execute(
         "UPDATE ydoc_docs SET settled_update_seq=NULLIF(?4,-1), pending_authors_json=?5, \
          last_settled_sha=NULL, settle_prior_update_seq=NULL, updated_at_ms=?6 \
@@ -730,6 +883,8 @@ pub fn reset_in(conn: &Connection, key: &DocKey, retain_content: bool) -> Result
     }
     if retain_content {
         fold_in(conn, key, i64::MAX)?;
+    } else {
+        clear_native_in(conn, key)?;
     }
     clear_provisional_author_in(conn, key)?;
     conn.execute(

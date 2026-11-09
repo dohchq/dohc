@@ -21,6 +21,40 @@ fn history_recovery_keeps_compacted_adopted_private_tail_authors() {
 }
 
 #[test]
+fn adopted_signed_out_agent_edit_accepted_after_sign_in_is_one_history_author() {
+    // Each agent `[agentId, onBehalfOf]` that coverage names.
+    fn agents(authors: &crate::author_coverage::Authors) -> Vec<Value> {
+        let authors: Value = serde_json::from_str(&authors.json()).unwrap();
+        authors
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|author| author["kind"] == "agent")
+            .map(|author| serde_json::json!([author["agentId"], author["onBehalfOf"]]))
+            .collect()
+    }
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    // The agent edits while nobody is signed in, so its row and its delivery
+    // name this computer's person. The relay binds the agent to the server
+    // account.
+    let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+    native_tail_apply(&mut f, edit.update, edit.delivery_id, 7);
+    let account = [serde_json::json!(["native-agent", "owner"])];
+    let recovered = f
+        .store
+        .read_with(|conn| crate::author_coverage::recovery_in(conn, &f.key))
+        .unwrap();
+    assert_eq!(agents(&recovered), account);
+    release(&mut f, "adoption");
+    let interval = f
+        .store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+        .unwrap();
+    assert_eq!(agents(&interval), account);
+}
+
+#[test]
 fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
     let mut f = Fixture::new();
     f.edit(true);
