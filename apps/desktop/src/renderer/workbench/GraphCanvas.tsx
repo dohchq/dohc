@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef } from "react";
+import { cutText } from "@dohc/workspace-contracts/names";
 import { prefersReducedMotion } from "../reducedMotion";
 import { DEFAULT_FORCES, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
 
@@ -109,8 +110,8 @@ function nodeRadius(degree: number, display: GraphDisplay): number {
   return (2.5 + Math.sqrt(degree) * 1.6) * (0.5 + display.nodeSize);
 }
 
-function shortTitle(title: string): string {
-  return title.length > 32 ? `${title.slice(0, 31)}…` : title;
+export function shortTitle(title: string): string {
+  return cutText(title, 32);
 }
 
 function addShape(ctx: CanvasRenderingContext2D, shape: GraphShape, x: number, y: number, r: number): void {

@@ -28,6 +28,9 @@ describe("importStopSentence", () => {
     expect(importStopSentence({ file: `${"l".repeat(200)}.md`, refusal: "dangling-link" })).toBe(
       `dohc did not import ${"l".repeat(59)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
     );
+    expect(importStopSentence({ file: `${"l".repeat(58)} ${"m".repeat(20)}.md`, refusal: "dangling-link" })).toBe(
+      `dohc did not import ${"l".repeat(58)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
+    );
   });
 });
 
@@ -39,6 +42,13 @@ describe("fitImportMessage", () => {
     expect(fitted.length).toBe(SHELL_ERROR_MAX_CHARS);
     expect(fitted.endsWith(`…${tail}`)).toBe(true);
     expect(fitted.startsWith("Imported a.md. xxx")).toBe(true);
+  });
+
+  it("leaves no space before the … when the cut lands after one", () => {
+    const head = "Imported a.md.";
+    const tail = " Import only the files that are still missing.";
+    const room = SHELL_ERROR_MAX_CHARS - head.length - tail.length;
+    expect(fitImportMessage(head, ` ${"x".repeat(room - 3)} ${"y".repeat(20)}`, tail)).toBe(`${head} ${"x".repeat(room - 3)}…${tail}`);
   });
 });
 

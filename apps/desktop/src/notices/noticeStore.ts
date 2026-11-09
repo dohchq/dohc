@@ -4,7 +4,8 @@ import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFil
 import { join } from "node:path";
 import { z } from "zod";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
-import { cutText, NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
+import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
+import { cutText } from "@dohc/workspace-contracts/names";
 import {
   isNoticeBody,
   isAutomationWake,

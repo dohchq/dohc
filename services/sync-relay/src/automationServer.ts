@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { AutomationScheduler, type SchedulerClock, type ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
-import { cutText } from "@dohc/automation-executor/automation-chat";
+import { cutText } from "@dohc/workspace-contracts/names";
 import { automationFailedNoticeId, type ReportedRun } from "@dohc/automation-executor/automation-failed-notice";
 import { reportAutomationFailure } from "@dohc/automation-executor/automation-failure-reporting";
 import { whoChangedLast, type AutomationsFileHistory } from "@dohc/automation-executor/automation-history";

@@ -64,11 +64,18 @@ function copyLinkAction(message: ChatMessageRecord) {
 
 const NEW_COMMENT_COMPOSER = "linked-chat-new-composer-input";
 
-// A comment's chat takes its title from the comment's first line.
+// A comment's chat takes its title from the comment's first line. A chat
+// title holds 200 UTF-16 units, so this cut counts those, on whole characters.
 const TITLE_MAX = 200;
 export function commentTitle(body: string): string {
   const line = body.trim().split("\n", 1)[0]!.trim();
-  return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1)}…` : line;
+  if (line.length <= TITLE_MAX) return line;
+  let kept = "";
+  for (const character of line) {
+    if (kept.length + character.length > TITLE_MAX - 1) break;
+    kept += character;
+  }
+  return `${kept.trimEnd()}…`;
 }
 
 const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
