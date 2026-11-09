@@ -8,12 +8,18 @@ interface RetryState {
   deadlineAnswers: number;
   failures: number;
   retryAtMs: number;
+  // When the relay builds this source again after its last build deadline. A request before then answers the same deadline without building.
+  relayWaitUntilMs: number;
   stop?: FirstOpenTemporaryStop;
   token: object;
   abort?: AbortController;
 }
 
-/** Pass-driven retries. The owner supplies monotonic time and cancels requests when their target leaves. */
+/**
+ * Pass-driven retries, one state per document. The caller supplies monotonic
+ * time, cancels requests when their target leaves, and forgets the document
+ * once it goes live or leaves this host.
+ */
 export class FirstOpenRetry {
   readonly #states = new Map<string, RetryState>();
   readonly #flights = new Set<string>();
@@ -30,6 +36,14 @@ export class FirstOpenRetry {
     return {deadlineAnswers: state.deadlineAnswers, retryAtMs: state.retryAtMs, stop: state.stop, inFlight: this.#flights.has(sourceKey(source))};
   }
 
+  /** Whether the document's source stopped after repeated build deadlines, so a caller reads its current source only then. */
+  stopped(document: {workspaceId: string; objectId: string}): boolean {return this.#states.get(documentKey(document))?.stop !== undefined;}
+
+  /**
+   * Starts a new attempt sequence, as Try again does. The first request
+   * waits for the relay's own wait after its last build deadline, so it builds
+   * rather than answering that deadline again.
+   */
   retry(document: {workspaceId: string; objectId: string}): boolean {
     const state = this.#states.get(documentKey(document));
     if (!state) return false;
@@ -37,7 +51,7 @@ export class FirstOpenRetry {
     state.abort?.abort();
     state.deadlineAnswers = 0;
     state.failures = 0;
-    state.retryAtMs = this.#now();
+    state.retryAtMs = Math.max(this.#now(), state.relayWaitUntilMs);
     state.stop = undefined;
     return true;
   }
@@ -54,7 +68,7 @@ export class FirstOpenRetry {
     let state = this.#states.get(key);
     if (!state || !sameSource(state.source, source)) {
       state?.abort?.abort();
-      state = {source: Object.freeze({...source}), deadlineAnswers: 0, failures: 0, retryAtMs: this.#now(), token: {}};
+      state = {source: Object.freeze({...source}), deadlineAnswers: 0, failures: 0, retryAtMs: this.#now(), relayWaitUntilMs: -Infinity, token: {}};
       this.#states.set(key, state);
     }
     if (state.stop || this.#now() < state.retryAtMs || this.#flights.has(flight)) return undefined;
@@ -72,6 +86,7 @@ export class FirstOpenRetry {
       if (outcome.kind === "unavailable") {
         if (outcome.reason === "build-deadline") {
           current.deadlineAnswers++;
+          current.relayWaitUntilMs = this.#now() + outcome.retryAfterMs;
           if (current.deadlineAnswers >= 3) {
             current.stop = {source: current.source, reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, recovery: "retry-later"};
             current.retryAtMs = Infinity;

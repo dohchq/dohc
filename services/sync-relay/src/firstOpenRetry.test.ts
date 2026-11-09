@@ -135,6 +135,31 @@ it.each([0, 0.5, 1])("backs off repeated transient answers and errors with cappe
   }
 });
 
+// Opus's r3a review, F6: Try again's first request landed inside the relay's
+// wait after its third build deadline, so it answered that deadline without a
+// build and counted as one of the three. Proves: Try again waits for the
+// relay's wait, so each attempt sequence gets three real builds.
+it("starts a retry after the relay's own deadline wait, so no answer from inside it counts", async () => {
+  const f = fixture(0), ask = vi.fn(async () => deadline(source, 240_000));
+  await f.retry.attempt(source, async () => deadline(source, 60_000));
+  f.advance(60_000);
+  await f.retry.attempt(source, async () => deadline(source, 120_000));
+  f.advance(120_000);
+  // The third deadline, at 180 s: the relay builds this source again only from 420 s.
+  await f.retry.attempt(source, ask);
+  expect(f.retry.stopped(source)).toBe(true);
+  f.advance(40_000);
+  expect(f.retry.retry(source)).toBe(true);
+  expect(f.retry.stopped(source)).toBe(false);
+  expect(f.retry.state(source)).toMatchObject({deadlineAnswers: 0, retryAtMs: 420_000});
+  f.advance(199_999);
+  expect(await f.retry.attempt(source, ask)).toBeUndefined();
+  f.advance(1);
+  await f.retry.attempt(source, ask);
+  expect(ask).toHaveBeenCalledTimes(2);
+  expect(f.retry.state(source)?.deadlineAnswers).toBe(1);
+});
+
 it("resets transient backoff on another answer, a new source, and explicit retry, honoring retry-after", async () => {
   const f = fixture(0);
   const busy = (s = source) => firstOpenOutcome(s, {kind: "unavailable", reason: "busy"});
