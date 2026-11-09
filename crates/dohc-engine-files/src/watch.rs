@@ -10,9 +10,9 @@
 //! queue, except `secret.key`: restoring it must retry secret capture. Data
 //! scans exclude that subtree. Policy files and ancestor changes still trigger
 //! a rescan, as do errors and uncertain events.
-//! Symlink notifications are likewise harmless: the scanner uses
-//! lstat and never descends through a symlink, so only real in-root content can
-//! reach a capture plan.
+//! Symlink notifications are harmless: the scanner uses lstat and never
+//! descends through a symlink, so only real in-root content can reach a
+//! capture plan.
 
 use crate::reconcile::ReconcileController;
 use crate::{CancellationToken, FilesError, FilesHandle, ReconcileRun};
