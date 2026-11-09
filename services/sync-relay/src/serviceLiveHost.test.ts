@@ -3829,7 +3829,7 @@ for (const c of [
     departedAt.set(row.objectId, {settlement: settlements.mock.calls.length, request: requests().length});
     move(row, `elsewhere/${row.objectId}.md`);
     expect(o.f.storage.serviceHostDocumentEnabled(row)).toBe(true);
-    expect(o.f.storage.serviceHostEnrollmentHasEditGrant({workspaceId: row.workspaceId, ownerUserId: "owner", path: row.path})).toBe(true);
+    expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: row.workspaceId, objectId: row.objectId, ownerUserId: "owner", shareId: row.shareId, path: row.path})).toBe(true);
     expect(o.f.storage.serviceActivationRetirement(row)).toBeNull();
     await o.host.update({workspaces, documents: documents.slice(index + 1), departing: documents.slice(0, index + 1)});
     await vi.waitFor(() => expect(o.host.isDocumentReady(documentFor(row))).toBe(false));
@@ -3936,7 +3936,8 @@ it("keeps accepted edits and queued edits when another device removes an enrolle
   expect(currentFile(), "The removed document must no longer be available as a saved file.").toBeUndefined();
   expect(o.f.storage.objectMoment({workspaceId: "workspace", objectId: o.sibling.objectId, versionId: "main"})).toMatchObject({path: null});
   expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(true);
-  expect(o.f.storage.serviceHostEnrollmentHasEditGrant({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path})).toBe(true);
+  expect(o.f.storage.serviceHostEnrollmentCovered({workspaceId: "workspace", objectId: o.sibling.objectId, ownerUserId: "owner", shareId: o.sibling.shareId,
+    path: o.sibling.path})).toBe(true);
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
   await o.depart();
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
