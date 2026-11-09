@@ -6014,12 +6014,10 @@ export const ChatDispatchFailedRun = z.object({
       handle: z.string().min(1).max(200).optional(),
     }).strict(),
     // For an agent the @ menu can't offer, a step in Settings: "Add an agent
-    // in Settings to ask again." when it's gone, "Turn Nova on in Settings
-    // to ask again." when it's off, and "Set up Nova in Settings to ask
-    // again." when it isn't set up.
+    // in Settings to ask again." when it's gone, and "Turn Nova on in
+    // Settings to ask again." when it's an agent dohc starts that's off.
     z.object({ kind: z.literal("add-agent") }).strict(),
     z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
-    z.object({ kind: z.literal("set-up"), name: z.string().min(1).max(1_000) }).strict(),
   ]).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
@@ -6029,7 +6027,7 @@ export type ChatDispatchNextStep = NonNullable<ChatDispatchFailedRun["nextStep"]
 
 // What a step in Settings asks the person to do.
 export function nextStepSettingsAction(step: Exclude<ChatDispatchNextStep, { kind: "message" }>): string {
-  return step.kind === "add-agent" ? "Add an agent" : step.kind === "turn-on" ? `Turn ${step.name} on` : `Set up ${step.name}`;
+  return step.kind === "add-agent" ? "Add an agent" : `Turn ${step.name} on`;
 }
 
 // A failed run's next step as one sentence, for the line under its message,

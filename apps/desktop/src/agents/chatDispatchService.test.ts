@@ -3636,12 +3636,15 @@ describe("chatDispatchService", () => {
 
   // An agent the @ menu can't offer can't be mentioned, so the line gives
   // the step in Settings. A removed agent's name is gone with it, so the row
-  // calls it your agent.
+  // calls it your agent. An agent you run reads a mention once it connects.
   it.each([
     { agent: "removed", words: "Your agent stopped before finishing. Its run ended with an error.", nextStep: { kind: "add-agent" } },
     { agent: "off", words: "Nova stopped before finishing. Its run ended with an error.", nextStep: { kind: "turn-on", name: "Nova" } },
-    { agent: "not set up", words: "Nova stopped before finishing. Its run ended with an error.", nextStep: { kind: "set-up", name: "Nova" } },
-  ] as const)("gives the step in Settings when the run's agent is now $agent", async ({ agent, words, nextStep }) => {
+    {
+      agent: "one you run", words: "Nova stopped before finishing. Its run ended with an error.",
+      nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" },
+    },
+  ] as const)("gives the step to ask again when the run's agent is now $agent", async ({ agent, words, nextStep }) => {
     const fixture = await createFixture();
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
@@ -3652,7 +3655,7 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     const [nova] = await fixture.serviceOptions.readDispatchAgents();
     vi.spyOn(fixture.serviceOptions, "readDispatchAgents").mockResolvedValue(agent === "removed" ? []
-      : [{ ...nova!, enabled: false, ...(agent === "not set up" ? { launch: undefined } : {}) }]);
+      : [{ ...nova!, enabled: false, ...(agent === "one you run" ? { launch: undefined } : {}) }]);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
       runId: claim.run.runId, triggerMessageId: trigger.messageId, words, nextStep, retryable: false,

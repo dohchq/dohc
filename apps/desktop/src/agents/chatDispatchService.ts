@@ -934,12 +934,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     // Otherwise the person asks the agent again, in a message the chat
     // words, with the @handle the composer inserts. A message won't wake an
-    // agent that's gone, off or not set up, so its step is in Settings, in
-    // the order its DM checks them, by the full name its DM and Settings show.
+    // agent that's gone or an agent dohc starts that's off, so its step is in
+    // Settings, in the order its DM checks them, by the full name its DM and
+    // Settings show. An agent you run reads the message once it's connected.
     const handle = agent ? handleForName(agent.name) : "";
     const nextStep: ChatDispatchNextStep = !agent ? { kind: "add-agent" }
-      : !agent.launch ? { kind: "set-up", name: agent.name }
-      : !agent.enabled ? { kind: "turn-on", name: agent.name }
+      : agent.launch && !agent.enabled ? { kind: "turn-on", name: agent.name }
       : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
     return { ...words, nextStep };
   }
