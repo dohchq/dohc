@@ -1363,8 +1363,14 @@ describe("private admitted-update upload", () => {
     const small = Array.from({ length: rangeCount - 1 }, (_, index) =>
       single(index + 1, 1),
     );
+    // Each merge of all 16,384 small updates took 3.6 s on a fast desktop, and the test took 37 s
+    // alone on a hosted runner. Merging them in groups first gives the same bytes in under 0.3 s.
+    const groups: Uint8Array[] = [];
+    for (let index = 0; index < small.length; index += 256)
+      groups.push(Y.mergeUpdates(small.slice(index, index + 256)));
+    const ranges = Y.mergeUpdates(groups);
     const encode = (length: number): Uint8Array =>
-      Y.mergeUpdates([...small, single(rangeCount, length)]);
+      Y.mergeUpdates([ranges, single(rangeCount, length)]);
     const measured = encode(maximum - 100);
     const finalLength = maximum - (measured.length - (maximum - 100));
     const bytes = encode(finalLength);
