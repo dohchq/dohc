@@ -35,6 +35,10 @@ import {LiveRestoreBusy} from "./liveRestoreValidation";
 // The engine's own check is answered as the engine answers this content
 // (`settlement-mismatch`, as firstOpenPublication.native.test.ts shows for
 // `a && b` in code), so this measures the relay's side only.
+//
+// It compares timings, so it runs alone, not beside the rest of the suite:
+// DOHC_FIRST_OPEN_FAIRNESS_MEASURE=1 pnpm --filter @dohc/sync-relay exec vitest run src/firstOpenFairness.test.ts --silent=false --reporter=verbose
+// firstOpenBase.test.ts checks the yield itself on every run.
 
 const pools: ReturnType<typeof createLiveValidationExecutor>[] = [];
 afterEach(async () => {
@@ -94,7 +98,7 @@ const pathological = (cycle: number) => {
   return lines.join("");
 };
 
-it("keeps live edits, a sibling activation and a restore within budget while a writer replaces a note first open refuses every minute", async () => {
+it.skipIf(process.env.DOHC_FIRST_OPEN_FAIRNESS_MEASURE !== "1")("keeps live edits, a sibling activation and a restore within budget while a writer replaces a note first open refuses every minute", async () => {
   const startedAt = performance.now();
   const pool = createLiveValidationExecutor();
   pools.push(pool);
