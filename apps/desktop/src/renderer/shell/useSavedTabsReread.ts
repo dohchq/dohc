@@ -83,6 +83,7 @@ export function useSavedTabsReread(input: {
           done = true;
           clearTimeout(waiting);
           stop();
+          latest.current.show(null);
           return;
         }
         reading = false;

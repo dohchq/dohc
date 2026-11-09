@@ -57,7 +57,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   hasUnacknowledgedShareSkips,
@@ -1790,12 +1790,15 @@ export function DesktopWorkspaceShell(props: {
         });
         uiStateLoaded.current = true;
       },
-      onError: () => {
+      onError: (error) => {
         restoredActiveFileSurface.current = null;
         setRestoredSurfaceCommit({
           selectionGeneration: workspaceSelectionGeneration,
           waitsForFile: false,
         });
+        // The window's stop message says why. Nothing reads the tabs again
+        // until the workspace opens again, so nothing waits for them either.
+        if (isStoppedWorkspaceRead(error)) return;
         setLayoutReadFailure({
           admission: workspaceAdmission,
           startedAt: layoutReadStartedAt.current,
