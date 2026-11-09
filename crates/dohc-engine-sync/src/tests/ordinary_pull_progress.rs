@@ -1048,10 +1048,10 @@ fn a_crash_before_the_cursor_commit_waits_until_a_retry_and_an_empty_terminal_pa
 
 /// Crashes the `nth` time a pass reaches `point`, before its transaction
 /// commits.
-struct CrashAt {
-    point: FaultPoint,
-    nth: usize,
-    seen: AtomicUsize,
+pub(super) struct CrashAt {
+    pub(super) point: FaultPoint,
+    pub(super) nth: usize,
+    pub(super) seen: AtomicUsize,
 }
 
 impl dohc_engine_storage::FaultInjector for CrashAt {

@@ -4704,6 +4704,129 @@ fn a_document_that_moved_first_in_a_trade_waits_until_the_other_moves() {
     assert_eq!(retained(&store), 0);
 }
 
+/// #2421 across a crash: the trade stops at any one apply, before that apply
+/// commits, and the host restarts. It still ends with both documents ready
+/// at their new paths, their text intact and each change applied once, and
+/// no document is ready at a spelling of another's head at any commit or
+/// after the restart.
+#[test]
+fn a_trade_of_spellings_stopped_at_any_apply_resumes_after_a_restart() {
+    let mut crashes = 0;
+    for nth in 0.. {
+        let (_scratch, path, mut store) = hosted_store();
+        let client = RelaySyncClient::new(HostedFeed::new());
+        let feed = client.transport();
+        feed.append(envelope("owner", 0, "workspace.init", json!({})));
+        feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+        feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+        feed.share("doc-a", "a.md");
+        feed.share("doc-b", "b.md");
+        sync(&client, &mut store);
+        feed.rename(
+            "owner",
+            3,
+            "doc-a",
+            "a.md",
+            "B.md",
+            "hosted a",
+            "moment-owner-1",
+        );
+        feed.rename(
+            "owner",
+            4,
+            "doc-b",
+            "b.md",
+            "A.md",
+            "hosted b",
+            "moment-owner-2",
+        );
+        feed.share("doc-a", "B.md");
+        feed.share("doc-b", "A.md");
+
+        let crash = super::ordinary_pull_progress::CrashAt {
+            point: FaultPoint::SyncBeforeApplyCommit,
+            nth,
+            seen: AtomicUsize::new(0),
+        };
+        let crashed = trade(&client, &mut store, &crash);
+        if crashed {
+            crashes += 1;
+            drop(store);
+            store = EngineStore::open(&path, 3_000).unwrap();
+            assert_eq!(ready_on_one_file(&store), Pairs::new(), "{nth}");
+            assert!(!trade(&client, &mut store, &NoFaults), "{nth}");
+        }
+        assert!(ready(&store, "doc-a"), "{nth}");
+        assert!(ready(&store, "doc-b"), "{nth}");
+        let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+        assert_eq!(
+            paths(&store).0,
+            vec![pair("doc-a", "B.md"), pair("doc-b", "A.md")],
+            "{nth}"
+        );
+        let (texts, applied) = content(&store);
+        assert_eq!(
+            texts,
+            heads(&[("doc-a", "hosted a"), ("doc-b", "hosted b")]),
+            "{nth}"
+        );
+        assert!(applied.values().all(|count| *count == 1), "{nth}");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+        assert_eq!(retained(&store), 0);
+        if !crashed {
+            break;
+        }
+    }
+    assert!(
+        crashes >= 2,
+        "the trade stopped at each of its renames: {crashes}"
+    );
+}
+
+/// Pass and commit as two [`sync`]s do, which a trade of spellings takes,
+/// checking after each commit that no document is ready at a spelling of
+/// another's head. Answers whether a pass crashed at `faults`.
+fn trade(
+    client: &RelaySyncClient<HostedFeed>,
+    store: &mut EngineStore,
+    faults: &dyn dohc_engine_storage::FaultInjector,
+) -> bool {
+    for _ in 0..2 {
+        for _ in 0..64 {
+            let Ok(outcome) = pass(client, store, faults) else {
+                return true;
+            };
+            commit(client, store, &outcome);
+            assert_eq!(ready_on_one_file(store), Pairs::new());
+            if !outcome.has_more {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Each pair of documents whose heads are spellings of one path while either
+/// is ready. On a disk that ignores case, the ready one writes the other's
+/// file.
+fn ready_on_one_file(store: &EngineStore) -> Pairs {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT a.object_id,b.object_id FROM snapshots a JOIN snapshots b \
+                   ON b.workspace_id=a.workspace_id AND b.version_id=a.version_id \
+                  AND a.object_id<b.object_id AND lower(a.path)=lower(b.path) \
+                 WHERE EXISTS(SELECT 1 FROM hosted_documents d \
+                   WHERE d.workspace_id=a.workspace_id AND d.state='ready' \
+                     AND d.object_id IN (a.object_id,b.object_id)) \
+                 ORDER BY a.object_id,b.object_id",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Pairs>>()
+        })
+        .unwrap()
+}
+
 /// Reports one document's live session.
 struct LiveSession(&'static str);
 
