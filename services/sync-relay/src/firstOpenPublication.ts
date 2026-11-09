@@ -147,8 +147,8 @@ export function createFirstOpenPublisher(options: {
   const admissionIntervalMs = options.admissionIntervalMs ?? 60_000;
   if (!Number.isSafeInteger(admissionIntervalMs) || admissionIntervalMs < 0) throw new Error("Invalid first-open admission interval.");
   const admitted = new Map<string, number>();
-  // Resolves to the admission's release. Work that built a base charges the quiet interval; a request that built nothing leaves none.
-  const admit = (workspaceId: string, objectId: string): ((built: boolean) => void) | false => {
+  // Resolves to the admission's release, which charges the quiet interval unless it is told the request ran no work.
+  const admit = (workspaceId: string, objectId: string): ((ranWork: boolean) => void) | false => {
     if (admissionIntervalMs === 0) return () => {};
     const key = JSON.stringify([workspaceId, objectId]), now = nowMs();
     if ((admitted.get(key) ?? -Infinity) > now) return false;
@@ -164,7 +164,7 @@ export function createFirstOpenPublisher(options: {
       }
     }
     admitted.set(key, Infinity);
-    return built => {if (built) admitted.set(key, nowMs() + admissionIntervalMs); else admitted.delete(key);};
+    return ranWork => {if (ranWork) admitted.set(key, nowMs() + admissionIntervalMs); else admitted.delete(key);};
   };
   // Every bound native capture and the relay's verifier apply to a base-only history.
   const bounds = (config: ServiceActivationConfig, source: FirstOpenSource, identity: {replicationEpoch: string; streamIdentity: string}, originId: string): FirstOpenBaseBounds => ({
@@ -258,7 +258,8 @@ export function createFirstOpenPublisher(options: {
     }
     const releaseAdmission = admit(workspaceId, objectId);
     if (!releaseAdmission) return answer({kind: "unavailable", reason: "busy"});
-    let builtBase = false;
+    // Only a build that found no free worker ran no work: reading and preparing the source, or a build that ran, charge the interval.
+    let ranWork = true;
     try {
       const bytes = storage.getBlob(workspaceId, head.sourceDigest);
       if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
@@ -269,12 +270,10 @@ export function createFirstOpenPublisher(options: {
       const preparation = prepared ?? await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
       if (preparation.kind !== "prepared") return refusal(preparation);
       let proof = preparation.proof;
-      // A build that ran, whatever it answered, is the work the quiet interval spaces out. One with no free worker ran nothing.
-      builtBase = true;
       const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},
         currentPath: source.path, headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest,
         sourceByteLength: source.sourceByteLength, bounds: bounds(config, source, identity, originId)}, signal));
-      builtBase = built.kind !== "busy";
+      ranWork = built.kind !== "busy";
       signal.throwIfAborted();
       if (built.kind === "busy") return answer({kind: "unavailable", reason: "busy"});
       if (built.kind === "deadline") {
@@ -353,7 +352,7 @@ export function createFirstOpenPublisher(options: {
         if (caught.kind !== "prepared") return refusal(caught);
         proof = caught.proof;
       }
-    } finally {releaseAdmission(builtBase);}
+    } finally {releaseAdmission(ranWork);}
   }
   };
 }
