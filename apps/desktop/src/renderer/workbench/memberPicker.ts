@@ -20,7 +20,8 @@ export function emailKey(email: string): string {
 export function splitAddresses(text: string): { emails: string[]; rest: string } {
   const emails: string[] = [];
   const rest: string[] = [];
-  for (const part of text.split(/[,;\n]+/)) {
+  // A quoted name such as `"Doe, Jane"` is only a name, and may hold a comma.
+  for (const part of text.replace(/"[^"]*"/g, " ").split(/[,;\n]+/)) {
     // A part with bracketed addresses names people: keep every address in
     // it, bracketed or bare, and drop the names.
     const bracketed = [...part.matchAll(/<([^<>]+)>/g)].map((match) => match[1]!.trim()).filter(isEmail);

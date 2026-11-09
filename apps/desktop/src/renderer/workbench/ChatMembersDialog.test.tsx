@@ -155,6 +155,27 @@ describe("ChatMembersDialog", () => {
     expect(chips()).toEqual(["Aana@example.com"]);
   });
 
+  it("keeps Back put while Add runs", async () => {
+    let finish = (_added: boolean) => {};
+    dialog({ members: [member("ana@example.com")], onAdd: () => new Promise<boolean>((resolve) => { finish = resolve; }) });
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    await userEvent.type(field(), "ben{Enter}{Enter}");
+    expect((screen.getByTestId("chats-share-back") as HTMLButtonElement).disabled).toBe(true);
+    finish(true);
+    await waitFor(() => expect(screen.getByTestId("chats-share-panel").dataset.view).toBe("members"));
+    await userEvent.click(screen.getByTestId("chats-share-add-people"));
+    expect((screen.getByTestId("chats-share-back") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("lets a paste replace the selected text", async () => {
+    dialog();
+    await userEvent.type(field(), "ana@example.com");
+    field().setSelectionRange(0, field().value.length);
+    fireEvent.paste(field(), { clipboardData: { getData: () => "ben@example.com, cy@example.org" } });
+    expect(chips()).toEqual(["Bben@example.com", "Ccy@example.org"]);
+    expect(field().value).toBe("");
+  });
+
   it("puts focus back in the field when Add fails", async () => {
     dialog({ onAdd: async () => false });
     await userEvent.type(field(), "new@example.net");
@@ -216,6 +237,7 @@ describe("memberPicker", () => {
     expect(splitAddresses("a@x")).toEqual({ emails: [], rest: "a@x" });
     expect(splitAddresses("Ana <ana@x.co> Ben <ben@y.co>")).toEqual({ emails: ["ana@x.co", "ben@y.co"], rest: "" });
     expect(splitAddresses("a@x.co Ben <ben@y.co>").emails.sort()).toEqual(["a@x.co", "ben@y.co"]);
+    expect(splitAddresses('"Doe, Jane" <jane@x.co>, bob@y.co')).toEqual({ emails: ["jane@x.co", "bob@y.co"], rest: "" });
   });
 
   it("offers a new address only when it is a whole email nobody matches", () => {

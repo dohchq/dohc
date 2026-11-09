@@ -61,6 +61,8 @@ export function ChatMembersDialog(props: Props) {
     () => new Set([...memberKeys, ...added.map((person) => emailKey(person.email))]),
     [added, memberKeys],
   );
+  // While Add runs, Back stays put like Cancel, so the run finishes in its own picker.
+  const [adding, setAdding] = useState(false);
   const id = useId();
   const canGoBack = props.members.length > 0 || added.length > 0 || props.readFailure !== null;
 
@@ -78,7 +80,7 @@ export function ChatMembersDialog(props: Props) {
       >
         <div className="flex items-center gap-2">
           {view === "add" && canGoBack ? (
-            <IconButton aria-label="Back to members" title="Back to members" data-testid="chats-share-back" onClick={() => setView("members")}>
+            <IconButton aria-label="Back to members" title="Back to members" data-testid="chats-share-back" disabled={adding} onClick={() => setView("members")}>
               <ArrowLeft size={14} aria-hidden />
             </IconButton>
           ) : null}
@@ -120,6 +122,7 @@ export function ChatMembersDialog(props: Props) {
               if (finished) setView("members");
             }}
             onCancel={canGoBack ? () => setView("members") : props.onClose}
+            onBusy={setAdding}
           />
         )}
       </div>
@@ -246,6 +249,7 @@ function AddPeople(props: {
   // `finished` once everyone picked is a member; otherwise the rest stay picked.
   onAdded: (people: ReadonlyArray<{ email: string; viewOnly: boolean }>, finished: boolean) => void;
   onCancel: () => void;
+  onBusy: (busy: boolean) => void;
 }) {
   const [picked, setPicked] = useState<ReadonlyArray<string>>([]);
   const [text, setText] = useState("");
@@ -317,6 +321,7 @@ function AddPeople(props: {
       return;
     }
     setBusy(true);
+    props.onBusy(true);
     const viewOnly = access === "view";
     const done: string[] = [];
     try {
@@ -326,6 +331,7 @@ function AddPeople(props: {
       }
     } finally {
       setBusy(false);
+      props.onBusy(false);
     }
     const finished = done.length === people.length;
     if (done.length > 0) props.onAdded(done.map((email) => ({ email, viewOnly })), finished);
@@ -389,7 +395,11 @@ function AddPeople(props: {
     const pasted = event.clipboardData.getData("text");
     if (busy || !/[\s,;<]/.test(pasted.trim())) return;
     event.preventDefault();
-    const { emails, rest } = splitAddresses(`${text} ${pasted}`);
+    // The paste replaces the selection, as it would in any field.
+    const input = event.currentTarget;
+    const before = text.slice(0, input.selectionStart ?? text.length);
+    const after = text.slice(input.selectionEnd ?? text.length);
+    const { emails, rest } = splitAddresses(`${before}${pasted}${after}`);
     pick(emails, rest);
   }
 
