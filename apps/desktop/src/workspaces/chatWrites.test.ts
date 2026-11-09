@@ -47,6 +47,11 @@ function fixture() {
   const store = {
     getMessage: vi.fn<ChatWriteStore["getMessage"]>(async () => { throw Error("missing message"); }),
     listChannelThreads: vi.fn<ChatWriteStore["listChannelThreads"]>(async () => []),
+    getThread: vi.fn<ChatWriteStore["getThread"]>(async (input) => ({
+      thread: { id: input.threadId, workspaceId: input.workspaceId, title: "", createdAtMs: 1, updatedAtMs: 1, lane: "posts" },
+      channel: null, messageCount: 0,
+    })),
+    listMessagesPage: vi.fn<ChatWriteStore["listMessagesPage"]>(async () => ({ messages: [], nextAfterMessageOrder: 0 })),
     findThreadChannelId: vi.fn(async () => {
       await reach("channel");
       return "channel";
@@ -109,11 +114,12 @@ function fixture() {
     localUserDisplayName: () => displayName,
     agentDisplayName: async (agentId?: string) => agentId === "codex" ? "Codex" : agentId === "terminal" ? "Terminal" : "Nova",
     // The person's agents: Nova, the default, and Codex, which dohc starts,
-    // and Terminal, which they run.
-    agentIdsToWake: async (body: string, dmAgentId: string | null) => [...new Set([
+    // and Terminal and Scout, which they run.
+    agentIdsToWake: async (body: string, dmAgentId: string | null, answeredAgentId: string | null) => [...new Set([
       ...(dmAgentId !== null && dmAgentId !== "terminal" ? [dmAgentId] : []),
       ...Object.entries({ default: "@nova", codex: "@codex" })
         .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
+      ...(answeredAgentId === "default" || answeredAgentId === "codex" ? [answeredAgentId] : []),
     ])],
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
@@ -304,6 +310,52 @@ describe("chat writes", () => {
     });
     expect(test.store.getChannelWireId).not.toHaveBeenCalled();
     expect(test.store.sendMessage.mock.calls[3]![0]).not.toHaveProperty("wakeAgentIds");
+  });
+
+  it("wakes the agent dohc starts that a person's reply answers", async () => {
+    const test = fixture();
+    const byAgent = (id: string, authorAgentId: string | undefined): ChatMessage => ({
+      id, workspaceId: "workspace", threadId: "thread", body: "Blocked: which bucket?", createdAtMs: 1, attachments: [],
+      author: { kind: "agent", displayName: "Codex" }, ...(authorAgentId ? { authorAgentId } : {}),
+    });
+    const reply = (input: { writer?: ChatWriter; body?: string; parentMessageId?: string } = {}) => test.writes.sendMessage(test.place, {
+      writer: input.writer ?? PERSON, threadId: "thread", body: input.body ?? "Use the EU one",
+      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}), resolveAttachments: async () => [],
+    });
+    const woken = () => test.store.sendMessage.mock.calls.map(([input]) => input.wakeAgentIds ?? []);
+    // A post Codex started: a person's reply in it answers Codex.
+    test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", "codex")], nextAfterMessageOrder: 1 });
+    await reply();
+    // Naming Codex too wakes it once.
+    await reply({ body: "@codex use the EU one" });
+    // The CLI's and an agent's messages wake no one.
+    await reply({ writer: { via: "cli", actor: "human" } });
+    await reply({ writer: AGENT });
+    // A post an agent the person runs started, or one that gave no id.
+    test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", "scout")], nextAfterMessageOrder: 1 });
+    await reply();
+    test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", undefined)], nextAfterMessageOrder: 1 });
+    await reply();
+    // A Group's conversation has no starter: only a reply under Codex's message answers it.
+    test.store.getThread.mockResolvedValue({
+      thread: { id: "thread", workspaceId: "workspace", title: "", createdAtMs: 1, updatedAtMs: 1, lane: "chat" },
+      channel: null, messageCount: 3,
+    });
+    test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", "codex")], nextAfterMessageOrder: 1 });
+    await reply();
+    test.store.getMessage.mockResolvedValue(byAgent("question", "codex"));
+    await reply({ parentMessageId: "question" });
+    // A read that fails wakes no one, not the post's starter, and the reply
+    // is still sent.
+    test.store.getThread.mockResolvedValue({
+      thread: { id: "thread", workspaceId: "workspace", title: "", createdAtMs: 1, updatedAtMs: 1, lane: "posts" },
+      channel: null, messageCount: 3,
+    });
+    test.store.getMessage.mockRejectedValue(new Error("engine busy"));
+    await reply({ parentMessageId: "question" });
+    test.store.listMessagesPage.mockRejectedValue(new Error("engine busy"));
+    await reply();
+    expect(woken()).toEqual([["codex"], ["codex"], [], [], [], [], [], ["codex"], [], []]);
   });
 
   it("writes a dispatched run's reply as its agent, by id and settings name", async () => {

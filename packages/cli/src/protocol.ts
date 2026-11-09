@@ -61,6 +61,15 @@ export const documentAgentNameSchema = z
 const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
+// The name and purpose limits are the New group dialog's.
+const groupCreateArgsSchema = z
+  .object({
+    ...argsBase,
+    name: z.string().min(1).max(80),
+    purpose: z.string().max(200).optional(),
+    type: z.enum(["posts", "chat", "both"]).optional(),
+  })
+  .strict();
 const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
@@ -545,6 +554,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("groupCreate"), args: groupCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
@@ -656,6 +666,7 @@ export const CLI_CAPABILITIES = {
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
+  groupCreate: ["group.create"],
   threads: ["chat.threads.list"],
   watch: ["chat.inbox.read"],
   inbox: ["chat.inbox.read"],
@@ -1815,6 +1826,7 @@ export const cliResultSchemas = {
   appPublication: OwnerAppPublicationResult,
   ownerAppResponses: OwnerAppResponsesResult,
   groups: groupsResultSchema,
+  groupCreate: z.object({ group: cliGroupSchema }).strict(),
   threads: threadsResultSchema,
   watch: z.object({ messages: z.array(cliInboxMentionSchema), cursor: z.string().min(1).max(1_048_576) }).strict(),
   inbox: inboxResultSchema,

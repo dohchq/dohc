@@ -163,6 +163,18 @@ export function createLiveAgentDispatchStore(
         { retryTransportErrors: true },
       );
     },
+    coverDeliveredRequests: async (input) => {
+      assertWorkspaceId(input.workspaceId);
+      return await invoke(
+        async (adapter) =>
+          await adapter.request(
+            CHATS_METHOD.dispatchCoverDelivered,
+            { runId: input.runId, messageIds: input.messageIds },
+            { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
+          ),
+        { retryTransportErrors: true },
+      );
+    },
     completeRun: async (input) =>
       await invoke(
         async (adapter) => {

@@ -384,6 +384,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!document.ok) throw new DohcCliError(document.reason);
       return document.markdown;
     }
+    case "collectionSetFields":
+      return `Updated ${lineSafe((result as Extract<CliResultByVerb["collectionSetFields"], { ok: true }>).recordPath)}`;
     case "documentEdit":
     case "documentCreate": {
       const document = result as CliResultByVerb["documentEdit" | "documentCreate"];
@@ -420,6 +422,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
+    case "groupCreate":
+      return renderGroups({ groups: [(result as CliResultByVerb["groupCreate"]).group] });
     case "threads":
       return renderThreads(result as CliResultByVerb["threads"]);
     case "watch": {

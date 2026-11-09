@@ -731,6 +731,44 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// Covers the requests a run read while it ran, as a claim covers the
+    /// requests already waiting: each pending trigger of the run's agent among
+    /// `message_ids` is done under the run, so no later run answers it again.
+    /// A run that fails gives them back with the rest it covered. An ended run
+    /// covers nothing. Returns how many it covered.
+    pub fn cover_delivered_requests(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        message_ids: &[String],
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<i64, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let run_id = normalize_dispatch_run_id(run_id)?;
+        let message_ids = message_ids
+            .iter()
+            .map(|id| normalize_dispatch_id(id, "Message id is invalid."))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
+            let run = require_run_in_workspace(tx, &workspace_id, &run_id)?;
+            if run.ended_at_ms.is_some() {
+                return Ok::<_, DomainError>(0);
+            }
+            let mut covered = 0_usize;
+            for message_id in &message_ids {
+                covered += tx
+                    .execute(
+                        "UPDATE chat_dispatch_ledger \n                         SET state = 'done', run_id = ?4, attempt_count = attempt_count + 1, \n                             updated_at_ms = ?5 \n                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND agent_id = ?3 \n                           AND state = 'pending'",
+                        params![workspace_id, message_id, run.agent_id, run_id, now_ms],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+            }
+            i64::try_from(covered).map_err(|_| dispatch_corrupt())
+        })?;
+        committed(outcome)
+    }
+
     pub fn record_run_message(
         &mut self,
         workspace_id: &str,

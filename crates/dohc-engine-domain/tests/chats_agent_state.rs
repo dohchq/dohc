@@ -1624,6 +1624,67 @@ fn fail_pending_is_workspace_thread_scoped() {
 }
 
 #[test]
+fn cover_delivered_takes_only_the_running_runs_agents_pending_requests() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "start", "thread", "run", 10);
+    let mut chats = LinkedChatStore::new(&mut store);
+    for (trigger, agent, at) in [
+        ("reply", "default", 11),
+        ("reply", "codex", 11),
+        ("later", "default", 12),
+    ] {
+        chats
+            .enqueue_dispatch(WS, trigger, agent, "thread", at, &NO_FAULTS)
+            .expect("enqueue");
+    }
+    let delivered = ["reply".to_owned(), "start".to_owned(), "missing".to_owned()];
+    assert!(
+        chats
+            .cover_delivered_requests(OTHER_WS, "run", &delivered, 13, &NO_FAULTS)
+            .is_err(),
+        "another workspace's caller cannot cover this run's requests"
+    );
+    let covered = chats
+        .cover_delivered_requests(WS, "run", &delivered, 13, &NO_FAULTS)
+        .expect("cover");
+    let pending = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending");
+    assert_eq!(
+        (
+            covered,
+            pending
+                .iter()
+                .map(|dispatch| (
+                    dispatch.trigger_message_id.as_str(),
+                    dispatch.agent_id.as_str()
+                ))
+                .collect::<Vec<_>>()
+        ),
+        (1, vec![("reply", "codex"), ("later", "default")]),
+        "only the run agent's pending request among the delivered ones is covered"
+    );
+    chats
+        .complete_dispatch(WS, "run", 0, 14, &NO_FAULTS)
+        .expect("complete");
+    assert_eq!(
+        chats
+            .cover_delivered_requests(WS, "run", &["later".to_owned()], 15, &NO_FAULTS)
+            .expect("cover after end"),
+        0,
+        "an ended run covers nothing"
+    );
+    let next = chats
+        .claim_next_pending(WS, "default", "run-2", "agent", None, 16, &NO_FAULTS)
+        .expect("claim")
+        .expect("some claim");
+    assert_eq!(
+        next.dispatch.trigger_message_id, "later",
+        "the next run skips the reply the first run already read"
+    );
+}
+
+#[test]
 fn record_run_message_rejects_foreign_workspace_run() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);

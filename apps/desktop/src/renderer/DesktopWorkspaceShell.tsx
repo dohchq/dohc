@@ -5851,7 +5851,7 @@ export function DesktopWorkspaceShell(props: {
   // create a duplicate presence lease, and suspend its polls so one open
   // conversation does not double every chat read (D2#6). The page's landed
   // reads still reach the navigator through their local-thread and DM
-  // revisions.
+  // revisions, and it still reloads the Group list on activity.
   const chatsTabIsLive = wb.editorGroups.some((group) =>
     (parseTab(group.activeTab)?.kind === "chat"),
   );

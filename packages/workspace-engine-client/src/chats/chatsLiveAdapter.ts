@@ -1004,6 +1004,18 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async coverDeliveredRequests(input: {
+    workspaceId: string;
+    runId: string;
+    messageIds: string[];
+  }): Promise<number> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.dispatchCoverDelivered, {
+      runId: input.runId,
+      messageIds: input.messageIds,
+    });
+  }
+
   async completeRun(input: {
     runId: string;
     exitCode: number;
