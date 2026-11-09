@@ -818,8 +818,8 @@ impl WatchedRoot {
 mod callback_tests {
     use super::*;
     use crate::{
-        CaptureError, CaptureOp, CaptureSink, FilesActor, IngestOutcome, IngestReason, ScanBounds,
-        apply_reconcile_plan,
+        CaptureError, CaptureOp, CaptureSink, FilesActor, IngestOutcome, IngestReason,
+        RetireOutcome, ScanBounds, apply_reconcile_plan,
     };
     use dohc_engine_storage::NoFaults;
     use dohc_test_scratch::ScratchDir;
@@ -1152,8 +1152,8 @@ mod callback_tests {
             })
         }
 
-        fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
-            Ok(())
+        fn retire(&mut self, _path: &str) -> Result<RetireOutcome, CaptureError> {
+            Ok(RetireOutcome::Retired)
         }
     }
 

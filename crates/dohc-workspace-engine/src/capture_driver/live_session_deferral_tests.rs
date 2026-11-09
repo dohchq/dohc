@@ -1883,9 +1883,9 @@ async fn a_restored_secret_key_retries_quarantined_capture_without_content_chang
             .expect("files actor"),
     );
     assert!(harness.capture(&files.handle()).await);
-    let key = harness
-        .root
-        .join(dohc_engine_crypto::SECRET_KEY_FILE_RELATIVE);
+    // Capture keeps the key beside the store's database. In a workspace that is
+    // `.dohc/engine` under the root; this harness keeps the store elsewhere.
+    let key = harness.db.with_file_name("secret.key");
     let staged_key = key.with_file_name("restored-key.tmp");
     std::fs::rename(&key, &staged_key).expect("park original key outside its known location");
     std::fs::write(&secret, "TOKEN=changed").expect("external secret edit");
@@ -1909,7 +1909,9 @@ async fn a_restored_secret_key_retries_quarantined_capture_without_content_chang
     std::fs::rename(&staged_key, &key).expect("atomic key restore");
     dohc_engine_files::watch::notify_settled_change_for_harness(
         harness.root.clone(),
-        key,
+        harness
+            .root
+            .join(dohc_engine_crypto::SECRET_KEY_FILE_RELATIVE),
         &files.handle(),
     );
     let noticed = files.handle().stats().await.expect("callback stats").dirty;
@@ -1925,7 +1927,7 @@ async fn a_restored_secret_key_retries_quarantined_capture_without_content_chang
         (0, 0, false)
     );
     let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).expect("store observer");
-    let loaded_key = dohc_engine_crypto::load_key_file(&harness.root)
+    let loaded_key = dohc_engine_crypto::load_key_file(key.parent().expect("store folder"))
         .expect("load restored key")
         .expect("original key restored");
     let captured = dohc_engine_domain::SecretFileStore::new(&mut store, &loaded_key)
