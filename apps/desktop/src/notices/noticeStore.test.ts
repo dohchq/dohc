@@ -1425,6 +1425,18 @@ it("cuts a long file name to fit the title and keeps listing other refusals", as
   expect(cut).toMatch(/^Some author names did not sync for “a+…”$/u);
 });
 
+it("leaves no space before the … when a file name is cut just after one", async () => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-space", originId: "host", originSeq: 1, refusalCoordinates: [{ originId: "host", originSeq: 1 }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path: `notes/${"a".repeat(81)} ${"b".repeat(40)}.md`, objectId: "object-1", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [row] = (await first.store.list()).notices;
+  // The title keeps the name's first 82 characters, which end with its space.
+  expect(row!.title).toBe(`Some author names did not sync for “${"a".repeat(81)}…”`);
+});
+
 it("keeps the refusals it words for itself equal to the engine's", () => {
   const engine = (path: string) => readFileSync(new URL(`../../../../crates/dohc-engine-sync/src/${path}`, import.meta.url), "utf8")
     .replace(/=\s+"/g, '= "');

@@ -179,10 +179,10 @@ export function automationNoticeId(stepKey: string, recipientUserId: string): st
   return `automation-notify:${createHash("sha256").update(`${stepKey}/notify/${recipientUserId}`).digest("hex")}`;
 }
 
-/** `text` cut to `max` characters, ending with "…" when it was longer. */
+/** `text` cut to `max` characters, ending with "…" when it was longer. No space comes before the "…". */
 export function cutText(text: string, max: number): string {
   const characters = [...text];
-  return characters.length <= max ? text : `${characters.slice(0, max - 1).join("")}…`;
+  return characters.length <= max ? text : `${characters.slice(0, max - 1).join("").trimEnd()}…`;
 }
 
 /** One message an automation writes, keyed so a retry writes it once. */

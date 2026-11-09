@@ -2532,8 +2532,9 @@ describe("chatDispatchService", () => {
 
     const [notice] = fixture.notices;
     expect(fixture.notices).toHaveLength(1);
-    expect(notice!.title).toMatch(/^Nova didn't reply in "Audit every file in the workspace .*…"$/u);
-    expect([...notice!.title]).toHaveLength(120);
+    // The cut lands after a space, so the title ends one short of the limit.
+    expect(notice!.title).toBe(`Nova didn't reply in "Audit ${"every file in the workspace ".repeat(3)}every…"`);
+    expect([...notice!.title].length).toBeLessThanOrEqual(120);
   });
 
   it("keeps the agent's own reply when the run fails without adding dohc text", async () => {
@@ -3665,6 +3666,23 @@ describe("chatDispatchService", () => {
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
       runId: claim.run.runId, triggerMessageId: trigger.messageId, words, retryable: true,
     });
+  });
+
+  it("leaves no space before the … when a start failure is cut just after one", async () => {
+    const fixture = await createFixture();
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
+      agentId: "default",
+    });
+    const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "claude -p" });
+    if (!claim) throw new Error("Expected a run.");
+    // The body keeps the reason's first 480 characters, which end with its space.
+    await fixture.dispatch.failRun({ runId: claim.run.runId, reason: `runner failed to start: ${"x".repeat(479)} and more` });
+    await activate(fixture);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.words)
+      .toBe(`Nova didn't reply. It couldn't start: ${"x".repeat(479)}…`);
   });
 
   it("flushes a live run for next-boot recovery without posting during quit", async () => {

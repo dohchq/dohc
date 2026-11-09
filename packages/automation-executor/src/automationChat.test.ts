@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
-import { chatDirectoryOf, readChatDirectory, hasChatMessage, type ChatDirectoryChannel } from "./automationChat";
+import { chatDirectoryOf, cutText, readChatDirectory, hasChatMessage, type ChatDirectoryChannel } from "./automationChat";
 import type { RosterGrant } from "./automationReach";
 
 const dm = (id: string, wireId = id, runningThreadId: string | null = `thread-${id}`): ChatDirectoryChannel => ({
@@ -101,6 +101,12 @@ describe("reading where automations write", () => {
     expect(directory.group("Trip")).toMatchObject({ channelId: "trip" });
     expect(directory.directMessage("user-ana")).toMatchObject({ threadId: "thread-dm-ana" });
   });
+});
+
+it("cuts text to its limit with no space before the …", () => {
+  expect(cutText("Pack the tent", 13)).toBe("Pack the tent");
+  expect(cutText("Pack the tent", 8)).toBe("Pack th…");
+  expect(cutText("Pack the tent", 10)).toBe("Pack the…");
 });
 
 it("distinguishes an absent saved message from an unavailable engine", async () => {
