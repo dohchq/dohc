@@ -218,17 +218,14 @@ async fn committed_application_compacts_and_preserves_replay_through_fold_failur
             } else {
                 Arc::new(NoFaults)
             };
-            let result = handle.apply(update.clone(), faults, 100_000_000).await;
-            if cursor == 64 && mode == "fold-error" {
-                assert!(matches!(
-                    result,
-                    Err(RuntimeError::LiveApplication(ApplicationError::Collab(_)))
-                ));
-            } else {
-                let applied = ack(result.unwrap());
-                assert!(!applied.application_replayed);
-                assert_eq!(applied.local_ydoc_sequence, cursor);
-            }
+            // A failed fold leaves the committed update in place, so the
+            // delivery is acknowledged and compaction retries later.
+            let applied = ack(handle
+                .apply(update.clone(), faults, 100_000_000)
+                .await
+                .unwrap());
+            assert!(!applied.application_replayed);
+            assert_eq!(applied.local_ydoc_sequence, cursor);
             deliveries.push(update);
             if cursor == 63 {
                 actor

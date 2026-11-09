@@ -191,7 +191,7 @@ export const CAPABILITIES = {
   "chat.follows.list": capability("List the local person's chat follows.", {ipc: ["listChatFollows"]}),
   "chat.follow.set": capability("Set whether the local person follows a Group, thread, or author.", {ipc: ["setChatFollow"]}),
   "chat.inbox.seen.mark": capability("Mark the personal chat feed seen through its head cursor.", {ipc: ["markPersonalChatFeedSeen"]}),
-  "group.create": capability("Create a Group and its folder.", {ipc: ["createChatChannel"]}),
+  "group.create": capability("Create a Group and its folder.", {ipc: ["createChatChannel"], mcp: {owner: ["dohc_create_group"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "chat.thread.read.mark": capability("Mark a thread read through a message sequence.", {ipc: ["markChatThreadRead"]}),
   "chat.reactions.list": capability("List a thread's reactions for the current viewer.", {ipc: ["listChatReactions"]}),
   "chat.reaction.set": capability("Set the local person's reaction to added or removed.", {ipc: ["setChatReaction"]}),

@@ -12,6 +12,9 @@
     "groups": [
       "group.list"
     ],
+    "groupCreate": [
+      "group.create"
+    ],
     "threads": [
       "chat.threads.list"
     ],
@@ -265,9 +268,11 @@
     "document comment": "file.chat.start",
     "document kept-edits": "workspace.status",
     "document save-recovery-copy": "share.live.document.recovery.save",
+    "document set-fields": "collection.record.edit",
     "document retry-kept-edits": "share.live.document.retry",
     "document stop-again": "share.live.document.stop",
     "chat groups": "group.list",
+    "chat create-group": "group.create",
     "chat threads": "chat.threads.list",
     "chat watch": "chat.inbox.read",
     "chat inbox": "chat.inbox.read",

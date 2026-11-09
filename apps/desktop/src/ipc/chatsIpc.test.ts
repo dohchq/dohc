@@ -67,6 +67,8 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
   }
   const storeMethods = {
     createThread: vi.fn<DesktopLinkedChatStore["createThread"]>(async () => thread),
+    getThread: vi.fn(async () => ({ thread })),
+    listMessagesPage: vi.fn(async () => ({ messages: [] })),
     sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async ({ automation: _automation, authorActorKey, ...input }) => ({ ...message, ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), attachments: storedAttachments(input.attachments) })),
     resolveChatDecision: vi.fn<DesktopLinkedChatStore["resolveChatDecision"]>(async input => ({ ...input, state: "resolved", atMs: 4 })),
     setReaction: vi.fn<DesktopLinkedChatStore["setReaction"]>(async input => ({ ...input, reactionId: "reaction", atMs: 4 })),

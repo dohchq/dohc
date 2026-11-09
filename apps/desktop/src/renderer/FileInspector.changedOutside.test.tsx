@@ -37,7 +37,7 @@ const retryKeys = engine.retryKeys;
 // itself. A small limit keeps it small, so opening it stays fast on a busy host.
 vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
-  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 8 * 1024,
 }));
 
 vi.mock("./collab/useEngineDoc", async () => {
@@ -304,7 +304,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
   // Panes on one note share its engine session, so one pane's reload hands
   // every pane the new bytes. Edit anyway covers only the bytes it confirmed.
   it.each([true, false])("rereads another pane before Edit anyway after a shared reload (lossy: %s)", async (lossy) => {
-    const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(1_100);
+    const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(140);
     const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
     const versionB = lossy
       ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`

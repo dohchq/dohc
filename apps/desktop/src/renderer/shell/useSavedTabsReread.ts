@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { GetWorkspaceUiStateResult } from "../../ipc/bridgeContract";
+import { isStoppedWorkspaceRead } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { allTabs, parseUiState } from "../workbench/workbenchState";
 
@@ -74,8 +75,17 @@ export function useSavedTabsReread(input: {
           restore: () => apply(stored),
           toast: false,
         });
-      }, () => {
+      }, (error: unknown) => {
         if (done) return;
+        // The window's stop message says why. Nothing reads the tabs again
+        // until the workspace opens again, so nothing waits for them either.
+        if (isStoppedWorkspaceRead(error)) {
+          done = true;
+          clearTimeout(waiting);
+          stop();
+          latest.current.show(null);
+          return;
+        }
         reading = false;
         if (again) {
           again = false;
