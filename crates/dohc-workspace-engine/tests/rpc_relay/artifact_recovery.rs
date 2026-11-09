@@ -355,10 +355,9 @@ impl Notes {
         )
         .await;
         let elapsed = started.elapsed();
-        self.a = serde_json::from_value(
-            opened.expect("open workspace").result["workspace"].clone(),
-        )
-        .unwrap();
+        self.a =
+            serde_json::from_value(opened.expect("open workspace").result["workspace"].clone())
+                .unwrap();
         elapsed
     }
 
