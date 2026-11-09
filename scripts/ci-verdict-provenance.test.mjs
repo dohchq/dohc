@@ -416,17 +416,21 @@ function workflowContext({ enabled = "", event = "pull_request", draft = false, 
   };
 }
 
-test("disabled Blacksmith never allocates a PR runner, while manual runs use GitHub Ubuntu", () => {
+test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksmith is on", () => {
   const document = load(workflow);
   assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
   assert.deepEqual(document.on.pull_request.types, ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"]);
+  for (const name of ["javascript", "rust", "confinement"]) assert.equal(document.jobs[name].needs, "changes", `${name} cannot bypass selection`);
   for (const enabled of ["", "false", "0", "disabled"]) {
-    for (const draft of [false, true]) {
-      const context = workflowContext({enabled, draft});
-      assert.equal(workflowExpression(document.jobs.changes.if, context), false);
-      for (const name of ["javascript", "rust", "confinement"]) assert.equal(document.jobs[name].needs, "changes", `${name} cannot bypass selection`);
-      assert.equal(workflowExpression(document.jobs.verification.if, {...context, needs: {changes: {result: "skipped"}}}), false);
+    for (const draft of [false, true]) for (const fork of [false, true]) {
+      const context = workflowContext({enabled, draft, fork});
+      assert.equal(workflowExpression(document.jobs.changes.if, context), !draft && !fork);
+      for (const [name, job] of Object.entries(document.jobs)) {
+        if (name === "confinement") assert.equal(job["runs-on"], "ubuntu-24.04");
+        else assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"]);
+      }
     }
+    assert.equal(workflowExpression(document.jobs.verification.if, {...workflowContext({enabled}), needs: {changes: {result: "skipped"}}}), false);
     const manual = workflowContext({enabled, event: "workflow_dispatch", size: "8"});
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
     for (const [name, job] of Object.entries(document.jobs)) {
@@ -436,7 +440,7 @@ test("disabled Blacksmith never allocates a PR runner, while manual runs use Git
   }
 });
 
-test("enabled cloud CI excludes drafts and forks and bounds manual runner sizes", () => {
+test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () => {
   const {jobs, concurrency} = load(workflow);
   for (const draft of [false, true]) for (const fork of [false, true]) {
     assert.equal(workflowExpression(jobs.changes.if, workflowContext({enabled: "true", draft, fork})), !draft && !fork);

@@ -210,9 +210,8 @@ State why the draft exists, what feedback is needed, and what remains. Drafts ar
 Use the [PR template](.github/pull_request_template.md). State the problem, resulting behavior, evidence, and unverified behavior.
 Include screenshots or recordings when they help assess a visible change.
 
-Blacksmith stays off until a maintainer enables `BLACKSMITH_ENABLED`.
-While off, verify locally; manual GitHub checks use GitHub-hosted `ubuntu-24.04` runners.
-When enabled, ready same-repository PRs use Blacksmith. Reuse covered passing cloud evidence instead of repeating full local gates.
+PR checks run on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs. Drafts and forks start no automatic checks.
+Passing PR checks that cover the head replace a local `pnpm verify:pr`. Windows and macOS behavior still needs its own platform check.
 Before changing CI activation, read [the setup procedure](docs/engineering/enable-blacksmith.md).
 Never check out, install, build, or test fork PR code on shared Windows/Mac hosts or machines with maintainer credentials.
 Ask a maintainer how to verify it.
