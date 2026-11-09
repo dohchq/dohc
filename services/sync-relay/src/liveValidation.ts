@@ -207,7 +207,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       signal?.throwIfAborted();
       if (closed) throw new Error("Live validation closed.");
     }
+    // After ending a build it starts its own child, so an idle live-edit child stays warm.
     const slot = auxiliary && ((yielding > 0 && !foreground) || [...slots].some((slot) => slot.auxiliary)) ? undefined :
+      (building && slots.size < 2 ? spawn() : undefined) ??
       [...slots].find((slot) => !slot.busy) ??
       (slots.size < 2 ? spawn() : undefined);
     if (!slot)
