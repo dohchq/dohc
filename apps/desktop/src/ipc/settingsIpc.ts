@@ -290,8 +290,9 @@ export function createSettingsIpc<
     // renderer cannot write .dohc through writeWorkspaceText (reserved path),
     // so this narrow pair is the only writer. Both directions are zod-bounded;
     // a corrupt/foreign on-disk file reads as null ("no saved state"), never
-    // an error. A Windows read without the engine's open is refused, and the
-    // renderer then saves nothing. A write is refused unless the engine's
+    // an error. A Windows read without the engine's open, or of a file another
+    // program keeps busy, is refused, and the renderer then saves nothing
+    // until a later read works. A write is refused unless the engine's
     // current open of the workspace prepared .dohc/local.
     getWorkspaceUiState: async (_input, { operation }) => {
       const parsed = GetWorkspaceUiStateResult.safeParse(

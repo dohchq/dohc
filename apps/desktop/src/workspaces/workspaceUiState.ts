@@ -1,6 +1,6 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { atomicReplaceFile } from "../atomicReplaceFile";
+import { atomicReplaceFile, isWindowsBusy, retryWhileWindowsBusy } from "../atomicReplaceFile";
 import {
   existingLocalStateDir,
   localStateDir,
@@ -27,17 +27,18 @@ export const MAX_UI_STATE_FILE_BYTES = 256 * 1024;
 
 // Tolerant read: a missing, corrupt, oversized, or escape-y file is "no saved
 // state", never an error. On Windows, a read the engine's open doesn't hold
-// `.dohc/local` throughout is refused instead, so the renderer saves no
-// defaults over a file it couldn't read. Returns the raw parsed JSON — the
-// IPC handler validates the shape with the WorkspaceUiState zod contract
-// before it reaches the renderer.
+// `.dohc/local` throughout is refused instead, and so is a read Windows keeps
+// refusing while another program holds the file, after the retries a write
+// gets. Either way the renderer saves no defaults over a file it couldn't
+// read. Returns the raw parsed JSON — the IPC handler validates the shape
+// with the WorkspaceUiState zod contract before it reaches the renderer.
 export async function readUiStateFile(rootPath: string): Promise<unknown> {
   try {
     return await (process.platform === "win32"
-      ? readOwnedLocalState(rootPath, uiStateIn)
+      ? readOwnedLocalState(rootPath, (dir) => retryWhileWindowsBusy(() => uiStateIn(dir)))
       : uiStateIn(await existingLocalStateDir(rootPath)));
   } catch (error) {
-    if (error instanceof LocalStateUnavailableError) throw error;
+    if (error instanceof LocalStateUnavailableError || isWindowsBusy(error)) throw error;
     return null;
   }
 }
