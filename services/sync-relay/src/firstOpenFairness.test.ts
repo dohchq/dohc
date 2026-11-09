@@ -29,6 +29,8 @@ import {LiveRestoreBusy} from "./liveRestoreValidation";
 // Time: the relay's publisher and the host's retries read one injected clock.
 // It runs in real time while work runs and jumps over idle waits, so each
 // one-minute cycle keeps its real build and costs only that build's real time.
+// A host wait that overlaps a running activation or restore passes in real
+// time until that work ends, as it would on a real host.
 //
 // The engine's own check is answered as the engine answers this content
 // (`settlement-mismatch`, as firstOpenPublication.native.test.ts shows for
@@ -205,6 +207,8 @@ it("keeps live edits, a sibling activation and a restore within budget while a w
           : outcome.kind === "refused" ? `refused:${outcome.reason}` : outcome.kind});
         const next = retry.state(source)?.retryAtMs ?? Infinity;
         if (next === Infinity || next >= cycleStart + CYCLE_MS) break;
+        // The host's wait runs in real time beside foreground work, and the clock jumps only once that work is done.
+        if (probing) await Promise.race([probing, pace(next - clock())]);
         jumpTo(next);
       }
       building = undefined;
