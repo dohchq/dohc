@@ -1056,7 +1056,7 @@ describe("CLI socket server", () => {
       expect(ended.mock.calls.every(([agentId]) => agentId === "terminal")).toBe(true);
     });
 
-    it("takes one of your agents' ids as a name only through its agent id", async () => {
+    it("keeps a write that gives an agent you run's id as its name the unnamed agent's", async () => {
       const authors = recordWriteAuthors();
       const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
       context.stopSync = stop;
@@ -1065,12 +1065,13 @@ describe("CLI socket server", () => {
       await invoke("collectionSetFields", { ...named, recordPath: "tasks/a.md", fields: { status: "done" } });
       await invoke("documentEdit", { ...named, path: "notes/plan.md", replacement: "Done." });
       await invoke("stopSync", named);
-      // The name is dropped, so each write is the unnamed agent's.
+      // Without --agent-id the name is only a claim: each write is the
+      // unnamed agent's, and where a write keeps a name, it is that claim.
       expect(authors).toEqual([
         { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
-        { actorOriginId: "dohc-mcp", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
+        { actorOriginId: "dohc-mcp", agentName: "terminal", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
       ]);
-      expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 });
+      expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", agentName: "terminal", onBehalfOf: "person-local", depth: 0 });
     });
 
     it("refuses a cursor from another reader", async () => {
@@ -5027,6 +5028,7 @@ describe("CLI socket server", () => {
     const nova = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const chat = await store.startChannelThread({
       authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: { kind: "human", displayName: "Sam" }, body: "Draft the agenda",
+      wakeAgentIds: ["default"],
     });
     // The run dohc dispatched for Sam's message, so the store knows it.
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
