@@ -60,6 +60,10 @@ test("the phase lists and runs only ignored tests whose last name segment it sel
   assert.deepEqual(readerTestArgs("run", ["b", "a", "b"]),
     ["nextest", "run", "--locked", "--workspace", "--run-ignored", "ignored-only", "-E", "test(/(^|::)b$/) | test(/(^|::)a$/)"]);
   assert.equal(readerTestArgs("list", ["a"])[1], "list");
+  const reused = ["--cargo-metadata", "target/nextest/cargo-metadata.json", "--binaries-metadata", "target/nextest/binaries-metadata.json",
+    "--workspace-remap", "/checkout", "--target-dir-remap", "/checkout/target"];
+  for (const command of ["list", "run"]) assert.deepEqual(readerTestArgs(command, ["a"], reused),
+    ["nextest", command, ...reused, "--run-ignored", "ignored-only", "-E", "test(/(^|::)a$/)"]);
   assert.throws(() => readerTestArgs("run", []), /No test has the reader phase's ignore reason/u);
 });
 

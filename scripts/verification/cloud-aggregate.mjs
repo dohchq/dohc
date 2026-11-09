@@ -1,7 +1,7 @@
 import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS } from "./cloud-rust.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 
 export function aggregateJavascript(records) {
   const preparation = records.filter(record => record.part === "prepare-0");
@@ -35,6 +35,8 @@ export function aggregateRust(records) {
   const archive = one("archive-0");
   if (archive.scratch?.status !== "PASS" || RUST_ARCHIVE_PROOFS.some(name => archive.steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust archive proof is missing or did not pass.");
   const shards = Array.from({ length: RUST_SHARDS }, (_, index) => one(`tests-${index}`));
+  if (RUST_TEST_PROOFS.some(name => shards.flatMap(shard => shard.steps ?? []).filter(step => step.name === name).length !== 1
+    || shards[0].steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust test proof is missing, duplicated, or did not pass.");
   if (records.length !== shards.length + 2 || new Set(records.map(record => record.commit)).size !== 1) throw new Error("Rust parts examined different commits or unexpected evidence.");
   for (const shard of shards) {
     if (JSON.stringify([...shard.planned].sort()) !== JSON.stringify([...archive.planned].sort())) throw new Error("Rust inventories disagree.");
@@ -42,7 +44,7 @@ export function aggregateRust(records) {
     if (shard.scratch?.status !== "PASS") throw new Error(`Rust scratch cleanup failed: ${shard.part}.`);
   }
   assertTaskCoverage(archive.planned.map(id => ({ id })), shards);
-  return { tasks: archive.planned.length, steps: [...policy.steps, ...RUST_ARCHIVE_PROOFS.map(name => ({ name, status: "PASS" })), { name: "test --workspace", status: "PASS" }], parts: records.map(({ part, seconds }) => ({ part, seconds })) };
+  return { tasks: archive.planned.length, steps: [...policy.steps, ...[...RUST_ARCHIVE_PROOFS, ...RUST_TEST_PROOFS].map(name => ({ name, status: "PASS" })), { name: "test --workspace", status: "PASS" }], parts: records.map(({ part, seconds }) => ({ part, seconds })) };
 }
 
 function gateJobNames(scope) {

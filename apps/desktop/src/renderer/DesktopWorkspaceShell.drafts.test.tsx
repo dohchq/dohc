@@ -34,7 +34,8 @@ async function openDirtyMarkdown(
   await user.click(row);
   await screen.findByTestId("view-markdown");
   const editor = await enterMarkdownSource(user);
-  await user.type(editor, "Draft!");
+  await user.click(editor);
+  await user.paste("Draft!");
   await waitFor(() =>
     expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
   );

@@ -8,9 +8,10 @@ import { readTreeState, classifyTreeProvenance } from "../../tools/rust-engine-p
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 
-export const RUST_SHARDS = 8;
+export const RUST_SHARDS = 16;
 export const RUST_POLICY_STEPS = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
-export const RUST_ARCHIVE_PROOFS = ["test fixtures", "reader tests"];
+export const RUST_ARCHIVE_PROOFS = ["test fixtures"];
+export const RUST_TEST_PROOFS = ["reader tests"];
 
 export function rustTestInventory(list) {
   const suites = list["rust-suites"];
@@ -57,7 +58,6 @@ export async function cloudRust(part, index = 0) {
         const fixtureEnv = { ...env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch };
         await step("test fixtures", "cargo", ["nextest", "run", "--locked", "--workspace", "--run-ignored", "only", "--no-tests=fail", "--retries=0", "-E", "binary_id(=dohc-engine-testkit::empty_store_image) & test(=prepare_empty_store_image)"],
           { env: fixtureEnv });
-        await step("reader tests", process.execPath, ["tools/rust-engine-program/reader-tests.mjs"], { env: fixtureEnv });
       });
       writeFileSync(resolve(".agent-artifacts/verification/rust-inventory.json"), JSON.stringify(report.planned));
     } else if (part === "tests" && Number.isSafeInteger(index) && index >= 0 && index < RUST_SHARDS) {
@@ -79,6 +79,8 @@ export async function cloudRust(part, index = 0) {
         { env: { ...process.env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch } });
       report.completed = passedRustTests(result.stdout + "\n" + result.stderr);
       if (JSON.stringify([...report.completed].sort()) !== JSON.stringify([...report.assigned].sort())) throw new Error("The Rust shard did not pass every assigned test exactly once.");
+      if (index === 0) await step("reader tests", process.execPath, ["tools/rust-engine-program/reader-tests.mjs", ...reused],
+        { env: { ...process.env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch } });
     } else throw new Error("Use archive or tests with a valid shard index.");
     report.verdict = "PASS";
   } catch (error) { report.verdict = "FAIL"; report.error = error.stack; throw error; }

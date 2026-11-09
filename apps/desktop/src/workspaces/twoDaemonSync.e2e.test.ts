@@ -343,17 +343,17 @@ it.skipIf(engine.missing)(
 // spelling and a write of the new one. On a disk that ignores case, as macOS
 // and Windows do by default, writing `Notes.md` rewrites the existing
 // `notes.md`, so the page must delete first or the file is lost.
-it.skipIf(engine.missing)(
+const caseProbeRoot = await createTestScratch("dohc-case-rename-probe-");
+await writeFile(join(caseProbeRoot, "probe.md"), "");
+const ignoresCase = await readFile(join(caseProbeRoot, "PROBE.md")).then(() => true, () => false);
+await rm(join(caseProbeRoot, "probe.md"));
+it.skipIf(engine.missing || !ignoresCase)(
   "keeps a file another daemon renamed only by case on a disk that ignores case",
-  async (context) => {
+  async () => {
     const workspaceId = "two-daemon-case-rename";
     const token = `test:${workspaceId}`;
     const rootA = await createTestScratch("dohc-case-rename-a-");
     const rootB = await createTestScratch("dohc-case-rename-b-");
-    await writeFile(join(rootB, "probe.md"), "");
-    const ignoresCase = await readFile(join(rootB, "PROBE.md")).then(() => true, () => false);
-    await rm(join(rootB, "probe.md"));
-    if (!ignoresCase) context.skip("this disk keeps case apart");
     const relayRoot = await createTestScratch("dohc-case-rename-relay-");
     const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
     let daemonA: LiveDaemonCapture | null = null;

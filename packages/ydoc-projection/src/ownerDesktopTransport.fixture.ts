@@ -41,6 +41,7 @@ import {yDocToMarkdown} from "./import-export.js";
 import {policy} from "./liveCommittedDeliveryTestSupport.js";
 import { ensureLocalhostTls } from "../../../services/share-web/src/testing/device-control/localhostTls.js";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary.js";
+import { realDaemonReaderConfig } from "../../../apps/desktop/src/testing/realDaemonWorkspaceSessions.js";
 import { cleanupSuiteTestScratch, cleanupTestScratch, createTestScratch } from "../../../apps/desktop/src/workspaces/testTemp.js";
 
 export const engine = requireEngineBinaryOrSkip();
@@ -75,7 +76,7 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
     DOHC_ENGINE_OWNER_HOST_CONFIG: nativeConfig,DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig}});
   expect(conflicting.status).not.toBe(0);
   expect(conflicting.stderr).toContain("mutually exclusive");
-  const lifecycle = new EngineDaemonLifecycle({command: binary,maxRestarts: 0,privateOwnerHost: {configPath: nativeConfig,client: {aggregateBytes: 200_000_000,maxUploads: 2}}});
+  const lifecycle = new EngineDaemonLifecycle({command: binary,readerConfig: realDaemonReaderConfig(),maxRestarts: 0,privateOwnerHost: {configPath: nativeConfig,client: {aggregateBytes: 200_000_000,maxUploads: 2}}});
   await lifecycle.start();
   const singleton = lifecycle.currentClient() as EngineClient;
   const routes = new RelayTransportRouteGuard();

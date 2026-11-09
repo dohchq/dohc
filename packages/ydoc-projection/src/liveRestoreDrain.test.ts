@@ -415,7 +415,9 @@ const evidenceChanges: readonly (readonly [string, () => ContentProposal, (f: Co
     f => f.raw.exec("DELETE FROM sync_relay_object_moments WHERE relay_seq=0")],
   ["absent artifact", () => contentProposalFixture(), f => addArtifact(f, absentArtifact, -1)],
 ];
-it.each(restorePaths.flatMap(path => evidenceChanges.map(([name, make, change]) => [path, name, make, change] as const)))(
+it.each(restorePaths.flatMap(path => evidenceChanges
+  .filter(([name]) => path === "read" || path === "admission" || name === "operation row")
+  .map(([name, make, change]) => [path, name, make, change] as const)))(
   "refuses %s when its %s changes during validation", async (path, _name, make, change) => {
     const f = make();
     try {

@@ -82,8 +82,7 @@ function inspect(engineDb: DatabaseSync, relayDb: DatabaseSync, workspaceId: str
   return { captured, relayed, indexedRecords, pendingOps, pullCursor, relayCursor, pushPositions };
 }
 
-it.for(counts)("automatically syncs %i valid-id Collection files through create and rewrite", { timeout: 420_000 }, async (count, context) => {
-  if (count === 0 || engine.missing) context.skip();
+it.skipIf(!process.env.DOHC_BULK_SYNC_COUNT || engine.missing).for(counts)("automatically syncs %i valid-id Collection files through create and rewrite", { timeout: 420_000 }, async (count) => {
   if (!Number.isSafeInteger(count) || count < 1 || count > 2_000) throw new Error("Invalid bulk fixture count.");
   await mkdir(output, { recursive: true });
   const scratch = await mkdtemp(join(output, `${label}-${count}-fixture-`));

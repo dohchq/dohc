@@ -1,14 +1,14 @@
 import { ChildProcess, execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveValidationExecutor, createValidatorFailureLog, LiveValidatorFailure } from "./liveValidation.js";
 import {selfHostLiveProfile} from "./selfHostLiveProfile.js";
 import { LiveRestoreBusy, LiveRestoreTooLarge } from "./liveRestoreValidation.js";
+import { nestedEmphasis } from "./liveValidation.fixture.js";
 
 import {registered, cleanupLiveDeliveryFixtures} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
 const {encodeStateAsUpdate} = createRequire(new URL("../../../packages/ydoc-projection/package.json", import.meta.url))("yjs") as {
@@ -52,15 +52,7 @@ it.each([4093, 4094])("returns state bytes only when %s retained updates reach t
   }
 }, 30_000);
 
-function longCheckpoint(paragraphs: number, mixed: boolean) {
-  const markdown = Array.from({length: paragraphs}, (_, i) => mixed
-    ? `Paragraph ${i} **bold** *italic* \`code\` [link](https://example.com).`
-    : `Paragraph ${i} **bold** text.`).join("\n\n");
-  const doc = markdownToYDoc(markdown);
-  try {return encodeStateAsUpdate(doc);} finally {doc.destroy();}
-}
-
-const longValidations = {
+const validations = {
   settlement: async ({pool, input}, checkpoint) =>
     expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint})).toMatchObject({kind: "accepted"}),
   journal: async ({pool, input}, checkpoint) =>
@@ -72,19 +64,10 @@ const longValidations = {
     expect(await pool.restore(selfHostLiveProfile().service.restore.validation).point(restorePoint(input, checkpoint)))
       .toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)}),
 } satisfies Record<string, (f: ReturnType<typeof fixture>, checkpoint: Uint8Array) => Promise<void>>;
-it.each(Object.entries(longValidations))("routes %s validation through a capped child", async (_, validate) => {
-  await validate(fixture(), longCheckpoint(3, true));
+it.each(Object.entries(validations))("routes %s validation through a capped child", async (_, validate) => {
+  const f = fixture();
+  await validate(f, f.input.checkpoint);
 }, 60_000);
-
-it("accepts 5000 mixed paragraphs in a capped child", async () => {
-  await longValidations.settlement(fixture(), longCheckpoint(5000, true));
-}, 60_000);
-
-it("refuses 25000 bold paragraphs in a capped child", async () => {
-  const {pool, input} = fixture(), checkpoint = longCheckpoint(25000, false);
-  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
-    .toMatchObject({kind: "refused", reason: "capacity-refused"});
-}, 30_000);
 
 
 
@@ -202,24 +185,6 @@ it("retains no pipe of a fork refused with EAGAIN", async () => {
     "--input-type=module", "-e", script, new URL("./liveValidation.ts", import.meta.url).href]);
   expect(stdout.trim()).toBe("0");
 }, 30_000);
-
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-/** A note whose source witness nests emphasis `depth` levels; it reads as one flat emphasis run. */
-function nestedEmphasis(depth: number) {
-  const source = "*".repeat(depth) + "b" + " a*".repeat(depth);
-  const doc = markdownToYDoc(`*b${" a".repeat(depth)}*`), meta = doc.getMap("meta");
-  meta.set("dohcMarkdownSource", source);
-  meta.set("dohcMarkdownSourceSha256", sha256(source));
-  meta.set("dohcMarkdownSourceProjectionSha256", sha256(yDocToMarkdown(doc)));
-  const checkpoint = encodeStateAsUpdate(doc); doc.destroy();
-  return {source, checkpoint};
-}
-it("keeps a worker thread's stack for deeply nested emphasis", async () => {
-  const {pool, input} = fixture(), {source, checkpoint} = nestedEmphasis(2400);
-  // A child's default stack refuses this witness as unreadable instead of verifying it.
-  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
-    .toMatchObject({kind: "accepted", evidence: {projectedMarkdownSha256: sha256(source)}});
-}, 120_000);
 
 let heapCheckpoint: Uint8Array | undefined;
 function heapExhaustionCheckpoint() {

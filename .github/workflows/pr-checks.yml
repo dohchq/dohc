@@ -313,7 +313,7 @@ jobs:
           compression-level: 0
   javascript-native:
     name: JS native ${{ matrix.shard }}
-    needs: [changes, javascript-prepare]
+    needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -350,6 +350,10 @@ jobs:
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - name: Install browser
         run: pnpm exec playwright install chromium
+      - name: Wait for the shared build within the complete gate budget
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verification/wait-preparation.mjs js
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: javascript-prepared-${{ github.run_attempt }}
@@ -467,8 +471,10 @@ jobs:
           compression-level: 0
   rust-tests:
     name: Rust tests ${{ matrix.shard }}
-    needs: [changes, rust-archive]
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
+    needs: [changes, rust-archive, javascript]
+    if: >-
+      always() && !cancelled() && needs.changes.result == 'success' && needs.rust-archive.result == 'success' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     strategy:
@@ -483,6 +489,14 @@ jobs:
           - 5
           - 6
           - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
