@@ -550,7 +550,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           // The whole path: a title names only the file, and two folders can hold one name.
           details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
           atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null,
-          read: prior?.read === true || notice.readAtMs !== null,
+          // The list holds a read until main answers and lets go of one main refused.
+          read: notice.readAtMs !== null,
           retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
           // A hold is on purpose: nothing failed.
           ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),

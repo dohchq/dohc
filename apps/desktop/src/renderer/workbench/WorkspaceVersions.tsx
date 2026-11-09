@@ -69,6 +69,27 @@ function versionName(
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
+// How long a read waits for its answer. The engine can leave a read with no
+// answer while the workspace's engine thread is stuck (#3318), so the
+// Versions reads give up, in the words of the engine's own deadline.
+const READ_DEADLINE_MS = 30_000;
+
+// The read, or a failure once it has gone READ_DEADLINE_MS with no answer. An
+// answer after that is dropped.
+export function withDeadline<T>(read: Promise<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const error = new Error(`${what} got no answer in ${READ_DEADLINE_MS} ms.`);
+      error.name = "EngineRequestDeadlineError";
+      reject(error);
+    }, READ_DEADLINE_MS);
+    read.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 // A version's merge notice, so a later merge of the same version takes it back.
 function mergeIdentity(workspaceId: string, versionId: string): string {
   return `version-merge:${workspaceId}:${versionId}`;
@@ -297,7 +318,7 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
 
   const refresh = useCallback(async () => {
     const token = snapshotToken.current;
-    const result = await bridge().listWorkspaceVersions({ workspaceId });
+    const result = await withDeadline(bridge().listWorkspaceVersions({ workspaceId }), "listWorkspaceVersions");
     if (token !== snapshotToken.current) return null;
     setSnapshot(result);
     return result;

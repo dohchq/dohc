@@ -5,6 +5,7 @@ import { badRequest, notFound, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./requestInputs";
 import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
+import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { referencedBlobShas } from "./storage/blobReferences";
 import { logBlobsMissing } from "./storage/errors";
@@ -238,9 +239,11 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
  * service host credential for the workspace owner; this decides scope.
  * A row or blob outside the scope answers exactly as an absent one.
  */
-export function createServiceHostFeed(storage: SyncRelayStorage, firstOpen?: FirstOpenPublisher) {
+export function createServiceHostFeed(storage: SyncRelayStorage,
+  {firstOpen, lookupUserDisplayName}: {firstOpen?: FirstOpenPublisher; lookupUserDisplayName?: LogAuthorNameLookup} = {}) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} }, { watched: () => false });
+  const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} }, { watched: () => false },
+    lookupUserDisplayName);
   const blobReach = createBlobReach(storage);
   const currentScope = (workspaceId: string) => {
     const scope = storage.readServiceHostFeedScope(workspaceId);

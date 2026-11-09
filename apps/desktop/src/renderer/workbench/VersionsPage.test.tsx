@@ -68,6 +68,8 @@ function Page(props: {
   onReviewConflicts?: () => void;
   onError?: OnError;
   onSettled?: (identity: string) => void;
+  // The versions list's own failure, which the shell shows as a toast.
+  onVersionsError?: (message: string, cause: unknown) => void;
 }) {
   const workspaceId = props.workspaceId ?? "ws-1";
   const versions = useWorkspaceVersions({
@@ -77,7 +79,7 @@ function Page(props: {
     activeTabDirty: props.dirty ?? false,
     beginLineageOperation: async () => () => {},
     onWorkspaceStateChanged: () => {},
-    onError: () => {},
+    onError: props.onVersionsError ?? (() => {}),
     clearError: () => {},
     onMergeNotice: () => {},
     onConflictError: () => {},
@@ -492,6 +494,110 @@ describe("VersionsPage", () => {
     act(filedRetry(onError));
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide");
+  });
+
+  // Only the page's timers are fake, as above, so these tests use act alone.
+  const fakePageTimers = () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ now: NOW, toFake: ["Date", "setTimeout", "clearTimeout"] });
+  };
+  const DEADLINE_WORDS = "dohc did not answer in time. Try again.";
+
+  it("gives up on when each version last changed after 30 seconds, drops the answer that comes later, and reads again on Try again", async () => {
+    const late = deferred<{ versions: unknown[] }>();
+    bridgeMock.listVersionLastChanges.mockReturnValueOnce(late.promise);
+    const onError = vi.fn<OnError>();
+    fakePageTimers();
+    render(<Page onError={onError} />);
+    await act(async () => {});
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledOnce();
+    // The rows wait for this read.
+    expect(screen.queryAllByTestId("versions-page-row")).toHaveLength(0);
+    await act(() => vi.advanceTimersByTimeAsync(29_999));
+    expect(onError).not.toHaveBeenCalled();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const sentence = "dohc could not read when each version last changed.";
+    expect(onError).toHaveBeenCalledExactlyOnceWith(sentence, expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-reads:/), false);
+    expect(withErrorWords(sentence, onError.mock.calls[0]![1])).toBe(`${sentence} ${DEADLINE_WORDS}`);
+    // The rows show, sorted by when each was made, and the later answer changes nothing.
+    expect(screen.getAllByTestId("versions-page-name").map((name) => name.textContent)).toEqual(["Main", "Draft two", "Fresh", "Draft"]);
+    await act(async () => late.resolve({ versions: [{ versionId: "draft", lastChange: { atMs: NOW - HOUR, personName: "Ana" } }] }));
+    expect(details("draft")).not.toContain("Changed");
+    act(filedRetry(onError));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledTimes(2);
+    expect(details("draft")).toContain("Changed 1h ago by Ice");
+  });
+
+  it("gives up on a count after 30 seconds and counts the next version, drops the answer that comes later, and counts again on Try again", async () => {
+    const late = deferred<{ count: number }>();
+    bridgeMock.countWorkspaceVersionChanges.mockReturnValueOnce(late.promise);
+    const onError = vi.fn<OnError>();
+    fakePageTimers();
+    render(<Page onError={onError} />);
+    await act(async () => {});
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", versionId: "draft" });
+    await act(() => vi.advanceTimersByTimeAsync(29_999));
+    // One at a time: the next count waits its turn.
+    expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const sentence = "dohc could not count the files that differ from Main.";
+    expect(onError).toHaveBeenCalledExactlyOnceWith(sentence, expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-reads:/), false);
+    expect(withErrorWords(sentence, onError.mock.calls[0]![1])).toBe(`${sentence} ${DEADLINE_WORDS}`);
+    expect(within(row("draft")).getByTestId("versions-page-count-retry")).toBeTruthy();
+    expect(details("nested")).toContain("1 file differs from Main");
+    await act(async () => late.resolve({ count: 9 }));
+    expect(details("draft")).not.toContain("9 files");
+    expect(within(row("draft")).getByTestId("versions-page-count-retry")).toBeTruthy();
+    act(filedRetry(onError));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(details("draft")).toContain("3 files differ from Main");
+  });
+
+  it("gives up on the versions after 30 seconds a try, drops the answer that comes later, and lists them on Try again", async () => {
+    const late = deferred<{ versions: unknown[]; activeVersionId: string }>();
+    bridgeMock.listWorkspaceVersions.mockImplementation(() => new Promise(() => {}));
+    bridgeMock.listWorkspaceVersions.mockReturnValueOnce(late.promise);
+    const onVersionsError = vi.fn();
+    fakePageTimers();
+    render(<Page onVersionsError={onVersionsError} />);
+    await act(async () => {});
+    // Five tries, each 30 seconds, a second apart.
+    await act(() => vi.advanceTimersByTimeAsync(5 * 30_000 + 4 * 1_000 - 1));
+    expect(bridgeMock.listWorkspaceVersions).toHaveBeenCalledTimes(5);
+    expect(screen.queryByTestId("versions-page-retry")).toBeNull();
+    expect(onVersionsError).not.toHaveBeenCalled();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const retry = screen.getByTestId("versions-page-retry");
+    expect(onVersionsError).toHaveBeenCalledOnce();
+    expect(onVersionsError.mock.calls[0]![1]).toMatchObject({ name: "EngineRequestDeadlineError" });
+    await act(async () => late.resolve({ versions: [MAIN, DRAFT], activeVersionId: "main" }));
+    expect(screen.queryAllByTestId("versions-page-row")).toHaveLength(0);
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT], activeVersionId: "main" });
+    act(() => within(retry).getByRole("button", { name: "Try again" }).click());
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getAllByTestId("versions-page-row")).toHaveLength(2);
+  });
+
+  it("drops a read that gives up after the page shows another workspace", async () => {
+    const stale = deferred<{ versions: unknown[] }>();
+    bridgeMock.listVersionLastChanges.mockReturnValueOnce(stale.promise);
+    const onError = vi.fn<OnError>();
+    fakePageTimers();
+    const { rerender } = render(<Page workspaceId="ws-1" onError={onError} />);
+    await act(async () => {});
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1" });
+    rerender(<Page workspaceId="ws-2" onError={onError} />);
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(bridgeMock.listVersionLastChanges).toHaveBeenLastCalledWith({ workspaceId: "ws-2" });
+    expect(details("draft")).toContain("Changed 1h ago by Ice");
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    expect(onError).not.toHaveBeenCalled();
+    expect(details("draft")).toContain("Changed 1h ago by Ice");
   });
 
   it("drops an answer about the workspace the page showed before", async () => {

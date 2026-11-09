@@ -8,7 +8,7 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
 import { EMPTY_ART } from "./EmptyArt";
-import { NewVersionHint, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
+import { NewVersionHint, type VersionNameField, type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
@@ -17,27 +17,6 @@ interface ConflictCount { count: number; more: boolean }
 // Conflict counts read the open conflicts a page at a time. Past this many pages
 // a count shows as a lower bound.
 const CONFLICT_PAGES_MAX = 5;
-
-// How long a read waits for its answer. The engine can leave a read with no
-// answer while the workspace's engine thread is stuck (#3318), so the page
-// gives up, in the words of the engine's own deadline.
-const READ_DEADLINE_MS = 30_000;
-
-// The read, or a failure once it has gone READ_DEADLINE_MS with no answer. An
-// answer after that is dropped.
-function withDeadline<T>(read: Promise<T>, what: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      const error = new Error(`${what} got no answer in ${READ_DEADLINE_MS} ms.`);
-      error.name = "EngineRequestDeadlineError";
-      reject(error);
-    }, READ_DEADLINE_MS);
-    read.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error: unknown) => { clearTimeout(timer); reject(error); },
-    );
-  });
-}
 
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
 // `quiet` changes the row where it stands, with no new toast.
@@ -179,7 +158,7 @@ export function VersionsPage(props: {
     if (versionIds === null) return;
     const token = lastChangeReads.next();
     notice.started("last-changes");
-    bridge().listVersionLastChanges({ workspaceId }).then(
+    withDeadline(bridge().listVersionLastChanges({ workspaceId }), "listVersionLastChanges").then(
       (result) => {
         if (!lastChangeReads.isCurrent(token)) return;
         notice.worked("last-changes");
@@ -251,7 +230,7 @@ export function VersionsPage(props: {
         staleCounts.current.delete(versionId);
         let count: Count;
         try {
-          count = (await bridge().countWorkspaceVersionChanges({ workspaceId, versionId })).count;
+          count = (await withDeadline(bridge().countWorkspaceVersionChanges({ workspaceId, versionId }), "countWorkspaceVersionChanges")).count;
         } catch (error) {
           countErrors.current.set(versionId, error);
           count = "failed";

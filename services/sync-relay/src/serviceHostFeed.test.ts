@@ -5,7 +5,7 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFee
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {hostedPublication, hostedRowDecision} from "./serviceHostFeed";
-import {assertClientLogProvenance, FIRST_OPEN_ORIGIN_PREFIX, parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
+import {assertClientLogProvenance, FIRST_OPEN_ORIGIN_PREFIX, parseLogOp, SERVICE_HOST_ORIGIN_PREFIX, type LogAuthorNameLookup} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
 import {stableJsonStringify} from "./canonicalJson";
 import {filterOpForShare, type AnyShareSelector} from "./shareFilter";
@@ -48,7 +48,7 @@ function ydoc(objectId: string, path: string, update: {sha256: string}) {
   return {versionId: "main", objectId, path, contentKind: "richdoc", updateBlobSha256: update.sha256, isBaseState: false, lineageClaimId: binding.lineageClaimId};
 }
 
-async function fixture() {
+async function fixture(lookupUserDisplayName?: LogAuthorNameLookup) {
   const f = await ticketFixture(); cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: ws, replicationEpoch: "epoch", streamIdentity: "stream"});
   for (const {sha256, content} of [A, B, C, P, Y, YP]) f.storage.putBlob({workspaceId: ws, sha256, content, createdAtMs: 1});
@@ -71,7 +71,7 @@ async function fixture() {
   const setGrant = (shareId: string, change: string) => f.raw.prepare(`UPDATE sync_relay_share_grants SET ${change} WHERE share_id=?`).run(shareId);
   const enroll = (path: string, shareId = scope.shareId) => f.storage.enrollServiceHostDocument({workspaceId: ws, ownerUserId: "owner-1", shareId, path, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enroll("docs/a.md"), {key, namespace});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true, lookupUserDisplayName,
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
   const request = (method: string, suffix: string, body?: BodyInit, contentType = "application/json") => handle(new Request(`https://relay.test/sync/${ws}/hosted/${suffix}`,
     {method, headers: {authorization: `Bearer ${bearer}`, ...(body === undefined ? {} : {"content-type": contentType})}, ...(body === undefined ? {} : {body})}));
@@ -95,13 +95,22 @@ async function fixture() {
   return {...f, handle, bearer, append, share, setGrant, enroll, request, page, read, push, upload, blobStatus, hostCoordinate, objects, uploads};
 }
 
-it.each(["owner-1", "reader-2"])("binds service-host moment context %s to its authenticated owner", async accountId => {
-  const f = await fixture();
+it.each(["owner-1", "reader-2"])("binds service-host moment context %s to its authenticated owner, by the owner's account name", async accountId => {
+  const looked: string[] = [];
+  const f = await fixture(userId => { looked.push(userId); return "Ada Owner"; });
   const payload = write(binding.objectId, "docs/a.md", A, {authorContext: {kind: "account", accountId}});
   expect((await f.push([["moment.append", payload]])).status).toBe(200);
   expect(f.hostCoordinate(0)?.payloadJson).toBe(stableJsonStringify(write(binding.objectId, "docs/a.md", A)));
   expect(f.hostCoordinate(0)?.admittedAuthorSnapshot).toEqual(accountId === "owner-1"
-    ? [{kind: "human", humanId: "owner-1", humanName: "Unnamed"}] : undefined);
+    ? [{kind: "human", humanId: "owner-1", humanName: "Ada Owner"}] : undefined);
+  expect(looked, "only the owner the server authenticated is looked up").toEqual(accountId === "owner-1" ? ["owner-1"] : []);
+});
+
+it("names the owner's service-host edits Unnamed when their account name does not read", async () => {
+  const f = await fixture(() => { throw new Error("The account database did not answer."); });
+  const payload = write(binding.objectId, "docs/a.md", A, {authorContext: {kind: "account", accountId: "owner-1"}});
+  expect((await f.push([["moment.append", payload]])).status).toBe(200);
+  expect(f.hostCoordinate(0)?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "owner-1", humanName: "Unnamed"}]);
 });
 
 it("serves hosted rows unchanged and refuses private files, their blobs and coordinates", async () => {

@@ -14,7 +14,7 @@ async fn first_owner_append_dispatches_its_proof_before_holding() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn first_owner_append_commits_after_proof() {
     first_owner_append(false, true).await;
 }

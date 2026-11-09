@@ -355,7 +355,8 @@ const serviceReplication = selfHostedLive && deployment && linkKey
       const firstOpen = createFirstOpenPublisher({storage, namespace: deployment.history.namespace,
         activation: () => currentServiceHost()?.activationConfig(), host: () => currentServiceHost()});
       return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen,
-        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
+        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input}),
+        lookupUserDisplayName: userId => lookupUserDisplayName(userId)});
     })() : undefined;
 
 function createTestActorResolver(): ResolveActor {

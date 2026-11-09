@@ -109,7 +109,8 @@ async function reconnectFailureCapture(prefix: string) {
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
     // Capture that never settles: "unsettled" runs healthy, "scanning" is a
     // replacement still on its first scan, "stopped" a driver that stopped.
-    captureAnswer: null as "unsettled" | "scanning" | "stopped" | null,
+    // "rescanning" settles, then reads a deliberate rescan's moment.
+    captureAnswer: null as "unsettled" | "scanning" | "stopped" | "rescanning" | null,
   };
   const daemonClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
@@ -157,11 +158,14 @@ async function reconnectFailureCapture(prefix: string) {
       const answer = state.captureAnswer;
       const lifecycle = daemonCaptureLifecycleAnswer(request, () => ({
         deferredWrites: [], heldFiles: [], degraded: false,
-        settled: answer === null, running: answer === null || answer === "unsettled",
+        settled: answer === null || answer === "rescanning", running: answer === null || answer === "unsettled",
       }));
       if (lifecycle && (answer === "scanning" || answer === "stopped") && request.method === "watcher.status") {
         return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }),
           running: false, degraded: answer === "stopped", phase: "degraded" } };
+      }
+      if (lifecycle && answer === "rescanning" && request.method === "watcher.status") {
+        return { ...lifecycle, result: { ...(lifecycle.result as { [key: string]: JsonValue }), running: false } };
       }
       if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
@@ -605,6 +609,17 @@ it("keeps History paused when Try again finds capture stopped again, and catchin
   const refused = await capture.retryHistoryCapture().then(() => null, (error: unknown) => error);
   expect(refused).toBeInstanceOf(HistoryStillPausedError);
   expect(refused).toMatchObject({ paths: [] });
+  state.captureAnswer = null;
+  await capture.stop();
+});
+
+// A deliberate rescan right after Try again reads not running while ready,
+// and neither degraded nor terminal. History runs.
+it("lets Try again resume History when it finds a deliberate rescan", async () => {
+  const { capture, state, outcomes } = await reconnectFailureCapture("dohc-ydoc-history-retry-rescan-");
+  state.captureAnswer = "rescanning";
+  await expect(capture.retryHistoryCapture()).resolves.toBeUndefined();
+  expect(outcomes.at(-1)).toBe(true);
   state.captureAnswer = null;
   await capture.stop();
 });

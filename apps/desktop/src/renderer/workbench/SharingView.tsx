@@ -560,11 +560,24 @@ export function skipsShown(mount: ShareMount | undefined, view: SkipView): boole
   return hasUnacknowledgedShareSkips(skipped) && !(typeof state === "number" && state >= skipped.generation);
 }
 
-function countOf(lane: SharingLane, answer: AccessAnswer): string {
-  const active = lane === "granted"
-    ? groupShares(answer.rows).filter((group) => group.rows.some((row) => row.status === "active")).length
-    : answer.rows.filter((row) => row.kind === "share" && row.status === "active").length;
-  return `${active}${answer.nextCursor ? "+" : ""}`;
+// Every share the list shows, whatever its status, and the rows this
+// computer adds. "24+" while more can load, read as "24 or more shares".
+function ListCount(props: { lane: SharingLane; answer: AccessAnswer; local: number }) {
+  const { lane, answer } = props;
+  const listed = lane === "granted"
+    ? groupShares(answer.rows).length
+    : answer.rows.filter((row) => row.kind === "share").length;
+  const count = listed + props.local;
+  return (
+    <span data-testid={`sharing-${lane}-count`} className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal">
+      {answer.nextCursor ? (
+        <>
+          <span aria-hidden>{count}+</span>
+          <span className="sr-only">{count} or more shares</span>
+        </>
+      ) : count}
+    </span>
+  );
 }
 
 function Section(props: {
@@ -586,11 +599,7 @@ function Section(props: {
       <h3 tabIndex={-1} data-sharing-lane-focus
         className="dohc-section-label m-0 flex h-6 items-center rounded-md px-3">
         {words.label}
-        {known ? (
-          <span data-testid={`sharing-${lane}-count`} className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal">
-            {countOf(lane, view.answer)}
-          </span>
-        ) : null}
+        {known ? <ListCount lane={lane} answer={view.answer} local={local.length} /> : null}
       </h3>
       <div className="px-1 pb-1">
         {view.status === "loading" ? (

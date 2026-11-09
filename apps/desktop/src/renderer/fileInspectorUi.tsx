@@ -15,6 +15,7 @@ import { IconButton, SecondaryButton } from "./ui/controls";
 import { NARROW_GROUP_HIDDEN, useTabRowActionsSlot } from "./workbench/tabRowActions";
 import { useShownAfter } from "./ui/useShownAfter";
 import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
+import { SAVE_STATE } from "./ui/StateMark";
 import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 
 // A file view's actions, at the right end of its editor group's tab row: the
@@ -298,7 +299,7 @@ export function ReadOnlyPropertiesFlag(props: {
   );
 }
 
-export function LossyNoteNoticeView(props: { held?: boolean; children: ReactNode }) {
+export function LossyNoteNoticeView(props: { held?: boolean; tooLarge?: boolean; children: ReactNode }) {
   return (
     <div
       data-testid="lossy-note-notice"
@@ -307,7 +308,9 @@ export function LossyNoteNoticeView(props: { held?: boolean; children: ReactNode
     >
       <span className="flex min-w-0 items-center gap-1">
         <Lock aria-hidden size={12} className="shrink-0" />
-        {props.held
+        {props.tooLarge
+          ? SAVE_STATE["too-large"].title
+          : props.held
           ? "dohc held a change, because saving it would rewrite parts it can't show."
           : LOSSY_NOTE_TITLE}
       </span>
@@ -325,11 +328,15 @@ export function LossyNoteNotice(props: {
   contentHash: string | null;
   // A change to the note waits for Edit anyway.
   held?: boolean;
+  // Its text is past the live limit, which no editor in dohc opens, so it
+  // has no Edit anyway.
+  tooLarge?: boolean;
   onError?: ReportButtonError;
   // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const onEditAnyway = props.tooLarge ? undefined : props.onEditAnyway;
   // Each opening of the warning asks History again: capture can record an
   // outside edit after the note opened.
   const [opened, setOpened] = useState(0);
@@ -358,9 +365,9 @@ export function LossyNoteNotice(props: {
     : "dohc could not confirm that History can restore the original.";
   return (
     <>
-      <LossyNoteNoticeView held={props.held}>
+      <LossyNoteNoticeView held={props.held} tooLarge={props.tooLarge}>
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
-        {props.onEditAnyway ? (
+        {onEditAnyway ? (
           <button
             type="button"
             data-testid="lossy-note-edit-anyway"
@@ -374,7 +381,7 @@ export function LossyNoteNotice(props: {
           </button>
         ) : null}
       </LossyNoteNoticeView>
-      {confirming && props.onEditAnyway ? (
+      {confirming && onEditAnyway ? (
         <ConfirmDialog
           icon={FilePenLine}
           title="Edit this note anyway?"
@@ -386,7 +393,7 @@ export function LossyNoteNotice(props: {
           onCancel={() => setConfirming(false)}
           onConfirm={() => {
             setConfirming(false);
-            props.onEditAnyway?.();
+            onEditAnyway();
           }}
         >
           <p>

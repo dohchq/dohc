@@ -293,31 +293,31 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_no_reader_prefix_refuses_before_fencing() {
     impossible_prefix_refuses_before_fencing("no-reader");
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_missing_prefix_refuses_before_fencing() {
     impossible_prefix_refuses_before_fencing("missing");
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_pre_rename_prefix_refuses_before_fencing() {
     impossible_prefix_refuses_before_fencing("pre-rename");
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_oversized_prefix_refuses_before_fencing() {
     impossible_prefix_refuses_before_fencing("oversized");
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_settlement_retries_a_verdict_evicted_between_transactions() {
     let (mut f, _) = reader_fixture();
     let prep = f.freeze(f.baseline_point.clone());
@@ -370,7 +370,7 @@ fn reader_restore_settlement_retries_a_verdict_evicted_between_transactions() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_prepares_against_selected_history_without_changing_the_live_doc() {
     let (mut f, source) = reader_fixture();
     let edit = f.doc.richdoc_append_paragraph("later accepted body");
@@ -403,7 +403,7 @@ fn reader_restore_prepares_against_selected_history_without_changing_the_live_do
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_source_proofs_refuse_forged_partial_and_stale_witnesses() {
     let (mut f, _) = reader_fixture();
     let input = f.freeze(f.baseline_point.clone());
@@ -433,7 +433,7 @@ fn reader_restore_source_proofs_refuse_forged_partial_and_stale_witnesses() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_rechecks_authority_and_artifact_after_a_cached_proof() {
     for case in [
         "binding",
@@ -495,7 +495,7 @@ fn reader_restore_rechecks_authority_and_artifact_after_a_cached_proof() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_applies_settles_and_resumes_in_both_directions() {
     for direction in [
         "reader-to-reader",
@@ -671,7 +671,7 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_application_settlement_and_resume_recheck_authority() {
     for stage in ["application", "settlement", "resume"] {
         for case in [
@@ -774,7 +774,7 @@ fn reader_restore_application_settlement_and_resume_recheck_authority() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_source_rechecks_its_fence_and_budget_before_a_cached_verdict() {
     let (mut f, source) = reader_fixture();
     let input = f.freeze(f.baseline_point.clone());
@@ -4825,7 +4825,7 @@ fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable()
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_to_native_restore_without_a_reader_holds_the_current_reader_head() {
     let mut f = Fixture::new("native original\n");
     let target = f.baseline_point.clone();
@@ -4865,7 +4865,7 @@ fn reader_to_native_restore_without_a_reader_holds_the_current_reader_head() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_to_native_restore_validates_the_prefix_artifact_and_cached_authority() {
     for case in [
         "valid",
@@ -4998,7 +4998,7 @@ fn reader_to_native_restore_validates_the_prefix_artifact_and_cached_authority()
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_prefix_checks_the_budget_before_dispatch() {
     let (mut f, source) = reader_fixture();
     let input = f.freeze(f.baseline_point.clone());
@@ -5022,7 +5022,7 @@ fn reader_restore_prefix_checks_the_budget_before_dispatch() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_waits_for_the_authorized_history_artifact() {
     let (mut f, source) = reader_fixture();
     let edit = f.doc.richdoc_append_paragraph("later");
@@ -5098,13 +5098,13 @@ fn ordinary_history_stays_native(caller: &str) {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_history_leaves_publication_native() {
     ordinary_history_stays_native("publication");
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_restore_history_leaves_sync_native() {
     ordinary_history_stays_native("sync");
 }
@@ -5198,27 +5198,27 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
     assert_eq!(reader.dispatch_count(), 0);
 }
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_point_no_reader_refuses_before_fencing() {
     impossible_point_refuses("no-reader");
 }
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_point_missing_refuses_before_fencing() {
     impossible_point_refuses("missing");
 }
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_point_pre_rename_refuses_before_fencing() {
     impossible_point_refuses("pre-rename");
 }
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_point_oversized_refuses_before_fencing() {
     impossible_point_refuses("oversized");
 }
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_point_partial_refuses_before_fencing() {
     impossible_point_refuses("partial");
 }
@@ -5487,7 +5487,7 @@ fn accepted_reader_signal_is_monotonic_and_unknown_history_stays_conservative() 
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_history_signal_keeps_expired_points_on_preflight() {
     let (mut f, _) = reader_fixture();
     let signal = |f: &Fixture| {
@@ -5507,7 +5507,7 @@ fn reader_history_signal_keeps_expired_points_on_preflight() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_post_rename_point_does_not_require_the_old_head_artifact() {
     let (mut f, source) = reader_fixture();
     damage(&f, "UPDATE moments SET path='old.md'");
@@ -5573,7 +5573,7 @@ fn native_points_do_not_need_an_artifact() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn reader_partial_prefix_refuses_before_fencing() {
     impossible_prefix_refuses_before_fencing("partial");
 }

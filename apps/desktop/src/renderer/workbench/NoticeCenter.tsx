@@ -66,8 +66,9 @@ export type Notice = {
   filePaths?: readonly string[];
   // A terminal command the body asks the person to run, shown with its copy.
   command?: string;
-  // Closes the notice's toast once its row is read. The row stays.
-  onRead?: () => void;
+  // Closes the notice's toast once its row is read. The row stays. A read
+  // dohc saves resolves false when it could not save it.
+  onRead?: () => void | Promise<boolean>;
   read?: boolean;
   // Where a press on the row goes: the thing it is about. A row without it
   // goes nowhere.
@@ -1177,8 +1178,9 @@ export function NoticeCenter(props: {
   onRetryWorkspaceError?: (id: string) => void;
   onWorkspaceErrorAction?: (id: string, index?: number) => void;
   onHideWorkspaceError?: (id: string) => void;
-  // Told when an error's row is read. Closing its toast doesn't read it.
-  onReadWorkspaceError?: (id: string) => void;
+  // Told when an error's row is read. Closing its toast doesn't read it. A
+  // read dohc saves resolves false when it could not save it.
+  onReadWorkspaceError?: (id: string) => Promise<boolean> | undefined;
   onDismissWorkspaceError?: (id: string) => void;
   // Opens what a row is about. Resolves to null once it opened, or to a
   // sentence for the row, such as why the target is gone. Nothing opens
@@ -1700,7 +1702,7 @@ export function NoticeCenter(props: {
         ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)
           ? { onRead: () => {
             if (!error.seen) props.onHideWorkspaceError?.(error.id);
-            if (!error.read) props.onReadWorkspaceError?.(error.id);
+            return error.read ? undefined : props.onReadWorkspaceError?.(error.id);
           } }
           : {}),
         read: error.read === true,
@@ -2050,7 +2052,8 @@ export function NoticeCenter(props: {
   // Every row counts until it is read.
   const count = unreadLocal + unreadSent;
   const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
-  // Reading a row of this computer's keeps the row and closes its toast.
+  // Reading a row of this computer's keeps the row and closes its toast. A
+  // read dohc could not save shows the row unread again.
   const readLocal = (rows: readonly Notice[], setAside: boolean) => {
     setLocalRead((current) => {
       const next = new Set(current);
@@ -2058,7 +2061,14 @@ export function NoticeCenter(props: {
       if (setAside && setAsideKey !== null) next.add(setAsideKey);
       return next;
     });
-    for (const row of rows) row.onRead?.();
+    for (const row of rows) {
+      const saving = row.onRead?.();
+      if (!(saving instanceof Promise)) continue;
+      const key = localReadKey(props.workspaceId, row);
+      void saving.then((saved) => {
+        if (!saved) setLocalRead((current) => (current.has(key) ? new Set([...current].filter((read) => read !== key)) : current));
+      });
+    }
   };
   // How to read each unread row as it is now, by a name that stays with the
   // row while its words change.
