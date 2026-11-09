@@ -440,7 +440,8 @@ export interface ChatMessageAppendPayload {
   linkPrincipalId?: string;
   // The agent connection that wrote a link message. Only the relay sets it.
   agentConnectionId?: string;
-  // The agent that wrote an agent message in one of its runs.
+  // The agent in Settings that wrote an agent message: one you run, or the
+  // agent of a run.
   authorAgentId?: string;
   // What an agent reported about itself.
   authorReported?: ChatReportedAgent;
@@ -856,7 +857,7 @@ export interface ChannelThreadSummary {
     bodySnippet: string;
     automation?: ChatMessageAutomation;
     authorReported?: ChatReportedAgent;
-    // The agent that wrote the message in one of its runs. Provenance only.
+    // The agent in Settings that wrote the message. Provenance only.
     authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
@@ -959,7 +960,7 @@ export interface ChatMessage {
   body: string;
   createdAtMs: number;
   automation?: ChatMessageAutomation;
-  // The agent that wrote the message in one of its runs. Provenance only.
+  // The agent in Settings that wrote the message. Provenance only.
   authorAgentId?: string;
   // What the agent reported about itself. Only an agent message has one.
   authorReported?: ChatReportedAgent;
@@ -990,11 +991,43 @@ interface ChatAgentReadState {
   updatedAtMs: number;
 }
 
+// Which agent reads, and so which place in each thread moves. A run dohc
+// dispatched reads as its agent while it runs. Unnamed agents share one place
+// and do not read agent chats. An agent you run reads its chat, mentions of
+// its handle, and threads it posted in, where only its person asks it: a post
+// by one of `requesters`, or a post with no account when `unattributedCounts`.
+export type ChatAgentReader =
+  | { kind: "run"; runId: string }
+  | { kind: "unnamed" }
+  | {
+      kind: "connected";
+      agentId: string;
+      handle: string;
+      requesters: string[];
+      unattributedCounts: boolean;
+    };
+
 // A message that asked one agent, which that agent has not read.
 interface ChatAgentRequestRecord {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   authorKind: ChatActor["kind"];
+  createdAtMs: number;
+}
+
+// An unread request with what a waiting agent shows.
+interface ChatAgentRequestDetail {
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  channel: {
+    id: ChatChannelId;
+    kind: ChatChannelKind;
+    name: string;
+    slug: string;
+    purpose: string;
+  } | null;
+  author: { kind: ChatActor["kind"]; displayName: string };
+  body: string;
   createdAtMs: number;
 }
 
@@ -1185,13 +1218,13 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    // The agent writing in one of its runs. Only an agent author has one.
+    // The agent in Settings writing. Only an agent author has one.
     authorAgentId?: string;
     // What the agent reported about itself. Only an agent author has one.
     authorReported?: ChatReportedAgent;
-    // The author's own agents the message names, resolved on this computer.
-    // Each one wakes, as does the agent whose chat this is. Never journaled.
-    namedAgentIds?: string[];
+    // Every agent this message wakes, resolved from this computer's settings:
+    // its DM's agent and each agent dohc starts that it names. Never journaled.
+    wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     // Desktop's own thread in an agent DM, an automation's wake thread or the
@@ -1263,13 +1296,13 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    // The agent writing in one of its runs. Only an agent author has one.
+    // The agent in Settings writing. Only an agent author has one.
     authorAgentId?: string;
     // What the agent reported about itself. Only an agent author has one.
     authorReported?: ChatReportedAgent;
-    // The author's own agents the message names, resolved on this computer.
-    // Each one wakes, as does the agent whose chat this is. Never journaled.
-    namedAgentIds?: string[];
+    // Every agent this message wakes, resolved from this computer's settings:
+    // its DM's agent and each agent dohc starts that it names. Never journaled.
+    wakeAgentIds?: string[];
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -1326,18 +1359,27 @@ export interface LinkedChatStore {
   ): Promise<ChatAttachment[]>;
   linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
   fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
-  // An agent's place in each thread. A run dohc dispatched names itself and
-  // reads as its agent; without a run, the reads are those of agents outside
-  // a run. The engine refuses a run that is not running.
+  // A reader's place in each thread. The engine refuses a run that is not
+  // running.
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
-    runId?: string;
+    reader: ChatAgentReader;
     threadId: ChatThreadId;
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, runId?: string): Promise<ChatAgentRequestRecord[]>;
+  listAgentUnreadThreads(workspaceId: WorkspaceId, reader: ChatAgentReader): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, reader: ChatAgentReader): Promise<ChatAgentRequestRecord[]>;
+  // One page of a reader's unread requests after `after`, oldest first, in
+  // one Group or thread when named. `more` is set when another page follows.
+  listAgentRequestsPage(input: {
+    workspaceId: WorkspaceId;
+    reader: ChatAgentReader;
+    channelId?: ChatChannelId;
+    threadId?: ChatThreadId;
+    after?: { createdAtMs: number; messageId: ChatMessageId };
+    limit?: number;
+  }): Promise<{ requests: ChatAgentRequestDetail[]; more: boolean }>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,

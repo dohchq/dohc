@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -12,6 +12,7 @@ import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 
 interface ParsedCliBase {
   actor: CliActor;
+  agentId?: string;
   json: boolean;
 }
 
@@ -477,7 +478,7 @@ const CHAT_VERBS = {
   },
   inbox: {
     capabilityId: "chat.inbox.read",
-    summary: "List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.",
+    summary: "List unread threads. For an agent, also list its unread requests: mentions of it, its DMs, and replies in threads it posted in.",
     operands: "",
     parse: ({ operands }) => {
       noExtraArgs(operands, "inbox");
@@ -1440,6 +1441,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
 
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
   { name: "--as-agent", text: "Post and read chat as an agent." },
+  { name: "--agent-id", value: "id", text: "Work as this agent you run, by its id in Settings › Agents. Implies --as-agent." },
   { name: "--json", text: "Print the result as JSON." },
   { name: "--help", text: "Show help. -h does the same." },
 ];
@@ -1452,15 +1454,18 @@ const VALUE_FLAGS = new Set(
 
 function stripGlobalFlags(argv: readonly string[]): {
   actorFlag: boolean;
+  agentId?: string;
   json: boolean;
   tokens: string[];
 } {
   let actorFlag = false;
+  let agentId: string | undefined;
   let json = false;
   let optionsEnded = false;
   let expectsOptionValue = false;
   const tokens: string[] = [];
-  for (const token of argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]!;
     if (expectsOptionValue) {
       tokens.push(token);
       expectsOptionValue = false;
@@ -1475,6 +1480,12 @@ function stripGlobalFlags(argv: readonly string[]): {
       actorFlag = true;
       continue;
     }
+    if (!optionsEnded && token === "--agent-id") {
+      agentId = takeValue(argv, index, token);
+      if (!cliAgentIdSchema.safeParse(agentId).success) fail("--agent-id requires an agent's id from Settings › Agents");
+      index += 1;
+      continue;
+    }
     if (!optionsEnded && token === "--json") {
       json = true;
       continue;
@@ -1484,7 +1495,7 @@ function stripGlobalFlags(argv: readonly string[]): {
       expectsOptionValue = true;
     }
   }
-  return { actorFlag, json, tokens };
+  return { actorFlag, ...(agentId === undefined ? {} : { agentId }), json, tokens };
 }
 
 export function parseCliArguments(
@@ -1503,7 +1514,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || global.agentId !== undefined || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
-  return { actor: agent ? "agent" : "human", json: global.json, ...body };
+  return { actor: agent ? "agent" : "human", ...(global.agentId === undefined ? {} : { agentId: global.agentId }), json: global.json, ...body };
 }

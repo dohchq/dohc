@@ -936,12 +936,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
     // Otherwise the person asks the agent again, in a message the chat
     // words, with the @handle the composer inserts. A message won't wake an
-    // agent that's gone, off or not set up, so its step is in Settings, in
-    // the order its DM checks them, by the full name its DM and Settings show.
+    // agent that's gone or an agent dohc starts that's off, so its step is in
+    // Settings, in the order its DM checks them, by the full name its DM and
+    // Settings show. An agent you run reads the message once it's connected.
     const handle = agent ? handleForName(agent.name) : "";
     const nextStep: ChatDispatchNextStep = !agent ? { kind: "add-agent" }
-      : !agent.launch ? { kind: "set-up", name: agent.name }
-      : !agent.enabled ? { kind: "turn-on", name: agent.name }
+      : agent.launch && !agent.enabled ? { kind: "turn-on", name: agent.name }
       : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
     return { ...words, nextStep };
   }
@@ -1227,10 +1227,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (failedCount === 0) continue;
       notifyRunUpdated(workspace, threadId);
       const agent = agents.find(({ id }) => id === agentId);
+      // An agent you run reads its requests itself, so nothing is wrong to tell.
+      if (agent && !agent.launch) continue;
       const message = !agent
         ? "That agent isn't set up on this computer. Set it up in Settings → Agents."
-        : agent.launch ? `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`
-          : `${clip(agent.name)} has no chat runner set up. Set one up in Settings → Agents.`;
+        : `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`;
       try {
         options.onDispatchNotice?.(workspace, { reason: "no-runner", threadId, message });
       } catch (error) {
@@ -1376,12 +1377,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  // Each agent dohc can start has its own chat. A background pass must not
-  // create a chat for an agent that is off. One agent's chat that cannot be
-  // made does not keep the others from theirs, and a later scan tries again.
+  // Each agent dohc starts and each agent you run has its own chat. A
+  // background pass must not create a chat for an agent dohc starts that is
+  // off. One agent's chat that cannot be made does not keep the others from
+  // theirs, and a later scan tries again.
   async function ensureAgentChats(workspace: ChatDispatchWorkspace): Promise<void> {
     for (const agent of await options.readDispatchAgents()) {
-      if (!agent.enabled || !agent.launch) continue;
+      if (agent.launch && !agent.enabled) continue;
       try {
         await options.chatStoreFor(workspace).ensureAgentChannel({
           workspaceId: workspace.workspaceId,

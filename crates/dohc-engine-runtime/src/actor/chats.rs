@@ -1,15 +1,15 @@
 use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
-    ChatAgentRequest, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
-    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFollow,
-    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
-    ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
-    DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
-    ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel,
-    UnreadFileThread,
+    AgentReader, AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary,
+    ChatAgentReadState, ChatAgentRequest, ChatAgentRequestDetail, ChatAttachment, ChatBookmark,
+    ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
+    ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadLane, ChatThreadProjection,
+    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery, FollowTargetKind,
+    LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, StreamPage,
+    StreamPosition, ThreadDispatchPause, ThreadWithChannel, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -520,13 +520,37 @@ impl ActorHandle {
     pub async fn chat_agent_unread_requests(
         &self,
         workspace_id: String,
-        run_id: Option<String>,
+        reader: AgentReader,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_requests(&workspace_id, run_id.as_deref(), after, limit)
+                .list_agent_unread_requests(&workspace_id, &reader, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn chat_agent_requests_page(
+        &self,
+        workspace_id: String,
+        reader: AgentReader,
+        channel_id: Option<String>,
+        thread_id: Option<String>,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequestDetail>, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .list_agent_requests_page(
+                    &workspace_id,
+                    &reader,
+                    channel_id.as_deref(),
+                    thread_id.as_deref(),
+                    after,
+                    limit,
+                )
                 .map_err(RuntimeError::from)
         })
         .await
@@ -535,13 +559,13 @@ impl ActorHandle {
     pub async fn chat_agent_unread_threads(
         &self,
         workspace_id: String,
-        run_id: Option<String>,
+        reader: AgentReader,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_threads(&workspace_id, run_id.as_deref(), after, limit)
+                .list_agent_unread_threads(&workspace_id, &reader, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await
@@ -551,7 +575,7 @@ impl ActorHandle {
     pub async fn chat_agent_mark_thread_read(
         &self,
         workspace_id: String,
-        run_id: Option<String>,
+        reader: AgentReader,
         thread_id: String,
         up_to_created_at_ms: i64,
         up_to_message_id: String,
@@ -566,7 +590,7 @@ impl ActorHandle {
                 chats
                     .mark_thread_read_by_agent(
                         &workspace_id,
-                        run_id.as_deref(),
+                        &reader,
                         &thread_id,
                         up_to_created_at_ms,
                         &up_to_message_id,

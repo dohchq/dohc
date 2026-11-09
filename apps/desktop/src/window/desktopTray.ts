@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
-import { firstAgent, type DesktopUserSettingsResult } from "../settings/userSettings";
+import { runnableAgents, type DesktopUserSettingsResult } from "../settings/userSettings";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import {
   resolveDesktopIconDirectory,
@@ -56,7 +56,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   let dispatchEnabled = false;
 
   function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
-    return firstAgent(settings)?.enabled === true;
+    return runnableAgents(settings).length > 0;
   }
 
   function desktopIconDirectory(): string {

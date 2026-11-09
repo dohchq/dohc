@@ -14,8 +14,8 @@ import {
   trustOpenWorkspace,
 } from "./helpers/workspace";
 
-// Screenshot harness (@ui-audit) for Settings › Agents: one agent on and one
-// off, then keyboard focus on the on agent's switch. Light and dark, cropped
+// Screenshot harness (@ui-audit) for Settings › Agents: one agent on, one off
+// and one you run, then keyboard focus on the on agent's switch. Light and dark, cropped
 // to the Agents section. Not a regression test; it runs only when a shot
 // directory is set.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
@@ -28,6 +28,7 @@ const SETTINGS: DesktopUserSettings = {
   agents: {
     default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 1 },
     vega: { name: "Vega", hue: "blue", launch: { command }, changesFiles: true, enabled: false, timeoutMinutes: 1 },
+    terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 1 },
   },
 };
 

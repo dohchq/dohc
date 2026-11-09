@@ -38,6 +38,7 @@ export const CHATS_METHOD = {
   conversationLinks: "chats.conversations.listLinks",
   attachmentsListFileMentions: "chats.attachments.listFileMentions",
   mentionsListForHandle: "chats.mentions.listForHandle",
+  agentReadListRequestsPage: "chats.agentReadState.listRequestsPage",
   agentReadListUnreadRequests: "chats.agentReadState.listUnreadRequests",
   agentReadListUnreadThreads: "chats.agentReadState.listUnreadThreads",
   agentReadMarkThreadRead: "chats.agentReadState.markThreadRead",
@@ -166,7 +167,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
   authorReported?: ChatReportedAgent;
-  namedAgentIds?: string[];
+  wakeAgentIds?: string[];
   nowMs?: number;
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
@@ -217,7 +218,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
   authorReported?: ChatReportedAgent;
-  namedAgentIds?: string[];
+  wakeAgentIds?: string[];
   nowMs?: number;
 };
 type ChatMessagesListParams = ChatsJsonObject & {
@@ -256,12 +257,29 @@ type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | {
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
 };
-// A run dohc dispatched names itself, and the engine reads its agent from the
-// run's record. Without a run, the reads are those of agents outside a run.
-type ChatAgentUnreadThreadsParams = ChatPageParams & { runId?: string };
-type ChatAgentRequestsParams = ChatPageParams & { runId?: string };
+// Which agent reads. A run dohc dispatched names itself, and the engine reads
+// its agent from the run's record.
+type ChatAgentReaderParams =
+  | (ChatsJsonObject & { kind: "run"; runId: string })
+  | (ChatsJsonObject & { kind: "unnamed" })
+  | (ChatsJsonObject & {
+      kind: "connected";
+      agentId: string;
+      handle: string;
+      requesters: string[];
+      unattributedCounts: boolean;
+    });
+type ChatAgentUnreadThreadsParams = ChatPageParams & { reader: ChatAgentReaderParams };
+type ChatAgentRequestsParams = ChatPageParams & { reader: ChatAgentReaderParams };
+type ChatAgentRequestsPageParams = ChatsJsonObject & {
+  reader: ChatAgentReaderParams;
+  channelId?: string;
+  threadId?: string;
+  after?: ChatsJsonObject & { createdAtMs: number; messageId: string };
+  pageLimit?: number;
+};
 type ChatAgentReadMarkParams = ChatsJsonObject & {
-  runId?: string;
+  reader: ChatAgentReaderParams;
   threadId: string;
   upTo: ChatsJsonObject & { createdAtMs: number; messageId: string };
   expectedRevision?: number;
@@ -417,6 +435,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {channelWireId:string;scope:string;sharedChannelRowsUncovered:number;cursor?:string};
   [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsParams;
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
+  [CHATS_METHOD.agentReadListRequestsPage]: ChatAgentRequestsPageParams;
   [CHATS_METHOD.agentReadListUnreadRequests]: ChatAgentRequestsParams;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatAgentUnreadThreadsParams;
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadMarkParams;
@@ -759,6 +778,23 @@ const ChatAgentRequestSchema = mutableStruct({
   authorKind: MessageAuthorKindSchema,
   createdAtMs: AnyInt,
 });
+// An unread request with what a waiting agent shows.
+const ChatAgentRequestDetailSchema = mutableStruct({
+  threadId: Schema.String,
+  messageId: Schema.String,
+  channel: Schema.NullOr(
+    mutableStruct({
+      id: Schema.String,
+      kind: ChannelKindSchema,
+      name: Schema.String,
+      slug: Schema.String,
+      purpose: Schema.String,
+    }),
+  ),
+  author: mutableStruct({ kind: MessageAuthorKindSchema, displayName: Schema.String }),
+  body: Schema.String,
+  createdAtMs: AnyInt,
+});
 const ChatChannelOpeningMessageSchema = mutableStruct({
   authorActorKey: Schema.optionalKey(Schema.String),
   origin: Schema.optionalKey(Schema.Literal("cli")),
@@ -933,6 +969,10 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.attachmentsListFileMentions]: Schema.Unknown,
   [CHATS_METHOD.mentionsListForHandle]: pageSchema({
     mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
+  }),
+  [CHATS_METHOD.agentReadListRequestsPage]: mutableStruct({
+    requests: Schema.mutable(Schema.Array(ChatAgentRequestDetailSchema)),
+    more: Schema.Boolean,
   }),
   [CHATS_METHOD.agentReadListUnreadRequests]: pageSchema({
     requests: Schema.mutable(Schema.Array(ChatAgentRequestSchema)),

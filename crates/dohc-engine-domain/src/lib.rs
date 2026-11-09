@@ -74,10 +74,11 @@ pub use automations::{
     watch_automation_groups,
 };
 pub use chats::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AGENT_REPLY_EXCERPT_CHARS, AgentRunRecord,
-    AgentUnreadThreadRow, BookmarkMode, BookmarkTargetKind, CHAT_THREAD_HEADER_MESSAGE_ID,
-    ChannelGroup, ChannelOpeningMessage, ChannelThreadSummary, ChatActorKind, ChatAgentReadState,
-    ChatAgentRequest, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AGENT_REPLY_EXCERPT_CHARS, AgentReader,
+    AgentRunRecord, AgentUnreadThreadRow, BookmarkMode, BookmarkTargetKind,
+    CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChannelOpeningMessage, ChannelThreadSummary,
+    ChatActorKind, ChatAgentReadState, ChatAgentRequest, ChatAgentRequestChannel,
+    ChatAgentRequestDetail, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
     ChatChannelKind, ChatChannelSummary, ChatChannelType, ChatDecision, ChatDecisionState,
     ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage,
     ChatMessageAutomation, ChatMessageLinkAuthor, ChatMessagePage, ChatProjectionFileAccess,

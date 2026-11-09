@@ -618,13 +618,12 @@ describe("ChatLane", () => {
     for (const [nextStep, label] of [
       [{ kind: "add-agent" }, "Add an agent in Settings"],
       [{ kind: "turn-on", name: "Nova" }, "Turn Nova on in Settings"],
-      [{ kind: "set-up", name: "Nova" }, "Set up Nova in Settings"],
     ] as const) {
       await failedWith(nextStep);
       await waitFor(() => expect(screen.getByTestId("chats-lane-run-open-settings").textContent).toBe(label));
       expect(screen.queryByTestId("chats-lane-run-next-step")).toBeNull();
     }
-    fireEvent.click(screen.getByRole("button", { name: "Set up Nova in Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Turn Nova on in Settings" }));
     expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
   });
 

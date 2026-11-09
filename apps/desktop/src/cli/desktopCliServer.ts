@@ -28,6 +28,7 @@ import {
   type startCliServer as startCliServerImplementation,
 } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import { agentHandle } from "../settings/userSettings";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -59,6 +60,26 @@ import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { UNNAMED_AGENT_ID, VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+
+// The engine reads at most this many accounts for one agent you run.
+const MAX_AGENT_REQUESTERS = 64;
+
+// The accounts this computer's person posts as in a workspace, as its
+// registry entry records them: the owner account sync started with, or the
+// account that opened a received copy, and each joined channel's account. A
+// post with no account is theirs only in a workspace they own.
+export function workspaceRequesters(
+  workspace: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels">,
+): { requesters: string[]; unattributedCounts: boolean } {
+  const own = workspace.shareView
+    ? workspace.shareView.recipientUserId
+    : (workspace.remote ?? workspace.pausedRemote)?.ownerUserId;
+  const accounts = [own, ...(workspace.sharedChannels ?? []).map((channel) => channel.recipientUserId)];
+  return {
+    requesters: [...new Set(accounts.filter((account): account is string => Boolean(account)))].slice(0, MAX_AGENT_REQUESTERS),
+    unattributedCounts: !workspace.shareView,
+  };
+}
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
   const { depth = 0, onBehalfOf, agentRunId } = origin.attribution;
@@ -113,6 +134,9 @@ interface DesktopCliServerDependencies<State> {
   /** A window's press path, for one workspace. */
   buttons(workspace: RegistryEntry): CliButtonsPort;
   findWorkspace(workspaceId: string): RegistryEntry | null;
+  /** The agent you run with this id in this computer's settings, or null. */
+  agentYouRun(agentId: string): Promise<{ name: string } | null>;
+  agentWaiting?: CliServerOptions["agentWaiting"];
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
   activity: {
@@ -714,6 +738,14 @@ export function createDesktopCliServer<State>(
       agentWriteRunId: (workspaceId) => activity.agentWriteRunId(workspaceId),
       dispatchedRunSecret: (workspaceId) => activity.dispatchedRunSecret(workspaceId),
       agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
+      connectedAgent: async (workspaceId, agentId) => {
+        const agent = await dependencies.agentYouRun(agentId);
+        const workspace = findWorkspace(workspaceId);
+        return agent && workspace
+          ? { agentId, name: agent.name, handle: agentHandle(agent.name), ...workspaceRequesters(workspace) }
+          : null;
+      },
+      agentWaiting: dependencies.agentWaiting,
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

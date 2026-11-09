@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentLaunch, launchCommand } from "../agents/agentToolCatalog";
+import { AgentLaunch } from "../agents/agentToolCatalog";
 import type { PreferredName } from "@dohc/workspace-contracts/chat-identity";
 import {
   MAX_PREFERRED_NAME_LENGTH,
@@ -65,7 +65,8 @@ export const DEFAULT_AGENT_ID = "default";
 // An id starts with a letter, so the agents keep the order the file lists them in.
 // Its dashes are single and inside it, so its chat's slug keeps the id as it is.
 export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.")
-  .refine((id) => id !== "dohc-mcp", "dohc-mcp stands for agents that give no name. Give this agent another id.");
+  .refine((id) => id !== "dohc-mcp", "dohc-mcp stands for agents that give no name. Give this agent another id.")
+  .refine((id) => !id.startsWith("p-"), "Ids that start with p- are kept for personal agents. Give this agent another id.");
 
 export const AgentSettings = z.object({
   name: PreferredNameForIpc,
@@ -130,10 +131,9 @@ export function automationAgent(settings: Pick<DesktopUserSettings, "agents">): 
   return agent?.launch ? { ...agent, launch: agent.launch } : null;
 }
 
-/** The first agent when dohc can start it, else null. */
-export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
-  const agent = firstAgent(settings);
-  return agent?.launch ? { ...agent, launch: agent.launch } : null;
+/** The agent you run with this id: an entry dohc never starts. */
+export function agentYouRun(settings: Pick<DesktopUserSettings, "agents">, agentId: string): Agent | null {
+  return listAgents(settings).find((agent) => agent.id === agentId && !agent.launch) ?? null;
 }
 
 // A message names one of your agents with @ and its name's handle: the name
@@ -147,35 +147,41 @@ export function agentMentionId(agentId: string): string {
   return `agent:${agentId}`;
 }
 
-// The @ roster's entries for your agents that are on and have a handle.
-export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name" | "enabled">[]): MentionCandidate[] {
+// The @ roster's entries for your agents with a handle: each one dohc starts
+// that is on, and each one you run.
+export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[]): MentionCandidate[] {
   return agents.flatMap((agent) => {
     const handle = agentHandle(agent.name);
-    return agent.enabled && handle
+    return (agent.enabled || !agent.launch) && handle
       ? [{ id: agentMentionId(agent.id), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
       : [];
   });
 }
 
 /**
- * The agents dohc can start that a message names, in any case, outside
- * code and file links. A message wakes each one it names, so only your own
- * messages read your agents' names.
+ * The agents your message starts runs for: the agent of the DM it is in,
+ * and each agent dohc starts that it names, on or off, in any case, outside
+ * code and file links. An agent you run reads its own messages, and a
+ * personal agent's id starts with p-, so neither gets a run. A DM's agent
+ * this computer doesn't list still gets one, so its notice says it has no
+ * chat runner.
  */
-export function agentIdsNamedIn(settings: Pick<DesktopUserSettings, "agents">, body: string): string[] {
+export function agentIdsToWake(
+  settings: Pick<DesktopUserSettings, "agents">,
+  body: string,
+  dmAgentId: string | null,
+): string[] {
+  const agents = listAgents(settings);
   const named = new Set(chatMentionTokens(body).map(({ handle }) => normalizeHandle(handle)));
-  return listAgents(settings)
+  const dmAgent = dmAgentId !== null && !dmAgentId.startsWith("p-") &&
+    !agents.some((agent) => agent.id === dmAgentId && !agent.launch) ? [dmAgentId] : [];
+  const namedAgents = agents
     .filter((agent) => {
       const handle = agentHandle(agent.name);
       return agent.launch && handle && named.has(normalizeHandle(handle));
     })
     .map(({ id }) => id);
-}
-
-/** The command that starts the first agent, or "" when there is none. */
-export function firstAgentCommand(settings: Pick<DesktopUserSettings, "agents">): string {
-  const launch = firstAgent(settings)?.launch;
-  return launch ? launchCommand(launch) : "";
+  return [...new Set([...dmAgent, ...namedAgents])];
 }
 
 /** The settings with one agent changed. */
@@ -188,13 +194,22 @@ export function withAgent(
   return agent ? { ...settings, agents: { ...settings.agents, [id]: change(agent) } } : settings;
 }
 
-/** The settings with the first agent changed, or a first agent added when there is none. */
-export function withFirstAgent(
+/**
+ * The agent Chats sets up: the first one dohc starts, or a new id when there is
+ * none. An agent you run keeps its id and stays one you run, so the config it
+ * was given keeps working.
+ */
+export function agentIdDohcStarts(settings: Pick<DesktopUserSettings, "agents">): string {
+  return listAgents(settings).find((agent) => agent.launch !== undefined)?.id ?? newAgentId(Object.keys(settings.agents), "agent");
+}
+
+/** The settings with the agent Chats sets up changed, or added when there is none. */
+export function withAgentDohcStarts(
   settings: DesktopUserSettings,
   change: (current: AgentSettings | null) => AgentSettings,
 ): DesktopUserSettings {
-  const id = Object.keys(settings.agents)[0];
-  return { ...settings, agents: { ...settings.agents, [id ?? DEFAULT_AGENT_ID]: change(id === undefined ? null : settings.agents[id]!) } };
+  const id = agentIdDohcStarts(settings);
+  return { ...settings, agents: { ...settings.agents, [id]: change(settings.agents[id] ?? null) } };
 }
 
 /** What a new agent starts with: the first free hue, and off until the person turns it on. */

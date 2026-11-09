@@ -57,7 +57,7 @@ fn start_thread(
         request_id: None,
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
     }
 }
 
@@ -87,7 +87,7 @@ fn send_msg(
         request_id: None,
         author_agent_id: None,
         author_reported: None,
-        named_agent_ids: Vec::new(),
+        wake_agent_ids: Vec::new(),
     }
 }
 
@@ -1424,7 +1424,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     let agent_read_state = chats
         .mark_thread_read_by_agent(
             WS,
-            None,
+            &dohc_engine_domain::AgentReader::Unnamed,
             "thread-revision",
             30,
             "message-reply",
@@ -2994,14 +2994,17 @@ fn dispatch_claim_is_single_writer_idempotent() {
         .expect("agent");
     chats
         .start_channel_thread(
-            &start_thread(
-                "agent-1",
-                "t1",
-                "m0",
-                "@agent do it",
-                ChatActorKind::Human,
-                20,
-            ),
+            &StartChannelThread {
+                wake_agent_ids: vec!["default".to_owned()],
+                ..start_thread(
+                    "agent-1",
+                    "t1",
+                    "m0",
+                    "@agent do it",
+                    ChatActorKind::Human,
+                    20,
+                )
+            },
             &NO_FAULTS,
         )
         .expect("start");

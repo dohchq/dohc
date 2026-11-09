@@ -1688,7 +1688,7 @@ export const ActorPresentation = z.object({
   group: z.string(),
   hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
-  // The Settings agent that wrote your agent's message in one of its runs. Its Settings color wins over `hue`.
+  // The Settings agent that wrote your agent's message. Its Settings color wins over `hue`.
   agentId: z.string().min(1).max(64).optional(),
   // A connected agent, writing outside a run dohc started: it takes the plug.
   // "unknown" is an agent post that came through a share, which serves no run
@@ -2102,7 +2102,7 @@ export const ChatMessageRecord = z.object({
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
   authorReported: ChatReportedAgentRecord.optional(),
-  // The agent that wrote it in one of its runs, which only main records.
+  // The agent in Settings that wrote it, which only main records.
   authorAgentId: AgentId.optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
@@ -6018,12 +6018,10 @@ export const ChatDispatchFailedRun = z.object({
       handle: z.string().min(1).max(200).optional(),
     }).strict(),
     // For an agent the @ menu can't offer, a step in Settings: "Add an agent
-    // in Settings to ask again." when it's gone, "Turn Nova on in Settings
-    // to ask again." when it's off, and "Set up Nova in Settings to ask
-    // again." when it isn't set up.
+    // in Settings to ask again." when it's gone, and "Turn Nova on in
+    // Settings to ask again." when it's an agent dohc starts that's off.
     z.object({ kind: z.literal("add-agent") }).strict(),
     z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
-    z.object({ kind: z.literal("set-up"), name: z.string().min(1).max(1_000) }).strict(),
   ]).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
@@ -6033,7 +6031,7 @@ export type ChatDispatchNextStep = NonNullable<ChatDispatchFailedRun["nextStep"]
 
 // What a step in Settings asks the person to do.
 export function nextStepSettingsAction(step: Exclude<ChatDispatchNextStep, { kind: "message" }>): string {
-  return step.kind === "add-agent" ? "Add an agent" : step.kind === "turn-on" ? `Turn ${step.name} on` : `Set up ${step.name}`;
+  return step.kind === "add-agent" ? "Add an agent" : `Turn ${step.name} on`;
 }
 
 // A failed run's next step as one sentence, for the line under its message,
@@ -7076,6 +7074,18 @@ export const chatDispatchPauseOperations = {
   },
 } as const satisfies OperationTable;
 
+// The agents you run that hold a chat wait on this computer now, by id.
+export const AgentsListeningEvent = z.strictObject({ agentIds: z.array(z.string().min(1)) });
+export type AgentsListeningEvent = z.infer<typeof AgentsListeningEvent>;
+export const agentsListeningOperations = {
+  readAgentsListening: {
+    capabilityId: "agent.listening.read",
+    scope: "device",
+    channel: "desktop:read-agents-listening",
+    payload: z.strictObject({}), result: AgentsListeningEvent, guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
@@ -7644,6 +7654,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
+    OperationBridge<typeof agentsListeningOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7881,6 +7892,8 @@ export interface DohcDesktopBridge
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // Agent dispatch was paused or resumed on this computer, from any window or the tray.
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
+  // An agent you run started or stopped waiting for messages on this computer.
+  onAgentsListening(listener: (event: AgentsListeningEvent) => void): () => void;
   // An agent request changed state in a group this window shows: re-read
   // that group's page.
   onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;

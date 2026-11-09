@@ -19,6 +19,21 @@ describe("chat watch", () => {
     expect(() => parseCliArguments(["chat", "watch", "--timeout", "0"], {})).toThrow();
   });
 
+  it("names the agent you run on every request, as an agent", async () => {
+    expect(parseCliArguments(["chat", "post", "general", "--agent-id", "terminal", "Done"], {})).toMatchObject({ actor: "agent", agentId: "terminal", verb: "post" });
+    expect(parseCliArguments(["chat", "post", "general", "Done"], {})).not.toHaveProperty("agentId");
+    expect(() => parseCliArguments(["chat", "watch", "--agent-id", "Terminal"], {})).toThrow("--agent-id requires an agent's id from Settings › Agents");
+    expect(() => parseCliArguments(["chat", "watch", "--agent-id"], {})).toThrow("--agent-id requires a value");
+    // After --, it is text.
+    expect(parseCliArguments(["chat", "grep", "--", "--agent-id"], {})).toMatchObject({ pattern: "--agent-id" });
+
+    const request = vi.fn(async () => ({ messages: [], cursor: "next" }));
+    await executeCli({ argv: ["chat", "watch", "--agent-id", "terminal", "--once", "--json"], env: {}, request });
+    expect(request.mock.calls[0]).toEqual([expect.objectContaining({ verb: "watch", args: expect.objectContaining({ actor: "agent", agentId: "terminal" }) })]);
+    expect(cliRequestSchema.safeParse({ protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "inbox", args: { cwd: "/workspace", actor: "agent", agentId: "terminal" } }).success).toBe(true);
+    expect(cliRequestSchema.safeParse({ protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "inbox", args: { cwd: "/workspace", actor: "agent", agentId: "Terminal" } }).success).toBe(false);
+  });
+
   it("rejects a wire timeout past the request deadline", () => {
     expect(cliRequestSchema.safeParse({ protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "watch", args: { cwd: "/workspace", actor: "agent", timeoutMs: 25_001 } }).success).toBe(false);
   });
