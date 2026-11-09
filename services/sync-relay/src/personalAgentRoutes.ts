@@ -468,11 +468,13 @@ export function createPersonalAgentToolRoutes(input: {
     if (!input.limiter.allow(authority.callerKey, nowMs())) throw relayError("link_read_rate_limited");
     const body = await readBody(request);
     switch (route.action) {
-      // A post reads the fence again once its body is in; its write reads that epoch.
+      // A post or a read checks the fence again once its body is in, and a
+      // post's write reads that epoch. A wait checks before it answers, and a
+      // file stream before each chunk.
       case "post": return post(await linkAuthority.freshPersonal(authority), body);
       case "wait": return await wait(authority, body, request.signal);
-      case "chat": return chat(authority, body);
-      case "files": return files(authority, body);
+      case "chat": return chat(await linkAuthority.freshPersonal(authority), body);
+      case "files": return files(await linkAuthority.freshPersonal(authority), body);
       case "blob": return blob(authority, body, request.signal);
     }
   };

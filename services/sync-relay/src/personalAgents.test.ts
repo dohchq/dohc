@@ -1257,6 +1257,25 @@ describe("a personal agent's posts", () => {
     await expectRefused(await tool(f, agent, "post", arriving("post-2", () => { f.fence.changePassword(OWNER, NEW_PASSWORD); })));
     expect(logOf(f, WS_A)).toHaveLength(before);
   });
+
+  it("refuses a chat or file read when a reset commits while its body is still arriving", async () => {
+    for (const action of ["chat", "files"] as const) {
+      const f = await fixture();
+      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+      const fields = action === "chat" ? { workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId) } : { workspaceId: WS_A };
+      const arriving = (meanwhile: () => void) => new ReadableStream<Uint8Array>({
+        pull(controller) {
+          meanwhile();
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(fields)));
+          controller.close();
+        },
+      }, { highWaterMark: 0 });
+
+      await ok(await tool(f, agent, action, arriving(() => {})));
+      // No notification: the read of the fence after the body refuses.
+      await expectRefused(await tool(f, agent, action, arriving(() => { f.fence.changePassword(OWNER, NEW_PASSWORD); })));
+    }
+  });
 });
 
 describe("a personal agent's tools", () => {
