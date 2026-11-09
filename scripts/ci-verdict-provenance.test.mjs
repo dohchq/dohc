@@ -454,7 +454,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     const context = workflowContext({enabled: "true", event: "workflow_dispatch", size});
     for (const name of ["javascript", "rust"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [`blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`]);
-      assert.equal(jobs[name]["timeout-minutes"], 60);
+      assert.equal(jobs[name]["timeout-minutes"], name === "rust" ? 90 : 60);
     }
     for (const name of ["changes", "verification"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
