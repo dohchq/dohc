@@ -1797,8 +1797,8 @@ export function NoticeCenter(props: {
           ? { actions: [{ label: "Try again", onClick: () => void retryFirstOpen(refusal), disabled: view.retrying }] }
           : {}),
         onDismiss: () => setDismissedFirstOpen((current) => new Set(current).add(view.key)),
-        copyText: view.details,
-        copyLabel: "Copy live editing details",
+        revision: view.key,
+        copy: { report: view.details },
         Icon: AlertTriangle,
       });
     }
@@ -2403,6 +2403,14 @@ export function NoticeCenter(props: {
             </WithDetails>
           ) : null}
           {firstOpenToast && firstOpenToastView ? (
+            <WithDetails
+              key={firstOpenToastView.key}
+              copy={{ report: firstOpenToastView.details }}
+              shown={[`${firstOpenToastView.title}. ${firstOpenToastView.body}`]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="owner-live-first-open-toast"
+            >
+            {(details) => (
             <div
               data-testid="owner-live-first-open-toast"
               role="status"
@@ -2410,28 +2418,27 @@ export function NoticeCenter(props: {
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
               <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-                {firstOpenToastView.title}. {firstOpenToastView.body}
-              </span>
-              {onRetryLiveFirstOpen ? (
-                <button
-                  type="button"
-                  data-testid="owner-live-first-open-toast-retry"
-                  disabled={firstOpenToastView.retrying}
-                  onClick={() => void retryFirstOpen(firstOpenToast)}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                >
-                  Try again
-                </button>
-              ) : null}
-              <CopyButton
-                key={firstOpenToastView.key}
-                iconOnly
-                pinName
-                label="Copy live editing details"
-                testId="owner-live-first-open-toast-copy"
-                getText={() => firstOpenToastView.details}
-              />
+              <div className="min-w-0 flex-1">
+                <span className="block select-text cursor-text break-words leading-snug">
+                  {firstOpenToastView.title}. {firstOpenToastView.body}
+                </span>
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {onRetryLiveFirstOpen ? (
+                    <button
+                      type="button"
+                      data-testid="owner-live-first-open-toast-retry"
+                      disabled={firstOpenToastView.retrying}
+                      onClick={() => void retryFirstOpen(firstOpenToast)}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      Try again
+                    </button>
+                  ) : null}
+                  {details.action}
+                </div>
+                {details.block}
+              </div>
+              {details.icon}
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
                 type="button"
@@ -2442,6 +2449,8 @@ export function NoticeCenter(props: {
                 <X size={12} aria-hidden />
               </button>
             </div>
+            )}
+            </WithDetails>
           ) : null}
           {crashToastVisible && crashReport ? (
             <WithDetails

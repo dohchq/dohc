@@ -5074,7 +5074,8 @@ it("never reports a ready document's first open as refused", async () => {
   const handle = createServiceHostEnrollmentRoutes({storage: o.f.storage, history: o.f.history, resolveActor: async () => ({workspaceId: "workspace", userId: "owner"}),
     host: {ready: document => o.host.isDocumentReady(document), reconcile() {}, unavailable: false, blocked: document => o.host.blocked(document),
       unblock: document => o.host.unblock(document), diverged: () => false, holdReason: document => o.host.holdReason(document),
-      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenRefusal: (document, source) => o.host.firstOpenRefusal(document, source)}});
+      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenRefusal: (document, source) => o.host.firstOpenRefusal(document, source),
+      stop: async <T>(_document: unknown, fence: () => T) => fence()}});
   const status = async () => (await (await handle(new Request("https://relay.test/sync/workspace/live-host",
     {headers: {authorization: "Bearer owner-token"}}))).json()).documents;
   expect(await status()).toEqual([{path: "docs/a.md", objectId: "object", status: "unavailable", reason: "live-first-open-refused", firstOpen: expect.objectContaining({reason: "deletion"})}]);

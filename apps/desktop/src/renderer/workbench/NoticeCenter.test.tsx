@@ -1884,7 +1884,8 @@ describe("notice center", () => {
       const toast = screen.getByTestId("owner-live-first-open-toast");
       expect(toast.textContent).toContain(`Live editing can't start for notes.md. ${body}`);
       expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-      await user.click(screen.getByTestId("owner-live-first-open-toast-copy"));
+      await user.click(screen.getByTestId("owner-live-first-open-toast-details"));
+      await user.click(screen.getByTestId("owner-live-first-open-toast-details-copy"));
       const fromToast = await navigator.clipboard.readText();
       expect(fromToast).toContain(`Detail: ${body}`);
       expect(fromToast).toContain("File: docs/notes.md");
@@ -1898,7 +1899,8 @@ describe("notice center", () => {
       expect(row().textContent).toContain("Live editing can't start for notes.md");
       expect(row().textContent).toContain(body);
       expect(within(row()).getByRole("button", { name: "Try again" })).toBeTruthy();
-      await user.click(screen.getByTestId("notice-owner-live-first-open-object-1-copy"));
+      await user.click(screen.getByTestId("notice-owner-live-first-open-object-1-details"));
+      await user.click(screen.getByTestId("notice-owner-live-first-open-object-1-details-copy"));
       expect(await navigator.clipboard.readText()).toBe(fromToast);
     });
 
