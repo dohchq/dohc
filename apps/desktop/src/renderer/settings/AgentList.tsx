@@ -7,6 +7,7 @@ import { isAgentIdTaken, withErrorWords } from "../../ipc/errorWords";
 import {
   agentNameTaken,
   automationAgent,
+  DEFAULT_AGENT_ID,
   listAgents,
   newAgentDefaults,
   newAgentId,
@@ -115,7 +116,7 @@ async function stillListed(agentId: string): Promise<boolean> {
 }
 
 // The MCP config that runs dohc's MCP server as this agent you run.
-export function configSnippet(config: Extract<McpConfigResult, { command: string }>, agentId: string): string {
+function configSnippet(config: Extract<McpConfigResult, { command: string }>, agentId: string): string {
   return JSON.stringify({ mcpServers: { dohc: { command: config.command, args: [...config.args, "--agent-id", agentId] } } }, null, 2);
 }
 
@@ -563,9 +564,11 @@ export function AgentList(props: {
   }, [onClearError, onError, requests, workspaceId]);
 
   // A new agent takes the first free id, name and color. One dohc starts is
-  // on and checked at once; one you run has nothing to check.
+  // on and checked at once; one you run has nothing to check. An agent you run
+  // never takes the default id, which Chats would set up as one dohc starts.
   const add = async (fields: Pick<AgentSettings, "name" | "enabled"> & Partial<Pick<AgentSettings, "launch">>, idBase: string) => {
-    const id = newAgentId([...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)], idBase);
+    const taken = [...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)];
+    const id = newAgentId(fields.launch ? taken : [...taken, DEFAULT_AGENT_ID], idBase);
     const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });

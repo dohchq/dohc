@@ -5,9 +5,8 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { AGENT_TOOLS } from "../../src/agents/agentToolCatalog";
 import type { McpConfigResult } from "../../src/ipc/bridgeContract";
-import { activityPin } from "../../src/testPins";
 import { desktopRoot, testSearchPath } from "./desktopApp";
-import type { TempWorkspace } from "./workspace";
+import { openChatsView, type TempWorkspace } from "./workspace";
 
 export async function installFakeAgentTools(
   temp: Pick<TempWorkspace, "baseDir">,
@@ -60,8 +59,8 @@ export async function openAgentChat(page: Page, agentId: string, name: string): 
     )
     .toBe(true);
 
-  await page.getByTestId(activityPin("chats")).click();
-  await expect(page.getByTestId("chats-view")).toBeVisible();
+  // Clicking Chats while it is open would close it.
+  await openChatsView(page);
   await page.locator(`[data-testid="chats-my-agent"][data-agent-id="${agentId}"]`).click();
   await expect(page.getByTestId("chats-channel-title")).toHaveText(name);
 }

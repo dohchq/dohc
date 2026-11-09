@@ -458,7 +458,7 @@ export interface CliServerOptions {
   isOwnAgentId(name: string): Promise<boolean>;
   // An agent you run started a chat wait. The returned function runs once
   // when the wait ends, aborts or times out.
-  agentWaiting?(agentId: string): () => void;
+  agentWaiting?(agentId: string): (hold?: boolean) => void;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -4269,7 +4269,15 @@ async function watchMessages(
       return { messages, cursor: encode([...kept, ...returned]) };
     },
   });
-  return endWait ? waited.finally(endWait) : waited;
+  if (!endWait) return waited;
+  // A refused or aborted wait clears at once; an answered one holds briefly.
+  return waited.then((result) => {
+    endWait();
+    return result;
+  }, (error: unknown) => {
+    endWait(false);
+    throw error;
+  });
 }
 
 export async function handleCliRequestLine(

@@ -480,6 +480,12 @@ it("gives the first agent you add the default id", async () => {
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
 });
 
+it("never gives an agent you run the default id, which Chats sets up as one dohc starts", async () => {
+  const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
+  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["agent"]);
+});
+
 it("says on each tile that dohc couldn't look for tools, and looks again from the toast", async () => {
   bridgeMock.detectAgentTools.mockRejectedValueOnce(new Error("probe failed"));
   const { onError } = renderList();

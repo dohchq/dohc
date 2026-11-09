@@ -31,11 +31,10 @@ function alive(pid: number): boolean {
   }
 }
 
-// The fake runner and the process it started, once the run is working.
-async function runTree(path: string): Promise<number[] | null> {
+// The fake runner's pid, once the run is working.
+async function runnerPid(path: string): Promise<number | null> {
   try {
-    const { runner, child } = JSON.parse(await readFile(path, "utf8")) as Record<string, number>;
-    return [runner!, child!];
+    return (JSON.parse(await readFile(path, "utf8")) as { runner: number }).runner;
   } catch {
     return null;
   }
@@ -52,16 +51,16 @@ test("an agent you run gets a message in its chat and replies as itself while a 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let agent: ChildProcess | null = null;
-  let tree: number[] = [];
+  let runner: number | null = null;
   try {
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
-    const pids = join(temp.baseDir, "run-tree.json");
+    const pids = join(temp.baseDir, "run.json");
     const settings: DesktopUserSettings = {
       ...DEFAULT_USER_SETTINGS,
       profile: { preferredName: "Sam" },
       agents: {
         default: {
-          name: "Nova", hue: "olive", launch: { command: `"${process.execPath}" "${fakeRunner}" hold-tree "${pids}"` },
+          name: "Nova", hue: "olive", launch: { command: `"${process.execPath}" "${fakeRunner}" hold "${pids}"` },
           changesFiles: true, enabled: true, timeoutMinutes: 5,
         },
         terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 1 },
@@ -77,8 +76,8 @@ test("an agent you run gets a message in its chat and replies as itself while a 
     await openMyAgent(page);
     await page.getByTestId("chats-lane-composer").fill("keep working");
     await page.getByTestId("chats-lane-composer").press("Enter");
-    await expect.poll(() => runTree(pids), { timeout: 30_000 }).not.toBeNull();
-    tree = (await runTree(pids))!;
+    await expect.poll(() => runnerPid(pids), { timeout: 30_000 }).not.toBeNull();
+    runner = await runnerPid(pids);
     await expect.poll(() => runActive(page)).toBe(true);
 
     // Terminal connects as itself and waits.
@@ -101,11 +100,11 @@ test("an agent you run gets a message in its chat and replies as itself while a 
     await expect.poll(() => agentsListening(page), { timeout: 10_000 }).toEqual([]);
     // Nova's run worked on throughout.
     expect(await runActive(page)).toBe(true);
-    expect(tree.filter(alive)).toEqual(tree);
+    expect(alive(runner!)).toBe(true);
   } finally {
     await stopAgentYouRun(agent);
     await cleanupDesktopWorkspace(desktop, temp);
     // Quitting dohc ends the run; this stops whatever a failed check left.
-    for (const pid of tree.filter(alive)) await hardKillPid(pid);
+    if (runner !== null && alive(runner)) await hardKillPid(runner);
   }
 });

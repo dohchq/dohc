@@ -1,8 +1,9 @@
 /**
  * The agents you run that hold a chat wait on this computer, counted per id.
  * `onChange` hears the sorted ids each time an agent starts or stops listening.
- * An agent stays listening for `holdMs` after its last wait ends, so one that
- * waits again at once never drops out between waits.
+ * An agent stays listening for `holdMs` after its last wait answers, so one
+ * that waits again at once never drops out between waits. A wait that fails
+ * or is aborted ends without the hold.
  */
 export function createAgentWaits(onChange: (agentIds: string[]) => void, holdMs = 2_000) {
   const open = new Map<string, number>();
@@ -11,7 +12,7 @@ export function createAgentWaits(onChange: (agentIds: string[]) => void, holdMs 
   return {
     listening,
     /** Counts one wait by this agent. The returned function ends it; a second call does nothing. */
-    begin(agentId: string): () => void {
+    begin(agentId: string): (hold?: boolean) => void {
       const count = open.get(agentId) ?? 0;
       open.set(agentId, count + 1);
       const held = holds.get(agentId);
@@ -20,7 +21,7 @@ export function createAgentWaits(onChange: (agentIds: string[]) => void, holdMs 
         holds.delete(agentId);
       } else if (count === 0) onChange(listening());
       let ended = false;
-      return () => {
+      return (hold = true) => {
         if (ended) return;
         ended = true;
         const left = (open.get(agentId) ?? 1) - 1;
@@ -29,6 +30,10 @@ export function createAgentWaits(onChange: (agentIds: string[]) => void, holdMs 
           return;
         }
         open.delete(agentId);
+        if (!hold) {
+          onChange(listening());
+          return;
+        }
         holds.set(agentId, setTimeout(() => {
           holds.delete(agentId);
           onChange(listening());

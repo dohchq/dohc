@@ -211,13 +211,22 @@ export function withAgent(
   return agent ? { ...settings, agents: { ...settings.agents, [id]: change(agent) } } : settings;
 }
 
-/** The settings with the first agent changed, or a first agent added when there is none. */
-export function withFirstAgent(
+/**
+ * The agent Chats sets up: the first one dohc starts, or a new id when there is
+ * none. An agent you run keeps its id and stays one you run, so the config it
+ * was given keeps working.
+ */
+export function agentIdDohcStarts(settings: Pick<DesktopUserSettings, "agents">): string {
+  return listAgents(settings).find((agent) => agent.launch !== undefined)?.id ?? newAgentId(Object.keys(settings.agents), "agent");
+}
+
+/** The settings with the agent Chats sets up changed, or added when there is none. */
+export function withAgentDohcStarts(
   settings: DesktopUserSettings,
   change: (current: AgentSettings | null) => AgentSettings,
 ): DesktopUserSettings {
-  const id = Object.keys(settings.agents)[0];
-  return { ...settings, agents: { ...settings.agents, [id ?? DEFAULT_AGENT_ID]: change(id === undefined ? null : settings.agents[id]!) } };
+  const id = agentIdDohcStarts(settings);
+  return { ...settings, agents: { ...settings.agents, [id]: change(settings.agents[id] ?? null) } };
 }
 
 /** What a new agent starts with: the first free hue, and off until the person turns it on. */

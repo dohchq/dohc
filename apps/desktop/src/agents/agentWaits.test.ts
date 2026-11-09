@@ -48,6 +48,15 @@ it("keeps an agent listening when it waits again before the hold ends", () => {
   expect(onChange).toHaveBeenCalledTimes(2);
 });
 
+it("stops listening at once when a wait fails or is aborted", () => {
+  const onChange = vi.fn();
+  const waits = createAgentWaits(onChange, 2_000);
+  waits.begin("terminal")(false);
+  expect(onChange).toHaveBeenLastCalledWith([]);
+  expect(waits.listening()).toEqual([]);
+  expect(onChange).toHaveBeenCalledTimes(2);
+});
+
 it("ends a wait once, however often its end runs", () => {
   const onChange = vi.fn();
   const waits = createAgentWaits(onChange, 2_000);

@@ -179,7 +179,7 @@ export function AgentDetails(props: {
         </Term>
       </dl>
       {agent.launch ? null : (
-        <p className="m-0 mt-2.5 flex items-center gap-1.5 text-[12px] text-muted">
+        <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">
           <Monitor size={14} aria-hidden />Reaches every workspace dohc opens on this computer.
         </p>
       )}

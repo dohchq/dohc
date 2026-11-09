@@ -24,7 +24,7 @@ import {
   newAgentId,
   newAgentName,
   isOwnAgentId,
-  withFirstAgent,
+  withAgentDohcStarts,
   effectiveThemeMode,
   zoomPercent,
 } from "./userSettings";
@@ -358,14 +358,25 @@ describe("desktop user settings model", () => {
     expect(firstAgentCommand({ agents: { default: named } })).toBe("");
   });
 
-  it("adds the default agent when there is none, and changes the first agent once there is one", () => {
-    const add = (settings: DesktopUserSettings) => withFirstAgent(settings, (current) => current ?? testAgent({ name: "Nova" }));
+  it("leaves an agent you run to you when Chats sets up an agent dohc starts", () => {
+    const { launch: _launch, ...yours } = testAgent({ name: "Terminal" });
+    const onlyYours = { ...DEFAULT_USER_SETTINGS, agents: { default: yours } };
+    const added = withAgentDohcStarts(onlyYours, (current) => current ?? testAgent({ name: "Nova" }));
+    expect(added.agents.default).toEqual(yours);
+    expect(added.agents.agent).toMatchObject({ name: "Nova" });
+    const started = { ...onlyYours, agents: { default: yours, codex: testAgent({ name: "Codex" }) } };
+    const renamed = withAgentDohcStarts(started, (current) => ({ ...current!, name: "Atlas" }));
+    expect(renamed.agents).toEqual({ default: yours, codex: { ...started.agents.codex, name: "Atlas" } });
+  });
+
+  it("adds the default agent when there is none, and changes the first agent dohc starts once there is one", () => {
+    const add = (settings: DesktopUserSettings) => withAgentDohcStarts(settings, (current) => current ?? testAgent({ name: "Nova" }));
     // Two saves made from the same settings add one agent.
     expect(add(DEFAULT_USER_SETTINGS)).toEqual(add(DEFAULT_USER_SETTINGS));
     const added = add(DEFAULT_USER_SETTINGS);
     expect(Object.keys(added.agents)).toEqual(["default"]);
     const later = { ...added, agents: { "agent-b": testAgent({ name: "Bee" }), ...added.agents } };
-    expect(firstAgent(withFirstAgent(later, (current) => ({ ...current!, name: "Atlas" })))).toMatchObject({ id: "agent-b", name: "Atlas" });
+    expect(firstAgent(withAgentDohcStarts(later, (current) => ({ ...current!, name: "Atlas" })))).toMatchObject({ id: "agent-b", name: "Atlas" });
   });
 
   it("resolves system theme from the OS preference", () => {
@@ -637,10 +648,10 @@ describe("desktop user settings store", () => {
     const before = await readFile(path, "utf8");
     const seen = await readUserSettingsFile(root);
     expect(seen.agentProblems?.map(({ id }) => id)).not.toContain("default");
-    const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
+    const added = withAgentDohcStarts(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
     await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(refusal);
     // A save queued behind the refused one starts from the agent it added.
-    const toggled = withFirstAgent(added, (current) => ({ ...current!, enabled: !current!.enabled }));
+    const toggled = withAgentDohcStarts(added, (current) => ({ ...current!, enabled: !current!.enabled }));
     await expect(writeUserSettingsFile(root, toggled, added)).rejects.toThrow(refusal);
     expect(await readFile(path, "utf8")).toBe(before);
     // Other settings still save around it.
@@ -651,7 +662,7 @@ describe("desktop user settings store", () => {
     await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }) } }));
     const read = await readUserSettingsFile(root);
     await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents: { default: broken } }));
-    const renamed = withFirstAgent(read.settings, (current) => ({ ...current!, name: "Atlas" }));
+    const renamed = withAgentDohcStarts(read.settings, (current) => ({ ...current!, name: "Atlas" }));
     await expect(writeUserSettingsFile(root, renamed, read.settings)).rejects.toThrow(refusal);
     expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual({ default: broken });
   });
@@ -663,7 +674,7 @@ describe("desktop user settings store", () => {
       await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents }));
       const before = await readFile(path, "utf8");
       const seen = await readUserSettingsFile(root);
-      const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
+      const added = withAgentDohcStarts(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
       await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(
         `dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`,
       );

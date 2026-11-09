@@ -74,6 +74,14 @@ if (mode === "silent-fail") {
   process.exit(3);
 }
 
+// Works until dohc ends the run, with no process of its own, so it behaves
+// the same on every platform. It writes its pid to the file named after the mode.
+if (mode === "hold") {
+  writeFileSync(process.argv[3], JSON.stringify({ runner: process.pid }));
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
+}
+
 // Starts a process that outlives its parent, as an agent's tools can, then
 // works on (hold-tree) or exits (leave-tree). It writes the pids of its parent,
 // itself and that process to the file named after the mode.

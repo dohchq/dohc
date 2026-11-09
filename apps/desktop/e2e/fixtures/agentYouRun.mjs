@@ -37,6 +37,8 @@ child.stdout.setEncoding("utf8").on("data", (chunk) => {
   for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
     const message = JSON.parse(buffer.slice(0, newline));
     buffer = buffer.slice(newline + 1);
+    // A request or notification from the server is not an answer.
+    if (message.method !== undefined) continue;
     const call = pending.get(message.id);
     if (!call) continue;
     pending.delete(message.id);
