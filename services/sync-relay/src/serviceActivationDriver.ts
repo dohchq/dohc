@@ -92,14 +92,14 @@ export interface RetirementScope {
 export type RetirementStep={kind:"retired"}|{kind:"held"}|{kind:"pending";reason:string};
 const RETIREMENT_ROUNDS=4;
 const retiring={kind:"pending" as const,reason:"Service activation is retiring."};
-// The engine's own code for refusing a capture, which it answers the same way on every pass: its message
-// when that is a stable code, such as `live-application-byte-budget-exceeded`, else its wire code. Undefined
-// for cancellation, the pass deadline, and a document that is only not ready yet or still has no lineage.
+// The engine's own code for refusing a capture it answers the same way on every pass: its message when that
+// is a stable code, such as `live-application-byte-budget-exceeded`, else its wire code. Only a byte budget qualifies: the engine answers LIMIT_EXCEEDED for one the document's lineage,
+// replay or full state exceeds (rpc/error.rs:427,677). Undefined for any other failure, such as a conflict a
+// later pull or an applied resolution clears, or a generic INTERNAL, so the next pass captures again.
 function captureRefusal(error:unknown,signal:AbortSignal){
   if(signal.aborted || !(error instanceof EngineRequestError) || error.wireError?.retry!=="no" ||
-    isHostedDocumentUnready(error) || isLiveDocumentWithoutLineage(error))return undefined;
+    error.wireError.code!=="LIMIT_EXCEEDED")return undefined;
   const {code,message}=error.wireError;
-  if(code==="CANCELLED" || code==="DEADLINE_EXCEEDED")return undefined;
   return FIRST_OPEN_ACTIVATION_CODE.test(message)?message:code;
 }
 /** The code a document's first open reports when the relay's activation validation refused its capture. */
