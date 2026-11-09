@@ -323,9 +323,16 @@ export function createAgentConnectionRoutes(input: {
   // is read, so no other credential on the call can stand in for it.
   async function accountSession(request: Request): Promise<AccountSession> {
     if (!input.resolveAccountSession) throw new Refused();
-    const session = await input.resolveAccountSession(new Request(request.url, {
-      headers: { cookie: request.headers.get("cookie") ?? "" }, signal: request.signal,
-    }));
+    let session: AccountSession;
+    try {
+      session = await input.resolveAccountSession(new Request(request.url, {
+        headers: { cookie: request.headers.get("cookie") ?? "" }, signal: request.signal,
+      }));
+    } catch (error) {
+      // A session lookup that can't reach Postgres fails closed, as the fence does.
+      if (error instanceof UnauthorizedError) throw error;
+      throw relayError("personal_agent_unavailable");
+    }
     if (session.expiresAtMs <= nowMs()) throw new UnauthorizedError();
     return session;
   }

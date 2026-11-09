@@ -164,7 +164,11 @@ function handler(storage: SyncRelayStorage, f: Pick<Fixture, "now" | "fence" | "
     nowMs: () => f.now.value,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
     credentialFence: f.fence,
-    resolveAccountSession: resolveSession,
+    // Account sessions live in the same Postgres as the fence.
+    resolveAccountSession: async (incoming) => {
+      if (f.fence.down) throw new Error("The database is unreachable.");
+      return await resolveSession(incoming);
+    },
     discussionActivity: f.activity,
     ...overrides,
   });
