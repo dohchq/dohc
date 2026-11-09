@@ -72,7 +72,8 @@ export function Toast({ message, onClose }: { message: ToastMessage; onClose(): 
       {message.body ? <Text style={[styles.body, { color: theme.muted }]} numberOfLines={open ? undefined : bodyLines} onPress={toggle} suppressHighlighting>{message.body}</Text> : null}
       {message.action ? (
         <View style={styles.actions}>
-          <ActionPill label={message.action.label} onPress={() => { message.action?.onPress?.(); onClose(); }} />
+          {/* Close first: an action that shows a new toast (Undo, Try again) must not have it cleared by this close. */}
+          <ActionPill label={message.action.label} onPress={() => { const action = message.action; onClose(); action?.onPress?.(); }} />
         </View>
       ) : null}
     </Animated.View>
