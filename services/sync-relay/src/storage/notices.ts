@@ -368,8 +368,7 @@ function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): 
   const what = storage.getShareLabels(share.shareId).subjectName ?? shareSubjectFallback(selector);
   return (senderLabel) => {
     const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
-    const name = [...what].length <= room ? what : `${[...what].slice(0, room - 1).join("")}…`;
-    return `${senderLabel} shared ${name} with you`;
+    return `${senderLabel} shared ${cutText(what, room)} with you`;
   };
 }
 

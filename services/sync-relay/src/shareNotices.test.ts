@@ -135,6 +135,12 @@ describe("a notice when a share reaches a person", () => {
     expect(title).toMatch(/^Name owner \(owner@dohc\.test\) shared a+… with you$/u);
   });
 
+  it("leaves no space before the … when the name's cut lands after one", async () => {
+    const { h } = await relay();
+    await createShare(h, "owner", WORKSPACE, { subjectName: `${"a".repeat(73)} bcd`, paths: ["trip"], recipientUserId: "ana" });
+    expect(await titles(h, "ana")).toEqual([`Name owner (owner@dohc.test) shared ${"a".repeat(73)}… with you`]);
+  });
+
   it("names a granter with no display name by the email the recipient already sees", async () => {
     const { h } = await relay({ lookupUserDisplayName: () => null });
     await createShare(h, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
