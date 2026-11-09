@@ -55,9 +55,10 @@ export function hostedReplicaQuiet(duties: HostedPullDuties): boolean {
  * log head and epoch floor, its identity, and its hosted, departed, shared and
  * settling documents. Equal readings mean a pull would bring nothing new, so a
  * write elsewhere, or one that changes none of these, leaves it unchanged.
+ * With no scope the feed answers nothing, and the relay may hold no such workspace.
  */
 export function hostedRelayState(storage: SyncRelayStorage, workspaceId: string): string {
   const scope = storage.readServiceHostFeedScope(workspaceId);
-  return JSON.stringify([storage.automationWorkspaceLogHead(workspaceId), storage.getEpochLogFloor(workspaceId),
-    scope && [scope.replicationEpoch, scope.streamIdentity, [...scope.hosted], [...scope.departed], [...scope.shared], [...scope.settling]]]);
+  return JSON.stringify(scope && [storage.automationWorkspaceLogHead(workspaceId), storage.getEpochLogFloor(workspaceId),
+    scope.replicationEpoch, scope.streamIdentity, [...scope.hosted], [...scope.departed], [...scope.shared], [...scope.settling]]);
 }
