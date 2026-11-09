@@ -24,9 +24,12 @@ CREATE TABLE ydoc_native_authors (
       REFERENCES ydoc_docs(workspace_id, version_id, object_id)
       ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
--- A read of one coverage skips the rows of every other.
+-- A read of one coverage skips the rows of every other, and reads its rows
+-- one identity at a time, so admission finds an identity with one seek.
 CREATE INDEX ydoc_native_authors_coverage
-    ON ydoc_native_authors (workspace_id, version_id, object_id, coverage, seq);
+    ON ydoc_native_authors (workspace_id, version_id, object_id, coverage,
+                            actor_origin_id, actor_kind, on_behalf_of, agent_run_id,
+                            chain_depth, seq);
 -- The interval-wide rows above, one per identity and depth with their count,
 -- so admission reads each identity once however many updates it wrote. A
 -- missing scope or run is ''; a recorded one is never empty.

@@ -661,6 +661,43 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     Ok(authors)
 }
 
+/// [`reserved_in`] with the authors of every update that still holds its
+/// own, including a held lineage's private updates.
+fn reserved_with_private_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
+    let mut authors = reserved_in(conn, key)?;
+    union_native_in(conn, key, None, i64::MAX, false, &mut authors)?;
+    Ok(authors)
+}
+
+/// Whether this identity already has an update on this document that holds
+/// its author. Its next edit then adds no author.
+fn private_author_in(
+    conn: &Connection,
+    key: &DocKey,
+    actor: &str,
+    attribution: &ChangeAttribution,
+) -> Result<bool, CollabError> {
+    conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_native_authors WHERE workspace_id=?1 \
+         AND version_id=?2 AND object_id=?3 AND coverage='update' AND actor_origin_id=?4 \
+         AND actor_kind=?5 AND on_behalf_of IS ?6 AND agent_run_id IS ?7)",
+    )
+    .map_err(sql)?
+    .query_row(
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            actor,
+            attribution.actor_kind.as_str(),
+            attribution.on_behalf_of,
+            attribution.agent_run_id,
+        ],
+        |row| row.get(0),
+    )
+    .map_err(sql)
+}
+
 /// The authors the unresolved settlement's moment names.
 fn unresolved_authors_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
     let mut authors = Authors::default();
@@ -705,8 +742,7 @@ pub fn shared_json(author: &SharedChangeAuthor) -> Result<String, CollabError> {
 /// delivery's snapshot already replaced each author it named. The outbox names
 /// no relay namespace, so its lineage's activations name the ones to check.
 pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
-    let mut authors = reserved_in(conn, key)?;
-    union_native_in(conn, key, None, i64::MAX, false, &mut authors)?;
+    let mut authors = reserved_with_private_in(conn, key)?;
     let mut statement = conn
         .prepare(
             "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e
@@ -803,6 +839,14 @@ pub(crate) fn check_batch_admission_in<'a>(
     credits: impl Iterator<Item = (Option<&'a str>, Option<&'a ChangeAttribution>)>,
 ) -> Result<bool, CollabError> {
     let mut covered = reserved_in(conn, key)?;
+    // A held lineage's private authors enter its interval together at its
+    // release, so they bound a new identity too. They never request a
+    // settlement, which could not consume them.
+    let mut with_private = if accepted_only_in(conn, key)? {
+        Some(reserved_with_private_in(conn, key)?)
+    } else {
+        None
+    };
     let mut seen = std::collections::BTreeSet::new();
     let mut settle = false;
     for (actor, attribution) in credits {
@@ -811,6 +855,9 @@ pub(crate) fn check_batch_admission_in<'a>(
         let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
         if !seen.insert(json.clone()) {
             continue;
+        }
+        if let Some(with_private) = with_private.as_mut() {
+            admit(with_private, &json)?;
         }
         let bytes = admit(&mut covered, &json)?;
         if actorless {
@@ -836,11 +883,18 @@ fn check_admission_with_coverage_in(
     let json = dohc_engine_domain::moment_author_json(actor, attribution);
     let actorless = json.is_none();
     let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
-    // An adopted owner's edit is private until the relay accepts it. Its
-    // author joins the interval with that acceptance, where a settlement can
-    // always make room, so only the entry itself is bounded here.
+    // An adopted owner's edit is private until the relay accepts it, and no
+    // settlement while held consumes its author. A release can bring every
+    // private author into the interval at once, so a new identity is counted
+    // with them. An identity with a private update already adds nothing, and
+    // one seek finds it.
     if accepted_only_in(conn, key)? {
         entry(&json)?;
+        if let (Some(actor), Some(attribution)) = (actor, attribution) {
+            if !private_author_in(conn, key, actor, attribution)? {
+                admit(&mut reserved_with_private_in(conn, key)?, &json)?;
+            }
+        }
         return Ok(Admission {
             request_settlement: false,
             introduced_unattributed: false,

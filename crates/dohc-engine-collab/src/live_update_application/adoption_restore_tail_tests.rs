@@ -230,6 +230,23 @@ fn held_admission_cost_does_not_grow_with_the_private_tail() {
     // Each accepted delivery's admission reads the reserved authors.
     let reserved =
         |conn: &rusqlite::Connection| crate::author_coverage::reserved_in(conn, &key).map(|_| ());
+    // Each keystroke of the tail's own agent is admitted.
+    let attribution = dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of: Some("installation-person".into()),
+        depth: 1,
+        run: None,
+        agent_run_id: None,
+    };
+    let keystroke = |conn: &rusqlite::Connection| {
+        crate::author_coverage::check_admission_in(
+            conn,
+            &key,
+            Some("native-agent"),
+            Some(&attribution),
+        )
+        .map(|_| ())
+    };
     let mut edits = 0;
     let mut steps = Vec::new();
     for tail in [10, 90] {
@@ -244,12 +261,214 @@ fn held_admission_cost_does_not_grow_with_the_private_tail() {
         }
         // The first read prepares its statements.
         read_steps(&mut f, reserved);
-        steps.push(read_steps(&mut f, reserved));
+        read_steps(&mut f, keystroke);
+        steps.push((read_steps(&mut f, reserved), read_steps(&mut f, keystroke)));
     }
     assert!(
-        steps[1] <= steps[0] + steps[0] / 10,
+        steps[1].0 <= steps[0].0 + steps[0].0 / 10,
         "held admission steps grew with the private tail: {steps:?}"
     );
+    assert!(
+        steps[1].1 <= steps[0].1 + steps[0].1 / 10,
+        "a known author's held keystroke grew with the private tail: {steps:?}"
+    );
+}
+
+/// One private edit by its own run of one agent.
+fn agent_run_edit(
+    f: &mut Fixture,
+    cache: &mut WriterDocCache,
+    run: usize,
+) -> Result<(), crate::CollabError> {
+    let key = f.key.clone();
+    let path = f.binding.current_path.clone();
+    let update = f
+        .doc
+        .richdoc_append_paragraph(&format!("Private run {run}."));
+    let attribution = dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of: None,
+        depth: 0,
+        run: None,
+        agent_run_id: Some(format!("run-{run}")),
+    };
+    let now = 20 + run as i64;
+    crate::record_local_update(
+        &mut f.store,
+        cache,
+        &key,
+        &update,
+        crate::LocalAppend {
+            actor_origin_id: Some("agent"),
+            attribution: Some(&attribution),
+            ..Default::default()
+        },
+        &NoFaults,
+        now,
+        |tx, outcome, _| {
+            owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &key,
+                &path,
+                outcome.seq,
+                &update,
+                &Default::default(),
+                now,
+            )
+        },
+    )
+    .map(|_| ())
+}
+
+/// The agent runs an author list names, in order.
+fn agent_runs(json: &str) -> Vec<String> {
+    let authors: Value = serde_json::from_str(json).unwrap();
+    let mut runs: Vec<String> = authors
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|author| author["agentRunId"].as_str().map(str::to_owned))
+        .collect();
+    runs.sort();
+    runs
+}
+
+/// Separate runs of an agent each make a private edit on a held lineage, and
+/// the relay refuses them. Retirement keeps them all, and the release brings
+/// every one of their authors into the interval at once. So the run that one
+/// moment could not name is refused when it edits, and writes nothing. After
+/// the release, the document settles and its moment names every run that was
+/// admitted.
+#[test]
+fn a_held_lineage_refuses_the_agent_run_one_moment_cannot_name() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    // The relay accepted and settled one edit, so the release has an
+    // accepted state to return the Y.Doc to.
+    let covered = native_tail_edit(&mut f, "# Covered\n", 11);
+    native_tail_apply(
+        &mut f,
+        covered.update.clone(),
+        covered.delivery_id.clone(),
+        3,
+    );
+    let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+    acknowledge_entry(&mut f, &covered);
+    settled(&mut f, Some(covered), "covered").unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
+        })
+        .unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| crate::author_coverage::reserved_in(conn, &f.key))
+        .unwrap()
+        .is_empty());
+    let mut cache = WriterDocCache::new();
+    let runs = crate::author_coverage::MAX_INTERVAL_AUTHORS;
+    for run in 0..runs {
+        agent_run_edit(&mut f, &mut cache, run).unwrap();
+    }
+    // A run that already has a private edit keeps editing.
+    agent_run_edit(&mut f, &mut cache, 0).unwrap();
+    const WRITES: [&str; 4] = [
+        "ydoc_docs",
+        "ydoc_updates",
+        "ydoc_native_authors",
+        "owner_ydoc_outbox_entries",
+    ];
+    let before = rows(&f, &WRITES);
+    let refused = agent_run_edit(&mut f, &mut WriterDocCache::new(), runs);
+    assert!(
+        matches!(refused, Err(crate::CollabError::AuthorCapacity)),
+        "the run past one moment's authors is refused"
+    );
+    assert_eq!(rows(&f, &WRITES), before, "a refused edit writes nothing");
+    let deliveries: Vec<String> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert_eq!(deliveries.len(), runs + 1);
+    refuse_head(&mut f, &deliveries[0], "delivery-conflict");
+    let absent = JournalEvidence {
+        receipts: vec![],
+        absent: deliveries.clone(),
+    };
+    let scope = RetirementScope {
+        max_deliveries: deliveries.len(),
+        ..retirement_scope()
+    };
+    let key = retirement_key(&f, 10);
+    assert!(matches!(
+        reconcile_activation(&mut f.store, &scope, &key, None, Some(&absent), &NoFaults).unwrap(),
+        Reconciliation::Reconciled { .. }
+    ));
+    release_parked(&mut f);
+    // The release returned the Y.Doc to accepted state.
+    let local = local_doc(&f).project(ContentKind::Richdoc).unwrap().content;
+    assert!(
+        local.contains("Covered") && !local.contains("Private run"),
+        "{local}"
+    );
+    let mut expected: Vec<String> = (0..runs).map(|run| format!("run-{run}")).collect();
+    expected.sort();
+    let TxnOutcome::Committed(()) = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+            let authors = crate::author_coverage::interval_in(tx, &f.key, i64::MAX)?;
+            assert_eq!(authors.len(), runs);
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                dohc_engine_domain::ProjectedWriteText {
+                    workspace_id: "workspace",
+                    version_id: "main",
+                    object_id: "object",
+                    path: std::borrow::Cow::Borrowed("owner.md"),
+                    text: std::borrow::Cow::Borrowed(&local),
+                    moment_id: "released",
+                    metadata_origin: "ydoc",
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: authors.moment_json().as_deref(),
+                    now_ms: 40,
+                    request_id: None,
+                },
+            )
+            .map_err(|_| ApplicationError::Corrupt)?;
+            crate::author_coverage::advance_in(tx, &f.key, false)?;
+            Ok(())
+        })
+        .unwrap()
+    else {
+        panic!("settlement interrupted")
+    };
+    let named: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE moment_id='released'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        agent_runs(&named),
+        expected,
+        "History names every run admitted"
+    );
+    assert!(f
+        .store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
