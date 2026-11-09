@@ -8342,19 +8342,24 @@ mod tests {
 
     /// This machine deletes `doc.md`, which retires its editor history.
     fn delete_doc(store: &mut EngineStore) {
+        delete_doc_as(store, "moment-deleted", 25);
+    }
+
+    /// The deletion above, recorded as `moment_id` at `now_ms`.
+    fn delete_doc_as(store: &mut EngineStore, moment_id: &str, now_ms: i64) {
         VersionedTextStore::new(store)
             .delete_text_file(
                 &DeleteTextFile {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
                     path: "doc.md".to_owned(),
-                    moment_id: "moment-deleted".to_owned(),
+                    moment_id: moment_id.to_owned(),
                     request_id: None,
                     metadata_origin: "api".to_owned(),
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     author_json: None,
-                    now_ms: 25,
+                    now_ms,
                 },
                 &NoFaults,
             )
@@ -8362,6 +8367,47 @@ mod tests {
         store
             .write_with(&NoFaults, |tx| {
                 crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-a")
+            })
+            .unwrap();
+    }
+
+    /// Restore `doc.md` from History to before `moment_id`, as the runtime's
+    /// History restore writes it and reconciles its editor history.
+    fn restore_doc_before(store: &mut EngineStore, moment_id: &str) {
+        let input = WriteText {
+            workspace_id: "ws".to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "object-a".to_owned(),
+            path: "doc.md".to_owned(),
+            text: "base text".to_owned(),
+            moment_id: "moment-restored".to_owned(),
+            metadata_origin: "restore".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 30,
+            request_id: None,
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                let result = dohc_engine_domain::write_published_history_text_in_tx(
+                    tx, &input, moment_id, None,
+                )
+                .map_err(map_local_domain_error)?;
+                crate::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    &result.snapshot.object_id,
+                    crate::ResultingHead::Text {
+                        path: &result.snapshot.path,
+                        text: &result.snapshot.text,
+                    },
+                    None,
+                    None,
+                    30,
+                )?;
+                Ok::<_, SyncError>(())
             })
             .unwrap();
     }
@@ -8671,6 +8717,99 @@ mod tests {
             &crate::NoLiveLeases,
         )
         .unwrap();
+
+        assert_eq!(text_keep_open_rows(&store), 1);
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "doc.md")
+            .unwrap();
+        assert!(head.is_none(), "{head:?}");
+    }
+
+    /// Import the other machine's "Keep this machine's copy" of `edited` over
+    /// this machine's deletion of `doc.md`. The history it replaced is `base`
+    /// with `first` applied. Returns the successor's claim.
+    fn import_peer_kept_copy(
+        store: &mut EngineStore,
+        key: &DocKey,
+        (base, first): (&[u8], &[u8]),
+        edited: &str,
+    ) -> String {
+        let predecessor = dohc_engine_collab::Ydoc::wire();
+        predecessor.apply(base).unwrap();
+        predecessor.apply(first).unwrap();
+        let claim = dohc_engine_storage::hex_sha256(base);
+        let built = peer_kept_its_copy(store, key, (&claim, &predecessor), edited);
+        let transition = built.validated.payload.lineage_transition.as_ref();
+        let successor = transition.unwrap().successor.clone().unwrap();
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+        envelope.origin_id = "peer-resolver".to_owned();
+        envelope.recorded_at_ms = 26;
+        crate::apply_replication_envelope(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        successor.lineage_claim_id
+    }
+
+    /// An unrelated conflict stays open at `doc.md` in another version. The
+    /// other machine's kept copy still comes back here, in `main`.
+    #[test]
+    fn a_kept_copy_over_a_deletion_ignores_a_conflict_in_another_version() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, key) =
+            deleter_with_retired_history(&base, &[("peer", 1, &first[..])], 0);
+        let mut other = peer_snapshot("feature text");
+        other.version_id = "feature".to_owned();
+        other.object_id = "object-feature".to_owned();
+        let conflict = TextConflict {
+            conflict_id: "conflict-feature".to_owned(),
+            workspace_id: "ws".to_owned(),
+            path: "doc.md".to_owned(),
+            target_version_id: "feature".to_owned(),
+            source_version_id: "peer".to_owned(),
+            created_at_ms: 15,
+            updated_at_ms: 15,
+            status: ConflictStatus::Open,
+            chosen_from: ConflictChoice::Current,
+            resolution: None,
+            metadata: ConflictMetadata::origin("sync"),
+            base: ConflictFileState::text("doc.md", None),
+            current: ConflictFileState::text("doc.md", Some(other)),
+            incoming: ConflictFileState::text("doc.md", None),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &conflict)
+            })
+            .unwrap();
+        let edited = "base text\nTokyo";
+        let successor = import_peer_kept_copy(&mut store, &key, (&base, &first), edited);
+
+        assert_eq!(active_claim(&store, &key), Some(successor));
+        assert_eq!(text_keep_head(&mut store).text, edited);
+        assert_eq!(deferred_rows(&store), 0);
+        assert_eq!(text_keep_open_rows(&store), 1);
+    }
+
+    /// This machine deleted the note, restored it from History, and deleted
+    /// it again before the other machine's typing arrived. The other machine
+    /// reviewed only one of those deletions, so its kept copy opens a review
+    /// here and the note stays deleted.
+    #[test]
+    fn a_kept_copy_over_a_deletion_asks_when_this_machine_deleted_the_note_again() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, key) = deleter_with_retired_history(&base, &[], 0);
+        restore_doc_before(&mut store, "moment-deleted");
+        assert_eq!(text_keep_head(&mut store).text, "base text");
+        delete_doc_as(&mut store, "moment-deleted-again", 35);
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
+        let edited = "base text\nTokyo";
+        import_peer_kept_copy(&mut store, &key, (&base, &first), edited);
 
         assert_eq!(text_keep_open_rows(&store), 1);
         let head = VersionedTextStore::new(&mut store)
