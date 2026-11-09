@@ -18,7 +18,10 @@
 //! file as a local moment and opens a conflict. Admit a write on a replaced
 //! claim and the edit typed after takeover lands in the winner.
 
+mod support;
+
 use base64::Engine as _;
+use dohc_engine_collab::reader_resolver::ReaderResolver;
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, WriterDocCache, Ydoc};
 use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_engine_runtime::{
@@ -284,6 +287,13 @@ fn learn_own_base_position(store: &mut EngineStore, key: &DocKey, own: &Replicat
         .expect("learn own base position");
 }
 
+/// A writer cache that checks Markdown witnesses as a running engine does.
+fn witnessed_cache(witness: &Arc<ReaderResolver>) -> WriterDocCache {
+    let mut cache = WriterDocCache::new();
+    cache.reader_resolver = Some(witness.clone());
+    cache
+}
+
 /// Apply relayed ops in order. Each must be answered for good: applied,
 /// skipped or, while the document is open, parked and then drained.
 fn deliver(
@@ -291,6 +301,7 @@ fn deliver(
     key: &DocKey,
     ops: &[(ReplicationEnvelope, Vec<u8>)],
     open: bool,
+    witness: &Arc<ReaderResolver>,
     case: Case,
 ) {
     let leases: &dyn LeaseProbe = if open { &AlwaysLive } else { &NoLiveLeases };
@@ -298,7 +309,7 @@ fn deliver(
         store.put_binary_blob(blob).expect("copy blob");
         let outcome = apply_ydoc_envelope(
             store,
-            &mut WriterDocCache::new(),
+            &mut witnessed_cache(witness),
             envelope,
             &NoFaults,
             leases,
@@ -320,7 +331,7 @@ fn deliver(
     }
     if open {
         let drained =
-            drain_deferred_ydoc_for_key(store, &mut WriterDocCache::new(), key, &NoFaults)
+            drain_deferred_ydoc_for_key(store, &mut witnessed_cache(witness), key, &NoFaults)
                 .unwrap_or_else(|error| panic!("{case:?}: drain {error:?}"));
         assert!(
             drained.refusals.is_empty(),
@@ -393,10 +404,12 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     let p = engine_db_path(&p_scratch).expect("peer db");
     prepare(&d, Some(markdown));
     prepare(&p, None);
+    let witness = support::witness_reader(&d_scratch);
 
     // The desktop opens the note and seeds it under the client the engine names.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&d, 1).expect("open actor").actor;
+    support::configure_witness_reader(&handle, &d_scratch).await;
     let state = open_note(&handle).await.expect("open the note");
     let client = yrs::ClientID::new(u64::from(state.seed_client_id.expect("seed client")));
     assert!(only_client(desktop_seed).get(&client) > 0, "{case:?}");
@@ -464,7 +477,14 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         .filter(|(op, _)| op.origin_id == RELAY_ORIGIN)
         .cloned()
         .collect();
-    deliver(&mut d_store, &key, &from_relay, case.desktop_open, case);
+    deliver(
+        &mut d_store,
+        &key,
+        &from_relay,
+        case.desktop_open,
+        &witness,
+        case,
+    );
     assert_eq!(
         journaled(&d_store).len(),
         desktop_ops.len(),
@@ -477,6 +497,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     if case.typing == Typing::AfterAdoption {
         let supervisor = WorkspaceSupervisor::new();
         let handle = supervisor.open(&d, 1).expect("open actor").actor;
+        support::configure_witness_reader(&handle, &d_scratch).await;
         let opened = open_note(&handle).await;
         if conflict_opens {
             assert!(
@@ -519,6 +540,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     if case.typing == Typing::AfterTakeover {
         let supervisor = WorkspaceSupervisor::new();
         let handle = supervisor.open(&d, 1).expect("open actor").actor;
+        support::configure_witness_reader(&handle, &d_scratch).await;
         let written = record(
             &handle,
             &key,
@@ -591,7 +613,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
 
     // A peer with no copy of the note pulls the whole log.
     let mut p_store = EngineStore::open(&p, 9_303).expect("open peer");
-    deliver(&mut p_store, &key, &log, false, case);
+    deliver(&mut p_store, &key, &log, false, &witness, case);
 
     let d_store = EngineStore::open(&d, 9_304).expect("open desktop");
     for store in [&d_store, &p_store] {
@@ -691,6 +713,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     // lineage in place.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&d, 1).expect("open actor").actor;
+    support::configure_witness_reader(&handle, &d_scratch).await;
     let text = head(&EngineStore::open(&d, 9_305).expect("open desktop"));
     handle
         .capture_ingest(

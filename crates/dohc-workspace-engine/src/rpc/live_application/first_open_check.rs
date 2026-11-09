@@ -139,7 +139,7 @@ impl OutputGuard for AnswerGuard {
     }
 }
 
-fn stopped(guard: &RestoreFenceOutputGuard) -> WireError {
+fn stopped(guard: &HostOutputGuard) -> WireError {
     if guard.cancel.is_cancelled() {
         WireError::new(ErrorCode::Cancelled, "first-open check cancelled")
     } else if guard
@@ -191,10 +191,11 @@ impl EngineService {
         if request.method != METHOD || request.idempotency_key.is_some() || !authorized() {
             return Err(workspace_unavailable());
         }
-        let guard = Arc::new(RestoreFenceOutputGuard {
+        let guard = Arc::new(HostOutputGuard {
             host: host.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
+            read: false,
         });
         if !guard.is_current() {
             return Err(stopped(&guard));
@@ -490,10 +491,11 @@ pub(crate) mod tests {
                 .first_open_check_host(&f.owner.handle(), Some(&f.ordinary))
                 .unwrap();
             let cancel = CancelSignal::new();
-            let guard = Arc::new(RestoreFenceOutputGuard {
+            let guard = Arc::new(HostOutputGuard {
                 host: host.clone(),
                 cancel: cancel.clone(),
                 deadline: None,
+                read: false,
             });
             let input = FirstOpenCheckInput {
                 host,

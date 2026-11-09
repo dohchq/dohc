@@ -664,10 +664,10 @@ mod tests {
             native_head_sequence: SAFE,
             full_state_digest: digest.clone(),
             full_state_byte_length: SAFE as usize,
+            predecessor_activation_id: Some(format!("ordinary-activation-{digest}")),
         };
-        let predecessor = format!(",\"predecessorActivationId\":\"ordinary-activation-{digest}\"");
         assert_eq!(
-            serde_json::to_string(&source).unwrap().len() + predecessor.len(),
+            serde_json::to_string(&source).unwrap().len(),
             fixture.reserve
         );
     }
