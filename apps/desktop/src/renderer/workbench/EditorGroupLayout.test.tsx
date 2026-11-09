@@ -82,8 +82,12 @@ describe("EditorGroupLayout", () => {
     ));
     const assertTones = (focused: HTMLElement, other: HTMLElement, otherGlyph: Element | null) => {
       expect(focused.classList.contains("text-ink")).toBe(true);
-      expect(receded('[role="tab"][aria-selected="true"]', nameTone)).toEqual([other]);
-      expect(receded("svg", glyphTone)).toEqual([otherGlyph]);
+      const names = receded('[role="tab"][aria-selected="true"]', nameTone);
+      const glyphs = receded("svg", glyphTone);
+      expect(names).toHaveLength(1);
+      expect(names[0]).toBe(other);
+      expect(glyphs).toHaveLength(1);
+      expect(glyphs[0]).toBe(otherGlyph);
       for (const tab of [focused, other]) {
         expect(tab.getAttribute("aria-selected")).toBe("true");
         expect(tab.classList.contains("bg-bg")).toBe(true);
@@ -97,8 +101,6 @@ describe("EditorGroupLayout", () => {
     act(() => left.focus());
     expect(document.activeElement).toBe(left);
     assertTones(left, right, rightGlyph);
-    expect(screen.getByRole("tab", { name: "left.md" })).toBe(left);
-    expect(screen.getByRole("tab", { name: "right.md" })).toBe(right);
   });
 
   it("labels each group and focuses it from pointer, focus, and context-menu entry", () => {

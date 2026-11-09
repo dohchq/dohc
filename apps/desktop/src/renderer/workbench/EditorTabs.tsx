@@ -257,10 +257,11 @@ const Tab = memo(function Tab(props: {
           </span>
         </>
       ) : null}
-      {/* The drawing's 8px from glyph to name; only the focused group's
-          active glyph is muted. The other glyphs are subtle. */}
+      {/* The drawing's 8px from glyph to name; only the active group's
+          active glyph is muted. The other glyphs are subtle. Its color fades
+          with the name's. */}
       <span className="flex items-center gap-2">
-        <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? `text-muted ${INACTIVE_GROUP_GLYPH}` : "text-subtle"} />
+        <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? `text-muted transition-colors duration-150 ${INACTIVE_GROUP_GLYPH}` : "text-subtle"} />
         <span className="max-w-44 truncate">{name}</span>
       </span>
       {/* The close's slot. An unsaved tab shows its dot here, so it is as
