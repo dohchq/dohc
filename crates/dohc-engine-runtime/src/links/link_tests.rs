@@ -23,7 +23,7 @@ pub(super) fn observe_checkpoints(store: &mut EngineStore) {
         .hooks_with(|c| {
             // Match sqlite3WalDefaultHook: same threshold, passive checkpoint,
             // and ignored checkpoint errors. This hook exists only in tests.
-            c.wal_hook(Some(|wal, frames| {
+            c.wal_hook(Some(|wal: &mut rusqlite::hooks::Wal, frames: std::ffi::c_int| {
                 let threshold = WAL_THRESHOLD.get();
                 if threshold > 0 && frames >= threshold {
                     WAL_CHECKPOINT_RAN.set(true);
