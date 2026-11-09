@@ -58,10 +58,13 @@ describe("ChatsView channels", () => {
 
     const names = await screen.findAllByTestId("chats-channel-name");
     expect(names.map((el) => el.textContent)).toEqual(["general", "product"]);
-    // Only the channel with unread messages shows a badge.
+    // Only the channel with unread messages is marked: its name goes bold, and
+    // its count is there for a screen reader, not as a visible number.
     const badges = screen.getAllByTestId("chats-channel-unread");
     expect(badges).toHaveLength(1);
-    expect(badges[0].textContent).toBe("2");
+    expect(badges[0].textContent).toBe("2 unread");
+    expect(badges[0].className).toBe("sr-only");
+    expect(names.map((el) => el.className.includes("font-medium"))).toEqual([false, true]);
     const rows = screen.getAllByTestId("chats-channel");
     expect(rows.map((row) => row.dataset.threadCount)).toEqual(["0", "3"]);
   });
@@ -350,7 +353,7 @@ describe("ChatsView panel navigator unread badges", () => {
       fileThreads: [],
     });
     const view = render(navigator(0));
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The editor read the thread: the durable count is zero now.
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -390,7 +393,7 @@ describe("ChatsView panel navigator unread badges", () => {
       fileThreads: [],
     });
     const view = render(navigator(0));
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The refresh the read triggers fails.
     bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
@@ -399,7 +402,7 @@ describe("ChatsView panel navigator unread badges", () => {
 
     // The channel list is still there — a stale badge beats an error card.
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
-    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2");
+    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2 unread");
 
     // The signal was not spent on that failure: the next read still refetches
     // and the badge catches up.
@@ -489,7 +492,7 @@ describe("ChatsView panel navigator unread badges", () => {
     );
     const view = render(navigator(0));
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The read lands. Channels answer; the optional share lookup does not.
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -530,7 +533,7 @@ describe("ChatsView panel navigator unread badges", () => {
     );
     const view = render(navigator(0));
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The read lands; the relay is down, so the listing resolves unreachable.
     bridgeMock.listChatChannels.mockResolvedValue({

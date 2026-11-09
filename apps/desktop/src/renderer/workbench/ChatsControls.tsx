@@ -47,8 +47,8 @@ export function AgentPresenceHint(props: {
   );
 }
 
-// Ink means the user was addressed: a DM or their agent. Quiet marks unread
-// activity in a group the user only follows.
+// Ink means the user was addressed: a DM or their agent. A group's chat row
+// shows no count, only its bold name. Quiet marks a post's unread replies.
 export function UnreadPill(props: { count: number; testId: string; tone?: "ink" | "quiet" }) {
   if (props.count <= 0) return null;
   return (

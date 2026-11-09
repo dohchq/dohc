@@ -68,12 +68,12 @@ import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { inputCount, onNextInput } from "../ui/inputCount";
 import {
   AtSign,
-  Bot,
   Hash,
   House,
   MessageSquare,
   Plus,
   Settings,
+  Sparkles,
   Square,
   Users,
   X,
@@ -434,8 +434,8 @@ function NavRow(props: {
   onClick: () => void;
   active?: boolean;
   muted?: boolean;
-  // Unread activity the user was not addressed in: the name carries the
-  // weight, not a pill.
+  // Any unread message: the name goes bold on every row. A count beside it
+  // means the user was addressed.
   unread?: boolean;
   labelTestId?: string;
   trailing?: React.ReactNode;
@@ -5124,7 +5124,11 @@ export function ChatsView(props: {
                               <span className="sr-only">{sharedLabel}</span>
                             </span>
                           ) : null}
-                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" tone="quiet" />
+                          {channel.unreadCount > 0 ? (
+                            <span data-testid="chats-channel-unread" className="sr-only">
+                              {channel.unreadCount} unread
+                            </span>
+                          ) : null}
                         </>
                       }
                     />
@@ -5196,6 +5200,7 @@ export function ChatsView(props: {
                       testId="chats-dm-item"
                       data={{ "data-channel-id": dm.channelId }}
                       active={selectedDmId === dm.channelId}
+                      unread={dm.unreadCount > 0}
                       onClick={() => openConversation({ level: "dm", dm })}
                       icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
                       label={dm.peerLabel}
@@ -5300,6 +5305,7 @@ export function ChatsView(props: {
                     testId="chats-my-agent"
                     data={{ "data-channel-id": channel.id, ...(channel.agentId ? { "data-agent-id": channel.agentId } : {}) }}
                     active={selectedChannelId === channel.id}
+                    unread={channel.unreadCount > 0}
                     onClick={() => openConversation({ level: "channel", channel })}
                     icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
                     label={label}
@@ -5370,7 +5376,7 @@ export function ChatsView(props: {
                 >
                   {hasAgent ? (
                     <>
-                      <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
+                      <Sparkles size={13} aria-hidden className="shrink-0 text-subtle" />
                       Manage agents
                     </>
                   ) : (
