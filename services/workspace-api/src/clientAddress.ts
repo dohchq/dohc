@@ -34,4 +34,7 @@ export function sanitizeAuthHeaders(headers: IncomingHttpHeaders, peer: string |
   delete headers["x-real-ip"];
   delete headers["cf-connecting-ip"];
   delete headers["forwarded"];
+  // Nothing needs the request's scheme. The router reads its path and query,
+  // and Better Auth uses the configured base URL.
+  delete headers["x-forwarded-proto"];
 }
