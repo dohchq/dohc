@@ -777,6 +777,61 @@ function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined):
 const sharingDeclinedKey = (workspaceId: string, declined: SharingDeclined): string =>
   JSON.stringify([workspaceId, declined.objectId, declined.versionId, declined.headBlobSha256]);
 
+// A file whose first open the server refused, or stopped trying after repeated
+// build deadlines. Each reason says why and what the person can still do; only
+// Try again asks the server again, and nothing here promises that it helps.
+// The copied details carry the codes.
+type LiveFirstOpen = NonNullable<SyncStatusResult["ownerLiveFirstOpen"]>[number];
+function liveFirstOpenCopy(refusal: LiveFirstOpen): { title: string; body: string } {
+  const name = refusal.source.path.split("/").pop() ?? refusal.source.path;
+  const title = `Live editing can't start for ${name}`;
+  switch (refusal.reason) {
+    case "retry-stopped":
+      return {
+        title: `Live editing did not start for ${name}`,
+        body: `The server took too long to prepare this file ${refusal.deadlineAnswers} times, so it stopped trying. The file is unchanged, and you can still edit it normally.`,
+      };
+    case "unsupported-source":
+      return {
+        title,
+        body: `${refusal.code === "not-utf8"
+          ? "This file isn't UTF-8 text, so the server can't edit it live."
+          : "The server can't edit this file's Markdown live without changing how it is written."} The file is unchanged, and you can still edit it normally.`,
+      };
+    case "too-large":
+      return { title, body: "This file is too large to go live automatically. The file is unchanged, and you can still edit it normally." };
+    case "deletion":
+      return { title, body: "This file was deleted or replaced earlier, so the server can't start live editing for it. You can still edit it normally." };
+    case "ordinary-activation-refused":
+      return { title, body: "The server refused to start live editing for this file. Copy the details and send them to the person who runs the server." };
+    case "integrity":
+      return { title, body: "The server's records for this file don't match, so it changed nothing. Copy the details and send them to the person who runs the server." };
+  }
+}
+// What Try again says when the server never took the request.
+const LIVE_FIRST_OPEN_RETRY_FAILED = "dohc could not ask the server to try again.";
+// One refusal of one file: a new reason, code, path or saved file is news.
+const liveFirstOpenKey = (workspaceId: string, refusal: LiveFirstOpen): string =>
+  JSON.stringify([workspaceId, refusal.source.objectId, refusal.reason, "code" in refusal ? refusal.code ?? null : null,
+    refusal.source.path, refusal.source.sourceDigest]);
+// One file, whatever its refusal says.
+const liveFirstOpenDocument = (workspaceId: string, refusal: LiveFirstOpen): string =>
+  JSON.stringify([workspaceId, refusal.source.objectId]);
+function liveFirstOpenDetails(workspaceId: string, refusal: LiveFirstOpen, title: string, body: string): string {
+  return errorDetails([
+    ["Live editing", title],
+    ["Detail", body],
+    ["File", refusal.source.path],
+    ["Reason", refusal.reason],
+    ["Code", "code" in refusal ? refusal.code ?? "" : ""],
+    ["Recovery", refusal.recovery],
+    ["Object id", refusal.source.objectId],
+    ["Source moment", refusal.source.sourceMomentId],
+    ["Source sha256", refusal.source.sourceDigest],
+    ["Workspace id", workspaceId],
+  ]);
+}
+
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
@@ -1140,6 +1195,10 @@ export function NoticeCenter(props: {
   onOpenLiveDocuments?: () => void;
   // Opens the refused document by version and object.
   onOpenSharingDeclined?: (versionId: string, objectId: string) => void;
+  // Try again on a file whose first open the server refused: one checked
+  // request. Resolves to null once the server took it, or to a sentence that
+  // says why it did not. Its answer arrives in a later status.
+  onRetryLiveFirstOpen?: (workspaceId: string, path: string) => Promise<string | null>;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -1459,6 +1518,86 @@ export function NoticeCenter(props: {
   );
   const { onOpenSharingDeclined } = props;
 
+  // Files the server refused to start live, one row each. Closing a toast
+  // keeps its row; dismissing the row removes both. A changed refusal has a
+  // new key, so it replaces the row and is announced again.
+  const [closedFirstOpen, setClosedFirstOpen] = useState<ReadonlySet<string>>(new Set());
+  const [dismissedFirstOpen, setDismissedFirstOpen] = useState<ReadonlySet<string>>(new Set());
+  const ownerLiveFirstOpen = useMemo(
+    () => (props.syncStatus?.ownerLiveFirstOpen ?? []).filter((refusal) => refusal.source.workspaceId === props.workspaceId),
+    [props.syncStatus?.ownerLiveFirstOpen, props.workspaceId],
+  );
+  const liveFirstOpen = useMemo(
+    () => ownerLiveFirstOpen.filter((refusal) => !dismissedFirstOpen.has(liveFirstOpenKey(props.workspaceId, refusal))),
+    [dismissedFirstOpen, ownerLiveFirstOpen, props.workspaceId],
+  );
+  const firstOpenToast =
+    liveFirstOpen.find((refusal) => !closedFirstOpen.has(liveFirstOpenKey(props.workspaceId, refusal))) ?? null;
+  // Each file's Try again on its way, by document, with the refusal it
+  // answers and why it did not run once it did not. Only its own request's
+  // answer settles it; a changed refusal or another workspace ends it.
+  const [firstOpenRetries, setFirstOpenRetries] = useState<
+    ReadonlyMap<string, { token: number; refusal: string; note: string | null }>
+  >(new Map());
+  const firstOpenRequests = useRef(0);
+  useEffect(() => {
+    const current = new Set(ownerLiveFirstOpen.map((refusal) => liveFirstOpenKey(props.workspaceId, refusal)));
+    setFirstOpenRetries((retries) =>
+      [...retries.values()].every((retry) => current.has(retry.refusal))
+        ? retries
+        : new Map([...retries].filter(([, retry]) => current.has(retry.refusal))),
+    );
+  }, [ownerLiveFirstOpen, props.workspaceId]);
+  const { onRetryLiveFirstOpen } = props;
+  const retryFirstOpen = useCallback(
+    async (refusal: LiveFirstOpen) => {
+      if (!onRetryLiveFirstOpen) return;
+      const workspaceId = props.workspaceId, path = refusal.source.path, key = liveFirstOpenKey(workspaceId, refusal);
+      const document = liveFirstOpenDocument(workspaceId, refusal), token = ++firstOpenRequests.current;
+      // Its answer is news, even if this refusal's toast was closed.
+      setClosedFirstOpen((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      setFirstOpenRetries((current) => new Map(current).set(document, { token, refusal: key, note: null }));
+      let note: string | null;
+      try {
+        note = await onRetryLiveFirstOpen(workspaceId, path);
+      } catch {
+        note = LIVE_FIRST_OPEN_RETRY_FAILED;
+      }
+      // A settled request frees its Try again; one that did not run says why.
+      setFirstOpenRetries((current) => {
+        const retry = current.get(document);
+        if (retry?.token !== token) return current;
+        const next = new Map(current);
+        if (note === null) next.delete(document);
+        else next.set(document, { ...retry, note });
+        return next;
+      });
+    },
+    [onRetryLiveFirstOpen, props.workspaceId],
+  );
+  // One view for the row and the toast, so they say and copy the same thing.
+  const firstOpenView = useCallback(
+    (refusal: LiveFirstOpen) => {
+      const copy = liveFirstOpenCopy(refusal), key = liveFirstOpenKey(props.workspaceId, refusal);
+      const attempt = firstOpenRetries.get(liveFirstOpenDocument(props.workspaceId, refusal));
+      const retry = attempt?.refusal === key ? attempt : null;
+      const body = retry?.note ? `${copy.body} ${retry.note}` : copy.body;
+      return {
+        key,
+        title: copy.title,
+        body,
+        retrying: retry !== null && retry.note === null,
+        details: liveFirstOpenDetails(props.workspaceId, refusal, copy.title, body),
+      };
+    },
+    [firstOpenRetries, props.workspaceId],
+  );
+  const firstOpenToastView = firstOpenToast ? firstOpenView(firstOpenToast) : null;
+
   useEffect(() => {
     if (!open) return;
 
@@ -1650,6 +1789,23 @@ export function NoticeCenter(props: {
         onRead: () => setDismissedRefusalsKey(refusalsKey),
         revision: refusalsKey,
         copy: { report: refusalsDetails },
+        Icon: AlertTriangle,
+      });
+    }
+
+    for (const refusal of liveFirstOpen) {
+      const view = firstOpenView(refusal);
+      next.push({
+        id: `owner-live-first-open-${encodeURIComponent(refusal.source.objectId)}`,
+        tone: "warning",
+        title: view.title,
+        body: view.body,
+        ...(onRetryLiveFirstOpen
+          ? { actions: [{ label: "Try again", onClick: () => void retryFirstOpen(refusal), disabled: view.retrying }] }
+          : {}),
+        onDismiss: () => setDismissedFirstOpen((current) => new Set(current).add(view.key)),
+        revision: view.key,
+        copy: { report: view.details },
         Icon: AlertTriangle,
       });
     }
@@ -1854,6 +2010,10 @@ export function NoticeCenter(props: {
     onOpenLiveDocuments,
     refusalsDetails,
     refusalsKey,
+    liveFirstOpen,
+    firstOpenView,
+    onRetryLiveFirstOpen,
+    retryFirstOpen,
   ]);
 
   // Set-aside drafts count as one notice: they may belong to paths
@@ -2254,6 +2414,56 @@ export function NoticeCenter(props: {
                 type="button"
                 aria-label={`Close notice for ${declineToast.path}`}
                 onClick={() => closeDecline(declineToast)}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+            )}
+            </WithDetails>
+          ) : null}
+          {firstOpenToast && firstOpenToastView ? (
+            <WithDetails
+              key={firstOpenToastView.key}
+              copy={{ report: firstOpenToastView.details }}
+              shown={[`${firstOpenToastView.title}. ${firstOpenToastView.body}`]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="owner-live-first-open-toast"
+            >
+            {(details) => (
+            <div
+              data-testid="owner-live-first-open-toast"
+              role="status"
+              aria-live="polite"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <div className="min-w-0 flex-1">
+                <span className="block select-text cursor-text break-words leading-snug">
+                  {firstOpenToastView.title}. {firstOpenToastView.body}
+                </span>
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {onRetryLiveFirstOpen ? (
+                    <button
+                      type="button"
+                      data-testid="owner-live-first-open-toast-retry"
+                      disabled={firstOpenToastView.retrying}
+                      onClick={() => void retryFirstOpen(firstOpenToast)}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      Try again
+                    </button>
+                  ) : null}
+                  {details.action}
+                </div>
+                {details.block}
+              </div>
+              {details.icon}
+              {/* Closing ends the announcement; the row stays in Notices. */}
+              <button
+                type="button"
+                aria-label={`Close notice for ${firstOpenToast.source.path}`}
+                onClick={() => setClosedFirstOpen((current) => new Set(current).add(firstOpenToastView.key))}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />

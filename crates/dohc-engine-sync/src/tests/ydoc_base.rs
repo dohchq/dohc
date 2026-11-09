@@ -5079,6 +5079,233 @@ fn different_document_seeds_keep_unsettled_edits_in_a_version_conflict() {
     }
 }
 
+/// An untouched seed loses to a base of other text, here a file changed
+/// offline before the relay built from the older head. The file is a real
+/// divergence, so it stays the current side of a conflict. Only a winner
+/// whose bytes the file already holds adopts silently
+/// (`first_open_build_skew.rs`).
+///
+/// Mutation check: drop the byte comparison in `preserve_base_sides_in_tx`
+/// and the older text overwrites the file.
+#[test]
+fn an_untouched_seed_losing_to_other_text_keeps_its_file_in_a_conflict() {
+    let file = "Written offline.\n";
+    assert_eq!(
+        untouched_seed_loses_to(
+            dohc_engine_collab::ContentKind::Plaintext,
+            file,
+            "Older head.\n"
+        ),
+        (file.to_owned(), "Older head.\n".to_owned(), file.to_owned())
+    );
+}
+
+/// The winner is the same rich document, but its source writes the list
+/// with `*` where the file, reformatted offline, writes `-`. The canonical
+/// text agrees; the bytes do not, so the file stays the current side of a
+/// conflict.
+///
+/// Mutation check: adopt on equal canonical text instead of equal bytes and
+/// the winner's `*` overwrites the file.
+#[test]
+fn an_untouched_seed_losing_to_other_source_bytes_keeps_its_file_in_a_conflict() {
+    use dohc_engine_collab::{ContentKind, Ydoc};
+    let (file, winner) = ("# A\n\n- x\n", "# A\n\n* x\n");
+    let canonical = |source: &str| {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+            .unwrap();
+        doc.project(ContentKind::Richdoc).unwrap().content
+    };
+    assert_eq!(canonical(file), canonical(winner), "one document");
+    assert_eq!(
+        untouched_seed_loses_to(ContentKind::Richdoc, file, winner),
+        (file.to_owned(), winner.to_owned(), file.to_owned())
+    );
+}
+
+/// The seed's source is the winner's, but the file now holds the seed's own
+/// projection, as the table-fix parent's construction writes it. The file was
+/// never preserved, so it stays the current side of a conflict.
+///
+/// Mutation check: drop the head comparison from the quiet adoption in
+/// `preserve_base_sides_in_tx` and the winner's source overwrites the file.
+#[test]
+fn an_untouched_seed_of_the_winners_source_keeps_a_file_holding_its_projection() {
+    let (file, parent) = table_note("table-fix-parent.json");
+    let (_, current) = table_note("candidates.json");
+    let projection = {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&parent).unwrap();
+        doc.project(dohc_engine_collab::ContentKind::Richdoc)
+            .unwrap()
+            .content
+    };
+    assert_ne!(projection, file, "the parent's seed settles to other bytes");
+    assert_eq!(
+        untouched_seed_lost(
+            dohc_engine_collab::ContentKind::Richdoc,
+            &file,
+            &parent,
+            Some(&projection),
+            &current,
+        ),
+        (projection.clone(), file, projection)
+    );
+}
+
+/// The seed and the winner are the same text, but the file changed after
+/// seeding. The head check keeps the changed file as the current side.
+#[test]
+fn an_untouched_seed_of_the_winners_bytes_keeps_a_file_changed_after_seeding() {
+    let (seeded, changed) = ("Seeded.\n", "Changed after seeding.\n");
+    let kind = dohc_engine_collab::ContentKind::Plaintext;
+    assert_eq!(
+        untouched_seed_lost(
+            kind,
+            seeded,
+            &build_base(kind, seeded),
+            Some(changed),
+            &build_base(kind, seeded),
+        ),
+        (changed.to_owned(), seeded.to_owned(), changed.to_owned())
+    );
+}
+
+/// One row of the first-open fixtures: the table note and its first base.
+fn table_note(fixture: &str) -> (String, Vec<u8>) {
+    use base64::Engine as _;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dohc-engine-collab/tests/first-open-base")
+        .join(fixture);
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let row = rows
+        .into_iter()
+        .find(|row| row["name"] == "table-inline-code")
+        .expect("the table note");
+    let base = base64::engine::general_purpose::STANDARD
+        .decode(row["candidate"].as_str().unwrap())
+        .unwrap();
+    (row["markdown"].as_str().unwrap().to_owned(), base)
+}
+
+fn build_base(kind: dohc_engine_collab::ContentKind, source: &str) -> Vec<u8> {
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(kind, source)
+        .unwrap();
+    doc.encode_full_state()
+}
+
+/// Seed `file` as an untouched lineage, lose it to a base whose source is
+/// `winner`, and read the open conflict's current, incoming and head text.
+fn untouched_seed_loses_to(
+    kind: dohc_engine_collab::ContentKind,
+    file: &str,
+    winner: &str,
+) -> (String, String, String) {
+    untouched_seed_lost(
+        kind,
+        file,
+        &build_base(kind, file),
+        None,
+        &build_base(kind, winner),
+    )
+}
+
+/// Seed `file` as the untouched lineage `seed`, replace the file with
+/// `captured`, lose the seed to the base `winner`, and read the open
+/// conflict's current, incoming and head text.
+fn untouched_seed_lost(
+    kind: dohc_engine_collab::ContentKind,
+    file: &str,
+    seed: &[u8],
+    captured: Option<&str>,
+    winner: &[u8],
+) -> (String, String, String) {
+    use dohc_engine_collab::{
+        DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, record_local_update,
+    };
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/offline.md";
+    let file_sha = seed_text_head(&mut engine, "offline", path, file);
+    let key = DocKey::new("ws", "main", "offline").unwrap();
+    record_local_update(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &key,
+        seed,
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(path),
+                content_kind: kind,
+                regime: Regime::LocalOnly,
+            }),
+            is_seed: true,
+            seed_source_sha256: Some(&file_sha),
+            ..Default::default()
+        },
+        &NoFaults,
+        1_100,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    if let Some(text) = captured {
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, text.len() as i64, text],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE snapshots SET blob_sha256=?1 WHERE object_id=?2",
+                    params![sha, key.object_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    }
+    let claim = engine.put_binary_blob(winner).unwrap();
+    let mut base_op = envelope(
+        "remote",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": path,
+            "contentKind": kind.as_str(), "updateBlobSha256": claim,
+            "lineageClaimId": claim, "isBaseState": true,
+        }),
+    );
+    base_op.relay_seq = Some(10);
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.text,i.text,h.text FROM conflicts f
+                 JOIN blobs c ON c.sha256=f.current_blob_sha256
+                 JOIN blobs i ON i.sha256=f.incoming_blob_sha256
+                 JOIN snapshots s ON s.object_id=f.current_object_id
+                 JOIN blobs h ON h.sha256=s.blob_sha256 WHERE f.status='open'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap()
+}
+
 /// Sol's second finding: a queued base replaced its document's lineage and
 /// opened a conflict, then its drain stopped before removing the row, as a
 /// drain that waits for validation does. The drain that removes the row

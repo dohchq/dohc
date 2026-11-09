@@ -69,6 +69,7 @@ import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes, isServiceHostEnrollmentPath} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
+import {createFirstOpenPublisher} from "./firstOpenPublication";
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
 import {TokenBucketLimiter} from "@dohc/service-http";
 import {NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_MAX_SENDERS, NOTICE_POST_REFILL_PER_SECOND} from "./noticeRoutes";
@@ -344,10 +345,16 @@ const automationReplication = automationReplicaKey
 // One limit per person for notices to others, shared by the route and this server's automations.
 const noticePostRateLimiter = new TokenBucketLimiter(NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_REFILL_PER_SECOND, NOTICE_POST_MAX_SENDERS);
 let automations: Awaited<ReturnType<typeof startAutomationServer>> | undefined;
+// The running service host, once one started. It changes as the self-host supervisor replaces its daemon.
+let currentServiceHost: () => Awaited<ReturnType<typeof startServiceLiveHost>> | undefined = () => undefined;
 const serviceReplication = selfHostedLive && deployment && linkKey
   ? (() => {
       const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
-      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+      // One publisher for the process, so its build waits and object admission outlive each daemon. Each request
+      // checks with the host running then, against the activation configuration its driver uses.
+      const firstOpen = createFirstOpenPublisher({storage, namespace: deployment.history.namespace,
+        activation: () => currentServiceHost()?.activationConfig(), host: () => currentServiceHost()});
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen,
         authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input}),
         lookupUserDisplayName: userId => lookupUserDisplayName(userId)});
     })() : undefined;
@@ -652,6 +659,7 @@ const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount:
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
   onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
+currentServiceHost = serviceHost;
 // Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
 const sessionHostBlocked = selfHost ? (document: {workspaceId: string; objectId: string}) =>
   storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document) : undefined;

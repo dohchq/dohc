@@ -65,19 +65,23 @@ import type { createPresencePollRegistry } from "../collab/presencePollRegistry"
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
-const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional()})).max(64);
+// A refused or stopped first open always names its refusal or stop, and nothing else carries one.
+const firstOpenPaired = (document: {reason?: string; firstOpen?: {reason: string}}) => document.firstOpen === undefined
+  ? document.reason !== "live-first-open-refused" && document.reason !== "live-first-open-retry-stopped"
+  : document.reason === (document.firstOpen.reason === "retry-stopped" ? "live-first-open-retry-stopped" : "live-first-open-refused");
+const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional(), firstOpen: z.unknown().optional()})).max(64);
 function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
   return rows.flatMap(row => {const parsed = schema.safeParse(row); return parsed.success ? [parsed.data] : [];});
 }
 const activeLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments}).transform(page => ({
   ...page, documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({
   status: z.enum(["ready", "preparing", "paused", "unavailable"]),
-  })),
+  }).refine(firstOpenPaired, "A refused first open must name its refusal.")),
 }));
 const retiredLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments,
   nextCursor: OwnerLiveDocumentsResult.shape.nextCursor}).transform(page => ({
   ...page, lastPath: page.documents.at(-1)?.path,
-  documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({status: z.literal("retired")})),
+  documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({status: z.literal("retired")}).refine(firstOpenPaired, "A refused first open must name its refusal.")),
 }));
 
 interface RelayShareRequest {
@@ -154,7 +158,8 @@ export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "s
 
 function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
   return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-    document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused"));
+    document.reason === "live-edit-unadmitted" || document.reason === "live-first-open-refused" ||
+    document.reason === "live-first-open-retry-stopped" || (!document.reason && (document.status === "retired" || document.status === "paused"));
 }
 
 /**
@@ -411,9 +416,9 @@ export function createRelaySharesIpcHandlers<
       // Concurrent list reads may see a document in both sets. The current
       // enrollment wins; all bindings and server-only credentials stay in main.
       // Resume is also how the owner tries again a document the server refused,
-      // one it could not start until the owner opened it, or one whose server
-      // copy is missing an owner edit: Resume retires the held session so the
-      // edit can apply.
+      // one whose first open it refused, one it could not start until the owner
+      // opened it, or one whose server copy is missing an owner edit: Resume
+      // retires the held session so the edit can apply.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: ownerLiveDocumentCanResume(document),
       }]));

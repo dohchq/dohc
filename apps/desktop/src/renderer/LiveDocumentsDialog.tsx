@@ -10,7 +10,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "live-first-open-refused" | "live-first-open-retry-stopped" | "conflict-parent-withheld";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
@@ -176,6 +176,9 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "live-document-without-lineage") return "Not started";
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
+  if (row.reason === "live-first-open-refused") return "Can't start";
+  // Temporary: Resume or an edit lets the server try again.
+  if (row.reason === "live-first-open-retry-stopped") return "Server timed out";
   switch (row.status) {
     case "ready":
       return "Live";

@@ -286,8 +286,9 @@ fn restore_generation_sql_errors_keep_their_storage_cause() {
     ));
 }
 
-#[test]
-fn expired_proofs_must_match_the_engine_projection() {
+// A resolver whose reader child is fake.cjs answering every request as `fault`.
+// The scratch directory holds the child's files for the resolver's lifetime.
+fn fake_resolver(fault: &str) -> (dohc_engine_testkit::ScratchDir, ReaderResolver) {
     use std::{fs, process::Command};
     let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
@@ -308,7 +309,10 @@ fn expired_proofs_must_match_the_engine_projection() {
     let script = include_str!("../../dohc-engine-reader/src/fake.cjs")
         .replace("MANIFEST", &identity.to_string())
         .replace("MODE", "\"normal\"")
-        .replace("const fault = r.currentPath;", "const fault = 'expired';");
+        .replace(
+            "const fault = r.currentPath;",
+            &format!("const fault = '{fault}';"),
+        );
     let bundle = scratch.path().join("fake.cjs");
     fs::write(&bundle, &script).unwrap();
     let mut manifest = identity;
@@ -321,6 +325,12 @@ fn expired_proofs_must_match_the_engine_projection() {
         bundle,
         manifest: manifest_path,
     }))));
+    (scratch, resolver)
+}
+
+#[test]
+fn expired_proofs_must_match_the_engine_projection() {
+    let (_scratch, resolver) = fake_resolver("expired");
     let (conn, key, doc, _, _) = fixture();
     // Force prove, rather than metadata-only construction, to exercise Expired.
     use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
@@ -351,6 +361,34 @@ fn expired_proofs_must_match_the_engine_projection() {
             Err(CollabError::MarkdownReaderUnavailable)
         ));
     }
+}
+
+// A reader that refuses a source, such as one nested past the live document
+// contract, has answered for that source. Unlike a crash, it is not asked again.
+#[test]
+fn refused_proofs_hold_without_another_dispatch() {
+    let (_scratch, resolver) = fake_resolver("refused");
+    let (conn, key, doc, _, _) = fixture();
+    let proof = pending(lookup(&conn, &key, &doc, &resolver));
+    run(proof.resolve());
+    assert!(
+        matches!(proof.result.get(), Some(Err(Failure::Unavailable))),
+        "{:?}",
+        proof.result.get()
+    );
+    // A held proof answers unavailable whatever its failure; only a released
+    // one shows whether the failure is retried.
+    let first = Arc::as_ptr(&proof);
+    drop(proof);
+    for _ in 0..3 {
+        assert!(matches!(
+            lookup(&conn, &key, &doc, &resolver),
+            Err(CollabError::MarkdownReaderUnavailable)
+        ));
+    }
+    let entries = resolver.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(Arc::as_ptr(&entries[0].pending), first);
 }
 fn lookup(
     conn: &Connection,

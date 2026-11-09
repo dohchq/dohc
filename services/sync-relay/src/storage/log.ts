@@ -100,6 +100,9 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   classifyRedundantRecoveries?: boolean;
   workReferences?: {userId: string; references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[]; datasetAccess?: import("./workReferences").DatasetReferenceAccess};
 }): AppendLogBatchResult {
+      // Code that resumes after a caller's transaction ended must not append on its own.
+      // It can't tell the writer's transaction from readTx's deferred BEGIN, which is safe only while transaction bodies stay synchronous.
+      if (!storage.db.isTransaction) throw new Error("A transactional log append requires the relay write transaction.");
       for (const op of input.ops) {
         if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
       }

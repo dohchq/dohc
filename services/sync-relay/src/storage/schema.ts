@@ -11,6 +11,7 @@ import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySc
 import { initializeServiceActivationSchema } from "./serviceActivationSchema";
 import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeServiceHostFeedIndex } from "./serviceHostFeed";
+import { initializeHostedDocumentIndex } from "./hostedDocumentIndex";
 import { initializeRelayAdmissionColumn } from "./relayAdmission";
 import { initializeServiceHostUploadSchema } from "./serviceHostUploads";
 import { initializeServiceKeptEditsSchema } from "./serviceKeptEdits";
@@ -1307,6 +1308,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializePushSchema(db);
     initializePushDeliveries(db);
     initializeLiveClaimIndex(db);
+    initializeHostedDocumentIndex(db);
     initializeServiceHostFeedIndex(db);
     initializeAgentConnectionSchema(db);
     db.exec(`

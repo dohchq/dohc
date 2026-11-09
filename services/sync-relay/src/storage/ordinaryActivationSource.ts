@@ -6,6 +6,7 @@ import type {LiveDocumentBaselineRegistrationInput} from "./types";
 import type {StorageContext} from "./context";
 import {MAX_OLD_SUFFIX_ENTRIES} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {ORDINARY_ACTIVATION_BASES} from "./ordinaryActivationBasis";
+import {activationCaptureBytes,activationDescriptorBytes,ordinaryActivationEntryBytes} from "./ordinaryActivationBytes";
 import {SETTLEMENT_BINDINGS,SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {isNativeSettlementRecord,settlementRecordDigest} from "./hostedSettlement";
 import {NATIVE_MOMENT_FIELDS} from "./serviceActivationPublication";
@@ -44,7 +45,7 @@ type HistoryInput={source:NativeOwnerActivationSource;document:LiveDocumentKey;b
 export function readOrdinaryActivationHistory(storage:StorageContext,input:HistoryInput):OrdinaryActivationHistory{
   const {source,document,baselineBytes,fullState,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
-  requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
+  requireValue(activationCaptureBytes(baselineBytes.length,fullState.length,activationDescriptorBytes(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
   const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
   // Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
@@ -61,7 +62,7 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,relay_admission,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
   let charged=baselineBytes.length;
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
-  for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
+  for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(ordinaryActivationEntryBytes(row,Number(row.payload_bytes)));}
   // Prove each move backward from the current path, without skipping a step.
   let provedPath=source.currentPath,latestMove:number|null=null,latestWrite:number|null=null;
   let latestWriteBlobSha256:string|null=null,latestWriteByteLength:number|null=null;

@@ -15,6 +15,7 @@ import {
   DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   MarkdownSourceStrip,
   EngineRemovalInProgressNotice,
+  RichTextRefused,
   LossyNoteNotice,
   OpenExternallyLink,
 } from "./fileInspectorUi";
@@ -2498,6 +2499,15 @@ export function MarkdownView(props: {
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
+            refused={limit => (
+              <RichTextRefused
+                workspaceId={props.workspaceId}
+                path={props.path}
+                limit={limit}
+                onSource={() => switchMode("source")}
+                onReport={props.onButtonError}
+              />
+            )}
           >
             <LazyMarkdownEditor
               key={wysiwygResyncEpoch}

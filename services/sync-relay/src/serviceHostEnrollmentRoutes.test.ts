@@ -15,11 +15,16 @@ import {relayError} from "./errors";
 import {stopWithoutSessionHost} from "./sessionHostStop";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
+import {FirstOpenRetry} from "./firstOpenRetry";
+import {FirstOpenAnswers} from "./firstOpenAnswers";
+import {FIRST_OPEN_INTEGRITY_CODES, FIRST_OPEN_TOO_LARGE_CODES, FIRST_OPEN_UNSUPPORTED_CAUSES, firstOpenOutcome, firstOpenRefusal,
+  type FirstOpenOutcome, type FirstOpenSourceIdentity} from "@dohc/workspace-contracts/first-open";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {RecoveryCopyRefusal, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 import {heldDocumentFixture} from "./heldDocument.test-helper";
 
+const FIRST_OPEN_CONTEXT = {policy: "policy", bounds: "bounds"};
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 // The workspace identity the fixture claims, whose hosted store holds the queues.
@@ -36,13 +41,26 @@ async function fixture() {
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
-  // The documents the session host blocked until their owner tries again.
+  // The documents the session host blocked until their owner tries again, and the relay's first-open answers it holds.
   const blocked = new Map<string, ServiceActivationBlock>(), pending = new Set<string>(), prepared: RetirableServiceActivation[] = [];
+  const answers = new FirstOpenAnswers();
+  let clock = 0;
+  const retry = new FirstOpenRetry({nowMs: () => clock, random: () => 0});
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
     holdReason: vi.fn((_document: {objectId: string}): ServiceHostedHold["reason"] | undefined => undefined),
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
-    unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
+    unblock: vi.fn((document: {workspaceId: string; objectId: string}) => {
+      const retried = answers.retry(document), resumed = retry.retry(document);
+      return blocked.delete(document.objectId) || retried || resumed;
+    }),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
+    // As the driver's: the source is read only while an answer or a stop stands.
+    firstOpenStatus: vi.fn((document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
+      if (!answers.has(document) && !retry.stopped(document)) return undefined;
+      const current = source();
+      return current && (answers.refusal(current, FIRST_OPEN_CONTEXT) ?? retry.state(current)?.stop);
+    }),
+    firstOpenAnswered: (outcome: FirstOpenOutcome) => answers.record(outcome, FIRST_OPEN_CONTEXT),
     keptEdits: {page: vi.fn(async (kept: ServiceKeptEdits, cursor: JsonValue | undefined) => keptPage(kept, cursor)),
       // The host grants in the document's turn after rechecking its caller and the refusal.
       retry: vi.fn(async (kept: ServiceKeptEdits, guard: () => void): Promise<"granted" | "changed" | "unavailable"> => {
@@ -74,7 +92,7 @@ async function fixture() {
   };
   // What the service host does once it no longer holds the document.
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId, nowMs: 20});
-  return {...f, history, host, resolveActor, handle, input, request, seed, release, setActor(value: typeof actor) {actor = value;}};
+  return {...f, retry, advance(ms: number) {clock += ms;}, history, host, resolveActor, handle, input, request, seed, release, setActor(value: typeof actor) {actor = value;}};
 }
 
 it("requires bearer owner authority, rejects ambient credentials and rejects unknown parameters", async () => {
@@ -574,6 +592,70 @@ it("reports a document missing an owner edit apart from other refusals", async (
   expect(await documents()).toEqual([unadmitted]);
 });
 
+type FirstOpenAnswer = Parameters<typeof firstOpenOutcome>[1];
+const receipt = {originId: "service-host:first-open:origin", originSeq: 0, relaySeq: 2} as const;
+// Every answer the relay gives, and the one the service host reports after capture.
+const EVERY_FIRST_OPEN_ANSWER: FirstOpenAnswer[] = [
+  {kind: "published", receipt}, {kind: "replayed", receipt}, {kind: "existing-history", reason: "prior-authority"},
+  {kind: "refused", reason: "deletion"}, {kind: "refused", reason: "stale-source"},
+  ...FIRST_OPEN_UNSUPPORTED_CAUSES.map(cause => ({kind: "refused", reason: "unsupported-source", cause}) as const),
+  ...FIRST_OPEN_TOO_LARGE_CODES.map(code => ({kind: "refused", reason: "too-large", code}) as const),
+  {kind: "refused", reason: "ordinary-activation-refused"}, {kind: "refused", reason: "ordinary-activation-refused", code: "native-disagreement"},
+  ...(["contention", "busy", "reconfigured", "history-unavailable", "worker-failed", "storage-failed", "host-absent", "host-unreachable",
+    "check-failed", "check-deadline"] as const).map(reason => ({kind: "unavailable", reason}) as const),
+  {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000},
+  ...FIRST_OPEN_INTEGRITY_CODES.map(reason => ({kind: "integrity", reason}) as const),
+];
+const currentSource = (f: Awaited<ReturnType<typeof fixture>>, objectId: string): FirstOpenSourceIdentity => {
+  const head = f.storage.readFirstOpenMoment(scope.workspaceId, objectId)!;
+  return {workspaceId: scope.workspaceId, objectId, path: head.path!, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest!};
+};
+
+// Proves: owner status, which the owner's agents also read, names a first-open
+// answer only when it stops live editing, as its typed reason, code, source and
+// recovery. Published, existing history, a stale source and every failure that
+// can pass leave the document preparing.
+it.each(EVERY_FIRST_OPEN_ANSWER.map(answer => [JSON.stringify(answer), answer] as const))("reports the first-open answer %s only as a refusal", async (_, answer) => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const outcome = firstOpenOutcome(currentSource(f, enrolled.objectId), answer), refusal = firstOpenRefusal(outcome);
+  f.host.firstOpenAnswered(outcome);
+  const response = await (await f.handle(f.request())).json();
+  expect(response.documents).toEqual([refusal
+    ? {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-first-open-refused", firstOpen: refusal}
+    : {path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
+  const refused = answer.kind === "integrity" || (answer.kind === "refused" && answer.reason !== "stale-source");
+  expect(response.documents[0].reason === "live-first-open-refused").toBe(refused);
+});
+
+// Proves: a refusal of the file's bytes stops reading as refused once those
+// bytes change, one of the document's history holds for every later source, and
+// a Resume asks once: the document prepares until the relay answers again.
+it("reports a refused first open until the file changes, and a Resume asks once more", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const source = currentSource(f, enrolled.objectId);
+  const unsupported = firstOpenOutcome(source, {kind: "refused", reason: "unsupported-source", cause: "settlement-mismatch"});
+  const refused = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-first-open-refused",
+    firstOpen: {reason: "unsupported-source", code: "settlement-mismatch", source, recovery: "none"}};
+  f.host.firstOpenAnswered(unsupported);
+  expect(await documents()).toEqual([refused]);
+  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
+  expect(await resumed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "preparing"});
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
+  f.host.firstOpenAnswered(unsupported);
+  expect(await documents()).toEqual([refused]);
+  const edit = (digest: string) => f.raw.prepare("UPDATE sync_relay_object_moments SET blob_sha256=? WHERE workspace_id=? AND object_id=?")
+    .run(digest, scope.workspaceId, enrolled.objectId);
+  edit("c".repeat(64));
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
+  const edited = currentSource(f, enrolled.objectId);
+  f.host.firstOpenAnswered(firstOpenOutcome(edited, {kind: "refused", reason: "deletion"}));
+  edit("d".repeat(64));
+  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-first-open-refused",
+    firstOpen: {reason: "deletion", source: edited, recovery: "none"}}]);
+});
+
 // Proves: Resume of a document held for an unadmitted live edit records the
 // retirement of its exact prepared activation, completed or a successor still
 // pending, in the enrollment transaction, before the host may try it again. A
@@ -967,4 +1049,59 @@ it("rejects invalid generations and a stale repeat after the generation moves", 
   f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=8").run();
   expect((await retire(7)).status).toBe(409);
   expect((await retire(8)).status).toBe(200);
+});
+
+
+it("reports a temporary retry stop apart from content refusal, and owner Resume clears it", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const source = currentSource(f, enrolled.objectId);
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "unavailable", reason: "live-first-open-retry-stopped",
+    firstOpen: {reason: "retry-stopped", code: "build-deadline", source, deadlineAnswers: 3, recovery: "retry-later"}}]});
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(f.retry.state(source)?.stop).toBeUndefined();
+  // The same stop coming back shows again, and Try again clears it again.
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "unavailable", reason: "live-first-open-retry-stopped"}]});
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "preparing"}]});
+  // An edit to the file ends a stop for its old bytes.
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  f.raw.prepare("UPDATE sync_relay_object_moments SET blob_sha256=? WHERE workspace_id=? AND object_id=?").run("c".repeat(64), scope.workspaceId, enrolled.objectId);
+  expect(await (await f.handle(f.request())).json()).toMatchObject({documents: [{status: "preparing"}]});
+});
+
+// Proves: ready wins. A refusal or a stop that lands after the document's
+// activation completed, while its host holds it ready, never shows it refused
+// or stopped. One that stands while it is not ready still shows, with the
+// engine's code in its stable form.
+it("never reports a ready document as refused or stopped by a first-open answer that lands later", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const source = currentSource(f, enrolled.objectId);
+  const refused = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-first-open-refused",
+    firstOpen: {reason: "ordinary-activation-refused", code: "limit-exceeded", source, recovery: "report"}};
+  const ready = {path: binding.currentPath, objectId: binding.objectId, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}};
+  f.host.firstOpenAnswered(firstOpenOutcome(source, {kind: "refused", reason: "ordinary-activation-refused", code: "LIMIT_EXCEEDED"}));
+  expect(await documents()).toEqual([refused]);
+  retainServiceActivation(f.raw, namespace);
+  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
+  f.host.ready.mockReturnValue(true);
+  expect(await documents()).toEqual([ready]);
+  for (let i = 0; i < 3; i++) {
+    await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "unavailable", reason: "build-deadline", retryAfterMs: 60_000}));
+    f.advance(120_000);
+  }
+  expect(await documents()).toEqual([ready]);
+  f.host.ready.mockReturnValue(false);
+  expect(await documents()).toEqual([refused]);
 });

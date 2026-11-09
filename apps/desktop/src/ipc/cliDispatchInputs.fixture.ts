@@ -44,6 +44,8 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document create": ["Notes/new.md"],
   "document chats": ["Notes/a.md"],
   "document comment": ["Notes/a.md", "--title", "Review", "--text", "Comment"],
+  "document live-status": [],
+  "document retry-live": ["Notes/a.md"],
   "document kept-edits": [],
   "document save-recovery-copy": ["Notes/a.md"],
   "document set-fields": ["board/launch.md", "--field", "Status=Blocked"],

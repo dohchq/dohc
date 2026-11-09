@@ -12,6 +12,7 @@ import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type
 import {validateUserWritePath} from "@dohc/workspace-core";
 import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalEntry, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
+import { firstOpenCandidateBinding, firstOpenCandidateUploadBytes, parseFirstOpenCandidateCheck, type FirstOpenCandidateCheck, type FirstOpenCandidateInput } from "./firstOpenCandidateCheck";
 import { keepEngineRunScope } from "./engineRunScope";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
@@ -639,14 +640,17 @@ export function isLiveDocumentWithoutLineage(error: unknown): boolean {
 }
 
 /**
- * A request the caller deadlined ran out of time before the daemon answered.
+ * A request the caller deadlined reached the daemon and ran out of time
+ * before the daemon answered.
  *
- * Expiry can precede transmission. The code remains `transport-error` for
- * callers that recover by rebinding; this class lets them distinguish their
- * own deadline from a socket failure without matching message text.
+ * The code remains `transport-error` for callers that recover by rebinding;
+ * this class lets them distinguish their own deadline from a socket failure
+ * without matching message text.
  *
- * The outcome is unknown: the daemon may still finish the work. Only the
- * daemon's own `DEADLINE_EXCEEDED` or `CANCELLED` means the work did not happen.
+ * The outcome is unknown: the daemon may still finish the work. A request
+ * that expires before reaching the wire rejects with an ordinary
+ * `DEADLINE_EXCEEDED` request error instead. That, or the daemon's own
+ * `DEADLINE_EXCEEDED` or `CANCELLED`, means the work did not happen.
  */
 export class EngineRequestDeadlineError extends EngineClientError {
   readonly requestId: number;
@@ -664,6 +668,11 @@ export class EngineRequestDeadlineError extends EngineClientError {
     this.method = method;
     this.deadlineMs = deadlineMs;
   }
+}
+
+/** The deadline elapsed before the request reached the wire, so the daemon never saw it. */
+function unsentDeadlineError(requestId: number): EngineRequestError {
+  return new EngineRequestError(requestId, { code: "DEADLINE_EXCEEDED", message: "Request deadline elapsed before transmission.", retry: "afterBackoff" });
 }
 
 type BlobStreamErrorCode =
@@ -744,6 +753,8 @@ interface PendingRequest {
   readonly deadlineTimer?: ReturnType<typeof setTimeout>;
   readonly restoreOutput?: PrivateLiveOutput;
   readonly cancelUnsent?: () => boolean;
+  // An upload's cancel waits for its input, so the stream stays framed.
+  readonly cancelAfterInput?: () => void;
   // Present only when the request asked the engine for progress.
   readonly onProgress?: () => void;
 }
@@ -1277,7 +1288,7 @@ export class EngineClient implements EngineTransport {
       this.ordinaryRequests++;
       this.ordinaryRequestBytes += retainedBytes;
     }
-    const unsent = !writeInput ? new AbortController() : undefined;
+    const unsent = new AbortController();
     let transmitted = false;
     let writeTask: Promise<void> = Promise.resolve();
     let inputComplete = false;
@@ -1297,10 +1308,22 @@ export class EngineClient implements EngineTransport {
         this.abandonedBlobStreams.set(streamId, wireId);
       }
       pending?.reject(error);
-      unsent?.abort(error);
+      unsent.abort(error);
       if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
     };
-    const expire = (): void => abandon(new EngineRequestDeadlineError(wireId, request.method, deadlineMs!), false);
+    const expire = (): EngineClientError => {
+      const error = transmitted
+        ? new EngineRequestDeadlineError(wireId, request.method, deadlineMs!)
+        : unsentDeadlineError(request.id);
+      abandon(error, false);
+      // A half-written upload cannot stay on this connection.
+      if (writeInput && transmitted && !inputComplete) this.close();
+      return error;
+    };
+    let cancelRequested = false;
+    const sendCancel = (): void => {
+      if (this.pending.has(wireId)) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
+    };
     const abort = (): void => {
       // Finish reserved input before cancelling so other requests retain valid framing.
       if ((writeInput && !inputComplete) || cancellationSent) return;
@@ -1309,31 +1332,41 @@ export class EngineClient implements EngineTransport {
       cancellationSent = true;
       abandon(cancellationError(), true);
     };
+    // A reply ends an ordinary request's timer. Input keeps it through its
+    // last drain, so an early reply cannot strand a half-written upload, and
+    // a half-written upload closes the connection at once.
+    const deadlineTimer =
+      deadlineMs !== null
+        ? setTimeout(() => {
+            if (writeInput && transmitted && !inputComplete) {
+              if (this.pending.has(wireId)) expire();
+              else this.close();
+              return;
+            }
+            // Give an inbound frame already queued by the transport one
+            // event-loop turn to settle before expiring the request.
+            setImmediate(() => {
+              if (this.pending.has(wireId)) expire();
+            });
+          }, Math.max(0, expiresAt! - performance.now()))
+        : undefined;
     const cancel = () => { void this.cancelRequest(wireId).catch(() => undefined); };
     const response = new Promise<Response>((resolve, reject) => {
-      const deadlineTimer =
-        deadlineMs !== null
-          ? setTimeout(() => {
-              // Give an inbound frame already queued by the transport one
-              // event-loop turn to settle before expiring the request.
-              setImmediate(() => {
-                const pending = this.pending.get(wireId);
-                if (!pending) return;
-                expire();
-              });
-            }, Math.max(0, expiresAt! - performance.now()))
-          : undefined;
       this.pending.set(wireId, {
         callerId: request.id,
         request,
         resolve,
         reject,
         ...(restoreOutput ? { restoreOutput } : {}),
-        ...(deadlineTimer ? { deadlineTimer } : {}),
-        ...(unsent ? { cancelUnsent: () => {
+        ...(deadlineTimer && !writeInput ? { deadlineTimer } : {}),
+        ...(!writeInput ? { cancelUnsent: () => {
           if (transmitted) return false;
           abandon(new EngineRequestError(request.id, { code: "CANCELLED", message: "Request cancelled before transmission.", retry: "no" }), false);
           return true;
+        } } : {}),
+        ...(writeInput ? { cancelAfterInput: () => {
+          cancelRequested = true;
+          if (inputComplete) sendCancel();
         } } : {}),
         ...(progress ? { onProgress } : {}),
       });
@@ -1342,27 +1375,22 @@ export class EngineClient implements EngineTransport {
       if (cancelSignal?.aborted) cancel();
       writeTask = this.writeFrame(() => {
         let payload = serializedEnvelope;
-        if (ordinary && expiresAt !== null) {
+        if (expiresAt !== null) {
           const remaining = Math.ceil(expiresAt - performance.now());
-          if (remaining <= 0) {
-            expire();
-            throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
-          }
+          if (remaining <= 0) throw expire();
           const captured = JSON.parse(serializedEnvelope) as Request;
           captured.deadlineMs = Math.min(deadlineMs!, remaining);
           payload = JSON.stringify(captured);
         }
         const frame = encodeFrame(FrameType.Control, 0, Buffer.from(payload, "utf8"), this.maxFrameBytes);
-        if (ordinary && expiresAt !== null && performance.now() >= expiresAt) {
-          expire();
-          throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
-        }
+        if (expiresAt !== null && performance.now() >= expiresAt) throw expire();
         transmitted = true;
         return frame;
-      }, unsent?.signal).then(async () => {
+      }, unsent.signal).then(async () => {
         await writeInput?.(wireId);
         inputComplete = true;
         if (signal?.aborted) abort();
+        else if (cancelRequested) sendCancel();
       });
       void writeTask.catch((cause: unknown) => {
         const pending = this.pending.get(wireId);
@@ -1387,10 +1415,11 @@ export class EngineClient implements EngineTransport {
       // Failed or expired input cannot leave a half-written stream on this connection.
       if (writeInput) {
         await writeTask.catch(() => undefined);
-        if (!inputComplete) this.close();
+        if (transmitted && !inputComplete) this.close();
       }
       throw error;
     } finally {
+      clearTimeout(deadlineTimer);
       signal?.removeEventListener("abort", abort);
       cancelSignal?.removeEventListener("abort", cancel);
       if (ordinary) {
@@ -1622,6 +1651,29 @@ export class EngineClient implements EngineTransport {
     return { response, bytes: output.blob!.bytes };
   }
 
+  /** Private configured-host check of a first-open candidate. The engine stores nothing. */
+  async checkFirstOpenCandidate(
+    request: Omit<LiveApplicationRequest, "registrationId">,
+    input: FirstOpenCandidateInput,
+    signal?: AbortSignal,
+    cancelSignal?: AbortSignal,
+  ): Promise<FirstOpenCandidateCheck> {
+    const binding = firstOpenCandidateBinding(input);
+    const byteLength = binding.candidateByteLength + binding.sourceByteLength;
+    const response = await this.sendLiveUpload(request, "liveApplication.checkFirstOpenCandidate", firstOpenCandidateUploadBytes(binding), () => {
+      // Capture bytes once. Caller mutations cannot change a queued upload.
+      const bundle = Buffer.concat([input.candidate, input.source], byteLength);
+      const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+      if (digest(bundle.subarray(0, binding.candidateByteLength)) !== binding.candidateSha256 ||
+          digest(bundle.subarray(binding.candidateByteLength)) !== binding.sourceSha256) throw new TypeError("First-open candidate digest mismatch.");
+      const streamId = this.nextLiveStreamId++, bundleDigest = digest(bundle);
+      if (!Number.isSafeInteger(streamId)) throw new TypeError("Live stream identifiers exhausted.");
+      return { params: { contractVersion: 1, binding: { ...binding }, streamId, byteLength, digest: bundleDigest },
+        streams: [{ streamId, bytes: bundle, digest: bundleDigest }] };
+    }, signal, undefined, cancelSignal);
+    return parseFirstOpenCandidateCheck(response.result, binding);
+  }
+
   async applyReplicaJournalPage(request: Omit<LiveApplicationRequest, "registrationId">, after: number, epochLogFloor: number, rows: readonly ReplicaJournalEntry[], signal?: AbortSignal): Promise<ReplicaPageResult> {
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("Invalid replica cursor.");
     if (!Number.isSafeInteger(epochLogFloor) || epochLogFloor < 0) throw new TypeError("Invalid replica epoch floor.");
@@ -1640,6 +1692,7 @@ export class EngineClient implements EngineTransport {
     prepare: () => LiveUpload,
     signal?: AbortSignal,
     restoreOutput?: PrivateLiveOutput,
+    cancelSignal?: AbortSignal,
   ): Promise<Response> {
     if (
       !this.liveConfig ||
@@ -1654,7 +1707,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["replica.applyJournalPage","ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["replica.applyJournalPage","ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry","liveApplication.checkFirstOpenCandidate"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||
@@ -1670,31 +1723,24 @@ export class EngineClient implements EngineTransport {
     }
     this.liveUploadBytes += charge;
     this.liveUploads += 1;
-    let stopped = false;
-    let uploaded = false;
-    const abort = (): void => {
-      stopped = true;
-      if (!uploaded) this.close();
-    };
-    // The reply timer ends when a response arrives. Keep the upload deadline
-    // through the final drain so an early reply cannot strand retained input.
-    const uploadDeadline = setTimeout(abort, request.deadlineMs);
+    const expiresAt = performance.now() + request.deadlineMs;
 
     try {
       const upload = prepare();
+      // Preparation comes out of the request's one deadline.
+      const deadlineMs = Math.ceil(expiresAt - performance.now());
+      if (deadlineMs < 1) throw unsentDeadlineError(request.id);
       const outgoing: Request = {
-        id: request.id, workspace: request.workspace, method, deadlineMs: request.deadlineMs,
+        id: request.id, workspace: request.workspace, method, deadlineMs,
         idempotencyKey: null, params: upload.params,
       };
       if (upload.streams.length === 0) {
         // No partial input stream exists. Cancelling this read must preserve the shared client.
-        clearTimeout(uploadDeadline);
         return await this.sendRequestWithInput(outgoing, undefined, signal, restoreOutput);
       }
       const writeInput = async (wireId: number): Promise<void> => {
         const current = (): void => {
           if (
-            stopped ||
             !this.pending.has(wireId) ||
             this.closed
           ) {
@@ -1734,8 +1780,6 @@ export class EngineClient implements EngineTransport {
             });
           }
         }
-        uploaded = true;
-        clearTimeout(uploadDeadline);
       };
 
       return await this.sendRequestWithInput(
@@ -1743,9 +1787,11 @@ export class EngineClient implements EngineTransport {
         writeInput,
         signal,
         restoreOutput,
+        false,
+        undefined,
+        cancelSignal,
       );
     } finally {
-      clearTimeout(uploadDeadline);
       if (restoreOutput?.wireId !== undefined) {
         for (const [streamId, stream] of this.blobStreams) {
           if (stream.start.requestId !== restoreOutput.wireId) continue;
@@ -1766,11 +1812,14 @@ export class EngineClient implements EngineTransport {
    * restore, owner activation capture) stopped after its work landed, and
    * before the daemon started to write it, gets no answer. It ends at its own
    * deadline with `EngineRequestDeadlineError`, and the outcome is unknown.
+   * A first-open candidate check stores nothing and still answers after a late cancel.
+   * An upload's cancel follows its last input frame.
    */
   private async cancelRequest(wireId: number): Promise<void> {
     const pending = this.pending.get(wireId);
     if (!pending) return;
     if (pending.cancelUnsent?.()) return;
+    if (pending.cancelAfterInput) return pending.cancelAfterInput();
     await this.writeEnvelope({ type: "cancel", id: wireId });
   }
 

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveValidationExecutor, createValidatorFailureLog, LiveValidatorFailure } from "./liveValidation.js";
@@ -163,7 +163,7 @@ it.each(["EMFILE", "EAGAIN"] as const)("fails a job whose fork is refused with %
   const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
   // The held job runs far longer than the test, so only the failed fork's slot can free capacity.
   const held = new AbortController();
-  const other = Promise.resolve(pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}, held.signal))
+  const other = holdDispatch(() => Promise.resolve(pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}, held.signal)))
     .catch((error: unknown) => error);
   const binding = (process as unknown as {binding(name: string): unknown}).binding;
   const {Process} = binding("process_wrap") as {Process: {prototype: {spawn(options: unknown): number}}};
@@ -200,6 +200,19 @@ it("retains no pipe of a fork refused with EAGAIN", async () => {
   expect(stdout.trim()).toBe("0");
 }, 30_000);
 
+// Submit a job into a real child slot without sending its IPC input. Only
+// cancellation or close can end it, independent of parser limits and host load.
+function holdDispatch<T>(start: () => T): T {
+  const prototype = ChildProcess.prototype as unknown as {spawn(...args: unknown[]): unknown};
+  const spawn = prototype.spawn;
+  const held = vi.spyOn(prototype, "spawn").mockImplementation(function (this: ChildProcess, ...args: unknown[]) {
+    const result: unknown = Reflect.apply(spawn, this, args);
+    this.send = () => true;
+    return result;
+  });
+  try {return start();} finally {held.mockRestore();}
+}
+
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 /** A note whose source witness nests emphasis `depth` levels; it reads as one flat emphasis run. */
 function nestedEmphasis(depth: number) {
@@ -211,12 +224,13 @@ function nestedEmphasis(depth: number) {
   const checkpoint = encodeStateAsUpdate(doc); doc.destroy();
   return {source, checkpoint};
 }
-it("keeps a worker thread's stack for deeply nested emphasis", async () => {
-  const {pool, input} = fixture(), {source, checkpoint} = nestedEmphasis(2400);
-  // A child's default stack refuses this witness as unreadable instead of verifying it.
+it("accepts emphasis within the inline contract and refuses a witness beyond it", async () => {
+  const {pool, input} = fixture(), {source, checkpoint} = nestedEmphasis(15);
   expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
     .toMatchObject({kind: "accepted", evidence: {projectedMarkdownSha256: sha256(source)}});
-}, 120_000);
+  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint: nestedEmphasis(2400).checkpoint}))
+    .toEqual({kind: "refused", reason: "invalid-schema", source: "registration-input"});
+}, 30_000);
 
 it.each(["journal", "settlement"] as const)("refuses %s work whose child runs out of heap, and replaces the child", async kind => {
   const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
@@ -232,8 +246,8 @@ it.each(["journal", "settlement"] as const)("refuses %s work whose child runs ou
 it("keeps a slot for live edits while an activation validates", async () => {
   const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000), activate = pool.ordinaryActivation(policy);
   const work = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
-  // The held job runs far longer than the test.
-  const held = new AbortController(), running = Promise.resolve(activate(work, held.signal)).catch((error: unknown) => error);
+  // The held job receives no IPC input.
+  const held = new AbortController(), running = holdDispatch(() => Promise.resolve(activate(work, held.signal))).catch((error: unknown) => error);
   expect(await activate(work)).toMatchObject({kind: "retry", reason: "admission-unavailable"});
   expect(validate.hasCapacity?.()).toBe(true);
   expect((await validate(input)).kind).toBe("accepted");
@@ -259,11 +273,11 @@ it.each(["activation", "restore"] as const)("lets activation and restore share o
   const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
   const activate = pool.ordinaryActivation(policy), restore = pool.restore(policy);
   const activation = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
-  // The held job runs far longer than the test.
+  // The held job receives no IPC input.
   const release = new AbortController();
-  const running = (held === "activation" ? Promise.resolve(activate(activation, release.signal)) : restore.point(restorePoint(input, checkpoint), release.signal))
+  const running = holdDispatch(() => held === "activation" ? Promise.resolve(activate(activation, release.signal)) : restore.point(restorePoint(input, checkpoint), release.signal))
     .catch((error: unknown) => error);
-  // A job given the second slot would run past this deadline instead of refusing.
+  // Neither auxiliary job may take the other slot, even while the child is held.
   if (held === "activation") await expect(restore.point(restorePoint(input, checkpoint), AbortSignal.timeout(10_000))).rejects.toBeInstanceOf(LiveRestoreBusy);
   else expect(await activate(activation, AbortSignal.timeout(10_000))).toMatchObject({kind: "retry", reason: "admission-unavailable"});
   expect(validate.hasCapacity?.()).toBe(true);
@@ -313,10 +327,10 @@ it("forgets the oldest named failure once the log is full", () => {
 it("kills a child at its deadline and keeps its slot until the child exits", async () => {
   const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
   const work = {document: input.document, currentPath: input.currentPath, checkpoint};
-  const held = new AbortController(), other = Promise.resolve(pool.normalizeSettlement(work, held.signal)).catch((error: unknown) => error);
-  await expect(pool.normalizeSettlement(work, AbortSignal.timeout(2_000))).rejects.toThrow("timeout");
+  const held = new AbortController(), other = holdDispatch(() => Promise.resolve(pool.normalizeSettlement(work, held.signal))).catch((error: unknown) => error);
+  await expect(holdDispatch(() => pool.normalizeSettlement(work, AbortSignal.timeout(2_000)))).rejects.toThrow("timeout");
   expect(validate.hasCapacity?.()).toBe(false);
-  // The other job runs far longer than the test, so only the killed child's exit frees a slot.
+  // Only the cancelled child can release a slot; the other still has no input.
   await validate.waitForCapacity!();
   expect((await validate(input)).kind).toBe("accepted");
   held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});

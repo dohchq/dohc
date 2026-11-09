@@ -110,6 +110,10 @@ interface DesktopCliServerDependencies<State> {
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  ownerLiveDocuments?: {
+    list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>): Promise<Extract<import("@dohc/cli/protocol").CliResultByVerb["liveDocuments"], {ok: true}>["documents"]>;
+    retry(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, path: string): Promise<void>;
+  };
   /** The Share dialog's Agents list and Disconnect for one link (shareLinkAgentActions.ts). */
   shareLinkAgents?: {
     list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: ShareLinkAgentsInput): Promise<ListRelayShareLinkAgentsResult>;
@@ -650,6 +654,12 @@ export function createDesktopCliServer<State>(
               list: () => capture.listRetainedCopies(),
               delete: (copies) => capture.deleteRetainedCopies(copies),
             },
+            ...(dependencies.ownerLiveDocuments ? {
+              ownerLiveDocuments: {
+                list: () => withOwnerLiveRecovery(operation => dependencies.ownerLiveDocuments!.list(operation)),
+                retry: (path: string) => withOwnerLiveRecovery(operation => dependencies.ownerLiveDocuments!.retry(operation, path)),
+              },
+            } : {}),
             ...(ownerLiveRecovery ? {
               keptEdits: {
                 list: () => withOwnerLiveRecovery(async operation =>

@@ -125,7 +125,7 @@ it.each([7, undefined])("answers DELETE with a retryable restore-in-progress con
   const handle = createServiceHostEnrollmentRoutes({storage: f.storage,
     history: f.history,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: ownerUserId}),
-    host: {ready: () => false, reconcile() {}, unavailable: false, blocked: () => undefined, holdReason: () => undefined, unblock: () => false, diverged: () => false,
+    host: {ready: () => false, reconcile() {}, unavailable: false, blocked: () => undefined, holdReason: () => undefined, firstOpenStatus: () => undefined, unblock: () => false, diverged: () => false,
       keptEdits: {page: () => Promise.reject(new Error("unexpected")), retry: async () => "unavailable" as const, copied: async () => {}},
       stop: async <T>(_document: unknown, fence: () => T) => fence()}});
   const response = await handle(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {

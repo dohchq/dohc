@@ -8,11 +8,18 @@ import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
-import { EngineRequestDeadlineError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { EngineClientError, EngineRequestDeadlineError, EngineRequestError, InvalidFirstOpenCandidateCheck, firstOpenCandidateBinding,
+  type FirstOpenCandidateInput } from "@dohc/workspace-engine-client/daemon";
+import {createFirstOpenPublisher, type FirstOpenBuild, type FirstOpenCheckHost, type FirstOpenNativeCheck} from "./firstOpenPublication.js";
+import {buildFirstOpenBase} from "./firstOpenBase.js";
+import {readFirstOpenHistoryFile} from "./storage/firstOpenHistory.js";
+import {createServiceHostReplication} from "./serviceHostReplication.js";
+import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential.js";
+import { firstOpenOutcome } from "@dohc/workspace-contracts/first-open";
 import {errorResponse} from "./errors.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
-import {HeldReadBusyError, HeldReadTooLargeError} from "./liveHostRequests.js";
+import {HeldReadBusyError, HeldReadTooLargeError, NativeRequestQueueError} from "./liveHostRequests.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import type {StorageContext} from "./storage/context.js";
@@ -25,6 +32,8 @@ import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
 import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
 import {nativeRestoreFence} from "./storage/liveRestoreOperation.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {liveValidation} from "./liveValidation.js";
+import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes.js";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {SERVICE_KEPT_EDITS_PAGE, type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
@@ -62,7 +71,8 @@ async function fixture({selfHosted = false} = {}) {
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const deploymentConfig = join(root, "deployment.json");
   initializeRelayDeployment({ configPath: deploymentConfig, relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") });
-  const deployment = openRelayDeployment(deploymentConfig);
+  // First-open history reads in this process, as firstOpenPublication.test.ts reads it.
+  const deployment = openRelayDeployment(deploymentConfig, {firstOpenHistory: async read => readFirstOpenHistoryFile(read)});
   const hostId = selfHosted ? `self-host-${deployment.history.namespace}` : "service";
   deployment.storage.provisionLiveHostControl({ mode: "service", hostId, updatedAtMs: 1, guard() {} });
   const config = { version: 1, engineExecutable: process.execPath, hostId, instanceId: "instance",
@@ -301,6 +311,85 @@ it("preserves a replacement connection when an older host closes", async () => {
   expect(f.storage.getLiveHostControl()).toMatchObject({ registeredConnectionId: "replacement", admissionState: "open" });
 });
 
+it("asks the engine to check a first-open candidate outside any turn, and says why it gave no verdict", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  const check = vi.fn<(...args: unknown[]) => Promise<unknown>>();
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return {...captured.client, checkFirstOpenCandidate: check};});
+  f.config.client.aggregateBytes = 8 * 1024 * 1024; await f.save();
+  const host = await startServiceLiveHost(f), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const source = new TextEncoder().encode("# Notes\n"), candidate = Uint8Array.of(0, 0);
+  const input = {objectId: "object", path: "docs/a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
+    source, sourceSha256: digest(source), candidate, candidateSha256: digest(candidate), maxFullStateBytes: 4096};
+  const wire = (code: ConstructorParameters<typeof EngineRequestError>[1]["code"]) => new EngineRequestError(7, {code, message: "refused", retry: "no"});
+  try {
+    const verdict = {status: "refused", cause: "settlement-mismatch"};
+    check.mockResolvedValueOnce(verdict);
+    const answered = await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal);
+    expect(answered).toMatchObject({kind: "answered", check: verdict});
+    expect(check.mock.calls[0]![0]).toMatchObject({workspace: "actual-open-handle", deadlineMs: f.config.client.requestDeadlineMs});
+    expect(check.mock.calls[0]![1]).toBe(input);
+    for (const [error, reason] of [
+      [wire("OVERLOADED"), "busy"], [new NativeRequestQueueError("capacity", "full"), "busy"],
+      [wire("DEADLINE_EXCEEDED"), "check-deadline"], [new NativeRequestQueueError("deadline", "late"), "check-deadline"],
+      [new EngineRequestDeadlineError(7, "liveApplication.checkFirstOpenCandidate", 10), "check-deadline"],
+      [wire("WORKSPACE_UNAVAILABLE"), "host-absent"], [wire("SESSION_EXPIRED"), "host-absent"],
+      [wire("INTERNAL"), "check-failed"], [new EngineClientError("closed", "closed"), "host-unreachable"],
+      [new EngineClientError("protocol-error", "Engine frame decoding failed."), "host-unreachable"],
+    ] as const) {
+      check.mockRejectedValueOnce(error);
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal), String(error)).toEqual({kind: "unavailable", reason});
+    }
+    // A check an idle engine could never admit is this host's configuration, logged with the sizes the engine names.
+    const capacity = new EngineRequestError(7, {code: "LIMIT_EXCEEDED", retry: "no", message:
+      "first-open-check-exceeds-host-capacity: reservation 1 bytes, foreground allowance 2 bytes, aggregate 3 bytes, 2 upload slots"});
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    check.mockRejectedValueOnce(capacity);
+    expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "host-capacity"});
+    expect(logged).toHaveBeenLastCalledWith("[service-live-host] first-open check exceeds this host's capacity", capacity);
+    expect(capacity.message).toContain("foreground allowance 2 bytes");
+    logged.mockRestore();
+    for (const error of [wire("BLOB_INVALID"), wire("INVALID_PARAMS"), new InvalidFirstOpenCandidateCheck()]) {
+      check.mockRejectedValueOnce(error);
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "integrity"});
+    }
+    // A relay fault stays one, and a cancelled caller keeps its cancellation.
+    check.mockRejectedValueOnce(new TypeError("a relay bug"));
+    await expect(host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).rejects.toThrow("a relay bug");
+    const abort = new AbortController();
+    check.mockImplementationOnce(async () => { abort.abort(new Error("cancelled")); throw wire("CANCELLED"); });
+    await expect(host.checkFirstOpenCandidate("workspace", input, abort.signal)).rejects.toThrow("cancelled");
+    // Neither another workspace nor an upload the client can never hold reaches the engine.
+    let calls = check.mock.calls.length;
+    expect(await host.checkFirstOpenCandidate("other", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
+    // 5 MiB plus the 3 MiB request allowance passes 8 MiB.
+    const large = new Uint8Array(5 * 1024 * 1024);
+    expect(await host.checkFirstOpenCandidate("workspace", {...input, candidate: large, candidateSha256: digest(large)}, new AbortController().signal))
+      .toEqual({kind: "host-capacity"});
+    expect(check.mock.calls.length).toBe(calls);
+    // One check at a time: another is busy until the first answers or fails.
+    type Release = {resolve(value: unknown): void; reject(error: unknown): void};
+    for (const settle of [(release: Release) => release.resolve(verdict), (release: Release) => release.reject(wire("INTERNAL"))]) {
+      let release!: Release;
+      check.mockImplementationOnce(() => new Promise((resolve, reject) => { release = {resolve, reject}; }));
+      const first = host.checkFirstOpenCandidate("workspace", input, new AbortController().signal);
+      await vi.waitFor(() => expect(check.mock.calls.length).toBe(calls + 1));
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "busy"});
+      expect(check.mock.calls.length).toBe(calls + 1);
+      settle(release);
+      await first;
+      check.mockResolvedValueOnce(verdict);
+      expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toMatchObject({kind: "answered"});
+      calls += 2;
+    }
+    // The answer holds only while its host stands.
+    expect(answered.kind === "answered" && answered.current()).toBe(true);
+    await host.close();
+    expect(answered.kind === "answered" && answered.current()).toBe(false);
+    expect(await host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
+  } finally {await host.close(); log.mockRestore();}
+});
+
 it("wakes captures after stored authority changes and releases its observer on close", async () => {
   const f = await fixture(), notify = vi.fn();
   spawn.mockImplementation(async options => clientFrom(options).client);
@@ -524,8 +613,9 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
 // `maxApplications` is the settlement bound, which pages a retirement's applications. `limits` are the drain budgets.
+// With `firstOpen`, the host asks the relay to start documents with no lineage through its `fetch`.
 async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
-  maxApplications?: number; limits?: DrainLimits; selfHosted?: boolean; restore?: boolean} = {}) {
+  maxApplications?: number; limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}; selfHosted?: boolean; restore?: boolean} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture({selfHosted: options.selfHosted}), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -586,7 +676,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
 
   const target ={workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
-  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
+  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: options.passDeadlineMs ?? 10_000, validation: policy,
     ...(options.empty || options.polling ? {pollIntervalMs: 20} : {}),
     ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {}), ...options.limits});
   // An empty host receives this workspace and document through `update`.
@@ -1022,7 +1112,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     doc.destroy();
     native.outboxId = NATIVE;
   };
-  const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
+  const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {}),
+    ...(options.firstOpen ? {firstOpen: options.firstOpen} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
@@ -1033,7 +1124,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
     refuseCapture(error: Error | undefined) {refusal = error;},
-    refuseCaptureAt(path: string, error: Error) {refusals.set(path, error);},
+    refuseCaptureAt(path: string, error: Error | undefined) {if (error) refusals.set(path, error); else refusals.delete(path);},
     otherActivations,
     refuseRegistration(error: Error | undefined) {registrationRefusal = error;},
     failDetach(error: Error | undefined) {detachFailure = error;},
@@ -1230,7 +1321,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 // counts as loaded but never activates, so only its unload reaches the engine.
 // Once `passes.deliver` is false, passes leave the sibling's delivery to the test.
 async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number;
-  limits?: DrainLimits; selfHosted?: boolean; restore?: boolean} = {}) {
+  limits?: DrainLimits; passDeadlineMs?: number; firstOpen?: {fetch: typeof fetch; nowMs?: () => number}; selfHosted?: boolean; restore?: boolean} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -5351,6 +5442,68 @@ it("activates a document without lineage once a Y.Doc update for it reaches the 
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
 });
 
+// Proves: a hosted document's first-open refusal reads through the host while
+// it holds. A Y.Doc update for the document does not lift a deletion, as it
+// lifts a block for missing lineage, nor does a later source. Resume asks
+// until an answer that holds arrives, and the document leaving the host
+// forgets its answer.
+it("holds a first-open refusal past later Y.Doc updates until its owner tries again", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], activations = vi.mocked(ServiceActivationDriver.prototype.activate).mock.contexts;
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const driver = activations.at(-1) as ServiceActivationDriver;
+  const source = {workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId, path: o.sibling.path, sourceMomentId: "moment-1", sourceDigest: "a".repeat(64)};
+  const later = {...source, sourceMomentId: "moment-2", sourceDigest: "b".repeat(64)};
+  const refusal = (current: typeof source) => o.host.firstOpenStatus(current, () => current);
+  driver.firstOpenAnswered(firstOpenOutcome(source, {kind: "refused", reason: "deletion"}));
+  expect(refusal(source)).toMatchObject({reason: "deletion", recovery: "none"});
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await o.nextPull(); await o.nextPull();
+  expect(refusal(later)).toMatchObject({reason: "deletion", source});
+  expect(driver.firstOpenStanding(later)).toMatchObject({reason: "deletion"});
+  expect(refusal({...source, objectId: "object-unhosted"})).toBeUndefined();
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  expect(refusal(later)).toBeUndefined();
+  expect(driver.firstOpenStanding(later)).toBeUndefined();
+  driver.firstOpenAnswered(firstOpenOutcome(later, {kind: "unavailable", reason: "busy"}));
+  expect(driver.firstOpenStanding(later)).toBeUndefined();
+  driver.firstOpenAnswered(firstOpenOutcome(later, {kind: "refused", reason: "deletion"}));
+  expect(driver.firstOpenStanding(later)).toMatchObject({reason: "deletion"});
+  expect(o.host.unblock(o.other)).toBe(false);
+  driver.removeTarget(o.target);
+  expect(driver.firstOpenStanding(later)).toBeUndefined();
+  expect(driver.firstOpenStatus(later, () => later)).toBeUndefined();
+});
+
+// Proves: owner status never reads a ready document as refused. A refusal the
+// relay gave before the document's capture is forgotten once that capture
+// succeeds, and status reads the document's head only while an answer stands.
+it("never reports a ready document's first open as refused", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], activations = vi.mocked(ServiceActivationDriver.prototype.activate).mock.contexts;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  o.refuseCapture(withoutLineage());
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe("without-lineage"));
+  const driver = activations.at(-1) as ServiceActivationDriver, head = o.f.storage.readFirstOpenMoment("workspace", "object")!;
+  driver.firstOpenAnswered(firstOpenOutcome({workspaceId: "workspace", objectId: "object", path: head.path!, sourceMomentId: head.sourceMomentId,
+    sourceDigest: head.sourceDigest!}, {kind: "refused", reason: "deletion"}));
+  const handle = createServiceHostEnrollmentRoutes({storage: o.f.storage, history: o.f.history, resolveActor: async () => ({workspaceId: "workspace", userId: "owner"}),
+    host: {ready: document => o.host.isDocumentReady(document), reconcile() {}, unavailable: false, blocked: document => o.host.blocked(document),
+      unblock: document => o.host.unblock(document), diverged: () => false, holdReason: document => o.host.holdReason(document),
+      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenStatus: (document, source) => o.host.firstOpenStatus(document, source),
+      stop: async <T>(_document: unknown, fence: () => T) => fence()}});
+  const status = async () => (await (await handle(new Request("https://relay.test/sync/workspace/live-host",
+    {headers: {authorization: "Bearer owner-token"}}))).json()).documents;
+  expect(await status()).toEqual([{path: "docs/a.md", objectId: "object", status: "unavailable", reason: "live-first-open-refused", firstOpen: expect.objectContaining({reason: "deletion"})}]);
+  o.refuseCapture(undefined);
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const reads = vi.spyOn(o.f.storage, "readFirstOpenMoment");
+  expect(await status()).toEqual([expect.objectContaining({path: "docs/a.md", status: "ready"})]);
+  expect(reads).not.toHaveBeenCalled();
+});
+
 // Proves: a document still without lineage after the update that lifted its
 // block blocks again, at that update, so it captures once per new update. One
 // whose retry meets another conflict is no longer blocked and waits.
@@ -5413,6 +5566,328 @@ it("captures a second target without lineage once more for an update during the 
   await o.nextPull(); await o.nextPull();
   expect(captures()).toBe(2);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// A note an agent wrote as a file, which no device ever opened.
+const neverOpened = {workspaceId: "workspace", objectId: "object-plain", path: "docs/plain.md", shareId: "share"};
+const serviceKey = new Uint8Array(32).fill(5);
+// The engine's verdict, standing in for the native check firstOpenPublication.native.test.ts drives.
+const checkedCandidate = (input: FirstOpenCandidateInput): FirstOpenNativeCheck => ({kind: "answered", current: () => true,
+  check: {status: "checked", contractVersion: 1, binding: firstOpenCandidateBinding(input), settledSourceSha256: input.sourceSha256,
+    settledSourceByteLength: input.source.byteLength, fullStateSha256: "f".repeat(64), fullStateByteLength: input.candidate.byteLength + 7}});
+
+// An empty host given the sibling and the never-opened note, whose captures
+// find no lineage. Its first-open requests reach the relay's real route,
+// publisher and storage, with the engine's check standing in. `answer` sees
+// each request before the relay does; `onCheck` runs once the engine checked a
+// base, before the relay writes it. The workspace's credential is its
+// service-host credential, or with `credential: "other"`, a well-formed one
+// the relay never derived.
+async function neverOpenedHost(options: {passDeadlineMs?: number; nowMs?: () => number; credential?: "service-host" | "other"; onCheck?: () => void;
+  answer?: (request: Request, relay: (request: Request) => Promise<Response>) => Promise<Response>} = {}) {
+  let relay!: (request: Request) => Promise<Response>;
+  // Each request, its signal, and the signal of the pass whose capture started it.
+  const requests: {request: Request; signal: AbortSignal; pass: AbortSignal | undefined}[] = [], statuses: number[] = [];
+  const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    const request = new Request(url, init);
+    const pass = vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === neverOpened.path).at(-1)?.[1];
+    requests.push({request, signal: init!.signal!, pass});
+    const response = await (options.answer ?? (next => relay(next)))(request, relay);
+    statuses.push(response.status);
+    return response;
+  });
+  const o = await emptyServiceHost({passDeadlineMs: options.passDeadlineMs, firstOpen: {fetch: fetcher, nowMs: options.nowMs}});
+  const text = new TextEncoder().encode("# Plan\n\nBring snacks.\n"), digest = sha256(text);
+  o.f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: text, createdAtMs: 1});
+  o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "agent", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1,
+    payloadJson: JSON.stringify({momentId: "plain-moment", objectId: neverOpened.objectId, versionId: "main", operation: "write", path: neverOpened.path,
+      payloadAfterPath: neverOpened.path, payloadAfterBlobSha256: digest, payloadAfterByteLength: text.byteLength, payloadAfterContentKind: "text", recordedAtMs: 1_001})}]});
+  const enrollment = o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: neverOpened.path,
+    nowMs: 10, guard() {}});
+  const namespace = o.f.history.namespace;
+  const builds = vi.fn<FirstOpenBuild>(async (policy, input) => buildFirstOpenBase(policy, input));
+  const checks = vi.fn<FirstOpenCheckHost["checkFirstOpenCandidate"]>(async (_workspaceId, input) => {options.onCheck?.(); return checkedCandidate(input);});
+  const publisher = createFirstOpenPublisher({storage: o.f.storage, namespace, activation: () => o.host.activationConfig(),
+    host: () => ({checkFirstOpenCandidate: checks}), build: builds});
+  relay = createServiceHostReplication({storage: o.f.storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen: publisher,
+    authorize: input => authorizeServiceHostReplication(o.f.storage, {key: serviceKey, namespace, ...input})});
+  const bearer = options.credential === "other" ? `dohc-service-v1.${"A".repeat(43)}` : deriveServiceHostBearer(enrollment, {key: serviceKey, namespace});
+  const hostedReplication = o.workspace.hostedReplication!;
+  const workspace = {...o.workspace, hostedReplication: {...hostedReplication, relay: {...hostedReplication.relay, bearerToken: bearer}}};
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(neverOpened.path, withoutLineage());
+  await o.host.update({workspaces: [workspace], documents: [o.sibling, neverOpened], ...stay});
+  return {...o, workspace, bearer, requests, statuses, fetcher, builds, checks,
+    captures: () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === neverOpened.path).length,
+    bases: () => o.raw.prepare("SELECT payload_json FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%'").all()};
+}
+
+// Proves: a hosted note no device ever opened starts through its first open.
+// Its fresh capture finds no lineage, the host asks the relay's real route with
+// the workspace's service-host credential, the relay publishes a base, and
+// the next pass pulls and captures the note again with no Resume. The receipt
+// alone does not make it ready: this engine's capture still finds no lineage,
+// so the note waits for a device like any other without lineage.
+it("starts a never-opened note through its first open, and only a later capture can make it ready", async () => {
+  const o = await neverOpenedHost();
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  expect(o.statuses).toEqual([200]);
+  expect(o.requests[0]!.request.headers.get("authorization")).toBe(`Bearer ${o.bearer}`);
+  expect(o.builds).toHaveBeenCalledOnce();
+  await vi.waitFor(() => expect(o.host.blocked(neverOpened)).toBe("without-lineage"));
+  const base = JSON.parse(String(o.bases()[0]!.payload_json)) as {lineageClaimId: string};
+  expect(o.host.isDocumentReady({workspaceId: "workspace", mainVersionId: "main", objectId: neverOpened.objectId, lineageClaimId: base.lineageClaimId})).toBe(false);
+  await o.nextPull(); await o.nextPull();
+  expect(o.fetcher).toHaveBeenCalledOnce();
+  expect(o.captures()).toBe(2);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Proves: a first-open request runs outside the pass whose capture started it.
+// It outlives that pass's deadline unaborted, as a build longer than a pass
+// must. No later pass asks again while it runs, the note reads as preparing,
+// not blocked, the other document stays ready, and the answer still counts.
+it("keeps a first-open request running past the deadline of the pass that started it", async () => {
+  const answer = deferred<void>();
+  const o = await neverOpenedHost({passDeadlineMs: 1_000, answer: async (request, relay) => {await answer.promise; return relay(request);}});
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  const {signal, pass} = o.requests[0]!;
+  await vi.waitFor(() => expect(pass?.aborted).toBe(true), {timeout: 5_000});
+  await o.nextPull(); await o.nextPull();
+  expect(signal.aborted).toBe(false);
+  expect(o.requests).toHaveLength(1);
+  expect(o.host.blocked(neverOpened)).toBeUndefined();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  answer.resolve();
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+});
+
+// Proves: a first-open request ends with the note's place on the host. The
+// note leaving the host, as after Stop, or the host closing,
+// aborts it before the relay builds anything, and nothing asks again.
+it.each(["the note leaves the host", "the host closes"] as const)("cancels a first-open request when %s", async ending => {
+  const o = await neverOpenedHost({answer: request => new Promise((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), {once: true});
+  })});
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  const {signal} = o.requests[0]!;
+  expect(signal.aborted).toBe(false);
+  if (ending === "the host closes") await o.host.close();
+  else await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  expect(signal.aborted).toBe(true);
+  if (ending === "the note leaves the host") {
+    await o.nextPull(); await o.nextPull();
+    expect(o.host.isDocumentReady(o.document)).toBe(true);
+  }
+  expect(o.requests).toHaveLength(1);
+  expect(o.builds).not.toHaveBeenCalled();
+  expect(o.bases()).toHaveLength(0);
+});
+
+// Proves: Pause or Stop landing after the engine checked the base,
+// before the relay writes it, publishes nothing through the wired route. The
+// host takes the answer as a failed request, the note's departure ends its
+// first open, and the other document keeps delivering edits throughout.
+it.each([["Pause", false], ["Stop", true]] as const)("publishes nothing when %s lands after the engine checked, and the other note keeps moving", async (_name, retire) => {
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => {
+    o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: neverOpened.path, ownerUserId: "owner", enabled: false, retire, nowMs: 20, guard() {}});
+  }});
+  await vi.waitFor(() => expect(o.statuses).toEqual([404]));
+  expect(o.checks).toHaveBeenCalledOnce();
+  expect(o.bases()).toHaveLength(0);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  // The lost request is neither a refusal nor a stop, so Live documents shows the pause alone.
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const source = () => ({...plain, path: neverOpened.path, sourceMomentId: "plain-moment", sourceDigest: "a".repeat(64)});
+  expect(o.host.firstOpenStatus(plain, source)).toBeUndefined();
+  // The self-host supervisor's next membership leaves the note out.
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  expect(o.host.firstOpenStatus(plain, source)).toBeUndefined();
+  // Live documents shows the note, while it lists it, as paused alone, with no refusal or stop.
+  const handle = createServiceHostEnrollmentRoutes({storage: o.f.storage, history: o.f.history, resolveActor: async () => ({workspaceId: "workspace", userId: "owner"}),
+    host: {ready: document => o.host.isDocumentReady(document), reconcile() {}, unavailable: false, blocked: document => o.host.blocked(document),
+      unblock: document => o.host.unblock(document), diverged: () => false, holdReason: document => o.host.holdReason(document),
+      keptEdits: {page: async () => null, retry: async () => "unavailable" as const, copied: async () => {}}, firstOpenStatus: (document, current) => o.host.firstOpenStatus(document, current),
+      stop: async <T>(_document: unknown, fence: () => T) => fence()}});
+  const listed = (await (await handle(new Request("https://relay.test/sync/workspace/live-host",
+    {headers: {authorization: "Bearer owner-token"}}))).json()).documents as {objectId: string}[];
+  const note = listed.filter(row => row.objectId === neverOpened.objectId);
+  if (!retire) expect(note).toHaveLength(1);
+  for (const row of note) expect(row).toEqual({path: neverOpened.path, objectId: neverOpened.objectId, status: "paused"});
+  o.acceptEdit("moving");
+  await o.host.drain(o.document);
+  expect(o.applied.has("edit-moving")).toBe(true);
+  await o.nextPull(); await o.nextPull();
+  expect(o.requests).toHaveLength(1);
+  expect(o.bases()).toHaveLength(0);
+});
+
+// The engine refusing a capture past its byte budget, which it answers the same way on every pass. The engine
+// names the budget for a live application's own check, and says only "workspace operation failed" for one a
+// Y.Doc read inside the capture meets.
+const limitExceeded = (message: string) => new EngineRequestError(1, {code: "LIMIT_EXCEEDED", message, retry: "no"} as never);
+
+// Proves: a note whose first open published a base, and whose capture the
+// engine then refuses past its byte budget, reports that refusal with the
+// engine's code in its stable form. No later pass captures it again or asks
+// the relay again until Try again, which allows exactly one more capture, and
+// the same refusal coming back shows again.
+it.each([
+  ["live-application-byte-budget-exceeded", "live-application-byte-budget-exceeded"],
+  ["workspace operation failed", "limit-exceeded"],
+] as const)("reports a capture refused with %s after a first open published its base, and captures again only after Try again", async (message, code) => {
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, limitExceeded(message))});
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const status = () => o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}));
+  const refused = {reason: "ordinary-activation-refused", code, recovery: "report",
+    source: expect.objectContaining({...plain, path: neverOpened.path, sourceMomentId: "plain-moment"})};
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  await vi.waitFor(() => expect(o.host.blocked(plain)).toBe("refused"));
+  expect(status()).toEqual(refused);
+  await o.nextPull(); await o.nextPull();
+  expect(o.captures()).toBe(2);
+  expect(o.fetcher).toHaveBeenCalledOnce();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  expect(o.host.unblock(plain)).toBe(true);
+  expect(status()).toBeUndefined();
+  await vi.waitFor(() => expect(o.captures()).toBe(3));
+  await vi.waitFor(() => expect(status()).toEqual(refused));
+  await o.nextPull(); await o.nextPull();
+  expect(o.captures()).toBe(3);
+  expect(o.fetcher).toHaveBeenCalledOnce();
+});
+
+// The engine's generic answer for a failure it does not name, which says nothing about the next pass.
+const internalFailure = () => new EngineRequestError(1, {code: "INTERNAL", message: "workspace operation failed", retry: "no"} as never);
+
+// Proves: a note whose first open published a base, and whose fresh capture
+// then meets a conflict that a later pull or an applied conflict resolution
+// clears, or a failure the engine does not name, waits as preparing rather
+// than for Try again. Live documents shows no refusal, every later pass
+// captures it again, and once the conflict clears the next capture goes
+// through, all with no Try again and no new first-open request.
+it.each([
+  ["live-application-conflict", diverged],
+  ["ydoc-conflict-open", conflictOpen],
+  ["a generic engine failure", internalFailure],
+] as const)("captures a first-opened note again after %s, with no Try again", async (_name, failure) => {
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, failure())});
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const status = () => o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}));
+  const capture = o.client().captureOwnerActivation;
+  const through = () => capture.mock.calls.filter((call, index) => call[1] === neverOpened.path && capture.mock.settledResults[index]?.type === "fulfilled").length;
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  await vi.waitFor(() => expect(o.captures()).toBeGreaterThan(3));
+  expect(o.host.blocked(plain)).toBeUndefined();
+  expect(status()).toBeUndefined();
+  expect(through()).toBe(0);
+  o.refuseCaptureAt(neverOpened.path, undefined);
+  await vi.waitFor(() => expect(through()).toBe(1));
+  expect(o.fetcher).toHaveBeenCalledOnce();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Proves: a note whose first open published a base, and whose capture the
+// relay's own activation validation then refuses, reports that refusal with
+// one stable code, releases the capture's native lease at once, and no later
+// pass captures it again.
+it("reports a refused activation validation after a first open published its base, and releases its lease", async () => {
+  const ordinaryActivation = liveValidation.ordinaryActivation;
+  let refuse = false;
+  const validations = vi.spyOn(liveValidation, "ordinaryActivation").mockImplementation(policy => {
+    const validate = ordinaryActivation(policy);
+    return async (work, signal) => refuse ? {kind: "refused", message: "Activation history is invalid."} : validate(work, signal);
+  });
+  cleanup.push(async () => validations.mockRestore());
+  let o!: Awaited<ReturnType<typeof neverOpenedHost>>;
+  o = await neverOpenedHost({onCheck: () => {refuse = true; o.refuseCaptureAt(neverOpened.path, undefined);}});
+  const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
+  const releases = () => o.ownerCalls().filter(([method]) => method === "liveApplication.releaseOwnerActivation").length;
+  await vi.waitFor(() => expect(o.captures()).toBe(2));
+  await vi.waitFor(() => expect(o.host.blocked(plain)).toBe("refused"));
+  expect(o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}))).toEqual({
+    reason: "ordinary-activation-refused", code: "activation-validation", recovery: "report", source: expect.objectContaining({...plain, path: neverOpened.path})});
+  expect(releases()).toBe(1);
+  await o.nextPull(); await o.nextPull();
+  expect(o.captures()).toBe(2);
+  expect(releases()).toBe(1);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Proves: only the workspace's service-host credential reaches first open. A
+// request with a credential the relay never derived is not found before
+// anything is read or built, and the host asks again only after backing off.
+it("builds nothing for a first-open request with another credential, and asks again only after backing off", async () => {
+  let clock = 0;
+  const o = await neverOpenedHost({credential: "other", nowMs: () => clock});
+  await vi.waitFor(() => expect(o.statuses).toEqual([404]));
+  await o.nextPull(); await o.nextPull();
+  expect(o.requests).toHaveLength(1);
+  // The first failure waits at most 1.5 s, with jitter.
+  clock += 1_500;
+  await vi.waitFor(() => expect(o.statuses).toEqual([404, 404]));
+  expect(o.builds).not.toHaveBeenCalled();
+  expect(o.checks).not.toHaveBeenCalled();
+  expect(o.bases()).toHaveLength(0);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+});
+
+// Review round 2 of 3b, finding 1: detach ended first-open work only after the
+// engine answered, and not at all when the detach failed. A publication whose
+// check had answered could pass the writer's guard meanwhile.
+// Proves: a detach aborts the workspace's first-open request and ends the
+// checks the engine answered before it, while the engine has not answered the
+// detach, and those checks stay ended when the detach fails.
+it.each(["answers", "fails"] as const)("ends a workspace's first-open work before its detach, which then %s", async outcome => {
+  // The retry clock stands still, so the aborted request is never asked again here.
+  const o = await neverOpenedHost({nowMs: () => 0, answer: request => new Promise((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), {once: true});
+  })});
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  Object.assign(o.client(), {checkFirstOpenCandidate: vi.fn(async () => ({status: "refused", cause: "settlement-mismatch"}))});
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const source = new TextEncoder().encode("# Plan\n"), candidate = Uint8Array.of(0, 0);
+  const input = {objectId: neverOpened.objectId, path: neverOpened.path, sourceMomentId: "plain-moment", replicationEpoch: "epoch", streamIdentity: "stream",
+    source, sourceSha256: digest(source), candidate, candidateSha256: digest(candidate), maxFullStateBytes: 4096};
+  const answered = await o.host.checkFirstOpenCandidate("workspace", input, new AbortController().signal);
+  expect(answered.kind === "answered" && answered.current()).toBe(true);
+  if (outcome === "fails") o.failDetach(new EngineRequestError(1, {code: "INTERNAL", message: "detach refused", retry: "no"} as never));
+  const parked = o.park("liveApplication.detachWorkspace"), detaching = o.host.deleteWorkspaces(["workspace"]);
+  await parked.entered.promise;
+  expect(o.requests[0]!.signal.aborted).toBe(true);
+  expect(answered.kind === "answered" && answered.current()).toBe(false);
+  expect(await o.host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
+  parked.release.resolve();
+  if (outcome === "fails") await expect(detaching).rejects.toThrow();
+  else await detaching;
+  expect(answered.kind === "answered" && answered.current()).toBe(false);
+  expect(o.requests).toHaveLength(1);
+  expect(o.bases()).toHaveLength(0);
+});
+
+// Review round 2 of 3b, finding 2: a stale-source answer left its source never
+// asked about again, so a source the relay's history came back to stayed
+// without a first open.
+// Proves: after a stale answer, the next pass that finds the same source asks
+// again, and the relay publishes its base.
+it("asks again about a source whose first-open answer said it was stale", async () => {
+  let answered = 0;
+  const o = await neverOpenedHost({answer: async (request, relay) => {
+    if (answered++ > 0) return relay(request);
+    const body = await request.clone().json() as {objectId: string; path: string; sourceMomentId: string; sourceDigest: string};
+    return Response.json({ok: true, outcome: firstOpenOutcome({workspaceId: "workspace", objectId: body.objectId, path: body.path,
+      sourceMomentId: body.sourceMomentId, sourceDigest: body.sourceDigest}, {kind: "refused", reason: "stale-source"})});
+  }});
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+  expect(o.statuses).toEqual([200, 200]);
+  expect(o.builds).toHaveBeenCalledOnce();
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,

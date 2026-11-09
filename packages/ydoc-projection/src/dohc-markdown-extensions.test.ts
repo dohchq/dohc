@@ -1,5 +1,36 @@
 import { describe, expect, it, vi } from 'vitest'
-import { dohcMarkdownExtensions } from './dohc-markdown-extensions.js'
+import type { JSONContent, MarkdownRendererHelpers } from '@tiptap/core'
+import { Table } from '@tiptap/extension-table'
+import { DohcMarkdownTable, dohcMarkdownExtensions } from './dohc-markdown-extensions.js'
+
+describe('table rendering', () => {
+  // The table renderer is Tiptap's, copied so a cell can be measured by
+  // another width. Measured by length, a table with no pipe, `<br>` or row
+  // height in it renders exactly as Tiptap's own does.
+  it("matches Tiptap's renderer", () => {
+    const render = (node: JSONContent): string => node.text ?? helpers.renderChildren(node.content ?? [])
+    const helpers: MarkdownRendererHelpers = {
+      renderChildren: nodes => [nodes].flat().map(render).join(''),
+      wrapInBlock: (prefix, content) => prefix + content,
+      indent: content => content,
+    }
+    const cell = (type: 'tableHeader' | 'tableCell', paragraphs: string[], align: string | null = null): JSONContent =>
+      ({ type, attrs: { align }, content: paragraphs.map(text => ({ type: 'paragraph', content: text ? [{ type: 'text', text }] : [] })) })
+    const row = (...cells: JSONContent[]): JSONContent => ({ type: 'tableRow', content: cells })
+    const tables: JSONContent[] = [
+      [row(cell('tableHeader', ['Event']), cell('tableHeader', ['Sent when'])), row(cell('tableCell', ['launched']), cell('tableCell', ['dohc starts.']))],
+      [row(cell('tableHeader', ['a'], 'left'), cell('tableHeader', ['b'], 'center'), cell('tableHeader', ['c'], 'right')), row(cell('tableCell', ['1']), cell('tableCell', ['']), cell('tableCell', ['3']))],
+      [row(cell('tableCell', ['no header'])), row(cell('tableCell', ['x']), cell('tableCell', ['a longer cell than its header']))],
+      [row(cell('tableHeader', ['  spaced \t out  '])), row(cell('tableCell', ['first', 'second']))],
+      [row(cell('tableHeader', ['Café 🎉'])), row(cell('tableCell', ['中文']))],
+    ].map(rows => ({ type: 'table', content: rows }))
+    const context = { index: 0, level: 0 }
+    for (const table of tables) {
+      expect(DohcMarkdownTable.config.renderMarkdown!(table, helpers, context), JSON.stringify(table))
+        .toBe(Table.config.renderMarkdown!(table, helpers, context).replace(/\n$/u, ''))
+    }
+  })
+})
 
 function startFor(name: string): (source: string) => number {
   const start = dohcMarkdownExtensions.find(extension => extension.name === name)

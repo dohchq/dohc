@@ -1,13 +1,14 @@
 import {workspaceIsDeleted} from "./storage/accountDeletion";
 import {stopWithoutSessionHost} from "./sessionHostStop";
-import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp} from "./serviceActivationDriver";
+import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp,type ServiceFirstOpenRequest} from "./serviceActivationDriver";
+import {createFirstOpenClient} from "./firstOpenClient";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
 import {liveEditors} from "./liveEditors.js";
-import {HeldReadBusyError, HeldReadTooLargeError, heldReadLane, queueLiveHostRequests} from "./liveHostRequests.js";
+import {HeldReadBusyError, HeldReadTooLargeError, heldReadLane, NativeRequestQueueError, queueLiveHostRequests} from "./liveHostRequests.js";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -18,7 +19,10 @@ import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
+import { createEngineClient, EngineClientError, EngineRequestDeadlineError, EngineRequestError, firstOpenCandidateBinding, firstOpenCandidateUploadBytes,
+  InvalidFirstOpenCandidateCheck, isHostedDocumentUnready, type FirstOpenCandidateInput } from "@dohc/workspace-engine-client/daemon";
+import type {FirstOpenNativeCheck} from "./firstOpenPublication.js";
+import type {FirstOpenRefusal, FirstOpenSourceIdentity, FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
 import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
@@ -198,6 +202,8 @@ const recoveryRefusal = (error: unknown) => new RecoveryCopyRefusal(
 interface HostedAttachment {
   readonly handle: string; readonly hosted: ServiceHostedReplication; readonly replica: ServiceActivationReplica;
   readonly identity: ServiceKeptEditsIdentity;
+  /** First-open requests with this attachment's service-host credential, when the host asks the relay to start documents. */
+  readonly firstOpen?: ServiceFirstOpenRequest;
   pulls: number; confirmed: number; readonly announced: Map<string, number>;
   readonly reached: Map<string, {pull: number; listed: boolean}>; dropped: number;
 }
@@ -214,6 +220,12 @@ export async function startServiceLiveHost(options: {
   history: LiveJournalHistoryAuthority;
   signal?: AbortSignal;
   frameChanges?: LiveHostChanges;
+  /**
+   * Asks the relay to start hosted documents that have no Y.Doc lineage, as
+   * each workspace's service host. `fetch` reaches the relay, and `nowMs` and
+   * `random` time the retries, unless a test injects others.
+   */
+  firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number};
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
@@ -243,7 +255,8 @@ export async function startServiceLiveHost(options: {
   };
   const ledgers = new Map<string, LiveClaimLedger>();
   // Attached workspaces and hosted documents, as `update` last left them.
-  const members = new Map<string, {handle: string; workspace: ServiceWorkspace}>();
+  // `detaching` and `detaches` end first-open checks once a detach begins, before the engine answers it.
+  const members = new Map<string, {handle: string; workspace: ServiceWorkspace; detaching: boolean; detaches: number}>();
   const hosted = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
   // Hosted documents that left the hosted set. Passes settle, publish and unload them.
   const leaving = new Set<string>();
@@ -298,6 +311,8 @@ export async function startServiceLiveHost(options: {
   let activation:ServiceActivationDriver|undefined;
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
+  // Whether a first-open check is queued or running on this host.
+  let firstOpenChecking = false;
   let requestId = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
@@ -424,14 +439,15 @@ export async function startServiceLiveHost(options: {
       if (row.workspaceId !== workspace.workspaceId || typeof handle !== "string" || !handle || [...members.values()].some(member => member.handle === handle)) {
         throw new Error("Configured workspace identity mismatch.");
       }
-      members.set(workspace.workspaceId, {handle, workspace});
+      members.set(workspace.workspaceId, {handle, workspace, detaching: false, detaches: 0});
       consumers.set(workspace.workspaceId, new LiveCommittedDelivery(storage, history, { client, workspace: handle,
         host: coordinate, deadlineMs: config.client.requestDeadlineMs, nextRequestId, restore }));
       const attachment = workspace.hostedReplication;
       if (!attachment) return;
       const replica = new ServiceHostedReplication({client, workspace: handle, workspaceId: workspace.workspaceId, nextRequestId,
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
-      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0, replica: {
+      const firstOpen = options.firstOpen && createFirstOpenClient({relay: attachment.relay, identity: attachment.identity, fetch: options.firstOpen.fetch});
+      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, firstOpen, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0, replica: {
         pull: joined => pull(attached, joined), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
@@ -524,11 +540,16 @@ export async function startServiceLiveHost(options: {
     };
     // Detach does not wait for unsettled work. The workspace store keeps it until the workspace attaches again.
     const detach = async (workspaceId: string, joined: AbortSignal) => {
-      try {await membershipRequest("liveApplication.detachWorkspace", members.get(workspaceId)!.handle, {}, joined);}
+      // First-open work ends before the engine answers, so nothing checked earlier can publish while the
+      // detach is pending, or after it fails. Checks while it is pending are refused; later ones may stand.
+      const member = members.get(workspaceId)!;
+      member.detaching = true; member.detaches++;
+      for (const document of hosted.values()) if (document.target.workspaceId === workspaceId) activation?.cancelFirstOpen(document.target);
+      try {await membershipRequest("liveApplication.detachWorkspace", member.handle, {}, joined);}
       catch (error) {
         // The workspace is already closed, as after a detach whose reply was lost.
         if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;
-      }
+      } finally {member.detaching = false;}
       members.delete(workspaceId); consumers.delete(workspaceId);
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) if (document.target.workspaceId === workspaceId) forget(key);
@@ -1221,7 +1242,10 @@ export async function startServiceLiveHost(options: {
             recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); heldOf.delete(key); observed.delete(key);
             activation.addTarget(document.target, document.objectId);
           }
-        } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
+        } else if (!changed.includes(document.target.workspaceId)) {
+          // A first open of a document that left would start a document someone stopped, or one this host lost access to.
+          leaving.add(key); activation.cancelFirstOpen(document.target);
+        }
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
       for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
@@ -1281,7 +1305,9 @@ export async function startServiceLiveHost(options: {
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         maxApplications:config.settlement?.maxApplicationsPerSettlement,
-        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
+        registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation),
+        firstOpen:target=>leaving.has(JSON.stringify([target.workspaceId,target.path]))?undefined:checked(target.workspaceId)?.firstOpen,
+        lifetime:signal,firstOpenClock:options.firstOpen});
       registerRetained();
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
       const pass=async()=>{
@@ -1498,6 +1524,15 @@ export async function startServiceLiveHost(options: {
         const key = hostedKey(document);
         return key !== undefined && activation!.unblock(hosted.get(key)!.target);
       },
+      /**
+       * What Live documents shows of a hosted document's first open for its current source: a refusal that stands,
+       * or a stop after repeated build deadlines. Reads the source only when one might stand.
+       */
+      firstOpenStatus(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined): FirstOpenRefusal | FirstOpenTemporaryStop | undefined {
+        return hostedKey(document) === undefined ? undefined : activation!.firstOpenStatus(document, source);
+      },
+      /** The activation configuration this host's driver runs with, which a first-open base must fit. */
+      activationConfig(): ServiceActivationConfig | undefined {return activation?.config;},
       /**
        * Reads one bounded page of a refused queue this host keeps, as the
        * engine pages a recovery read, for its owner's recovery copy. `cursor`
@@ -1739,6 +1774,56 @@ export async function startServiceLiveHost(options: {
         if (!config.settlement) throw new Error("Settlement is not configured on this service host.");
         const document = parseLiveDocumentKey(value);
         return deliver(document, callerSignal, (consumer, joined) => consumer.settle(document, joined));
+      },
+      /**
+       * Asks the engine whether a first-open candidate settles back to its
+       * file. Takes no turn, so an activation pass can wait on it, and runs
+       * while the host still prepares. The host must stand and keep the
+       * workspace attached from before the call until its answer is used;
+       * `current()` says whether it still does. One check at a time, queued
+       * or running, so checks never crowd out live writes.
+       */
+      async checkFirstOpenCandidate(workspaceId: string, input: FirstOpenCandidateInput, callerSignal: AbortSignal): Promise<FirstOpenNativeCheck> {
+        const member = members.get(workspaceId), detaches = member?.detaches;
+        const current = () => {
+          try {checkPreparing();} catch {return false;}
+          return member !== undefined && members.get(workspaceId) === member && !member.detaching && member.detaches === detaches;
+        };
+        const failed = (reason: Extract<FirstOpenNativeCheck, {kind: "unavailable"}>["reason"], error?: unknown): FirstOpenNativeCheck => {
+          if (error !== undefined) console.error("[service-live-host] first-open check gave no verdict", error);
+          return {kind: "unavailable", reason};
+        };
+        callerSignal.throwIfAborted();
+        if (!current()) return failed("host-absent");
+        // An upload the client can never hold is this host's configuration, not contention.
+        if (firstOpenCandidateUploadBytes(firstOpenCandidateBinding(input)) > config.client.aggregateBytes) return {kind: "host-capacity"};
+        if (firstOpenChecking) return failed("busy");
+        firstOpenChecking = true;
+        try {
+          const check = await withLiveHostSignal(signal, callerSignal, joined => client.checkFirstOpenCandidate(
+            {id: nextRequestId(), workspace: member!.handle, deadlineMs: config.client.requestDeadlineMs}, input, joined));
+          return current() ? {kind: "answered", check, current} : failed("host-absent");
+        } catch (error) {
+          callerSignal.throwIfAborted();
+          // An answer lost after it was sent retires the host; the deadline is what failed.
+          if (error instanceof EngineRequestDeadlineError) return failed("check-deadline", error);
+          if (!current()) return failed("host-absent", error);
+          const code = engineCode(error);
+          if (code === "OVERLOADED" || (error instanceof NativeRequestQueueError && error.reason === "capacity")) return failed("busy");
+          if (code === "LIMIT_EXCEEDED") {
+            console.error("[service-live-host] first-open check exceeds this host's capacity", error);
+            return {kind: "host-capacity"};
+          }
+          if (code === "DEADLINE_EXCEEDED" || error instanceof NativeRequestQueueError) return failed("check-deadline", error);
+          if (code === "BLOB_INVALID" || code === "INVALID_PARAMS" || error instanceof InvalidFirstOpenCandidateCheck) {
+            console.error("[service-live-host] first-open check disagreed with its candidate", error);
+            return {kind: "integrity"};
+          }
+          if (code === "WORKSPACE_UNAVAILABLE" || code === "SESSION_EXPIRED" || code === "FORBIDDEN") return failed("host-absent", error);
+          if (code !== undefined) return failed("check-failed", error);
+          if (error instanceof EngineClientError) return failed("host-unreachable", error);
+          throw error;
+        } finally {firstOpenChecking = false;}
       },
       drain,
       close,

@@ -8,6 +8,7 @@ import { parseHostEpoch, parseRelayAcceptedLiveUpdate } from "@dohc/live-session
 import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
+import { InvalidFirstOpenCandidateCheck } from "./firstOpenCandidateCheck";
 import { encodeReplicaJournalPage, type ReplicaRestoreCancellation } from "./replicaJournal";
 import {
   EngineClient,
@@ -701,6 +702,180 @@ describe("private native restore transport", () => {
   });
 });
 
+describe("private first-open candidate check", () => {
+  const call = { id: 905, workspace: "ws-0000000000000001", deadlineMs: 30_000 };
+  const candidate = Uint8Array.of(0, 0, 7), source = Buffer.from("# Notes\n");
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const input = { objectId: "object", path: "notes/a.md", sourceMomentId: "moment", replicationEpoch: "epoch", streamIdentity: "stream",
+    source, sourceSha256: digest(source), candidate, candidateSha256: digest(candidate), maxFullStateBytes: 4096 };
+  const binding = { objectId: "object", path: "notes/a.md", sourceMomentId: "moment", sourceSha256: digest(source), sourceByteLength: source.length,
+    candidateSha256: digest(candidate), candidateByteLength: candidate.length, replicationEpoch: "epoch", streamIdentity: "stream", maxFullStateBytes: 4096 };
+  const checked = { status: "checked", contractVersion: 1, binding, settledSourceSha256: digest(source), settledSourceByteLength: source.length,
+    fullStateSha256: "ab".repeat(32), fullStateByteLength: 40 };
+  async function answering(result: (params: Record<string, JsonValue>) => Record<string, JsonValue>) {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    const sent = { params: {} as Record<string, JsonValue>, bundle: [] as Buffer[], requests: 0 };
+    let wireId = -1;
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      sent.requests++; wireId = envelope.id; sent.params = envelope.params as Record<string, JsonValue>;
+      expect(envelope.method).toBe("liveApplication.checkFirstOpenCandidate");
+    };
+    peer.onBlobChunk = frame => {
+      sent.bundle.push(Buffer.from(frame.payload));
+      if (frame.fin) peer.send({ type: "response", id: wireId, result: result(sent.params) });
+    };
+    return { transport, sent };
+  }
+
+  it("uploads the candidate then the source in one stream and returns the engine's evidence", async () => {
+    const { transport, sent } = await answering(() => checked);
+    try {
+      expect(await transport.checkFirstOpenCandidate(call, input)).toStrictEqual(checked);
+      const bundle = Buffer.concat(sent.bundle);
+      expect(bundle).toEqual(Buffer.concat([candidate, source]));
+      expect(sent.params).toEqual({ contractVersion: 1, binding, streamId: expect.any(Number), byteLength: bundle.length, digest: digest(bundle) });
+      expect(sent.params).not.toHaveProperty("registrationId");
+    } finally { transport.close(); }
+  });
+
+  it.each([
+    ["refused", { status: "refused", contractVersion: 1, binding, cause: "settlement-mismatch" }],
+    ["too-large", { status: "too-large", contractVersion: 1, binding, bound: "full-state-encoding", limit: 4096 }],
+  ])("returns a %s verdict as a result, not an error", async (_name, result) => {
+    const { transport } = await answering(() => result);
+    try {
+      expect(await transport.checkFirstOpenCandidate(call, input)).toStrictEqual(result);
+    } finally { transport.close(); }
+  });
+
+  it.each([
+    ["an extra field", { ...checked, extra: true }],
+    ["another contract version", { ...checked, contractVersion: 2 }],
+    ["another source", { ...checked, binding: { ...binding, sourceMomentId: "other" } }],
+    ["an extra binding field", { ...checked, binding: { ...binding, versionId: "main" } }],
+    ["a settled source other than the file", { ...checked, settledSourceSha256: "cd".repeat(32) }],
+    ["a full state beyond the bound", { ...checked, fullStateByteLength: 4097 }],
+    ["an unknown cause", { status: "refused", contractVersion: 1, binding, cause: "unsupported" }],
+    ["another limit", { status: "too-large", contractVersion: 1, binding, bound: "full-state-encoding", limit: 4095 }],
+    ["an unknown status", { ...checked, status: "accepted" }],
+  ])("refuses an answer with %s", async (_name, result) => {
+    const { transport } = await answering(() => result as Record<string, JsonValue>);
+    try {
+      const refused = await transport.checkFirstOpenCandidate(call, input).catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(InvalidFirstOpenCandidateCheck);
+      expect(refused).toMatchObject({ message: "Invalid first-open candidate check." });
+    } finally { transport.close(); }
+  });
+
+  it.each([
+    ["a candidate digest that is not the bytes'", { ...input, candidateSha256: "cd".repeat(32) }, "digest mismatch"],
+    ["a source digest that is not the bytes'", { ...input, sourceSha256: "cd".repeat(32) }, "digest mismatch"],
+    ["a source beyond the engine's text limit", { ...input, source: new Uint8Array(2 * 1024 * 1024 + 1) }, "bounds"],
+    ["an encoding cap beyond the update limit", { ...input, maxFullStateBytes: 20 * 1024 * 1024 + 1 }, "bounds"],
+    ["a one-byte candidate", { ...input, candidate: Uint8Array.of(0), candidateSha256: digest(Uint8Array.of(0)) }, "bounds"],
+  ])("refuses %s before sending anything", async (_name, wrong, message) => {
+    const { transport, sent } = await answering(() => checked);
+    try {
+      await expect(transport.checkFirstOpenCandidate(call, wrong)).rejects.toThrow(message);
+      expect(sent.requests).toBe(0);
+    } finally { transport.close(); }
+  });
+
+  async function connected() {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge();
+    await transport.ready();
+    const checks: Extract<Envelope, { type: "request" }>[] = [];
+    let chunks = 0;
+    peer.onEnvelope = envelope => { if (envelope.type === "request" && envelope.method !== "blocker") checks.push(envelope); };
+    peer.onBlobChunk = frame => {
+      chunks++;
+      if (frame.fin) peer.send({ type: "response", id: checks.at(-1)!.id, result: checked });
+    };
+    return { peer, transport, checks, chunks: () => chunks };
+  }
+
+  it("sends what preparation and a delayed transport leave of the deadline, and refuses an expired check without uploading", async () => {
+    const { peer, transport, checks, chunks } = await connected();
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    peer.backpressured = true;
+    const blocker = transport.sendRequest(request(1, "blocker")).catch((error: unknown) => error);
+    const concat = Buffer.concat;
+    const preparation = vi.spyOn(Buffer, "concat").mockImplementationOnce((list, length) => {
+      clock.mockReturnValue(300);
+      return concat(list, length);
+    });
+    try {
+      const delayed = transport.checkFirstOpenCandidate(call, input);
+      clock.mockReturnValue(600); peer.drain();
+      expect(await delayed).toStrictEqual(checked);
+      expect(checks[0]).toMatchObject({ deadlineMs: 29_500 });
+      peer.backpressured = true;
+      const again = transport.sendRequest(request(2, "blocker")).catch((error: unknown) => error);
+      const expired = transport.checkFirstOpenCandidate({ ...call, id: 906, deadlineMs: 1_000 }, input).catch((error: unknown) => error);
+      const uploaded = chunks();
+      clock.mockReturnValue(2_000); peer.drain();
+      expect(await expired).toMatchObject({ wireError: { code: "DEADLINE_EXCEEDED" } });
+      expect(checks).toHaveLength(1);
+      expect(chunks()).toBe(uploaded);
+      // Nothing reached the wire, so the connection stays usable.
+      expect(await transport.checkFirstOpenCandidate({ ...call, id: 907 }, input)).toStrictEqual(checked);
+      transport.close(); await Promise.all([blocker, again]);
+    } finally { transport.close(); preparation.mockRestore(); clock.mockRestore(); }
+  });
+
+  it.each(["no answer", "an early refusal"])("closes the connection at the deadline when a sent check's header never drains, after %s, and returns its upload slot", async mode => {
+    const { peer, transport, chunks } = await connected();
+    peer.backpressured = true;
+    if (mode === "an early refusal") peer.onEnvelope = envelope => {
+      if (envelope.type === "request") peer.send({ type: "error", id: envelope.id, error: { code: "OVERLOADED", message: "busy", retry: "afterBackoff" } });
+    };
+    try {
+      const stuck = await transport.checkFirstOpenCandidate({ ...call, deadlineMs: 50 }, input).catch((error: unknown) => error);
+      if (mode === "no answer") expect(stuck).toBeInstanceOf(EngineRequestDeadlineError);
+      else expect(stuck).toMatchObject({ wireError: { code: "OVERLOADED" } });
+      expect(chunks()).toBe(0);
+      // The reservation is back: the next check reaches the closed connection, not a full upload slot.
+      await expect(transport.checkFirstOpenCandidate({ ...call, id: 906 }, input)).rejects.toThrow("The engine client is closed");
+    } finally { peer.drain(); transport.close(); }
+  });
+
+  it("asks the engine to stop a check after its last input frame and holds its upload slot until the engine answers", async () => {
+    const { peer, transport, checks } = await connected();
+    const cancellation = new AbortController();
+    const source = Buffer.alloc(100_000, 0x61), large = { ...input, source, sourceSha256: digest(source) };
+    const reached = Promise.withResolvers<void>();
+    let finished = false;
+    peer.onBlobChunk = frame => {
+      if (frame.fin) { finished = true; return; }
+      peer.backpressured = true; reached.resolve();
+    };
+    const onEnvelope = peer.onEnvelope!;
+    peer.onEnvelope = envelope => {
+      onEnvelope(envelope);
+      if (envelope.type === "cancel") peer.send({ type: "error", id: envelope.id, error: { code: "CANCELLED", message: "first-open check cancelled", retry: "no" } });
+    };
+    try {
+      const pending = transport.checkFirstOpenCandidate(call, large, undefined, cancellation.signal);
+      const cancelled = expect(pending).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });
+      await reached.promise;
+      cancellation.abort();
+      expect(peer.received.some(envelope => envelope.type === "cancel")).toBe(false);
+      await expect(transport.checkFirstOpenCandidate({ ...call, id: 906 }, input)).rejects.toThrow("upload capacity is full");
+      peer.drain(); await cancelled;
+      expect(finished).toBe(true);
+      expect(peer.received.at(-1)).toEqual({ type: "cancel", id: checks[0]!.id });
+      peer.onBlobChunk = frame => { if (frame.fin) peer.send({ type: "response", id: checks.at(-1)!.id, result: checked }); };
+      expect(await transport.checkFirstOpenCandidate({ ...call, id: 907 }, input)).toStrictEqual(checked);
+    } finally { peer.drain(); transport.close(); }
+  });
+});
+
 function helloAck(
   limits: typeof LIMITS = LIMITS,
   capabilities: string[] = ["core", "blobs"],
@@ -917,7 +1092,7 @@ describe("outbound backpressure", () => {
     const expired = transport.sendRequest({ ...request(3, "expired"), deadlineMs: 100 }).catch(error => error);
     try {
       clock.mockReturnValue(400); peer.drain(); await nextImmediate();
-      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(await expired).toMatchObject({ wireError: { code: "DEADLINE_EXCEEDED" } });
       expect(peer.received.find(envelope => envelope.type === "request" && envelope.method === "second"))
         .toMatchObject({ deadlineMs: 700 });
       expect(peer.received.some(envelope => envelope.type === "request" && envelope.method === "expired")).toBe(false);
@@ -1605,7 +1780,7 @@ describe("request progress", () => {
       const expired = transport.sendRequest({ ...request(1, "serialization.expiry"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
       await nextImmediate();
       expect(requests).toEqual([]);
-      expect(await expired).toBeInstanceOf(EngineRequestDeadlineError);
+      expect(await expired).toMatchObject({ wireError: { code: "DEADLINE_EXCEEDED" } });
       expect(vi.getTimerCount()).toBe(0);
       peer.send({ type: "progress", id: 1 });
       expect(onProgress).not.toHaveBeenCalled();

@@ -494,6 +494,37 @@ describe("owner live document enrollment", () => {
     ]);
   });
 
+  // A refused first open keeps its typed refusal for the owner and their
+  // agents, and Resume is its checked retry. A row that claims the reason
+  // without the refusal, or carries one for another reason, is skipped.
+  it("lists a refused first open with its refusal and lets the owner resume it", async () => {
+    const h = harness();
+    const firstOpen = {reason: "too-large", code: "capture-budget", recovery: "none",
+      source: {workspaceId, objectId: "object", path: "large.md", sourceMomentId: "moment", sourceDigest: "a".repeat(64)}};
+    const list = (documents: unknown[]) => {
+      h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
+        ? {ok: true, documents: [], nextCursor: null} : {ok: true, documents});
+      return h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId});
+    };
+    await expect(list([{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-refused", firstOpen}])).resolves.toEqual({
+      documents: [{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-refused", firstOpen, canResume: true}], nextCursor: null,
+    });
+    for (const row of [{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-refused"},
+      {objectId: "object", path: "large.md", status: "unavailable", reason: "session-host-refused", firstOpen}]) {
+      await expect(list([row])).resolves.toEqual({documents: [], nextCursor: null});
+    }
+    // A first open stopped after repeated build deadlines pairs only with its own reason, and Resume starts it again.
+    const stop = {reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, recovery: "retry-later", source: firstOpen.source};
+    await expect(list([{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen: stop}])).resolves.toEqual({
+      documents: [{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen: stop, canResume: true}], nextCursor: null,
+    });
+    for (const row of [{objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped"},
+      {objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: stop},
+      {objectId: "object", path: "large.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen}]) {
+      await expect(list([row])).resolves.toEqual({documents: [], nextCursor: null});
+    }
+  });
+
   it("lists each restore queue as save-only beside the current document, including an unhosted note", async () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")

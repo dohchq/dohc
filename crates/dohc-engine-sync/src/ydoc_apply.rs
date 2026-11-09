@@ -535,6 +535,10 @@ fn apply_deferred_base(
                 ));
             }
         };
+        let losing_seed_untouched = has_losing_lineage
+            && dohc_engine_collab::pristine_seed_lineage_source(tx, &key)
+                .map_err(map_collab_hard_error)?
+                .is_some();
         if let Some(result) = preserve_incomplete_base_in_tx(
             tx, &key, &payload, &incoming_doc, relay_seq, &origin_id, origin_seq,
             recorded_at_ms, search_policy, resolver,
@@ -676,7 +680,7 @@ fn apply_deferred_base(
                 lineage_claim_id: &payload.lineage_claim_id,
                 is_base_state: payload.is_base_state,
             },
-            losing_claim_id.as_deref(), losing_doc.as_ref(), losing_projection.as_ref(), losing_authors.as_deref(), last_settled_sha.as_deref(),
+            losing_claim_id.as_deref(), losing_doc.as_ref(), losing_projection.as_ref(), losing_seed_untouched, losing_authors.as_deref(), last_settled_sha.as_deref(),
             &projection.content, &origin_id, origin_seq, recorded_at_ms, search_policy, resolver,
         )?;
         if let Some(opened) = conflict {
@@ -5049,6 +5053,7 @@ fn preserve_base_sides_in_tx(
     losing_claim_id: Option<&str>,
     losing_doc: Option<&dohc_engine_collab::Ydoc>,
     losing_projection: Option<&dohc_engine_collab::Projection>,
+    losing_seed_untouched: bool,
     losing_authors: Option<&str>,
     last_settled_sha: Option<&str>,
     incoming_content: &str,
@@ -5059,9 +5064,17 @@ fn preserve_base_sides_in_tx(
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<(Option<i64>, Vec<String>), SyncError> {
     let mut recovered_paths = Vec::new();
-    // Equal projections need neither a choice nor a second copy.
+    let incoming_sha = hex_sha256(incoming_content.as_bytes());
+    // Equal projections need neither a choice nor a second copy, and neither
+    // does an untouched seed of the winner's bytes whose file still holds them.
+    let quiet_adoption = losing_seed_untouched
+        && last_settled_sha == Some(incoming_sha.as_str())
+        && validate_retryable_ydoc_identity(tx, key, path)?
+            .snapshot
+            .is_some_and(|snapshot| snapshot.blob_sha256 == incoming_sha);
     if let (Some(claim), Some(doc), Some(local)) = (losing_claim_id, losing_doc, losing_projection)
-        && hex_sha256(local.content.as_bytes()) != hex_sha256(incoming_content.as_bytes())
+        && !quiet_adoption
+        && hex_sha256(local.content.as_bytes()) != incoming_sha
     {
         if let Some(opened) = conflict_replaced_lineage_in_tx(
             tx,
@@ -5129,7 +5142,7 @@ fn preserve_base_sides_in_tx(
             || losing_projection
                 .is_some_and(|local| hex_sha256(local.content.as_bytes()) == snapshot.blob_sha256);
         if !head_is_preserved
-            && snapshot.blob_sha256 != hex_sha256(incoming_content.as_bytes())
+            && snapshot.blob_sha256 != incoming_sha
             && open_sync_conflict_id(tx, key)?.is_none()
         {
             let opened = open_base_conflict_in_tx(
@@ -7880,17 +7893,22 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 record_ydoc_conflicts_opened(tx, op, result.conflicts_opened)?;
                 return Ok(result);
             }
-            let losing_doc = if local_unpublished
+            let (losing_doc, losing_seed_untouched) = if local_unpublished
                 || marker_before.as_ref().is_some_and(|marker| {
                     marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
                         && marker.lineage_claim_id.as_deref() != Some(incoming.lineage_claim_id)
                 }) {
-                Some(
-                    dohc_engine_collab::load_doc_in(tx, &claim_key)
-                        .map_err(map_collab_hard_error)?,
+                (
+                    Some(
+                        dohc_engine_collab::load_doc_in(tx, &claim_key)
+                            .map_err(map_collab_hard_error)?,
+                    ),
+                    dohc_engine_collab::pristine_seed_lineage_source(tx, &claim_key)
+                        .map_err(map_collab_hard_error)?
+                        .is_some(),
                 )
             } else {
-                None
+                (None, false)
             };
             let losing_projection = match losing_doc.as_ref() {
                 Some(doc) => {
@@ -8024,6 +8042,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 losing_claim_id.as_deref(),
                 losing_doc.as_ref(),
                 losing_projection.as_ref(),
+                losing_seed_untouched,
                 losing_authors.as_deref(),
                 losing_last_settled_sha.as_deref(),
                 &projection.content,

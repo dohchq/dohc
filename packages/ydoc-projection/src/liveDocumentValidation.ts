@@ -7,16 +7,15 @@ import {
 import { liveDocumentKindForPath } from '@dohc/workspace-contracts/live-documents'
 import { validateUserWritePath } from '@dohc/workspace-core/paths'
 import { digest as sha256 } from 'lib0/hash/sha256'
-import {
-  prosemirrorJSONToYXmlFragment,
-  yXmlFragmentToProseMirrorRootNode,
-} from 'y-prosemirror'
+import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror'
 import * as Y from 'yjs'
 import {SOURCE_META_KEYS, readMarkdownSourceWitness, resolveMarkdownSource} from './artifact-markdown.js'
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
+  MarkdownNestingRefusal,
+  writeBodyFragment,
   yDocToMarkdown,
 } from './import-export.js'
 import {
@@ -454,7 +453,7 @@ function projectAndFinalize(
     projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource, engineReader)
   } catch (error) {
     // A journal candidate is an owner's edit: a validator failure retries it instead of refusing it.
-    if ((engineReader || unverifiedSource === 'refuse') && !(error instanceof Refusal)) throw error
+    if ((engineReader || unverifiedSource === 'refuse') && !(error instanceof Refusal) && !(error instanceof MarkdownNestingRefusal)) throw error
     pending = error instanceof Refusal ? error.reason : 'invalid-schema'
   }
   finally {
@@ -808,7 +807,7 @@ function validatePublicState(
     const rebuilt = new Y.Doc({ gc: false })
     try {
       const rebuiltBody = rebuilt.getXmlFragment('body')
-      prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody)
+      writeBodyFragment(rootNode.toJSON(), rebuiltBody)
       if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null))) refuse('invalid-schema')
     } catch (error) {
       if (!isProseMirrorSchemaError(error)) throw error
@@ -824,7 +823,9 @@ function validatePublicState(
   if (source.kind === 'invalid' || source.kind === 'import-failed'
     || (source.kind === 'unverified' && unverifiedSource === 'refuse')) refuse('invalid-schema')
   if (!zeroStructSeed) {
-    const reimported = markdownToYDoc(projectedMarkdown)
+    // The serializer's own output, which the lexing budget for files does not
+    // bound.
+    const reimported = markdownToYDoc(projectedMarkdown, { reading: 'projection' })
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
       const withoutSources = (values: Record<string, unknown>) => {

@@ -643,6 +643,24 @@ export interface SyncRelayStorage {
   listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
   /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
   latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
+  /** The enrolled document at the path while the service host may start it live, or null. */
+  readFirstOpenStanding(input: {workspaceId: string; ownerUserId: string; path: string}): string | null;
+  /** The object's latest main moment. */
+  readFirstOpenMoment(workspaceId: string, objectId: string): import("./firstOpenEligibility").FirstOpenMoment | null;
+  /** What a source's reserved first-open origin holds. */
+  readFirstOpenReceipt(originId: string, source: import("./firstOpenHistory").FirstOpenSource): import("./firstOpenEligibility").FirstOpenStoredReceipt;
+  /** Whether durable history lets the relay give the source's document a first live base, read off the relay writer. */
+  prepareFirstOpen(source: import("./firstOpenHistory").FirstOpenSource,
+    signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
+  /** Extends a preparation over the workspace log rows committed after it. */
+  catchUpFirstOpen(proof: import("./firstOpenEligibility").FirstOpenProof,
+    signal?: AbortSignal): Promise<import("./firstOpenEligibility").FirstOpenPreparation>;
+  /**
+   * Commits the proven source's base, its blob and one unauthored row at its reserved coordinate,
+   * in the relay writer, only if the preparation still holds there. `guard` runs as the append's guard.
+   */
+  writeFirstOpen(proof: import("./firstOpenEligibility").FirstOpenProof, base: import("./firstOpenEligibility").FirstOpenBase,
+    guard: (context: AppendLogBatchGuardContext) => void): import("./firstOpenEligibility").FirstOpenWrite;
   hasServiceHostConflictEffect(input: {workspaceId: string; objectId: string}): boolean;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
@@ -1335,6 +1353,8 @@ interface SqliteStatement {
 }
 
 export interface SqliteDb {
+  /** Whether a transaction is open on this connection. */
+  readonly isTransaction: boolean;
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
   close(): void;
@@ -1351,6 +1371,8 @@ export interface OpenSyncRelayStorageOptions {
   discussionLifetimeMessageLimit?: number;
   discussionNonOwnerShareRowLimit?: number;
   newDiscussionId?: () => string;
+  /** Reads first-open history off the writer. Defaults to the first-open worker. */
+  firstOpenHistory?: import("./firstOpenHistory").FirstOpenHistoryReader;
 }
 
 export type DeviceHostCredentialResult = LiveHostControlResult |

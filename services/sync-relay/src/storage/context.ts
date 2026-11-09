@@ -11,7 +11,9 @@ export interface StorageContext extends SyncRelayStorage {
     target: Extract<import("@dohc/workspace-engine-client/daemon").WorkTarget, {kind: "transactionalCollection" | "transactionalRecord"}>;
   }) => Promise<(() => boolean) | null>;
   readonly db: SqliteDb;
-  readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>;
+  /** The database file, for connections that only read it. */
+  readonly databasePath: string;
+  readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets" | "firstOpenHistory">>;
   readonly newDiscussionId: () => string;
   replicaViewTx<T>(run: () => T): T;
   tx<T>(run: () => T): T;

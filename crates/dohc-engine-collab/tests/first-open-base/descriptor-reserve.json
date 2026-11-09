@@ -1,0 +1,16 @@
+{
+  "known": {
+    "relayDatabaseNamespace": "history",
+    "workspaceId": "工作区-ü",
+    "objectId": "objét-🎉",
+    "currentPath": "notes/café \"q\"\\\u0001.md",
+    "replicationEpoch": "epoch-ü",
+    "streamIdentity": "stream",
+    "baseOriginId": "relay-origin-ü",
+    "sourceMomentId": "moment-ü",
+    "sourceDigest": "41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+    "sourceByteLength": 2097152
+  },
+  "descriptor": "{\"version\":1,\"readerSource\":true,\"relayDatabaseNamespace\":\"history\",\"workspaceId\":\"工作区-ü\",\"mainVersionId\":\"main\",\"objectId\":\"objét-🎉\",\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"currentPath\":\"notes/café \\\"q\\\"\\\\\\u0001.md\",\"replicationEpoch\":\"epoch-ü\",\"streamIdentity\":\"stream\",\"committedCursor\":9007199254740991,\"baseOriginId\":\"relay-origin-ü\",\"baseOriginSeq\":9007199254740991,\"baseRelaySeq\":9007199254740991,\"sourceMomentId\":\"moment-ü\",\"sourceDigest\":\"41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d\",\"sourceByteLength\":2097152,\"nativeHeadSequence\":9007199254740991,\"fullStateDigest\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"fullStateByteLength\":9007199254740991,\"predecessorActivationId\":\"ordinary-activation-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}",
+  "reserve": 876
+}

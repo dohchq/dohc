@@ -572,6 +572,7 @@ import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemon";
 import { rgPath } from "@vscode/ripgrep";
+import {createOwnerFirstOpenStatusReader} from "./cli/ownerFirstOpenStatus";
 import { createDesktopCliServer } from "./cli/desktopCliServer";
 import {
   startCliServer,
@@ -2714,6 +2715,7 @@ const activity = {
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
+      ownerLiveFirstOpen: desktopEngine.ownerLiveFirstOpen(workspaceId),
     })),
   recordShareViewStoreRefusal: (
     workspaceId: string,
@@ -4988,6 +4990,10 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
+let ownerLiveDocumentsForCli: {
+  list(operation: DesktopWorkspaceOperation): Promise<Extract<import("@dohc/cli/protocol").CliResultByVerb["liveDocuments"], {ok: true}>["documents"]>;
+  retry(operation: DesktopWorkspaceOperation, path: string): Promise<void>;
+} | undefined;
 let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, kept: { path: string } & import("./ipc/relaySharesIpc").OwnerLiveStopAgain) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
@@ -5046,6 +5052,16 @@ const agentWaits = createAgentWaits((agentIds) => {
 const { startDesktopCliServer } = createDesktopCliServer({
   notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
+  ownerLiveDocuments: {
+    list: operation => {
+      if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
+      return ownerLiveDocumentsForCli.list(operation);
+    },
+    retry: (operation, path) => {
+      if (!ownerLiveDocumentsForCli) throw new Error("Live editing is not ready. Try again.");
+      return ownerLiveDocumentsForCli.retry(operation, path);
+    },
+  },
   shareLinkAgents: shareLinkAgentsForCli,
   beforeMove: moveAcceptedEdits.beforeMove,
   ownerLiveRecovery: {
@@ -6822,6 +6838,10 @@ function registerIpcHandlers(): void {
     }),
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
+  ownerLiveDocumentsForCli = {
+    list: createOwnerFirstOpenStatusReader<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies),
+    retry: (operation, path) => agentOwnerLiveDocuments.resume({workspaceId: operation.workspace.workspaceId, path}, operation),
+  };
   ownerLiveStopAgainForCli = async (operation, kept) => {
     const result = await agentOwnerLiveDocuments.stopForAgent(
       {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);

@@ -1,13 +1,31 @@
 import {createLiveMarkdownRegistrationValidator} from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
-import type {LiveValidationWork} from "./liveValidation.js";
+import { buildFirstOpenBase } from "./firstOpenBase.js";
+import type {FirstOpenHistoryFailure, LiveValidationWork} from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
+import { readFirstOpenHistoryFile } from "./storage/firstOpenHistory.js";
 import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 import { runLiveRestoreWork } from "./liveRestoreValidation.js";
 const send = process.send?.bind(process);
 if (!send) throw new Error("Live validation requires a child process.");
 process.on("message", message => {
   const work = message as LiveValidationWork;
+  if (work.kind === "first-open-history") {
+    try {send(readFirstOpenHistoryFile(work.input));}
+    catch (error) {
+      const fault = error as {code?: unknown; errcode?: unknown};
+      const failure: FirstOpenHistoryFailure = {kind: "history-error", message: error instanceof Error ? error.message : String(error),
+        code: typeof fault?.code === "string" ? fault.code : undefined,
+        errcode: typeof fault?.errcode === "number" ? fault.errcode : undefined};
+      send(failure);
+    }
+    return;
+  }
+  if (work.kind === "first-open") {
+    try {send(buildFirstOpenBase(work.policy, work.input));}
+    catch (error) {send({kind: "failed", errorClass: error instanceof Error ? error.name : typeof error});}
+    return;
+  }
   if (work.kind === "restore") {
     send(runLiveRestoreWork(work.input, work.policy));
     return;

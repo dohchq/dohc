@@ -22,6 +22,7 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
+import { parseWork } from './parse-work.fixture.js'
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
@@ -95,6 +96,221 @@ it.each([
     expect(large[kind], `${kind} characters: ${small[kind]} -> ${large[kind]}`)
       .toBeLessThan(small[kind] * 2.2)
   }
+})
+
+// The characters `run` reads, as `parseWork` counts them, with each string
+// `indexOf` searched for.
+function searchWork(run: () => void, searched = new Set<string>()): number {
+  const by = new Map<string, number>()
+  const work = parseWork(run, by)
+  for (const key of by.keys()) if (key.startsWith('indexOf ')) searched.add(JSON.parse(key.slice(8)) as string)
+  return work
+}
+
+// marked asks each inline extension where it may start before each run of
+// plain text, and a line that ends in a hard break ends a run.
+it.each([
+  ['two-space hard breaks', 'a  \n'],
+  ['backslash hard breaks', 'a\\\n'],
+  ['hard breaks among other inline content', '*a* b  \nc `d` ==e== $f$ [[g]] ++h++\\\n'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    const paragraph = parseRichdocMarkdown(`${unit.repeat(repetitions)}end\n`).content?.[0]
+    expect(paragraph?.content?.filter(node => node.type === 'hardBreak'))
+      .toHaveLength(repetitions * (unit.split('\n').length - 1))
+  })
+  const small = measure(128)
+  const large = measure(256)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// The importer finds the end of a text's white space once, where marked's
+// hard-break rule looked ahead to it at each break.
+it.each([
+  'a  \nb', 'a  \n', 'a  \n  ', 'a\\\n \t', 'a  \n \n', `a  \n${String.fromCharCode(0xa0)}`, `a  \n${String.fromCharCode(0xa0)}b`,
+  `${`${String.fromCharCode(0xa0)}  \n`.repeat(3)}b`, `a  \n${String.fromCharCode(0x2028)}`, 'a  \nb  \n',
+])('reads hard breaks where marked does in %j', (markdown) => {
+  const breaks = (node: JSONContent): number => (node.type === 'hardBreak' ? 1 : 0) + (node.content ?? []).reduce((sum, child) => sum + breaks(child), 0)
+  const markedBreaks = (tokens: Array<{ type: string; tokens?: unknown }>): number =>
+    tokens.reduce((sum, token) => sum + (token.type === 'br' ? 1 : 0) + markedBreaks((token.tokens ?? []) as typeof tokens), 0)
+  expect(breaks(parseRichdocMarkdown(markdown))).toBe(markedBreaks(new Lexer(getDefaults()).lex(markdown)))
+})
+
+// marked's text rule stopped before an email address by reading the email
+// characters after each run, and its url rule read the characters an
+// address's local part may hold at each step. A spaceless paragraph is one
+// long run of them.
+it.each([
+  ['emphasis between letters', 'a*', ''],
+  ['underscores between letters', 'a_', ''],
+  ['exclamation marks between letters', 'a!', ''],
+  ['tildes between letters', 'a~', ''],
+  ['emphasis between letters before an address', 'a*', '@example.com'],
+  ['at signs between letters', 'a@', ''],
+  ['at signs between letters and spaces', 'a@ a ', ''],
+  ['addresses', 'a@b.co ', ''],
+  ['underlines between letters', 'a++', ''],
+  ['underscores between letters before an at sign with no domain', 'a_', 'a@x'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit, end) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}\n`).content).toHaveLength(1)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// Each `[[` searched to the end of its line for a whole wikilink, and the
+// wikilink tokenizer searched to the end of the text for its `]]`.
+it.each([
+  ['brackets', '['],
+  ['wikilink openers', '[['],
+  ['wikilink openers after letters', 'a[['],
+  ['wikilink openers with escaped brackets', '[[a\\]'],
+  ['wikilink openers across lines', '[[a\n'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit) => {
+  const searched = new Set<string>()
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}end\n`).content).toHaveLength(1)
+  }, searched)
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+  // The count sees the search for a wikilink's `]]` only through `indexOf`.
+  expect(searched).toContain(']]')
+})
+
+// The atom pattern backtracked through the rest of the text at each
+// `{{atom:` without a `}}`, each closing tag read every token before it, and
+// marked's emphasis opener rule read the rest of a run of delimiters at each
+// place in it.
+it.each([
+  ['atom openers', '{{atom:', '', '}'],
+  ['atom openers after letters', 'a{{atom:', '', '}'],
+  ['atoms closed by one brace', '{{atom:a}', '', '}'],
+  ['closing tags', '</b>', '', undefined],
+  ['open tags before closing tags of another name', '<b>', '</i>', undefined],
+  ['a run of asterisks before as many closers', '*', ' a*', undefined],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit, then, search) => {
+  const searched = new Set<string>()
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${then.repeat(repetitions)}end\n`).content).toHaveLength(1)
+  }, searched)
+  const small = measure(512)
+  const large = measure(1_024)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+  // The count sees the search for an atom's `}` only through `indexOf`.
+  if (search) expect(searched).toContain(search)
+})
+
+// marked's emphasis and strikethrough rules searched the rest of the text for
+// a closer at each opener, its link rule read a destination at each `[`, its
+// tag rule the rest at each comment, and it copied the text for each escape
+// it masked.
+it.each([
+  ['unclosed emphasis', '*a '],
+  ['unclosed underscores', '_a '],
+  ['unclosed strikethrough', '~a '],
+  ['globs', '*.txt '],
+  ['links with no text and no end', '[]('],
+  ['links with no end', '[a]('],
+  ['escaped brackets', '\\['],
+  ['comment openers after letters', 'a<!--'],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}end\n`).content).toHaveLength(1)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked cuts a paragraph at each `$` of `$$$…` and at each `$$` line, then
+// tries every block rule on the rest after each cut and joins the cut onto
+// the paragraph before it.
+it.each([
+  ['dollar signs', '$', '', ['paragraph', 'mathBlock']],
+  ['dollar signs before more lines', '$', '\nb\nc\n', ['paragraph', 'mathBlock', 'paragraph']],
+  ['math block openers', '$$a\n', '', ['paragraph']],
+  ['math block openers before a heading and an underline', '$$a\n', '# h\n---\n', ['paragraph', 'heading', 'horizontalRule']],
+  ['math block openers before a callout', '$$a\n', '> [!note] Title\n> body\n', ['paragraph', 'callout']],
+])('cuts a paragraph of %s in a linear amount of work', (_name, unit, end, kinds) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}`).content?.map(block => block.type)).toEqual(kinds)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked's emphasis and strikethrough rules counted every opener between an
+// opener and the one closer after them all, its opener rule read a whole run
+// of delimiters at each place in it, its code span and tag rules read the
+// rest for an end at each opener, and its url rule read the rest after each
+// `www.` with no domain.
+it.each([
+  ['emphasis openers before one closer', '*a ', 'a*'],
+  ['underscore openers before one closer', '_a ', 'a_'],
+  ['strikethrough openers before one closer', '~a ', 'a~'],
+  ['escaped brackets and emphasis openers before one closer', '\\[ *a ', 'a*'],
+  ['a run of asterisks', '*', '&'],
+  ['a run of underscores', '_', '~'],
+  ['code span openers no closer matches', '\\```', '@'],
+  ['instruction openers', '.<?', ''],
+  ['declaration openers', '.<!a ', ''],
+  ['CDATA openers', '.<![CDATA[', ''],
+  ['www. with no domain', '.www.', ''],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit, end) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}\n`).content).toHaveLength(1)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked's setext rule cannot cross a line or paragraph separator, so with one
+// before an underline it read the paragraph again at each cut, and its
+// masking copied the text for each reference to a defined link. marked's table
+// rule and the importer's table probe read every row of a table before they
+// found it was none, or nothing to return, at each line it could start, and
+// marked's paragraph rule read them all to end each paragraph before them.
+const LINE_SEPARATOR = String.fromCharCode(0x2028)
+const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029)
+it.each([
+  ['math block openers before a line separator', '$$a\n', `x${LINE_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['math block openers between lines before a line separator', 'a\n$$b\n', `x${LINE_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['dollar signs before a line separator', '$$', `${LINE_SEPARATOR}\n===`, ['paragraph']],
+  ['math block openers before a paragraph separator', '$$a\n', `x${PARAGRAPH_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['math block openers between lines before a paragraph separator', 'a\n$$b\n', `x${PARAGRAPH_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['dollar signs before a paragraph separator', '$$', `${PARAGRAPH_SEPARATOR}\n===`, ['paragraph']],
+  // marked reads `\r\n` as `\n`.
+  ['dollar signs before a carriage return', '$$', '\r\n===', ['heading']],
+  ['references to a defined link', '[x] ', '\n\n[x]: /u', ['paragraph']],
+  ['tables with no header cells', '|\n| - |\n', '', ['paragraph']],
+  ['empty items before table delimiters', '*\n| - |\n', '', ['bulletList', 'paragraph']],
+  ['declarations before an underline', '<!a ]]>', '\n---', ['paragraph']],
+])('cuts a paragraph of %s in a linear amount of work', (_name, unit, end, kinds) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    const found = parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}`).content?.map(block => block.type)
+    expect(found?.slice(0, kinds.length)).toEqual(kinds)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// Each level of nested emphasis lexes its text again, so the importer reads
+// 15 levels and refuses 16 (see nestedMarkdownContract.test.ts).
+it.each([
+  ['emphasis', '*', 'italic'],
+  ['strikethrough', '~~', 'strike'],
+])('reads %s nested 15 levels deep and refuses 16', (_name, delimiter, mark) => {
+  const nested = (depth: number) => `${`${delimiter}a `.repeat(depth)}b${` a${delimiter}`.repeat(depth)}`
+  const paragraph = parseRichdocMarkdown(nested(15)).content?.[0]
+  expect(paragraph?.content?.map(node => node.text).join('')).toBe(`${'a '.repeat(15)}b${' a'.repeat(15)}`)
+  expect(paragraph?.content?.every(node => node.marks?.some(({ type }) => type === mark))).toBe(true)
+  expect(() => parseRichdocMarkdown(nested(16))).toThrow(/not representable/)
 })
 
 it.each([
@@ -2883,6 +3099,21 @@ describe('Y.Doc markdown import/export', () => {
     )
   })
 
+  // The engine pads each column to the width its cells are written at.
+  it('pads a table column holding inline code or escapes to its written width', () => {
+    const markdown = [
+      'Codes:',
+      '',
+      '',
+      '| Code           | Meaning                        |',
+      '| -------------- | ------------------------------ |',
+      '| `app_launched` | dohc starts.                   |',
+      '| `a\\|b`         | x \\| y \\*not\\* &amp; &lt;b&gt; |',
+    ].join('\n')
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    expect(yDocToMarkdown(markdownToYDoc(markdown.replaceAll(/ {2,}\|/g, ' |')))).toBe(markdown)
+  })
+
   describe('table row heights', () => {
     const table = [
       '| Metric | Value |',
@@ -4613,4 +4844,28 @@ it.each(['Total\n1.\n\n  x', 'Total\n*\n\tfoo'])('keeps a bare marker in root pa
   for (const reading of ['source', 'projection'] as const) {
     expect(parseRichdocMarkdown(source, reading).content?.every(node => node.type === 'paragraph')).toBe(true)
   }
+})
+
+// Yjs spreads a detached element's children as call arguments, which overflows
+// a main thread's stack past about 124,000 children. A wide element goes in
+// empty and is filled in place.
+describe('an element with more children than Yjs can spread', () => {
+  it.each([
+    ['a paragraph of hard breaks', `${'a  \n'.repeat(6_000)}a\n`],
+    ['a list before a paragraph', `${'- a\n'.repeat(10_001)}\nafter\n`],
+    ['a quoted list', '> - a\n'.repeat(10_001)],
+    ['a list in a list item', `${'- a\n'.repeat(10_000)}- b\n${'  - c\n'.repeat(10_001)}`],
+  ])('builds the same tree as one conversion: %s', (_shape, markdown) => {
+    const staged = markdownToYDoc(markdown)
+    const direct = yDocFromBody(parseRichdocMarkdown(markdown).content ?? [])
+    expect(getDohcYDocBodyFragment(staged).toJSON()).toBe(getDohcYDocBodyFragment(direct).toJSON())
+    expect(yDocToMarkdown(staged)).toBe(yDocToMarkdown(direct))
+  })
+
+  it('seeds a paragraph of 200,000 hard breaks', () => {
+    const markdown = `a${'\\\n'.repeat(200_000)}a\n`
+    const paragraph = getDohcYDocBodyFragment(markdownToYDoc(markdown)).get(0) as Y.XmlElement
+    expect(paragraph.nodeName).toBe('paragraph')
+    expect(paragraph.length).toBe(200_002)
+  })
 })

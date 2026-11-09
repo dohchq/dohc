@@ -3,6 +3,7 @@ import { digest } from 'lib0/hash/sha256'
 import { Marked } from 'marked'
 import * as Y from 'yjs'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
+import { MarkdownNestingRefusal } from './markdown-nesting-refusal.js'
 
 const reader = new Marked()
 
@@ -27,9 +28,11 @@ export function sameMarkdownMeaning(left: string, right: string): boolean {
  * A note dohc wrote is its own canonical Markdown, apart from the final
  * newline a save drops, so it skips the render. A note the editor cannot
  * import at all is lossy too, and so is one larger than the engine checks.
+ * `refused` is the lossy note whose nesting the rich editor refuses, which the
+ * editor reports itself.
  */
-export function isLossyMarkdown(markdown: string): boolean {
-  if (exceedsLiveMarkdownLimit(markdown)) return true
+export function lossyMarkdownVerdict(markdown: string): 'clean' | 'lossy' | 'refused' {
+  if (exceedsLiveMarkdownLimit(markdown)) return 'lossy'
   let canonical: string
   try {
     const doc = markdownToYDoc(markdown)
@@ -38,11 +41,16 @@ export function isLossyMarkdown(markdown: string): boolean {
     } finally {
       doc.destroy()
     }
-  } catch {
-    return true
+  } catch (error) {
+    return error instanceof MarkdownNestingRefusal ? 'refused' : 'lossy'
   }
-  if (canonical === markdown.replace(/\r?\n$/u, '')) return false
-  return !sameMarkdownMeaning(markdown, canonical)
+  if (canonical === markdown.replace(/\r?\n$/u, '')) return 'clean'
+  return sameMarkdownMeaning(markdown, canonical) ? 'clean' : 'lossy'
+}
+
+/** Whether `markdown` is a lossy note, counting a nesting refusal as lossy. */
+export function isLossyMarkdown(markdown: string): boolean {
+  return lossyMarkdownVerdict(markdown) !== 'clean'
 }
 
 const VERDICT_LIMIT = 256

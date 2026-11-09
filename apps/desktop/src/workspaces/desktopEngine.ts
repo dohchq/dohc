@@ -19,6 +19,7 @@ import {
 } from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
+import { OwnerLiveFirstOpenStatus } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { readLocalStateFrom } from "./workspaceLocalState";
@@ -181,6 +182,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
+  // The files whose first open the server refused or stopped trying, as its last status reported them.
+  const ownerFirstOpen = new Map<string, OwnerLiveFirstOpenStatus[]>();
+  const setOwnerFirstOpen = (workspaceId: string, statuses: OwnerLiveFirstOpenStatus[]) => {
+    if (JSON.stringify(ownerFirstOpen.get(workspaceId) ?? []) === JSON.stringify(statuses)) return;
+    if (statuses.length) ownerFirstOpen.set(workspaceId, statuses); else ownerFirstOpen.delete(workspaceId);
+    dependencies.notifyOwnerDeliveryChanged?.(workspaceId);
+  };
   const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
   // The ready documents from each workspace's last complete live-host list, for the move guard.
   const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();
@@ -317,6 +325,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   function stopOwnerDelivery(): Promise<void> {
     ownerDeliveryGeneration += 1;
     for (const id of ownerDeliveryStatus.keys()) setOwnerDeliveryStatus(id, undefined);
+    for (const id of ownerFirstOpen.keys()) setOwnerFirstOpen(id, []);
     failedOwnerDocuments.clear();
     frozenOwnerDocuments.clear();
     ownerStopFailures.clear();
@@ -341,7 +350,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             activeOwnerWorkspace = workspaceId;
             try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
               const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
-              if (!session) {setOwnerDeliveryStatus(workspaceId, undefined); return {documentCount: 0, acknowledged: false};}
+              if (!session) {setOwnerDeliveryStatus(workspaceId, undefined); setOwnerFirstOpen(workspaceId, []); return {documentCount: 0, acknowledged: false};}
               const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
               const check = () => {
                 signal.throwIfAborted(); operation.assertCurrent(); session.assertCurrent();
@@ -382,10 +391,22 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
               liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, documents));
-              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
+              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown; firstOpen?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
+              // Each refused or stopped first open is its own file's notice, so it does not make the workspace's delivery retry.
+              // One this build cannot read is logged and counts as an ordinary unavailable document.
+              const firstOpen = new Map<typeof rows[number], OwnerLiveFirstOpenStatus>();
+              for (const row of rows) {
+                if (row.status !== "unavailable" || (row.reason !== "live-first-open-refused" && row.reason !== "live-first-open-retry-stopped")) continue;
+                const parsed = OwnerLiveFirstOpenStatus.safeParse(row.firstOpen);
+                if (!parsed.success) console.error("[desktop] live first-open status is invalid:", parsed.error);
+                else if ((parsed.data.reason === "retry-stopped") !== (row.reason === "live-first-open-retry-stopped")) {
+                  console.error("[desktop] live first-open status does not match its reason:", row.reason);
+                } else firstOpen.set(row, parsed.data);
+              }
+              setOwnerFirstOpen(workspaceId, [...firstOpen.values()].filter(status => status.source.workspaceId === workspaceId));
               // The server reports a diverged copy even after its owner stopped every document.
-              const unavailable = diverged === true || rows.some(row => row.status === "unavailable");
+              const unavailable = diverged === true || rows.some(row => row.status === "unavailable" && !firstOpen.has(row));
               const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
               // One it cannot start goes before it: the owner must open it before a Resume can help.
@@ -1054,6 +1075,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     hasOwnerLiveRefusals(workspaceId: string): boolean | undefined {
       return dependencies.serverOwnerDelivery?.hasRefusals(workspaceId);
+    },
+    ownerLiveFirstOpen(workspaceId: string): OwnerLiveFirstOpenStatus[] | undefined {
+      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? ownerFirstOpen.get(workspaceId) : undefined;
     },
     get daemon() { return rustEngineDaemon; },
     get sessions() { return rustEngineWorkspaceSessions; },

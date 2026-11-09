@@ -14,6 +14,7 @@ import type { ServiceHostFeedScope } from "./storage/serviceHostFeed";
 import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
 import { chargesProofBudget, type RetirementRefusal } from "./storage/serviceActivationPublication";
 import { MAX_BLOB_BYTES } from "./wireLimits";
+import { parseFirstOpenRequest, type FirstOpenPublisher } from "./firstOpenPublication";
 import {
   createWorkspaceReplicationRoutes,
   enforceWorkspaceIdentity,
@@ -107,16 +108,19 @@ function hostedWriter(scope: ServiceHostFeedScope, documents: ReadonlyMap<string
     (absent(record.beforeObjectId) || record.beforeObjectId === objectId) ? objectId : null;
 }
 
-export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, payload: unknown): boolean {
-  return hostedWriter(scope, scope.hosted, opKind, payload) !== null;
-}
+/**
+ * A `ydoc.update` not explicitly a delta. A host continues lineages; it never
+ * starts one. A settling document's baseline is the retirement writer's to prove.
+ */
+const hostedBase = (opKind: string, payload: unknown) => opKind === "ydoc.update" && asRecord(payload)?.isBaseState !== false;
 
 /**
- * Why the relay refused one of the host's ops. A settling document's row the
- * retirement writer could not prove is `unproved-retirement-output`;
- * `retirement-proof-over-budget` is one whose proof no push can finish.
+ * Why the relay refused one of the host's ops. `base-state-from-host`: see
+ * `hostedBase`. A settling document's row the retirement writer could not
+ * prove is `unproved-retirement-output`; `retirement-proof-over-budget` is one
+ * whose proof no push can finish.
  */
-export type HostedRefusalReason = "outside-hosted-documents" | RetirementRefusal;
+export type HostedRefusalReason = "outside-hosted-documents" | "base-state-from-host" | RetirementRefusal;
 
 type HostedPublication = { kind: "accepted" | "departed" } | { kind: "retiring"; retirement: ServiceActivationRetirement } |
   { kind: "refused"; reason: HostedRefusalReason };
@@ -129,11 +133,12 @@ type HostedPublication = { kind: "accepted" | "departed" } | { kind: "retiring";
  * the host uploads it and retries. A document out of the share settles that
  * way. A settling document's row still needs the retirement writer's proof.
  */
-function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): HostedPublication {
+export function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): HostedPublication {
   const payload: unknown = JSON.parse(op.payloadJson);
   const settling = hostedWriter(scope, new Map([...scope.settling].map(([objectId, row]) => [objectId, row.path])), op.opKind, payload);
   const objectId = settling ?? hostedWriter(scope, scope.hosted, op.opKind, payload);
   if (objectId === null) return { kind: "refused", reason: "outside-hosted-documents" };
+  if (settling === null && hostedBase(op.opKind, payload)) return { kind: "refused", reason: "base-state-from-host" };
   const blobs = referencedBlobShas(op.opKind, op.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs });
   const unknown = blobs.filter(sha256 => !known(sha256));
   if (unknown.length) throw logBlobsMissing(unknown);
@@ -234,7 +239,8 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
  * service host credential for the workspace owner; this decides scope.
  * A row or blob outside the scope answers exactly as an absent one.
  */
-export function createServiceHostFeed(storage: SyncRelayStorage, lookupUserDisplayName?: LogAuthorNameLookup) {
+export function createServiceHostFeed(storage: SyncRelayStorage,
+  {firstOpen, lookupUserDisplayName}: {firstOpen?: FirstOpenPublisher; lookupUserDisplayName?: LogAuthorNameLookup} = {}) {
   // It passes no session reauthentication, so a held log read answers at once.
   const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} }, { watched: () => false },
     lookupUserDisplayName);
@@ -286,7 +292,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage, lookupUserDispl
     if (head === "log" && route.length === 1 && request.method === "POST") {
       // Each coordinate gets its own decision. A refused op still takes its
       // coordinate, as a relay-written refusal, so the host's later ops land.
-      // What the scope already rules out is refused, and a blob out of reach
+      // What the scope already rules out, and any base, is refused, and a blob out of reach
       // fails the request, before preparation, which must never probe a blob
       // the host may not name; the rest is decided again under the append's
       // writer, where the scope cannot move.
@@ -356,6 +362,11 @@ export function createServiceHostFeed(storage: SyncRelayStorage, lookupUserDispl
       const row = storage.fetchLogCoordinate({ workspaceId, originId: second, originSeq });
       const scope = currentScope(workspaceId);
       return jsonResponse(logCoordinateAnswer(row && hostedRowDecision(scope, row).allowed ? row : null, epochLogFloor));
+    }
+
+    if (head === "first-open" && route.length === 1 && request.method === "POST" && firstOpen) {
+      const body = parseFirstOpenRequest(await readJsonObject(request));
+      return jsonResponse({ ok: true, outcome: await firstOpen({ workspaceId, ownerUserId: input.actor.userId, request: body, guard, signal: request.signal }) });
     }
 
     if (head === "blobs" && second === "have" && route.length === 2 && request.method === "POST") {

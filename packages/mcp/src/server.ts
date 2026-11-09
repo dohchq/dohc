@@ -73,6 +73,8 @@ import {
   saveRecoveryCopy,
   retryKeptEdits,
   stopAgain,
+  liveDocuments,
+  retryLiveDocument,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -306,6 +308,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_live_documents",
+    {description: "Read live document status from the owner's active list, including any first-open reason, code, source and recovery. A first open stopped after repeated build deadlines reads as retry-stopped. Owner workspace only.", inputSchema: {}},
+    async () => text(await liveDocuments(ctx)),
+  );
+
+  register(
+    "dohc_retry_live_document",
+    {description: "Resume live editing for a document, as the owner's Try again does. Clears a temporary first-open stop. Read dohc_live_documents for the result; a successful request alone does not mean the document is ready. Owner workspace only.", inputSchema: {path: z.string().min(1).max(4096)}},
+    async args => text(await retryLiveDocument(ctx, args)),
   );
 
   register(

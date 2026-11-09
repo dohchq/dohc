@@ -5,20 +5,13 @@ import {rowToLogRow} from "./rows";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, pathVisibleThroughShare} from "../shareFilter";
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
 import {currentServiceHostEnrollments, serviceHostOwnerRetains} from "./serviceHostEnrollment";
+import {hostedDocumentRows} from "./hostedDocumentIndex";
 import {listServiceActivationRetirements, type ServiceActivationRetirement} from "./serviceActivationRetirement";
 
-/** The op kinds that name one live document, and so may belong to a hosted one. */
-export const HOSTED_DOCUMENT_OP_KINDS = ["moment.append", "ydoc.update", "live.audit.application", "live.audit.settlement", "live.audit.base"] as const;
-const INDEX = "idx_sync_relay_log_hosted_documents";
 const CONFLICT_EFFECT_INDEX = "idx_sync_relay_log_conflict_effects";
 const CONFLICT_EFFECT_WHERE = "op_kind='moment.append' AND json_type(payload_json, '$.conflictId')='text'";
-const KINDS = HOSTED_DOCUMENT_OP_KINDS.map(kind => `'${kind}'`).join(",");
-const OBJECT = `CASE op_kind WHEN 'live.audit.settlement' THEN json_extract(payload_json, '$.record.binding.objectId')
-  WHEN 'live.audit.base' THEN json_extract(payload_json, '$.record.checkpoint.binding.objectId')
-  ELSE json_extract(payload_json, '$.objectId') END`;
 
 export function initializeServiceHostFeedIndex(db: SqliteDb): void {
-  db.exec(`CREATE INDEX IF NOT EXISTS ${INDEX} ON sync_relay_log(workspace_id, ${OBJECT}, relay_seq) WHERE op_kind IN (${KINDS})`);
   db.exec(`CREATE INDEX IF NOT EXISTS ${CONFLICT_EFFECT_INDEX} ON sync_relay_log(workspace_id, json_extract(payload_json, '$.objectId'), relay_seq)
     WHERE ${CONFLICT_EFFECT_WHERE}`);
 }
@@ -98,15 +91,13 @@ export function listServiceHostDocumentRows(storage: StorageContext, input: {
 }): SyncRelayLogRow[] {
   return storage.db.prepare(`SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq,
       admitted_author_snapshot_json, settlement_admission_json
-    FROM sync_relay_log INDEXED BY ${INDEX}
-    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND relay_seq>? ORDER BY relay_seq LIMIT ?`)
+    FROM ${hostedDocumentRows("?", "?")} AND relay_seq>? ORDER BY relay_seq LIMIT ?`)
     .all(input.workspaceId, input.objectId, input.afterRelaySeq, input.limit).map(rowToLogRow);
 }
 
 /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
 export function latestServiceHostDocumentUpdate(storage: StorageContext, input: {workspaceId: string; objectId: string}): number {
-  const row = storage.db.prepare(`SELECT relay_seq FROM sync_relay_log INDEXED BY ${INDEX}
-    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
+  const row = storage.db.prepare(`SELECT relay_seq FROM ${hostedDocumentRows("?", "?")} AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
     .get(input.workspaceId, input.objectId);
   return row ? Number(row.relay_seq) : 0;
 }

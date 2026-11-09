@@ -791,10 +791,10 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
-    config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
+    config:{targets:[target],validation:policy,validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
-    runDocument,
+    runDocument,lifetime:new AbortController().signal,
   })
   return {driver,target,pull}
 }

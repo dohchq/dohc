@@ -5,6 +5,7 @@ import type {SyncRelayLogRow, SyncRelayStorage} from "./storage";
 import {badRequest, errorResponse, notFound} from "./errors";
 import {jsonResponse} from "@dohc/service-http";
 import {REPLICA_LIVE_JOURNAL_MAX_ROWS} from "./storage/liveUpdateJournal";
+import type {FirstOpenPublisher} from "./firstOpenPublication";
 import type {LogAuthorNameLookup} from "./relayLogInputs";
 
 /**
@@ -23,6 +24,8 @@ export function createServiceHostReplication(options: {
   onLogRead?: (input: {workspaceId: string; bearer: string}, rows: readonly SyncRelayLogRow[]) => void;
   // Only the service host principal enables this route.
   hostedFeed?: boolean;
+  // With `hostedFeed`, answers `POST /sync/:workspaceId/hosted/first-open`.
+  firstOpen?: FirstOpenPublisher;
   // The owner's account name for the history of the hosted feed's edits.
   lookupUserDisplayName?: LogAuthorNameLookup;
   // Only the workspace replica principal enables this route.
@@ -33,7 +36,8 @@ export function createServiceHostReplication(options: {
     {watched: () => false}, undefined, (request, workspaceId, rows) => options.onLogRead?.({workspaceId,
       bearer: (request.headers.get("authorization") ?? "").slice(7)}, rows));
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
-  const feed = options.hostedFeed ? createServiceHostFeed(options.storage, options.lookupUserDisplayName) : undefined;
+  const feed = options.hostedFeed ? createServiceHostFeed(options.storage,
+    {firstOpen: options.firstOpen, lookupUserDisplayName: options.lookupUserDisplayName}) : undefined;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url), parts = url.pathname.split("/");

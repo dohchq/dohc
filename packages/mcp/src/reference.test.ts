@@ -157,4 +157,13 @@ describe("CLI, MCP, and app channel reference", () => {
       lifetime.abort();
     }
   });
+
+  it("documents the live document read and its first-open stop, offered only in the workspace that shares the note", async () => {
+    const page = await renderReference();
+    const section = (name: string) => page.split(`### \`${name}\``)[1]!.split(/\n#{2,3} /)[0]!;
+    expect(section("dohc_live_documents")).toContain("retry-stopped");
+    expect(section("dohc_live_documents")).toContain("Shared profiles do not offer this read.");
+    expect(section("dohc_live_documents")).not.toContain("Changes the workspace");
+    expect(section("dohc_retry_live_document")).toContain("Clears a temporary first-open stop");
+  });
 });

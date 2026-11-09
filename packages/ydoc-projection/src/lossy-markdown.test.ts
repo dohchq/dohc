@@ -4,7 +4,7 @@ import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
+import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyMarkdownVerdict, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
 
 vi.mock('./import-export.js', async importOriginal => {
   const actual = await importOriginal<typeof import('./import-export.js')>()
@@ -59,6 +59,14 @@ it('does not flag spaces after the last words of a note', () => {
 
 it('flags a note the editor cannot import', () => {
   expect(isLossyMarkdown('- a\n - b\n  - c\n   - d\n    - e\n')).toBe(true)
+})
+
+it.each([
+  `${'>'.repeat(121)} a\n`,
+  `${'*a '.repeat(17)}b${' a*'.repeat(17)}\n`,
+])('counts a nesting refusal as lossy, and tells the rich editor it refuses: %s', markdown => {
+  expect(lossyMarkdownVerdict(markdown)).toBe('refused')
+  expect(isLossyMarkdown(markdown)).toBe(true)
 })
 
 it('remembers a verdict by the digest it was given', () => {

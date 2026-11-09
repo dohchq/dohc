@@ -1,4 +1,5 @@
 import {accountIsFenced} from "./storage/accountDeletion";
+import {liveValidation} from "./liveValidation";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
@@ -18,6 +19,8 @@ import type { ServiceActivationAccess } from "./storage/serviceActivationAccess"
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
 import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
+import * as firstOpenStorage from "./storage/firstOpenEligibility";
+import type {FirstOpenHistoryReader, FirstOpenSource} from "./storage/firstOpenHistory";
 import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import * as serviceKeptEditsStorage from "./storage/serviceKeptEdits";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
@@ -337,6 +340,7 @@ export function openSyncRelayStorage(
     owner.write(() => initializeSyncRelaySchema(db));
     const storage = new SqliteSyncRelayStorage(
       db,
+      resolved,
       {
         pushConfigured: options.pushConfigured ?? false,
         workspaceQuotaBytes,
@@ -350,6 +354,7 @@ export function openSyncRelayStorage(
       },
       liveTickets as unknown as LiveTicketStoragePolicy | undefined,
       owner,
+      options.firstOpenHistory ?? liveValidation.readFirstOpenHistory,
     );
     storage.purgeExpiredShareRemovals(Date.now());
     return storage;
@@ -374,9 +379,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   constructor(
     readonly db: SqliteDb,
-    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
+    readonly databasePath: string,
+    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets" | "firstOpenHistory">>,
     private readonly liveTickets: LiveTicketStoragePolicy | undefined,
     private readonly owner: RelayWriteOwner,
+    private readonly firstOpenHistory: FirstOpenHistoryReader,
   ) {
     this.newDiscussionId = options.newDiscussionId;
   }
@@ -430,6 +437,27 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
+  }
+  readFirstOpenStanding(input: {workspaceId: string; ownerUserId: string; path: string}) {
+    return firstOpenStorage.readFirstOpenStanding(this, input);
+  }
+  readFirstOpenMoment(workspaceId: string, objectId: string) {
+    return firstOpenStorage.readFirstOpenMoment(this, workspaceId, objectId);
+  }
+  readFirstOpenReceipt(originId: string, source: FirstOpenSource) {
+    return firstOpenStorage.readFirstOpenReceipt(this, originId, source);
+  }
+  prepareFirstOpen(source: FirstOpenSource, signal?: AbortSignal) {
+    return firstOpenStorage.prepareFirstOpen(this, source, this.firstOpenHistory, signal);
+  }
+  catchUpFirstOpen(proof: firstOpenStorage.FirstOpenProof, signal?: AbortSignal) {
+    return firstOpenStorage.catchUpFirstOpen(this, proof, this.firstOpenHistory, signal);
+  }
+  writeFirstOpen(proof: firstOpenStorage.FirstOpenProof, base: firstOpenStorage.FirstOpenBase, guard: (context: AppendLogBatchGuardContext) => void) {
+    return firstOpenStorage.writeFirstOpen(this, proof, base, ({source, originId, op, blob}) => {
+      blobsStorage.putBlobInTransaction(this, {workspaceId: source.workspaceId, sha256: blob.sha256, content: blob.content, createdAtMs: Date.now()});
+      logStorage.appendLogBatchInTransaction(this, {workspaceId: source.workspaceId, originId, ops: [{...op}], guard});
+    });
   }
   hasServiceHostConflictEffect(input: Parameters<typeof serviceHostFeedStorage.hasServiceHostConflictEffect>[1]) {
     return serviceHostFeedStorage.hasServiceHostConflictEffect(this, input);

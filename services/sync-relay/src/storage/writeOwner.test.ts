@@ -7,6 +7,7 @@ function fixture() {
   const raw = new DatabaseSync(":memory:");
   raw.exec("CREATE TABLE work(value INTEGER); CREATE TABLE sync_relay_continuity(singleton INTEGER,stamp INTEGER,nonce TEXT,previous_nonce TEXT); INSERT INTO sync_relay_continuity VALUES(1,0,'initial',NULL)");
   const db: SqliteDb = {
+    get isTransaction() { return raw.isTransaction; },
     prepare: sql => raw.prepare(sql) as unknown as ReturnType<SqliteDb["prepare"]>,
     close: () => raw.close(),
     exec: sql => raw.exec(sql),

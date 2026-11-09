@@ -664,16 +664,34 @@ impl Ydoc {
     /// Both keep a block's text as written, so the source's text must also
     /// read, block by block, as the projection's text does.
     pub fn preserved_markdown_source(&self, canonical_projection: &str) -> Option<String> {
-        let reference = self.markdown_source_reference()?;
+        match self.preserved_markdown_source_cancellable(canonical_projection, &mut || {
+            Ok::<_, std::convert::Infallible>(())
+        }) {
+            Ok(source) => source,
+            Err(never) => match never {},
+        }
+    }
+
+    fn preserved_markdown_source_cancellable<E>(
+        &self,
+        canonical_projection: &str,
+        proceed: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Option<String>, E> {
+        let Some(reference) = self.markdown_source_reference() else {
+            return Ok(None);
+        };
         if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
-            return None;
+            return Ok(None);
         }
-        let source = self.markdown_source(&reference)?;
+        let Some(source) = self.markdown_source(&reference) else {
+            return Ok(None);
+        };
         if source == canonical_projection {
-            return Some(source);
+            return Ok(Some(source));
         }
-        self.source_reproduces(&source, canonical_projection, true)
-            .then_some(source)
+        Ok(self
+            .source_reproduces(&source, canonical_projection, true, proceed)?
+            .then_some(source))
     }
 
     /// The exact Markdown source for the version's file, where `snapshot_text`
@@ -692,7 +710,24 @@ impl Ydoc {
         canonical_projection: &str,
         snapshot_text: impl FnOnce() -> Result<Option<String>, E>,
     ) -> Result<Option<String>, E> {
-        if let Some(source) = self.preserved_markdown_source(canonical_projection) {
+        self.settled_markdown_source_cancellable(
+            canonical_projection,
+            snapshot_text,
+            &mut || Ok(()),
+        )
+    }
+
+    /// [`Ydoc::settled_markdown_source`], calling `proceed` before each
+    /// reading of the source so a caller can stop between them.
+    pub(crate) fn settled_markdown_source_cancellable<E>(
+        &self,
+        canonical_projection: &str,
+        snapshot_text: impl FnOnce() -> Result<Option<String>, E>,
+        proceed: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<Option<String>, E> {
+        if let Some(source) =
+            self.preserved_markdown_source_cancellable(canonical_projection, proceed)?
+        {
             return Ok(Some(source));
         }
         let Some(reference) = self.markdown_source_reference() else {
@@ -714,7 +749,7 @@ impl Ydoc {
         let (source_body, snapshot_body) = (body(&source), body(&snapshot));
         Ok(
             (source[source.len() - source_body..] == snapshot[snapshot.len() - snapshot_body..]
-                && self.source_reproduces(&source, canonical_projection, false))
+                && self.source_reproduces(&source, canonical_projection, false, proceed)?)
             .then_some(source),
         )
     }
@@ -727,48 +762,86 @@ impl Ydoc {
             return None;
         }
         let source = self.markdown_source(&reference)?;
-        self.source_reproduces(&source, canonical_projection, false)
-            .then_some(source)
+        let reproduces = self.source_reproduces::<std::convert::Infallible>(
+            &source,
+            canonical_projection,
+            false,
+            &mut || Ok(()),
+        );
+        matches!(reproduces, Ok(true)).then_some(source)
     }
 
     /// Whether `source` rebuilds `canonical_projection` under the source or
     /// projection reading. Without `reads_alike`, also try the successor
     /// reading and full reference links as desktop link marks. With it, each
     /// text block must read as its projection does; see [`markdown_reads_alike`].
-    fn source_reproduces(
+    fn source_reproduces<E>(
         &self,
         source: &str,
         canonical_projection: &str,
         reads_alike: bool,
-    ) -> bool {
-        [MarkdownReading::Source, MarkdownReading::Projection]
+        proceed: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        for reading in [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
             .chain((!reads_alike).then_some(MarkdownReading::Successor))
-            .any(|reading| {
-                let staged = Ydoc::wire();
-                if staged
-                    .rewrite_content_to_markdown_checked::<false>(
-                        ContentKind::Richdoc,
-                        source,
-                        reading,
-                        FileFold::No,
-                    )
-                    .is_err()
-                {
-                    return false;
-                }
-                let projects_alike = || {
-                    staged
-                        .project_richdoc()
-                        .is_ok_and(|projection| projection == canonical_projection)
-                };
-                (projects_alike()
-                    || (!reads_alike
-                        && reading == MarkdownReading::Source
-                        && staged.resolve_reference_links(source)
-                        && projects_alike()))
-                    && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
-            })
+        {
+            proceed()?;
+            let staged = Ydoc::wire();
+            if staged
+                .rewrite_content_to_markdown_checked::<false>(
+                    ContentKind::Richdoc,
+                    source,
+                    reading,
+                    FileFold::No,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let projects_alike = || {
+                staged
+                    .project_richdoc()
+                    .is_ok_and(|projection| projection == canonical_projection)
+            };
+            if (projects_alike()
+                || (!reads_alike
+                    && reading == MarkdownReading::Source
+                    && staged.resolve_reference_links(source)
+                    && projects_alike()))
+                && (!reads_alike || markdown_reads_alike(source, canonical_projection, reading))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// What `source` projects to under each reading
+    /// [`Ydoc::source_reproduces`] tries, in its order.
+    #[cfg(test)]
+    pub(crate) fn source_readings_for_test(
+        source: &str,
+    ) -> Vec<(&'static str, Result<String, CollabError>)> {
+        [
+            ("source", MarkdownReading::Source),
+            ("projection", MarkdownReading::Projection),
+            ("successor", MarkdownReading::Successor),
+        ]
+        .into_iter()
+        .map(|(name, reading)| {
+            let staged = Ydoc::wire();
+            let projected = staged
+                .rewrite_content_to_markdown_checked::<false>(
+                    ContentKind::Richdoc,
+                    source,
+                    reading,
+                    FileFold::No,
+                )
+                .and_then(|_| staged.project_richdoc());
+            (name, projected)
+        })
+        .collect()
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {
@@ -1581,6 +1654,14 @@ impl Ydoc {
                 }
                 if file_fold && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
+                }
+                // A staged rebuild exists only to be projected, so a source
+                // projection would refuse is not built.
+                if !WIRE_SEED && md_block_nodes(&blocks) > MAX_PROJECTION_NODES {
+                    return Err(CollabError::ProjectionTooComplex {
+                        max_depth: MAX_PROJECTION_DEPTH,
+                        max_nodes: MAX_PROJECTION_NODES,
+                    });
                 }
                 let edit = |txn: &mut yrs::TransactionMut<'_>| {
                     if WIRE_SEED && missing_schema_version {
@@ -3478,6 +3559,65 @@ fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {
         MdBlock::TaskList(items) => items.iter().any(|(_, item)| !item.blocks().is_empty()),
         _ => false,
     })
+}
+
+/// The fewest projection nodes `blocks` build: an element for each block,
+/// list item, table row and cell, each attribute the staged document writes,
+/// a heading's text, and a text with its run for each non-empty paragraph or
+/// code block. Wire-default cell spans are not counted.
+fn md_block_nodes(blocks: &[MdBlock<'_>]) -> usize {
+    let text_run = |body: &str| 2 * usize::from(!body.is_empty());
+    let paragraph = |body: &str| 1 + text_run(body);
+    let item = |body: &str, blocks: &[MdBlock<'_>]| 1 + paragraph(body) + md_block_nodes(blocks);
+    blocks
+        .iter()
+        .map(|block| match block {
+            MdBlock::Paragraph(body) => paragraph(body),
+            MdBlock::Heading { text, .. } => 3 + usize::from(!text.is_empty()),
+            MdBlock::Quote(inner) => 1 + md_block_nodes(inner),
+            MdBlock::BulletList(items) => {
+                1 + items
+                    .iter()
+                    .map(|(text, body)| item(text, body))
+                    .sum::<usize>()
+            }
+            MdBlock::OrderedList { items, .. } => {
+                2 + items
+                    .iter()
+                    .map(|entry| item(&entry.paragraph, entry.blocks()))
+                    .sum::<usize>()
+            }
+            MdBlock::TaskList(items) => {
+                1 + items
+                    .iter()
+                    .map(|(_, entry)| 1 + item(&entry.paragraph, entry.blocks()))
+                    .sum::<usize>()
+            }
+            MdBlock::CodeBlock { language, content } => {
+                1 + usize::from(!language.is_empty()) + text_run(content)
+            }
+            MdBlock::Rule => 1,
+            MdBlock::Table {
+                rows,
+                alignments,
+                row_heights,
+            } => {
+                // Escaped pipes and entities decode to text, never to none.
+                let cell = |(index, body): (usize, &String)| {
+                    1 + usize::from(matches!(alignments.get(index), Some(Some(_))))
+                        + paragraph(body)
+                };
+                1 + rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, cells)| {
+                        1 + usize::from(row_heights.contains_key(&row))
+                            + cells.iter().enumerate().map(cell).sum::<usize>()
+                    })
+                    .sum::<usize>()
+            }
+        })
+        .sum()
 }
 
 fn quote_fold_overflows(blocks: &[MdBlock<'_>], depth: usize) -> bool {
@@ -9806,6 +9946,103 @@ mod projection_tests {
         PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
     }
 
+    /// The count never exceeds what projecting the staged document charges.
+    #[test]
+    fn staged_block_nodes_are_a_lower_bound_on_projection_nodes() {
+        for markdown in [
+            "a\n\nb\n",
+            "# Title\n\n## \n",
+            "> a\n>\n> > b\n",
+            "- a\n- \n- b\n",
+            "* a\n\n  b\n\n* c\n",
+            "3. a\n4. b\n",
+            "- [ ] a\n- [x] b\n",
+            "| a | |\n| --- | --- |\n| `&#124;` | c |\n",
+            "```rs\nx\n```\n\n---\n",
+            "Text `&#60;` more\n",
+            "a  \nb\\\nc\n",
+        ] {
+            for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
+                let (blocks, refused) = parse_markdown_blocks_checked(markdown, reading);
+                assert!(!refused, "{markdown:?}");
+                let nodes = md_block_nodes(&blocks);
+                let staged = Ydoc::wire();
+                staged
+                    .rewrite_content_to_markdown_checked::<false>(
+                        ContentKind::Richdoc,
+                        markdown,
+                        reading,
+                        FileFold::No,
+                    )
+                    .unwrap();
+                assert!(
+                    staged.project_richdoc_with_node_budget(nodes - 1).is_err(),
+                    "{markdown:?} {reading:?}: {nodes}"
+                );
+            }
+        }
+    }
+
+    /// Without inline code the count is exact: every heading text, attribute,
+    /// cell and code text the staged document writes is charged.
+    #[test]
+    fn staged_block_nodes_count_plain_blocks_exactly() {
+        for markdown in [
+            "# Title\n\n## \n",
+            "3. a\n4. \n",
+            "- [ ] a\n- [x] b\n",
+            "| a | |\n| :-- | --: |\n| b | c |\n",
+            "```rs\nx\n```\n\n```\n```\n\n---\n",
+        ] {
+            let (blocks, refused) =
+                parse_markdown_blocks_checked(markdown, MarkdownReading::Source);
+            assert!(!refused, "{markdown:?}");
+            let nodes = md_block_nodes(&blocks);
+            let staged = Ydoc::wire();
+            staged
+                .rewrite_content_to_markdown_checked::<false>(
+                    ContentKind::Richdoc,
+                    markdown,
+                    MarkdownReading::Source,
+                    FileFold::No,
+                )
+                .unwrap();
+            assert!(
+                staged.project_richdoc_with_node_budget(nodes).is_ok()
+                    && staged.project_richdoc_with_node_budget(nodes - 1).is_err(),
+                "{markdown:?}: {nodes}"
+            );
+        }
+    }
+
+    /// A witness projection would refuse is refused before its staged
+    /// document is built, however small the document it claims to rebuild.
+    #[test]
+    fn a_staged_rebuild_over_the_node_limit_builds_nothing() {
+        let at_limit = "a\n\n".repeat((MAX_PROJECTION_NODES - 1) / 3);
+        let over = format!("{at_limit}a\n");
+        let staged = Ydoc::wire();
+        assert!(matches!(
+            staged.rewrite_content_to_markdown_checked::<false>(
+                ContentKind::Richdoc,
+                &over,
+                MarkdownReading::Source,
+                FileFold::No,
+            ),
+            Err(CollabError::ProjectionTooComplex { .. })
+        ));
+        assert_eq!(staged.encode_full_state(), [0, 0]);
+        staged
+            .rewrite_content_to_markdown_checked::<false>(
+                ContentKind::Richdoc,
+                &at_limit,
+                MarkdownReading::Source,
+                FileFold::No,
+            )
+            .unwrap();
+        staged.project_richdoc().unwrap();
+    }
+
     #[test]
     fn json_text_and_xml_text_charge_actual_run_nodes() {
         let doc = Doc::new();
@@ -13254,3 +13491,7 @@ mod fence_projection_tests {
 #[cfg(test)]
 #[path = "ydoc/nested1b_allowlist_tests.rs"]
 mod nested1b_allowlist_tests;
+
+#[cfg(test)]
+#[path = "ydoc/first_open_base_tests.rs"]
+mod first_open_base_tests;

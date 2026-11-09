@@ -88,7 +88,10 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+    // A hosted replica originates nothing, so it has no lineage to sweep.
+    if crate::hosted::is_hosted(tx, workspace_id)?
+        || !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)?
+    {
         return Ok(Vec::new());
     }
     let rows: Vec<(String, String, Option<String>)> = collect_rows(

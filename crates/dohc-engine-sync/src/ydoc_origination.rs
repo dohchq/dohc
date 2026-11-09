@@ -167,6 +167,11 @@ pub fn originate_ydoc_base_in_tx(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<BaseOrigination, SyncError> {
+    // Only the relay starts a hosted document's lineage. Pulls call this, so
+    // a hosted replica answers with nothing rather than failing them.
+    if crate::hosted::is_hosted(tx, &key.workspace_id)? {
+        return Ok(BaseOrigination::NothingToDo);
+    }
     let Some(marker) = dohc_engine_collab::read_marker_in(tx, key).map_err(SyncError::corrupt)?
     else {
         return Ok(BaseOrigination::NothingToDo);

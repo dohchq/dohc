@@ -144,9 +144,12 @@ function buildCliRequest(
     case "fileChats":
     case "documentRead":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+    case "retryLiveDocument":
+      return {verb: command.verb, protocolVersion: common.protocolVersion, args: {cwd: common.cwd, actor: common.actor, path: command.path}};
     case "saveRecoveryCopy":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
         ...(command.incident === undefined ? {} : { incident: command.incident }) } };
+    case "liveDocuments":
     case "liveKeptEdits":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
     case "retryKeptEdits":
@@ -402,7 +405,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["dataset", "liveDocuments", "retryLiveDocument", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);

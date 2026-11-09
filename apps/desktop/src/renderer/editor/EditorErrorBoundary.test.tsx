@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MarkdownNestingRefusal } from "@dohc/ydoc-projection";
 import { EditorErrorBoundary } from "./EditorErrorBoundary";
 
 function BrokenEditor(): never {
@@ -39,6 +40,21 @@ describe("EditorErrorBoundary", () => {
     expect(screen.getByTestId("editor-crash-recovery")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Render again" }));
     expect(screen.getByTestId("editor-crash-recovery")).toBeTruthy();
+  });
+
+  it("shows the refused view for a note nested too deeply, without reporting a crash", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    function DeepEditor(): never {
+      throw new MarkdownNestingRefusal("lexing");
+    }
+    render(
+      <EditorErrorBoundary resetKey="notes/deep.md" refused={limit => <p>refused by {limit}</p>}>
+        <DeepEditor />
+      </EditorErrorBoundary>,
+    );
+    expect(screen.getByText("refused by lexing")).toBeTruthy();
+    expect(screen.queryByTestId("editor-crash-recovery")).toBeNull();
+    expect(logged.mock.calls.some(call => String(call[0]).startsWith("[dohc] editor recovered"))).toBe(false);
   });
 
   it("recovers automatically when a different document reset key is rendered", () => {

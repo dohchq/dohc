@@ -1154,6 +1154,13 @@ export function DesktopWorkspaceShell(props: {
     (id: string, path: string) => bridge().resumeOwnerLiveDocument({ workspaceId: id, path }),
     [],
   );
+  // Try again on a file the server refused to start live is the owner's
+  // Resume: one more request, whose answer arrives in a later status.
+  const retryLiveFirstOpen = useCallback(
+    (id: string, path: string) =>
+      bridge().resumeOwnerLiveDocument({ workspaceId: id, path }).then(() => null),
+    [],
+  );
   const reportPendingLiveStop = useCallback((id: string, path: string, objectId: string, refusal: LiveStopRefusal, listPath = path) => {
     const current = () => workspaceIdRef.current === id && !workspaceAdmission.superseded;
     const identity = `live-stop-edits-pending:${objectId}`;
@@ -6571,6 +6578,7 @@ export function DesktopWorkspaceShell(props: {
                 ? {}
                 : {
                     onOpenLiveDocuments: () => openLiveDocuments(workspaceId),
+                    onRetryLiveFirstOpen: retryLiveFirstOpen,
                   })}
               {...crashReportNotice}
               automationHolds={automationHolds}

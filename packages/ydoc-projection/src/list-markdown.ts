@@ -1,10 +1,12 @@
+import { MarkdownNestingRefusal } from './markdown-nesting-refusal.js'
+
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
 // The editor's import and the desktop's read view both read list lines
 // through this one scan, so they agree on which tabs it keeps as text.
 export function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (text: string) => string): string {
   // Flat items beginning with ordinary text cannot introduce child blocks.
-  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+(?:\n[A-Za-z][^\n\t]*\n?)?$/u.test(markdown)) return markdown
+  if (!markdown.includes('\r') && /^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+(?:\n[A-Za-z][^\n\t]*\n?)?$/u.test(markdown)) return markdown
   const parents: Array<{ indent: number; column: number; content?: number }> = []
   const lines = markdown.split('\n')
   let changed = false
@@ -66,7 +68,7 @@ export function assertSupportedListMarkdown(markdown: string, preserveContentTab
       while (parents.length && indent < parents.at(-1)!.column) parents.pop()
     }
     const inList = parents.length > 0
-    if (quotes > 120) refuse()
+    if (quotes > 120) throw new MarkdownNestingRefusal('depth')
     if (run) { fence = run; fenceInList = inList; blank = false; continue }
     if (!inList && rule) { blank = false; continue }
     if ((inList || marker)
@@ -79,7 +81,7 @@ export function assertSupportedListMarkdown(markdown: string, preserveContentTab
       let depth = quotes + (parents.length + 1) * 2
       body = body.trimStart()
       while (true) {
-        if (depth > 128) refuse()
+        if (depth > 128) throw new MarkdownNestingRefusal('depth')
         if (body.startsWith('> ')) { body = body.slice(2); depth += 1; quoted = true; continue }
         const child = /^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)/u.exec(body)
         if (!child) break
