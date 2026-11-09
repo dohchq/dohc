@@ -954,6 +954,8 @@ describe("CLI socket server", () => {
       if (claim?.run.agentId !== "codex") throw new Error("Expected Codex's run");
       dispatchedRun = "codex";
       dispatchedRunId = claim.run.runId;
+      // It holds the run's secret, and is still not the run.
+      callerRunSecret = RUN_SECRET;
 
       const replied = await invoke("reply", { ...terminalArgs(), thread: cliThreadId(asked.thread.id), body: "Checked", attachments: [], needsDecision: false });
       expect(await authorAgentIdOf(replied)).toBe("terminal");
@@ -965,11 +967,11 @@ describe("CLI socket server", () => {
 
       const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
       context.stopSync = stop;
-      // In a chain an automation started, it writes at the chain's depth, and
-      // a person named through the socket is still the run's agent.
+      // In a chain an automation started, it writes at the chain's depth.
       agentRunDepth = 2;
       await invoke("stopSync", terminalArgs());
       expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "terminal", onBehalfOf: "person-local", depth: 2 });
+      // A person named through the socket is still the run's agent.
       await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
       expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2 });
     });
