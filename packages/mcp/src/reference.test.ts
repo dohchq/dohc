@@ -155,16 +155,13 @@ describe("CLI, MCP, and app channel reference", () => {
       lifetime.abort();
     }
   });
-});
 
-
-it.each([
-  ["dohc_live_documents", "Changes the workspace"],
-  ["dohc_live_documents", "retry-stopped"],
-  ["dohc_retry_live_document", "Clears a temporary first-open stop"],
-])("keeps %s free of the unshipped or incorrect claim %s", async (name, claim) => {
-  const page = await renderReference();
-  const section = page.split(`### \`${name}\``)[1]!.split(/\n#{2,3} /)[0]!;
-  expect(section).not.toContain(claim);
-  if (name === "dohc_live_documents") expect(section).toContain("Shared profiles do not offer this read.");
+  it("documents the live document read and its first-open stop, offered only in the workspace that shares the note", async () => {
+    const page = await renderReference();
+    const section = (name: string) => page.split(`### \`${name}\``)[1]!.split(/\n#{2,3} /)[0]!;
+    expect(section("dohc_live_documents")).toContain("retry-stopped");
+    expect(section("dohc_live_documents")).toContain("Shared profiles do not offer this read.");
+    expect(section("dohc_live_documents")).not.toContain("Changes the workspace");
+    expect(section("dohc_retry_live_document")).toContain("Clears a temporary first-open stop");
+  });
 });

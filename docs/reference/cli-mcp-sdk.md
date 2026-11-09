@@ -294,7 +294,7 @@ Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { 
 
 ### `dohc_live_documents`
 
-Read live document status from the owner's active list, including any first-open reason, code, source and recovery. Owner workspace only.
+Read live document status from the owner's active list, including any first-open reason, code, source and recovery. A first open stopped after repeated build deadlines reads as retry-stopped. Owner workspace only.
 
 Live document status requires the owning workspace. Shared profiles do not offer this read.
 
@@ -304,7 +304,7 @@ Returns `{ ok: true, documents: { path, objectId, status, reason?, firstOpen? }[
 
 ### `dohc_retry_live_document`
 
-Resume live editing for a document, as the owner's Try again does. Read dohc_live_documents for the result; a successful request alone does not mean the document is ready. Owner workspace only.
+Resume live editing for a document, as the owner's Try again does. Clears a temporary first-open stop. Read dohc_live_documents for the result; a successful request alone does not mean the document is ready. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
