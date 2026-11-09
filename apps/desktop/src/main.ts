@@ -563,7 +563,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsToWake, agentYouRun, automationAgent, listAgents, isOwnAgentId, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsToWake, agentYouRun, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { createAgentWaits } from "./agents/agentWaits";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
@@ -2804,6 +2804,7 @@ const activity = {
     workspaceId: string,
     run: ActiveAgentRun,
     expectedRootPath?: string,
+    secret?: string,
   ) =>
     workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       workspaceActivity.claimAgentRun(
@@ -2811,6 +2812,7 @@ const activity = {
         lease.state.activity,
         run,
         expectedRootPath,
+        secret,
       ),
     ),
   clearAgentRun: (
@@ -2845,11 +2847,14 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.agentWriteRunId(lease.state.activity),
     ),
-  // A run dohc started keeps its workspace after it ends; any other run only
-  // while it holds a slot.
-  agentRunWorkspace: (runId: string) => chatDispatchService.runWorkspace(runId) ??
-    workspaceAuthorities.workspaceIds().find((workspaceId) =>
-      withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId)),
+  dispatchedRunSecret: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.dispatchedRunSecret(lease.state.activity),
+    ),
+  // A run has a workspace only while it holds that workspace's slot.
+  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
+  ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3654,8 +3659,10 @@ const chatDispatchService = createChatDispatchService({
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       const workspaceId = workspace.workspaceId;
       if (run) {
-      if (!(await activity.claimAgentRun(workspaceId, { ...run, onBehalfOf: localUserId() },
-            lease.binding.canonicalRootPath,
+      // The secret goes to the run's slot only, never to capture or the engine.
+      const { secret, ...attribution } = run;
+      if (!(await activity.claimAgentRun(workspaceId, { ...attribution, onBehalfOf: localUserId() },
+            lease.binding.canonicalRootPath, secret,
           ))) {
         throw new Error("Another agent run is already active in this workspace.");
       }
@@ -4968,7 +4975,6 @@ const chatWrites = createChatWrites({
   },
   agentIdsToWake: async (body, dmAgentId) =>
     agentIdsToWake((await readCachedUserSettingsFile(stateDir())).settings, body, dmAgentId),
-  isOwnAgentId: async (name) => isOwnAgentId((await readCachedUserSettingsFile(stateDir())).settings, name),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
@@ -5129,7 +5135,6 @@ const { startDesktopCliServer } = createDesktopCliServer({
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
   agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
-  isOwnAgentId: async (name) => isOwnAgentId((await readCachedUserSettingsFile(stateDir())).settings, name),
   agentWaiting: (agentId) => agentWaits.begin(agentId),
   listWorkspaces,
   openWorkspaceActivity,

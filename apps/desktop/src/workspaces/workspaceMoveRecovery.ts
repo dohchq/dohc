@@ -12,7 +12,7 @@ import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 const Roots = z.object({ operationId: HistoryOperationId, from: z.string(), to: z.string() });
 const Mover = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("human"), humanId: z.string() }).strict(),
-  z.object({ kind: z.literal("agent"), agentId: z.string(), onBehalfOf: z.string(), agentRunId: z.string().optional(), depth: z.number().optional() }).strict(),
+  z.object({ kind: z.literal("agent"), agentId: z.string(), agentName: z.string().optional(), onBehalfOf: z.string(), agentRunId: z.string().optional(), depth: z.number().optional() }).strict(),
   z.object({ kind: z.literal("automation"), automationId: z.string(), onBehalfOf: z.string().optional(), depth: z.number() }).strict(),
 ]);
 const FileRecord = Roots.extend({

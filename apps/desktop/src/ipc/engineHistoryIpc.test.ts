@@ -387,6 +387,17 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       expect(EngineMomentDetailRecord.safeParse({...record, authors: [author], authorPresentations}).success, JSON.stringify(author)).toBe(false);
     }
   });
+  it("shows no name an agent gave with a character that hides or reorders text", () => {
+    for (const agentName of ["‮avon", "No​va", "Nova⁦", "ㅤ", "Nova­"]) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      const agent = {kind: "agent", agentId: "writer", agentName, onBehalfOf: "owner"} as const;
+      detail.moment.authors = [agent];
+      expect(engineMomentDetailForIpc(detail, names)).toMatchObject({agentAuthorName: "owner"});
+      detail.moment.authors = [agent, {kind: "agent", agentId: "other", onBehalfOf: "local"}];
+      expect(engineMomentDetailForIpc(detail, names)).toMatchObject({authorLabels: ["owner", "You"]});
+    }
+  });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide("v2\n") }),

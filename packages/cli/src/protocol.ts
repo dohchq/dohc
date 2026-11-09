@@ -37,6 +37,9 @@ const requestBase = {
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
   // Caller-reported, unverified attribution; grants no authority.
   door: z.enum(["cli", "mcp"]).optional(),
+  // The secret of the run dohc started this caller in (DOHC_RUN_SECRET). Only
+  // a request that carries it is that run's.
+  runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 };
 
 // An agent you run, by its id in Settings › Agents. The desktop refuses an
@@ -50,7 +53,12 @@ const argsBase = {
 };
 
 const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
-const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: z.string().min(1).max(200).optional() }).strict();
+// A name the calling agent gives itself, recorded as the author of its edits
+// and messages. A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
+const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
 const threadsArgsSchema = z
@@ -107,11 +115,6 @@ export const chatReportedAgentSchema = z
     message: "A reported version needs its product.",
   });
 export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
-// A name the calling agent gives itself, recorded as the author of its edits
-// and messages. A slash is refused so no name can pass for an automation's id.
-export const documentAgentNameSchema = z
-  .string()
-  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
 const postArgsSchema = z
   .object({
     ...argsBase,

@@ -3,6 +3,7 @@
 // injects how agent, named, and automation authors read, and the Collection
 // automations it names them from; nothing here touches Electron or process
 // state.
+import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
   WorkspaceEngineCapture,
@@ -70,7 +71,7 @@ function isSnapshotPerson(author: MomentAuthor): boolean {
 function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
   switch (author.kind) {
     case "unattributed": return "An unrecorded author";
-    case "agent": return author.agentName ?? names.agent(author) ?? "Agent";
+    case "agent": return shownAgentName(author.agentName) ?? names.agent(author) ?? "Agent";
     case "human": return author.humanName ?? names.person(author) ?? "Another person";
     case "named": return names.named(author);
     case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
@@ -130,7 +131,7 @@ function engineMomentBaseForIpc(
 ) {
   // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
-  const agentAuthorName = author?.kind === "agent" ? author.agentName ?? names.agent(author) : undefined;
+  const agentAuthorName = author?.kind === "agent" ? shownAgentName(author.agentName) ?? names.agent(author) : undefined;
   const personAuthorName = author?.kind === "human" && !("humanName" in author) ? names.person(author) : undefined;
   const liveAuthorName = author !== undefined && isSnapshotPerson(author) ? authorLabel(author, names) : undefined;
   return {

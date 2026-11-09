@@ -1690,6 +1690,10 @@ export const ActorPresentation = z.object({
   self: z.boolean(),
   // The Settings agent that wrote your agent's message. Its Settings color wins over `hue`.
   agentId: z.string().min(1).max(64).optional(),
+  // A connected agent, writing outside a run dohc started: it takes the plug.
+  // "unknown" is an agent post that came through a share, which serves no run
+  // id, so it could be either kind. It takes the plug and claims no kind.
+  connected: z.union([z.literal(true), z.literal("unknown")]).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
 export const AgentColorChangedEvent = z.object({
@@ -6078,6 +6082,8 @@ export const RunnerSelfTestResult = z.object({
   detail: z.string().min(1).max(2_000),
   // The run's log, when the check started a runner.
   logPath: z.string().min(1).max(4_096).optional(),
+  // The runner replied, but not as the check's run, so the check can't pass.
+  unconfirmed: z.literal(true).optional(),
 }).strict();
 export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
 

@@ -65,6 +65,8 @@ export type VersionedOrigin =
 export type AgentAuthor = JsonObject & {
   kind: "agent";
   agentId: string;
+  /** The name a connected agent gave itself, a label for History. */
+  agentName?: string;
   onBehalfOf: string;
   agentRunId?: string;
   /** The run's chain depth when an automation started it. */

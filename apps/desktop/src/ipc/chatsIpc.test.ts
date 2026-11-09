@@ -163,7 +163,6 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
     currentCredentialGeneration: () => 0,
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova", agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
-    isOwnAgentId: async () => false,
     localInstallationId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
     betweenDispatchScans: (_workspaceId, write) => write(),
@@ -896,7 +895,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     }],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"sealed",
   });
   const options:CliServerOptions={
-    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgent:()=>null,dispatchedRunId:()=>null,agentWriteRunId:()=>null,agentRunWorkspace:()=>undefined,connectedAgent:async()=>null,isOwnAgentId:async()=>false,
+    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgent:()=>null,dispatchedRunId:()=>null,dispatchedRunSecret:()=>null,agentWriteRunId:()=>null,agentRunWorkspace:()=>undefined,connectedAgent:async()=>null,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
     chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
     openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},

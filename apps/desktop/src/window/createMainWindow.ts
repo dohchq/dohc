@@ -351,7 +351,19 @@ export function createMainWindow(options?: {
     denyDisallowed(event, event.url);
   });
 
-  window.once("ready-to-show", () => window.show());
+  const retireInitialShow = () => {
+    window.removeListener("ready-to-show", showInitially);
+    window.webContents.removeListener("dom-ready", showInitially);
+    window.removeListener("closed", retireInitialShow);
+  };
+  const showInitially = () => {
+    retireInitialShow();
+    window.show();
+  };
+  window.once("ready-to-show", showInitially);
+  // A hidden window can finish loading without a first-paint event.
+  window.webContents.once("dom-ready", showInitially);
+  window.once("closed", retireInitialShow);
 
   // Each load and each change tells this window's renderer whether it is
   // full screen, where macOS hides the traffic lights.

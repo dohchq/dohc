@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { DOHC_AGENT_RUNS_GUARD, notARealFolderRefusal } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
-import { UNNAMED_AGENT_ID, type ActiveAgentRun } from "./activeAgentRun";
+import { UNNAMED_AGENT_ID } from "@dohc/workspace-contracts/engine";
+import type { ActiveAgentRun } from "./activeAgentRun";
 
 // Local agent runs. An agent run is a LOCAL concept: a small record in this
 // installation's file under .dohc/agent-runs (id, startedAt, agentId, status).

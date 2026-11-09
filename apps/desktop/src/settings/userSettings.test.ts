@@ -21,7 +21,6 @@ import {
   newAgentHue,
   newAgentId,
   newAgentName,
-  isOwnAgentId,
   withAgentDohcStarts,
   effectiveThemeMode,
   zoomPercent,
@@ -336,17 +335,6 @@ describe("desktop user settings model", () => {
     const agents = { default: testAgent({ name: "Codex" }), other: testAgent({ name: "codex 2" }) };
     expect(newAgentName(agents, "Codex")).toBe("Codex 3");
     expect(newAgentName(agents, "Claude Code")).toBe("Claude Code");
-  });
-
-  it("knows your agents by id, not by name", () => {
-    const settings = {
-      agents: {
-        default: testAgent({ name: "Atlas", nameBeforeMigration: "Nova" }),
-        "agent-b": testAgent({ name: "Bee" }),
-      },
-    };
-    for (const id of ["default", "agent-b"]) expect(isOwnAgentId(settings, id)).toBe(true);
-    for (const name of ["Atlas", "Nova", "Bee", "Default", "dohc-mcp"]) expect(isOwnAgentId(settings, name)).toBe(false);
   });
 
   it("leaves an agent you run to you when Chats sets up an agent dohc starts", () => {

@@ -24,9 +24,8 @@ import {
 // local person, naming the automation and its chain depth. Identity is never
 // the caller's: it comes from the registry and the signed-in session.
 // `agentName` is the name an agent gave for itself, such as an MCP client's
-// handshake name. It is provenance, like a document edit's author; without
-// it the message is from "Agent". A name that is one of the person's agents'
-// ids is dropped, so no other agent takes that agent's place.
+// handshake name. The message shows it; without it the message is from
+// "Agent". It is only a claim, so the message's key is the unnamed agent's.
 // `agentId` names an agent you run, or the agent of a run dohc dispatched.
 // Main knows both; the message carries that agent's id and settings name.
 // `reported` is what the agent said about itself: its MCP client's product
@@ -95,8 +94,6 @@ export function createChatWrites(dependencies: {
   agentDisplayName(agentId: string): Promise<string>;
   // The agents a person's message wakes, from its body and its DM's agent.
   agentIdsToWake(body: string, dmAgentId: string | null): Promise<string[]>;
-  // Whether a name is one of the person's agents' ids.
-  isOwnAgentId(name: string): Promise<boolean>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -113,7 +110,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, agentIdsToWake, isOwnAgentId, localInstallationId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, agentIdsToWake, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
@@ -230,13 +227,6 @@ export function createChatWrites(dependencies: {
     return await personActorFor(writer);
   }
 
-  // Keeps an agent's own name unless it is one of the person's agents' ids,
-  // which would give its message that agent's key.
-  async function admittedWriter(writer: ChatWriter): Promise<ChatWriter> {
-    if (writer.via !== "cli" || writer.agentName === undefined || !await isOwnAgentId(writer.agentName)) return writer;
-    return { via: "cli", actor: writer.actor, ...(writer.agentId ? { agentId: writer.agentId } : {}), ...(writer.reported ? { reported: writer.reported } : {}) };
-  }
-
   // People and agents; only they react.
   async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
@@ -268,8 +258,7 @@ export function createChatWrites(dependencies: {
       (findWorkspace(place.workspaceId)?.remote ?? findWorkspace(place.workspaceId)?.pausedRemote) !== undefined) {
       throw new AutomationChatSessionWait();
     }
-    const writer = await admittedWriter(input.writer);
-    const actor = await actorFor(writer);
+    const actor = await actorFor(input.writer);
     const wakeAgentIds = input.writer.via === "renderer"
       ? await agentIdsToWake(body, await dmAgentIdOf(place, admission))
       : [];
@@ -278,7 +267,7 @@ export function createChatWrites(dependencies: {
       credentials: admission.actorCredentials,
       installationId: admission.installationId,
       workspaceId: place.workspaceId,
-      writer,
+      writer: input.writer,
       displayName: actor.author.displayName,
     });
     return { admission, fields: {
@@ -515,7 +504,9 @@ export function deriveChatActorKey(input: {
       author: input.writer.via === "automation"
         ? { kind: "automation", automationId: input.writer.automationId }
         : input.writer.via === "cli" && input.writer.actor === "agent"
-          ? { kind: "agent", claimedName: input.writer.agentId ?? input.writer.agentName }
+          // Only an agent you run and a run dohc dispatched name their agent.
+          // Any other agent is the unnamed agent, whatever name it gives.
+          ? { kind: "agent", claimedName: input.writer.agentId }
           : { kind: "human" },
       displayName: input.displayName,
       origin: input.writer.via,

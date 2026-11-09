@@ -7,4 +7,9 @@
 # manual_is_multiple_of), run `cargo update -p time` under the Rust gate,
 # and delete this ignore.
 [advisories]
-ignore = ["RUSTSEC-2026-0009"]
+ignore = [
+  "RUSTSEC-2026-0009",
+  # Temporary. Remove by 2026-11-13, when the bundled SQLite update (#3511)
+  # lands, together with the matching entry in deny.toml.
+  "RUSTSEC-2026-0459",
+]
