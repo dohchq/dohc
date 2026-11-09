@@ -1953,8 +1953,24 @@ pub fn apply_committed_with_settlement_limit(
                     }
                 }
             }
-            match if authors.is_empty() { Ok(()) } else {
-                crate::author_coverage::admit_accepted_in(tx, &key, &authors)
+            // Canonical person and agent snapshots retain names and explicit depths.
+            let native_actor = admitted_actor.as_ref().filter(|(_, attribution)| {
+                own.is_some() || attribution.as_ref().is_some_and(|attribution| {
+                    attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Automation
+                })
+            });
+            // An author this delivery does not name moves from its update into
+            // the interval, so it needs room there too.
+            let promoted = crate::author_coverage::promoted_native_in(
+                tx,
+                &key,
+                &b.lineage_claim_id,
+                &event.metadata.accepted.receipt.update_digest,
+                &authors,
+                native_actor.and_then(|(actor, attribution)| Some((actor.as_deref()?, attribution.as_ref()?))),
+            )?;
+            match if authors.is_empty() && promoted.is_none() { Ok(()) } else {
+                crate::author_coverage::admit_delivery_in(tx, &key, &authors, promoted.as_deref())
             } {
                 Err(CollabError::AuthorCapacity)
                     if crate::author_coverage::unresolved_in(tx, &key)? =>
@@ -1969,12 +1985,6 @@ pub fn apply_committed_with_settlement_limit(
                 result => result?,
             }
             mutation_attempted = true;
-            // Canonical person and agent snapshots retain names and explicit depths.
-            let native_actor = admitted_actor.as_ref().filter(|(_, attribution)| {
-                own.is_some() || attribution.as_ref().is_some_and(|attribution| {
-                    attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Automation
-                })
-            });
             let append = durable::record_authorized_update_in_tx(
                 tx,
                 &key,

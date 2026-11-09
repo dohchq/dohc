@@ -24,6 +24,28 @@ CREATE TABLE ydoc_native_authors (
       REFERENCES ydoc_docs(workspace_id, version_id, object_id)
       ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+-- A read of one coverage skips the rows of every other.
+CREATE INDEX ydoc_native_authors_coverage
+    ON ydoc_native_authors (workspace_id, version_id, object_id, coverage, seq);
+-- The interval-wide rows above, one per identity and depth with their count,
+-- so admission reads each identity once however many updates it wrote. A
+-- missing scope or run is ''; a recorded one is never empty.
+CREATE TABLE ydoc_native_interval_authors (
+    workspace_id    TEXT    NOT NULL,
+    version_id      TEXT    NOT NULL,
+    object_id       TEXT    NOT NULL,
+    actor_origin_id TEXT    NOT NULL,
+    actor_kind      TEXT    NOT NULL CHECK (actor_kind IN ('human','agent','automation')),
+    on_behalf_of    TEXT    NOT NULL,
+    agent_run_id    TEXT    NOT NULL,
+    chain_depth     INTEGER NOT NULL CHECK (chain_depth >= 0),
+    updates         INTEGER NOT NULL CHECK (updates > 0),
+    PRIMARY KEY (workspace_id, version_id, object_id, actor_origin_id, actor_kind,
+                 on_behalf_of, agent_run_id, chain_depth),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id)
+      ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
 -- Unsettled updates already in the journal keep their authors.
 INSERT OR IGNORE INTO ydoc_native_authors
     (workspace_id, version_id, object_id, lineage_claim_id, update_digest, seq,

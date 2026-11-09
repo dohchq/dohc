@@ -115,6 +115,144 @@ fn adopted_agent_edit_its_acceptance_does_not_name_is_settled_with_its_agent() {
 }
 
 #[test]
+fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_enters() {
+    let person = LiveAuthorEntry::Human {
+        human_id: "owner".into(),
+        human_name: "Owner".into(),
+    };
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    // The accepted interval is full. The delivery's snapshot names only a
+    // person it already holds.
+    let full: Vec<Value> = std::iter::once(serde_json::to_value(&person).unwrap())
+        .chain((1..crate::author_coverage::MAX_INTERVAL_AUTHORS).map(
+            |index| serde_json::json!({"kind": "human", "humanId": format!("person-{index}")}),
+        ))
+        .collect();
+    let key = f.key.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET pending_authors_json=?1 \
+                 WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4",
+                rusqlite::params![
+                    Value::Array(full).to_string(),
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id
+                ],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+    let mut event = native_tail_event(&f, edit.update, edit.delivery_id, 7);
+    event.metadata.author_snapshot = Some(vec![person]);
+    let interval = |f: &Fixture| {
+        f.store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+            .unwrap()
+    };
+    let apply = |f: &mut Fixture, event: AdmittedLiveUpdate| {
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap()
+    };
+    // Acceptance would move the agent into the interval, where it has no
+    // room. The relay settles and offers the same delivery again.
+    let refused = apply(&mut f, event.clone());
+    assert!(
+        matches!(
+            refused,
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired)
+        ),
+        "{refused:?}"
+    );
+    let held = interval(&f);
+    assert_eq!(held.len(), crate::author_coverage::MAX_INTERVAL_AUTHORS);
+    assert!(agents(&held).is_empty());
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
+        })
+        .unwrap();
+    let applied = apply(&mut f, event);
+    assert!(
+        matches!(applied, ApplicationResult::Applied(..)),
+        "{applied:?}"
+    );
+    let settled = interval(&f);
+    assert_eq!(
+        agents(&settled),
+        [serde_json::json!(["native-agent", "installation-person"])]
+    );
+    assert_eq!(settled.len(), 2);
+}
+
+/// Counts the SQLite steps one read of the store takes.
+fn read_steps(
+    f: &mut Fixture,
+    read: impl FnOnce(&rusqlite::Connection) -> Result<(), crate::CollabError>,
+) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let steps = std::sync::Arc::new(AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&steps);
+    f.store
+        .hooks_with(|conn| {
+            conn.progress_handler(
+                1,
+                Some(move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+        })
+        .unwrap();
+    f.store.read_with(read).unwrap();
+    f.store
+        .hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
+        .unwrap();
+    steps.load(Ordering::Relaxed)
+}
+
+#[test]
+fn held_admission_cost_does_not_grow_with_the_private_tail() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let key = f.key.clone();
+    // Each accepted delivery's admission reads the reserved authors.
+    let reserved =
+        |conn: &rusqlite::Connection| crate::author_coverage::reserved_in(conn, &key).map(|_| ());
+    let mut edits = 0;
+    let mut steps = Vec::new();
+    for tail in [10, 90] {
+        while edits < tail {
+            edits += 1;
+            native_tail_edit_for(
+                &mut f,
+                &format!("private edit {edits}"),
+                10 + edits,
+                Some("installation-person"),
+            );
+        }
+        // The first read prepares its statements.
+        read_steps(&mut f, reserved);
+        steps.push(read_steps(&mut f, reserved));
+    }
+    assert!(
+        steps[1] <= steps[0] + steps[0] / 10,
+        "held admission steps grew with the private tail: {steps:?}"
+    );
+}
+
+#[test]
 fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
     let mut f = Fixture::new();
     f.edit(true);

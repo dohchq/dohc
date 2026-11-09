@@ -208,23 +208,28 @@ pub(crate) fn record_native_in(
     Ok(())
 }
 
-/// An accepted delivery of a native update names its authors. The update no
-/// longer owes its author when the delivery names the same kind, identity and
-/// run, so one edit is not listed again under another scope. An author the
-/// delivery does not name stays interval-wide, as a fold keeps it, so a held
-/// lineage names it too.
-pub(crate) fn accept_native_in(
-    conn: &Connection,
-    key: &DocKey,
-    lineage_claim_id: &str,
-    update_digest: &str,
-    authors: &[String],
-) -> Result<(), CollabError> {
-    let row: Option<(String, String, Option<String>, String)> = conn
-        .prepare_cached(
-            "SELECT actor_kind, actor_origin_id, agent_run_id, coverage FROM ydoc_native_authors \
-             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 \
-             AND update_digest=?5",
+/// One update's native author.
+struct NativeRow {
+    kind: String,
+    id: String,
+    on_behalf_of: Option<String>,
+    depth: u32,
+    run: Option<String>,
+    coverage: String,
+}
+
+impl NativeRow {
+    /// The row of the update with this digest, found by its key.
+    fn read_in(
+        conn: &Connection,
+        key: &DocKey,
+        lineage_claim_id: &str,
+        update_digest: &str,
+    ) -> Result<Option<Self>, CollabError> {
+        conn.prepare_cached(
+            "SELECT actor_kind, actor_origin_id, on_behalf_of, chain_depth, agent_run_id, coverage \
+             FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+             AND lineage_claim_id=?4 AND update_digest=?5",
         )
         .map_err(sql)?
         .query_row(
@@ -235,48 +240,206 @@ pub(crate) fn accept_native_in(
                 lineage_claim_id,
                 update_digest
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok(Self {
+                    kind: row.get(0)?,
+                    id: row.get(1)?,
+                    on_behalf_of: row.get(2)?,
+                    depth: row.get(3)?,
+                    run: row.get(4)?,
+                    coverage: row.get(5)?,
+                })
+            },
         )
         .optional()
-        .map_err(sql)?;
-    let Some((kind, id, run, coverage)) = row else {
+        .map_err(sql)
+    }
+
+    /// The row an append records for this author.
+    fn appended(actor: &str, attribution: &ChangeAttribution) -> Self {
+        Self {
+            kind: attribution.actor_kind.as_str().to_owned(),
+            id: actor.to_owned(),
+            on_behalf_of: attribution.on_behalf_of.clone(),
+            depth: attribution.depth,
+            run: attribution.agent_run_id.clone(),
+            coverage: "update".to_owned(),
+        }
+    }
+
+    /// Whether an accepted delivery's author lists name this kind, identity
+    /// and run.
+    fn named_by(&self, authors: &[String]) -> Result<bool, CollabError> {
+        let mut named = false;
+        for json in authors {
+            let entries: Vec<Value> = serde_json::from_str(json)
+                .map_err(|_| corrupt("accepted coverage is not an author list"))?;
+            named |= entries
+                .iter()
+                .any(|author| names(author, &self.kind, &self.id, self.run.as_deref()));
+        }
+        Ok(named)
+    }
+
+    /// This author as the list a moment records.
+    fn json(&self) -> Result<Option<String>, CollabError> {
+        let attribution = ChangeAttribution {
+            actor_kind: ChangeActorKind::parse(&self.kind)
+                .ok_or_else(|| corrupt("native author has an unknown kind"))?,
+            on_behalf_of: self.on_behalf_of.clone(),
+            depth: self.depth,
+            run: None,
+            agent_run_id: self.run.clone(),
+        };
+        Ok(dohc_engine_domain::moment_author_json(
+            Some(self.id.as_str()),
+            Some(&attribution),
+        ))
+    }
+}
+
+/// The author an accepted delivery moves from its update into the interval:
+/// the one its update's row holds, or the one its own append records, when
+/// the delivery does not name it. Its admission counts that author with the
+/// delivery's own, before anything is written.
+pub(crate) fn promoted_native_in(
+    conn: &Connection,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    update_digest: &str,
+    authors: &[String],
+    appended: Option<(&str, &ChangeAttribution)>,
+) -> Result<Option<String>, CollabError> {
+    let row = match NativeRow::read_in(conn, key, lineage_claim_id, update_digest)? {
+        Some(row) => row,
+        None => match appended {
+            Some((actor, attribution)) => NativeRow::appended(actor, attribution),
+            None => return Ok(None),
+        },
+    };
+    if row.coverage != "update" || row.named_by(authors)? {
+        return Ok(None);
+    }
+    row.json()
+}
+
+/// An accepted delivery of a native update names its authors. The update no
+/// longer owes its author when the delivery names the same kind, identity and
+/// run, so one edit is not listed again under another scope. An author the
+/// delivery does not name stays interval-wide, as a fold keeps it, so a held
+/// lineage names it too. [`promoted_native_in`] admitted it.
+pub(crate) fn accept_native_in(
+    conn: &Connection,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    update_digest: &str,
+    authors: &[String],
+) -> Result<(), CollabError> {
+    let Some(row) = NativeRow::read_in(conn, key, lineage_claim_id, update_digest)? else {
         return Ok(());
     };
-    let mut named = false;
-    for json in authors {
-        let entries: Vec<Value> = serde_json::from_str(json)
-            .map_err(|_| corrupt("accepted coverage is not an author list"))?;
-        named |= entries
-            .iter()
-            .any(|author| names(author, &kind, &id, run.as_deref()));
-    }
-    let statement = match (named, coverage.as_str()) {
-        (true, "update" | "interval") => {
-            "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
-             AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5"
+    let this_row = |statement: &str| -> Result<(), CollabError> {
+        conn.prepare_cached(statement)
+            .map_err(sql)?
+            .execute(params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage_claim_id,
+                update_digest
+            ])
+            .map_err(sql)?;
+        Ok(())
+    };
+    const FORGET: &str = "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 \
+         AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5";
+    match (row.named_by(authors)?, row.coverage.as_str()) {
+        (true, "update") => this_row(FORGET),
+        (true, "interval") => {
+            this_row(FORGET)?;
+            uncount_interval_in(conn, key, &row)
         }
         // The unresolved settlement's moment names it already. If that
         // settlement is compensated, the author does not return.
-        (true, "moment") => {
+        (true, "moment") => this_row(
             "UPDATE ydoc_native_authors SET coverage='replaced' WHERE workspace_id=?1 \
-             AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5"
-        }
+             AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5",
+        ),
         (false, "update") => {
-            "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
-             AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5"
+            count_interval_in(
+                conn,
+                key,
+                "lineage_claim_id=?4 AND update_digest=?5",
+                &[&lineage_claim_id, &update_digest],
+            )?;
+            this_row(
+                "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
+                 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5",
+            )
         }
-        _ => return Ok(()),
-    };
-    conn.prepare_cached(statement)
+        _ => Ok(()),
+    }
+}
+
+/// Adds the native rows `filter` selects to their identities' interval-wide
+/// counts, before those rows enter the interval.
+fn count_interval_in(
+    conn: &Connection,
+    key: &DocKey,
+    filter: &str,
+    values: &[&dyn rusqlite::ToSql],
+) -> Result<(), CollabError> {
+    let document: [&dyn rusqlite::ToSql; 3] = [&key.workspace_id, &key.version_id, &key.object_id];
+    conn.prepare_cached(&format!(
+        "INSERT INTO ydoc_native_interval_authors (workspace_id, version_id, object_id, \
+         actor_origin_id, actor_kind, on_behalf_of, agent_run_id, chain_depth, updates) \
+         SELECT workspace_id, version_id, object_id, actor_origin_id, actor_kind, \
+         COALESCE(on_behalf_of, ''), COALESCE(agent_run_id, ''), chain_depth, COUNT(*) \
+         FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+         AND {filter} GROUP BY actor_origin_id, actor_kind, on_behalf_of, agent_run_id, chain_depth \
+         ON CONFLICT (workspace_id, version_id, object_id, actor_origin_id, actor_kind, \
+         on_behalf_of, agent_run_id, chain_depth) DO UPDATE SET updates=updates+excluded.updates"
+    ))
+    .map_err(sql)?
+    .execute(&*[&document[..], values].concat())
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// Takes one update of `row`'s identity out of its interval-wide count.
+fn uncount_interval_in(
+    conn: &Connection,
+    key: &DocKey,
+    row: &NativeRow,
+) -> Result<(), CollabError> {
+    const IDENTITY: &str = "workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+         AND actor_origin_id=?4 AND actor_kind=?5 AND on_behalf_of=COALESCE(?6,'') \
+         AND agent_run_id=COALESCE(?7,'') AND chain_depth=?8";
+    let identity: &[&dyn rusqlite::ToSql] = &[
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &row.id,
+        &row.kind,
+        &row.on_behalf_of,
+        &row.run,
+        &row.depth,
+    ];
+    let remaining = conn
+        .prepare_cached(&format!(
+            "UPDATE ydoc_native_interval_authors SET updates=updates-1 WHERE {IDENTITY} AND updates>1"
+        ))
         .map_err(sql)?
-        .execute(params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            lineage_claim_id,
-            update_digest
-        ])
+        .execute(identity)
         .map_err(sql)?;
+    if remaining == 0 {
+        conn.prepare_cached(&format!(
+            "DELETE FROM ydoc_native_interval_authors WHERE {IDENTITY}"
+        ))
+        .map_err(sql)?
+        .execute(identity)
+        .map_err(sql)?;
+    }
     Ok(())
 }
 
@@ -320,8 +483,10 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     Ok(authors)
 }
 
-/// Adds the authors of this document's interval-wide rows, and unless `held`,
-/// of its updates in `(boundary, through]`.
+/// Adds the authors of this document's interval-wide rows, one per identity
+/// whatever their count, and unless `held`, of its updates in
+/// `(boundary, through]`. A held lineage's private updates stay out of its
+/// interval, so its read never visits them.
 fn union_native_in(
     conn: &Connection,
     key: &DocKey,
@@ -332,10 +497,24 @@ fn union_native_in(
 ) -> Result<(), CollabError> {
     let mut stmt = conn
         .prepare_cached(
+            "SELECT actor_origin_id, actor_kind, NULLIF(on_behalf_of, ''), MAX(chain_depth), \
+             NULLIF(agent_run_id, '') FROM ydoc_native_interval_authors \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+             GROUP BY actor_origin_id, actor_kind, on_behalf_of, agent_run_id",
+        )
+        .map_err(sql)?;
+    let rows = stmt
+        .query(params![key.workspace_id, key.version_id, key.object_id])
+        .map_err(sql)?;
+    union_identities(rows, authors)?;
+    if held {
+        return Ok(());
+    }
+    let mut stmt = conn
+        .prepare_cached(
             "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth), agent_run_id \
              FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-             AND (coverage='interval' \
-               OR (coverage='update' AND NOT ?6 AND seq>COALESCE(?4,-1) AND seq<=?5)) \
+             AND coverage='update' AND seq>COALESCE(?4,-1) AND seq<=?5 \
              GROUP BY actor_origin_id, actor_kind, on_behalf_of, agent_run_id",
         )
         .map_err(sql)?;
@@ -345,8 +524,7 @@ fn union_native_in(
             key.version_id,
             key.object_id,
             boundary,
-            through,
-            held
+            through
         ])
         .map_err(sql)?;
     union_identities(rows, authors)
@@ -402,12 +580,30 @@ pub fn fold_in(conn: &Connection, key: &DocKey, through: i64) -> Result<(), Coll
     if accepted_only_in(conn, key)? {
         return Ok(());
     }
+    let boundary: Option<i64> = conn
+        .query_row(
+            "SELECT settled_update_seq FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql)?
+        .flatten();
+    const FOLDED: &str = "coverage='update' AND seq<=?4 AND seq>COALESCE(?5,-1)";
+    count_interval_in(conn, key, FOLDED, &[&through, &boundary])?;
     conn.execute(
-        "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
-         AND version_id=?2 AND object_id=?3 AND coverage='update' AND seq<=?4 \
-         AND seq>COALESCE((SELECT settled_update_seq FROM ydoc_docs \
-         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),-1)",
-        params![key.workspace_id, key.version_id, key.object_id, through],
+        &format!(
+            "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
+             AND version_id=?2 AND object_id=?3 AND {FOLDED}"
+        ),
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            through,
+            boundary
+        ],
     )
     .map_err(sql)?;
     Ok(())
@@ -439,6 +635,17 @@ fn resolve_native_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError>
 pub(crate) fn clear_native_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     conn.execute(
         "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(sql)?;
+    uncount_document_in(conn, key)
+}
+
+/// Empties this document's interval-wide counts once its interval-wide rows go.
+fn uncount_document_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM ydoc_native_interval_authors \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
@@ -738,8 +945,20 @@ pub fn admit_accepted_in(
     } else {
         authors
     };
+    admit_delivery_in(conn, key, authors, None)
+}
+
+/// Admits an accepted delivery's authors with the native author its
+/// acceptance moves into the interval ([`promoted_native_in`]), and retains
+/// the delivery's own. Refuses before writing when either would not fit.
+pub(crate) fn admit_delivery_in(
+    conn: &Connection,
+    key: &DocKey,
+    authors: &[String],
+    promoted: Option<&str>,
+) -> Result<(), CollabError> {
     let mut covered = reserved_in(conn, key)?;
-    for json in authors {
+    for json in authors.iter().map(String::as_str).chain(promoted) {
         admit(&mut covered, json)?;
     }
     retain_pending_in(conn, key, authors)
@@ -836,22 +1055,27 @@ fn advance(
     // leaves the private tail's own authors above the native boundary. A
     // reserved attempt keeps them until it resolves, so compensation can
     // restore each one as its own row.
-    let consumed = "workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-         AND (coverage='interval' OR (coverage='update' AND NOT ?4))";
+    let consumed = if keep_boundary {
+        "coverage='interval'"
+    } else {
+        "coverage IN ('interval','update')"
+    };
     conn.execute(
         &if reserve_attempt {
-            format!("UPDATE ydoc_native_authors SET coverage='moment' WHERE {consumed}")
+            format!(
+                "UPDATE ydoc_native_authors SET coverage='moment' WHERE workspace_id=?1 \
+                 AND version_id=?2 AND object_id=?3 AND {consumed}"
+            )
         } else {
-            format!("DELETE FROM ydoc_native_authors WHERE {consumed}")
+            format!(
+                "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+                 AND object_id=?3 AND {consumed}"
+            )
         },
-        params![
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            keep_boundary
-        ],
+        params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
+    uncount_document_in(conn, key)?;
     clear_provisional_author_in(conn, key)?;
     Ok(())
 }
@@ -935,6 +1159,7 @@ pub fn compensate_in(
         params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
+    count_interval_in(conn, key, "coverage='moment'", &[])?;
     conn.execute(
         "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
          AND version_id=?2 AND object_id=?3 AND coverage='moment'",
