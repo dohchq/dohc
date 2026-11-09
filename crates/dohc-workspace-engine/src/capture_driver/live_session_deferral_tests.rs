@@ -1873,6 +1873,78 @@ async fn a_renamed_recovered_copy_leaves_its_occupant_an_ordinary_new_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_secret_key_retries_quarantined_capture_without_content_changes() {
+    let harness = Harness::new();
+    let secret = harness.root.join(".env");
+    std::fs::write(&secret, "TOKEN=original").expect("secret artifact");
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    // Capture keeps the key beside the store's database. In a workspace that is
+    // `.dohc/engine` under the root; this harness keeps the store elsewhere.
+    let key = harness.db.with_file_name("secret.key");
+    let staged_key = key.with_file_name("restored-key.tmp");
+    std::fs::rename(&key, &staged_key).expect("park original key outside its known location");
+    std::fs::write(&secret, "TOKEN=changed").expect("external secret edit");
+    files.handle().request_rescan();
+    for _ in 0..3 {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let parked = files.handle().stats().await.expect("parked stats");
+    assert_eq!(
+        (parked.quarantined, parked.deferred, parked.dirty),
+        (1, 0, false)
+    );
+    assert!(
+        !key.exists(),
+        "capture must not mint over encrypted history"
+    );
+
+    // Deliver only the restored key through the callback queue and debounce.
+    // OS backends can also emit ancestor-directory events for the rename,
+    // which would hide a dropped key event. No lease or content event fires.
+    std::fs::rename(&staged_key, &key).expect("atomic key restore");
+    dohc_engine_files::watch::notify_settled_change_for_harness(
+        harness.root.clone(),
+        harness
+            .root
+            .join(dohc_engine_crypto::SECRET_KEY_FILE_RELATIVE),
+        &files.handle(),
+    );
+    let noticed = files.handle().stats().await.expect("callback stats").dirty;
+    if !noticed {
+        files.close().await;
+        harness.close();
+        panic!("key restore never reached callback/debounce rescan");
+    }
+    assert!(harness.capture(&files.handle()).await);
+    let recovered = files.handle().stats().await.expect("recovered stats");
+    assert_eq!(
+        (recovered.quarantined, recovered.deferred, recovered.dirty),
+        (0, 0, false)
+    );
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).expect("store observer");
+    let loaded_key = dohc_engine_crypto::load_key_file(key.parent().expect("store folder"))
+        .expect("load restored key")
+        .expect("original key restored");
+    let captured = dohc_engine_domain::SecretFileStore::new(&mut store, &loaded_key)
+        .materialize_secret_file(WORKSPACE_ID, "main", ".env")
+        .expect("decrypt captured secret")
+        .expect("secret tip");
+    assert_eq!(captured, "TOKEN=changed".into());
+    assert_eq!(
+        std::fs::read(&secret).expect("intact secret"),
+        captured.as_bytes()
+    );
+    drop(store);
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() {
     use dohc_engine_collab::{
         ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
@@ -3271,6 +3343,7 @@ async fn started_env(
         first_import: None,
         carried,
         rules: None,
+        quarantine_retry_at: None,
     };
     let cancel = CancellationToken::new();
     env.observation
@@ -3475,5 +3548,79 @@ async fn a_file_the_first_pass_under_changed_rules_left_keeps_its_label() {
         "the held file records with the rescan that found it"
     );
     assert!(env.carried.is_none(), "the release recorded the file");
+    close_env(env, layer, supervisor, db).await;
+}
+
+// The controller stops rescanning a path after a few identical failures, and
+// the watcher ignores the engine's own writes. A failure that clears without
+// any watched event, here a secret key restored beside the store, outside the
+// workspace, must still be retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quarantined_capture_retries_without_a_watched_event() {
+    use std::time::Duration;
+
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    let secret = root.join(".env");
+    std::fs::write(&secret, "TOKEN=original").expect("secret artifact");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let (mut env, layer) = started_env(&root, &actor, &LeaseRegistry::new(), None).await;
+    tick_until_converged(&mut env, &layer).await;
+    let files = layer.files.handle();
+    let cancel = CancellationToken::new();
+
+    let key = db.with_file_name("secret.key");
+    let staged_key = key.with_file_name("restored-key.tmp");
+    std::fs::rename(&key, &staged_key).expect("hide the key");
+    std::fs::write(&secret, "TOKEN=changed").expect("external secret edit");
+    // The drive loop marks failing passes degraded; this test ticks directly.
+    env.status.mark_degraded();
+    let mut parked = false;
+    for _ in 0..50 {
+        env.tick(&layer, &cancel).await;
+        let stats = files.stats().await.expect("stats");
+        if (stats.quarantined, stats.dirty) == (1, false) {
+            parked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(parked, "the secret never settled in the quarantine");
+
+    std::fs::rename(&staged_key, &key).expect("restore the key");
+    for _ in 0..3 {
+        env.tick(&layer, &cancel).await;
+    }
+    assert_eq!(
+        files.stats().await.expect("stats").quarantined,
+        1,
+        "nothing retries the secret before the interval"
+    );
+    // The retry interval has passed.
+    env.quarantine_retry_at = Some(tokio::time::Instant::now());
+    let mut recovered = false;
+    for _ in 0..5 {
+        env.tick(&layer, &cancel).await;
+        if files.stats().await.expect("stats").quarantined == 0 {
+            recovered = true;
+            break;
+        }
+    }
+    assert!(recovered, "the quarantined secret was never retried");
+    assert_eq!(env.quarantine_retry_at, None);
+
+    let mut store = dohc_engine_storage::EngineStore::open(&db, 1).expect("store observer");
+    let loaded_key = dohc_engine_crypto::load_key_file(key.parent().expect("store folder"))
+        .expect("load restored key")
+        .expect("original key restored");
+    let captured = dohc_engine_domain::SecretFileStore::new(&mut store, &loaded_key)
+        .materialize_secret_file(WORKSPACE_ID, "main", ".env")
+        .expect("decrypt captured secret")
+        .expect("secret tip");
+    assert_eq!(captured, "TOKEN=changed".into());
+    drop(store);
     close_env(env, layer, supervisor, db).await;
 }
