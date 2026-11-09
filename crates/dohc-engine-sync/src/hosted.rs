@@ -1460,10 +1460,10 @@ pub(crate) fn stopped_hold(
 /// What holds a document whose read reached the end of its rows from being
 /// ready: heads still parked, a released hold whose row still stands, a
 /// live edit its bound session never admitted, retained work of it still
-/// waiting, a head at a spelling of the path of a document that is not ready,
-/// a head away from the path its scope names, or queued work it still owes,
-/// in that order. A reason it stored before counts only where
-/// it still holds. `None` once nothing does.
+/// waiting, a head at a spelling of the path of a document that is not ready
+/// or has left the scope, a head away from the path its scope names, or
+/// queued work it still owes, in that order. A reason it stored before counts
+/// only where it still holds. `None` once nothing does.
 fn completed_hold(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
@@ -1486,8 +1486,12 @@ fn completed_hold(
     }
     // A document that moved while another at a spelling of its path still
     // waited on it (#2421) shares that one's file on a disk that ignores
-    // case, so it is not ready until that one moves or is ready.
+    // case, so it is not ready until that one moves or is ready. One that
+    // left the scope keeps its file there until it parks.
     for head in head_writes(conn, workspace_id, object_id)? {
+        if held_by_departed(conn, workspace_id, &head.version_id, object_id, &head.path)? {
+            return Ok(Some(HostedHold::WorkWaiting));
+        }
         for held_by in
             spelling_occupants(conn, workspace_id, &head.version_id, object_id, &head.path)?
         {
