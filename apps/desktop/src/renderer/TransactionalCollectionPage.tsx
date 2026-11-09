@@ -567,7 +567,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled || detailsEdit !== null} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
       editing={detailsEdit ? { fieldId: detailsEdit.field.fieldId, content: <div data-edit-in-place className="flex min-w-0 flex-1 items-start gap-2" onKeyDown={editKeys}>
         {editForm(detailsEdit.field, `min-w-0 flex-1${inPlace(detailsEdit.field) ? " -mt-[7px] -mb-[2.5px] -ml-[11px]" : ""}`)}<span className="flex shrink-0 gap-2">{editButtons}</span>
-      </div> } : undefined}
+      </div>, onCancel: () => { if (!cellDisabled) closeEditor(); } } : undefined}
       onClose={() => { setDetails(null); if (detailsEdit) closeEditor(); }}
       onEdit={(field, operation, opener) => { trigger.current = opener; setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation, row: details, field }); }}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}

@@ -359,6 +359,37 @@ describe("transactional Collection page", () => {
     await waitFor(() => expect(document.activeElement).toBe(open));
   });
 
+  it("cancels a field open in details on Escape from Done, and the next Escape closes details", async () => {
+    setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Name" }));
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Alicia" } });
+    const done = within(dialog).getByRole("button", { name: "Done" });
+    done.focus();
+    fireEvent.keyDown(done, { key: "Escape" });
+    expect(within(dialog).queryByRole("form", { name: "Edit Name" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    expect(document.activeElement).toBe(done);
+    fireEvent.keyDown(done, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+  });
+
+  it("unlocks the page when details closes during an attachment upload", async () => {
+    const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
+    const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
+    const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
+    setup({ dataset: description, uploadFile }); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Amount" }));
+    fireEvent.change(within(dialog).getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt")] } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(uploadFile.mock.calls[0]![1].aborted).toBe(true);
+    await act(async () => pendingUpload.reject(new DOMException("The upload was cancelled.", "AbortError")));
+    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("closes details on Escape and returns keyboard focus to the row", async () => {
     setup(); await screen.findByText("Alice");
     const open = screen.getByRole("button", { name: "Open record 1" });

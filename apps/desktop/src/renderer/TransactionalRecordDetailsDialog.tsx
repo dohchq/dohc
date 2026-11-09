@@ -26,8 +26,9 @@ export interface TransactionalRecordDetailsDialogProps extends Pick<CollectionRe
   canEdit(field: TransactionalField): boolean;
   /** Opens a field for editing here. `opener` is its pencil, which takes focus back when the edit closes. */
   onEdit(field: TransactionalField, operation: DatasetOperation, opener: HTMLElement): void;
-  /** The field open for editing, and what shows in its place: the page's input, any error, Cancel and Save. */
-  editing?: { fieldId: string; content: ReactNode };
+  /** The field open for editing, and what shows in its place: the page's input, any error, Cancel and Save.
+   * While it is open, Escape anywhere in details calls `onCancel`, so the next Escape closes details. */
+  editing?: { fieldId: string; content: ReactNode; onCancel(): void };
   onAction?(operation: DatasetOperation): void;
   onClose(): void;
   onError: CollectionResourceError;
@@ -51,7 +52,7 @@ function ScopedRecordDetails(props: TransactionalRecordDetailsDialogProps) {
   const edits = props.offline ? [] : props.operations.filter(operation => operation.tableId === read.tableId && operation.kind === "edit" && !operation.readOnly);
   const actions = props.offline || !props.onAction ? [] : props.operations.filter(operation => operation.tableId === read.tableId && operation.kind === "action");
   const hasEditableField = fields.some(field => props.canEdit(field) && edits.some(operation => operation.fieldIds.includes(field.fieldId)));
-  return <Overlay onClose={props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Record details", className: "dohc-elevated dohc-pop-in flex max-h-[90vh] w-[min(620px,92vw)] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink" }}>
+  return <Overlay onClose={props.editing?.onCancel ?? props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Record details", className: "dohc-elevated dohc-pop-in flex max-h-[90vh] w-[min(620px,92vw)] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink" }}>
     <div className="flex items-center justify-between gap-3"><div><h2 className="m-0 text-base font-semibold">Record details</h2><p className="m-0 mt-1 text-[12px] text-muted">Record {String(props.row.id)}{props.unavailable ? null : ` · Version ${props.row.version}`}</p></div><SecondaryButton onClick={props.onClose}>Close</SecondaryButton></div>
     {props.unavailable ? <p role="status" className="m-0 text-sm text-muted">{props.unavailable}</p> : <>
     {props.buttons?.fields.length ? <div data-testid="record-buttons" className="flex flex-wrap items-center gap-1.5">{props.buttons.fields.map(field => <Fragment key={field}>{props.buttons!.render(field, props.row)}</Fragment>)}</div> : null}
