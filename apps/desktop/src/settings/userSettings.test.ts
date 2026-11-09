@@ -203,6 +203,14 @@ describe("desktop user settings model", () => {
     expect(agentIdsNamedIn(settings, "Claude Code, please")).toEqual([]);
   });
 
+  it("names no agent inside a file link, as the sent message shows", () => {
+    const settings = { agents: { default: testAgent({ name: "Nova" }) } };
+    for (const body of ["see @[trip @Nova notes.md]", "see @[notes @Nova.md]", "see @[trip/@Nova.md#Day 1]"]) {
+      expect(agentIdsNamedIn(settings, body), body).toEqual([]);
+    }
+    expect(agentIdsNamedIn(settings, "@[trip @Nova notes.md] for @Nova")).toEqual(["default"]);
+  });
+
   it("gives each agent the handle a message reads back in full, so a name with punctuation wakes its own agent", () => {
     expect(["Codex (Work)", "Nova.", "R2-D2-", "-Scout_", "Café Bot", "🦊"].map(agentHandle))
       .toEqual(["CodexWork", "Nova", "R2-D2", "Scout", "CaféBot", ""]);
