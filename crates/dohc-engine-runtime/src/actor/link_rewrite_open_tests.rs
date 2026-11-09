@@ -166,7 +166,7 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_open_rewrite_and_inverse_preserve_typing_labels_and_new_links() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let (lease, _) = f.open_document("source-0000").await;
     let start = Instant::now();
     assert_eq!(
@@ -220,7 +220,7 @@ async fn ordinary_open_rewrite_and_inverse_preserve_typing_labels_and_new_links(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn target_edit_in_open_document_refuses_before_any_compensation() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("target-forward", Arc::new(NoFaults)).await.unwrap();
     f.type_document(
@@ -251,7 +251,7 @@ async fn target_edit_in_open_document_refuses_before_any_compensation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_forward_open_inverse_and_open_forward_closed_inverse() {
     for open_forward in [false, true] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         let mut lease = if open_forward {
             Some(f.open_document("source-0000").await.0)
         } else {
@@ -288,7 +288,7 @@ async fn closed_forward_open_inverse_and_open_forward_closed_inverse() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adopted_open_source_stays_untouched_and_adoption_before_undo_refuses() {
     for after in [false, true] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         let (lease, _) = f.open_document("source-0000").await;
         if after {
             f.pass("adopt-after", Arc::new(NoFaults)).await.unwrap();
@@ -326,7 +326,7 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
         } else {
             FaultPoint::StorageAfterCommitBeforeAck
         };
-        let mut f = Fixture::new(1, 1);
+        let mut f = Fixture::new(1, 1).await;
         let (lease, _) = f.open_document("source-0000").await;
         let ws = f.ws.clone();
         let root = f.root.to_path_buf();
@@ -394,7 +394,7 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_not_restored() {
-    let f = Fixture::new(2000, 4999);
+    let f = Fixture::new(2000, 4999).await;
     // Publication has its own proof that a queued update waits at most one turn.
     let _publication = f.capture.clone().lock_owned().await;
     let _index_hold = f.actor.hold_link_drain();
@@ -525,7 +525,7 @@ async fn linking_document_updates_wait_at_most_one_turn_and_mid_undo_edits_are_n
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn literal_wikilinks_without_editor_elements_stay_unchecked() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, doc) = f.open_document_with_elements("source-0000", false).await;
     let before = doc.encode_state_vector();
     let result = f.pass("literal-open", Arc::new(NoFaults)).await.unwrap();
@@ -546,7 +546,7 @@ async fn literal_wikilinks_without_editor_elements_stay_unchecked() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_editor_opened_after_read_uses_its_ydoc_and_stays_open() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     drop(lease);
     let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
@@ -578,7 +578,7 @@ async fn an_editor_opened_after_read_uses_its_ydoc_and_stays_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("fence-gap", Arc::new(NoFaults)).await.unwrap();
     f.settle_document("source-0000").await;
@@ -597,7 +597,7 @@ async fn typing_after_fence_settlement_before_preflight_preserves_the_edit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_does_not_write_through_another_undos_internal_lease() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let before = format!("{BODY} [[other-old]]");
     let after = format!("{BODY} [[other-new]]");
     f.edit("source-0000", "source-0000.md", &before).await;
@@ -688,7 +688,7 @@ async fn forward_does_not_write_through_another_undos_internal_lease() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("reopen-gap", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
@@ -730,7 +730,7 @@ async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     let key = DocKey::new(&f.ws, "main", "source-0000").unwrap();
     let result = f
@@ -767,7 +767,7 @@ async fn marked_projection_over_the_limit_is_unchecked_instead_of_an_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
-    let f = Fixture::new(2, 2);
+    let f = Fixture::new(2, 2).await;
     f.pass("unmapped-inverse", Arc::new(NoFaults))
         .await
         .unwrap();
@@ -816,7 +816,7 @@ impl super::super::super::materialization::SelfWriteRecorder for BaselineWrites 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled() {
     for relevant in [false, true] {
-        let f = Fixture::new(1, 1);
+        let f = Fixture::new(1, 1).await;
         let (lease, _) = f.open_document("source-0000").await;
         let body = if relevant {
             "typing [[old]]"
@@ -855,7 +855,7 @@ async fn baseline_records_self_writes_and_leaves_unrelated_live_edits_unsettled(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("parked-peer", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
@@ -941,7 +941,7 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmappable_preflight_then_close_uses_the_disk_inverse() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     f.pass("close-unmappable", Arc::new(NoFaults))
         .await
         .unwrap();
@@ -967,7 +967,7 @@ async fn unmappable_preflight_then_close_uses_the_disk_inverse() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preflight_settle_failure_is_durable_and_other_members_continue() {
-    let f = Fixture::new(2, 2);
+    let f = Fixture::new(2, 2).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("settle-error", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
@@ -1015,7 +1015,7 @@ async fn preflight_settle_failure_is_durable_and_other_members_continue() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preflight_checkpoint_wait_releases_editor_gates() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.pass("preflight-lock", Arc::new(NoFaults)).await.unwrap();
     f.publish().await;
@@ -1095,7 +1095,7 @@ async fn forward_commit_retries_a_locked_writer_without_losing_the_source() {
 }
 
 async fn forward_lock_proof(lock_at_commit: bool) {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     f.actor
         .run(|store, _| {
@@ -1184,7 +1184,7 @@ async fn forward_lock_proof(lock_at_commit: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_write_defers_only_the_stale_source() {
-    let f = Fixture::new(2, 2);
+    let f = Fixture::new(2, 2).await;
     let (lease, _) = f.open_document("source-0000").await;
     let outside = "agent text [[old]]\n";
     std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
@@ -1207,7 +1207,7 @@ async fn outside_write_defers_only_the_stale_source() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_write_same_request_resumes_unwritten_sources_after_reopen() {
-    let mut f = Fixture::new(20, 20);
+    let mut f = Fixture::new(20, 20).await;
     let (lease, _) = f.open_document("source-0019").await;
     let outside = "agent text [[old]]\n";
     std::fs::write(f.root.join("source-0019.md"), outside).unwrap();
@@ -1284,7 +1284,7 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_capture_retries_only_that_note_and_undo_keeps_prose() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let (first, _) = f.open_document("source-0000").await;
     let (second, _) = f.open_document("source-0001").await;
     let agent = "agent prose [[old]]\n";
@@ -1366,7 +1366,7 @@ async fn outside_capture_retries_only_that_note_and_undo_keeps_prose() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_undo_before_capture_cancels_retry() {
-    let f = Fixture::new(2, 2);
+    let f = Fixture::new(2, 2).await;
     let (lease, _) = f.open_document("source-0000").await;
     let outside = "agent text [[old]]\n";
     std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
@@ -1386,7 +1386,7 @@ async fn outside_undo_before_capture_cancels_retry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_newer_write_waits_for_next_capture_without_polling() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     let first = "first prose [[old]]\n";
     let second = "second prose [[old]]\n";
@@ -1428,7 +1428,7 @@ async fn outside_newer_write_waits_for_next_capture_without_polling() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_capture_waits_for_a_reopened_lease_to_release() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     let outside = "agent prose [[old]]\n";
     std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
@@ -1469,7 +1469,7 @@ async fn outside_retry_failure_keeps_pending_work_and_durable_progress() {
         FaultPoint::StorageAfterCommitBeforeAck,
     ] {
         for nth in [4, 5] {
-            let f = Fixture::new(1, 1);
+            let f = Fixture::new(1, 1).await;
             let (lease, _) = f.open_document("source-0000").await;
             let outside = "agent prose [[old]]\n";
             std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
@@ -1510,7 +1510,7 @@ async fn outside_retry_failure_keeps_pending_work_and_durable_progress() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_refused_undo_keeps_the_deferred_retry() {
-    let f = Fixture::new(2, 2);
+    let f = Fixture::new(2, 2).await;
     let (lease, _) = f.open_document("source-0000").await;
     let outside = "agent prose [[old]]\n";
     std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
@@ -1534,7 +1534,7 @@ async fn outside_refused_undo_keeps_the_deferred_retry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_retry_yields_to_another_pass_and_keeps_its_offer() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     let outside = "agent prose [[old]]\n";
     std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
@@ -1564,7 +1564,7 @@ async fn outside_retry_yields_to_another_pass_and_keeps_its_offer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_retry_paused_mid_turn_resumes_after_undo_is_cancelled() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (lease, _) = f.open_document("source-0000").await;
     let outside = "agent prose [[old]]\n";
     std::fs::write(f.root.join("source-0000.md"), outside).unwrap();
