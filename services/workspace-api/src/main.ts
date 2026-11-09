@@ -43,7 +43,11 @@ const deliverEmail: SendEmail = config.smtp
 
 const email = accountEmailDelivery(deliverEmail);
 const pool = new Pool({ connectionString: config.postgresUrl, connectionTimeoutMillis: 3000, query_timeout: 5000, statement_timeout: 5000 });
-pool.on("error", () => console.error("[workspace-api] An idle database connection failed."));
+// Each connection logs its own failure, idle or in use. A query on a failed
+// connection still fails in its caller. The pool also reports an idle
+// connection's failure, which the connection's own listener logs.
+pool.on("connect", (client) => client.on("error", () => console.error("[workspace-api] A database connection failed.")));
+pool.on("error", () => undefined);
 const accountDeletion = createAccountDeletion({pool, secret: config.secret, serverOrigin: config.baseURL, relayUrl: config.internalRelayUrl});
 const auth = createWorkspaceAuth({
   accountDeletion,

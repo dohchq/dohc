@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CRASH_REPORT_DRAIN_MAX_BYTES,
   CRASH_REPORT_DRAIN_MAX_MS,
+  CRASH_REPORT_DRAIN_MAX_READS,
+  CRASH_REPORT_DRAINS_MAX,
   CRASH_REPORT_MAX_BYTES,
   CRASH_REPORT_PATH,
   CRASH_REPORTS_PER_CLIENT_PER_HOUR,
@@ -240,7 +242,57 @@ describe("crash report intake", () => {
     expect(endless.counted.pulled).toBeLessThan(CRASH_REPORT_DRAIN_MAX_BYTES + 16 * 1024);
   });
 
-  it("answers 413 and closes a stalled oversized upload when the drain runs out of time", async () => {
+  it("stops a drain after its most reads", async () => {
+    const { store } = memoryStore();
+    let reads = 0;
+    // One byte per read, without end.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        controller.enqueue(new Uint8Array(1));
+      },
+    }, { highWaterMark: 0 });
+    const answer = await createCrashReportIntake({ store })(streamPost(body, { "content-length": String(2 * CRASH_REPORT_MAX_BYTES) }));
+    expect(answer.status).toBe(413);
+    expect(reads).toBe(CRASH_REPORT_DRAIN_MAX_READS);
+  });
+
+  it("answers 413 without a drain while the most drains run at once, and drains again after", async () => {
+    const { store } = memoryStore();
+    const intake = createCrashReportIntake({ store });
+    const declared = { "content-length": String(2 * CRASH_REPORT_MAX_BYTES) };
+    // Uploads that send nothing until the test ends them.
+    const stalled = Array.from({ length: CRASH_REPORT_DRAINS_MAX }, () => {
+      let end!: () => void;
+      let reading!: () => void;
+      const read = new Promise<void>((resolve) => (reading = resolve));
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          end = () => controller.close();
+        },
+        pull() {
+          reading();
+        },
+      }, { highWaterMark: 0 });
+      return { answer: intake(streamPost(body, declared)), read, end };
+    });
+    await Promise.all(stalled.map((stall) => stall.read));
+
+    const extra = upload(2 * CRASH_REPORT_MAX_BYTES);
+    expect((await intake(streamPost(extra.body, declared))).status).toBe(413);
+    expect(extra.counted.pulled).toBe(0);
+
+    for (const stall of stalled) stall.end();
+    for (const stall of stalled) expect((await stall.answer).status).toBe(413);
+    const after = upload(2 * CRASH_REPORT_MAX_BYTES);
+    expect((await intake(streamPost(after.body, declared))).status).toBe(413);
+    expect(after.counted.pulled).toBe(2 * CRASH_REPORT_MAX_BYTES);
+  });
+
+  it.each([
+    ["with no declared length", "transfer-encoding: chunked", `${(CRASH_REPORT_MAX_BYTES + 1).toString(16)}\r\n${"x".repeat(CRASH_REPORT_MAX_BYTES + 1)}\r\n3\r\nabc\r\n`],
+    ["with a declared length", `content-length: ${2 * CRASH_REPORT_MAX_BYTES}`, `${"x".repeat(CRASH_REPORT_MAX_BYTES + 1)}abc`],
+  ])("answers 413 and closes a stalled oversized upload %s when the drain runs out of time", async (_name, framing, sent) => {
     const { rows, store } = memoryStore();
     const intake = createCrashReportIntake({ store, drainMaxMs: 50 });
     const handler = toNodeHandler(async (request: Request) => {
@@ -262,10 +314,9 @@ describe("crash report intake", () => {
       socket.on("data", (text: string) => { answer += text; });
       const closed = new Promise<void>((resolve) => socket.on("close", () => resolve()));
       // Past the size limit, then a few bytes more, then nothing and no end.
-      const over = CRASH_REPORT_MAX_BYTES + 1;
       const started = Date.now();
-      socket.write(`POST ${CRASH_REPORT_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: text/plain; charset=utf-8\r\ntransfer-encoding: chunked\r\n\r\n`);
-      socket.write(`${over.toString(16)}\r\n${"x".repeat(over)}\r\n3\r\nabc\r\n`);
+      socket.write(`POST ${CRASH_REPORT_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: text/plain; charset=utf-8\r\n${framing}\r\n\r\n`);
+      socket.write(sent);
       await closed;
       // The drain's 50 ms, with room for a loaded machine. A drain that kept
       // the default 10 s fails here, and one with no time limit would hold the

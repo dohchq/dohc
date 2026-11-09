@@ -23,7 +23,7 @@ describe("auth client address", () => {
     expect(authClientAddress("172.30.42.2", forwarded, trusted)).toBe("172.30.42.2");
   });
   it("overwrites a forged server-owned header", () => {
-    const headers = {"x-dohc-auth-client-ip": "203.0.113.8", "x-forwarded-for": "203.0.113.9", "cf-connecting-ip": "203.0.113.10"};
+    const headers = {"x-dohc-auth-client-ip": "203.0.113.8", "x-forwarded-for": "203.0.113.9", "cf-connecting-ip": "203.0.113.10", "x-forwarded-proto": "https"};
     sanitizeAuthHeaders(headers, "192.0.2.7", trusted);
     expect(headers).toEqual({"x-dohc-auth-client-ip": "192.0.2.7"});
   });
