@@ -79,6 +79,7 @@ export interface PersonalAgents {
   register(entry: PersonalRunningEntry): () => void;
   /** After signing in again: ends the agent's running work and wakes these logs. */
   endAgent(agentId: string, wakeWorkspaceIds: Iterable<string>): void;
+  endConnection(connectionId: string): void;
   respondToOwner(request: Request, route: PersonalAgentRoute, ownerUserId: string): Promise<Response>;
   /** At account deletion's fence, before any row is purged. */
   deleteAccount(userId: string): void;
@@ -265,6 +266,10 @@ export function createPersonalAgents(input: {
 
     endAgent(agentId, wakeWorkspaceIds) {
       endAndWake(entry => entry.agentId === agentId, wakeWorkspaceIds);
+    },
+
+    endConnection(connectionId) {
+      endAndWake(entry => entry.connectionId === connectionId, []);
     },
 
     async respondToOwner(request, route, ownerUserId) {

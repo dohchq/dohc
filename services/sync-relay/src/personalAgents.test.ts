@@ -661,12 +661,32 @@ describe("revocation", () => {
       connectionId: agent.connectionId,
     });
 
+    const terminate = running(f, agent, [WS_A]);
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
+    expect(terminate).toHaveBeenCalledOnce();
     await expectRefused(await refresh(f, agent.clientId, String(rotated.refreshToken), agent.resource));
     await expectPersonal(f, { accessToken: String(rotated.accessToken), resource: agent.resource }).rejects.toMatchObject({ code: "not_found" });
     expect(count(f, "sync_relay_personal_agent_connections", "connection_id = ?", agent.connectionId)).toBe(0);
     // With nothing left to sign in with, the roster shows it signed out.
     expect((await roster(f)).agents).toEqual([expect.objectContaining({ agentId: agent.agentId, status: "signed_out" })]);
+  });
+
+  it("ends the connection and its running work when a redeemed code comes back", async () => {
+    const f = await fixture();
+    const clientId = await registerClient(f);
+    const { code, resource } = await approve(f, { clientId });
+    const tokens = await ok(await redeem(f, { clientId, code, resource }));
+    const accessToken = String(tokens.accessToken);
+    const authority = await f.h.linkAuthority.personal(agentRequest(accessToken, resource));
+    const terminate = running(f, {
+      clientId, resource, accessToken, refreshToken: String(tokens.refreshToken),
+      agentId: authority.agentId, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch,
+    }, [WS_A]);
+
+    await expectRefused(await redeem(f, { clientId, code, resource }));
+    expect(terminate).toHaveBeenCalledOnce();
+    await expectPersonal(f, { accessToken, resource }).rejects.toMatchObject({ code: "not_found" });
+    expect((await roster(f)).agents).toEqual([expect.objectContaining({ agentId: authority.agentId, status: "signed_out" })]);
   });
 
   it("refuses a refresh from another client, and keeps the token for its own", async () => {

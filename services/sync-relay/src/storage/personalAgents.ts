@@ -89,7 +89,8 @@ export type PersonalAgentChoice = { kind: "new"; name: string } | { kind: "exist
 
 export type PersonalTokenGrant =
   | { ok: true; connection: PersonalConnectionRow; newlyReached: string[] }
-  | { ok: false };
+  // A replayed code or refresh token ends its connection; its running work must end too.
+  | { ok: false; endedConnectionId?: string };
 
 export function initializePersonalAgentSchema(db: SqliteDb): void {
   db.exec(`
@@ -470,9 +471,10 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
       WHERE a.code_hash = ?`).get(input.codeHash);
     if (!row) return { ok: false };
     if (row.status === "redeemed") {
-      deleteConnection(storage, String(row.connection_id));
+      const endedConnectionId = String(row.connection_id);
+      deleteConnection(storage, endedConnectionId);
       signOutAgentsWithoutCredentials(storage, String(row.owner_user_id));
-      return { ok: false };
+      return { ok: false, endedConnectionId };
     }
     const spend = (): { ok: false } => {
       storage.db.prepare("DELETE FROM sync_relay_personal_agent_authorizations WHERE authorization_id = ?").run(String(row.authorization_id));
@@ -565,11 +567,10 @@ export function refreshPersonalTokens(storage: StorageContext, input: {
     if (!row) return { ok: false };
     const connection = rowToConnection(row);
     if (row.used_at_ms !== null) {
-      if (usedRefreshTokenIsRecent(row.used_at_ms, nowMs)) {
-        deleteConnection(storage, connection.connectionId);
-        signOutAgentsWithoutCredentials(storage, connection.ownerUserId);
-      }
-      return { ok: false };
+      if (!usedRefreshTokenIsRecent(row.used_at_ms, nowMs)) return { ok: false };
+      deleteConnection(storage, connection.connectionId);
+      signOutAgentsWithoutCredentials(storage, connection.ownerUserId);
+      return { ok: false, endedConnectionId: connection.connectionId };
     }
     if (connection.clientId !== input.clientId || !constantTimeHashEqual(input.resourceHash, String(row.resource_hash)) ||
         !connectionIsCurrent(storage, row, input.fenceEpoch)) {

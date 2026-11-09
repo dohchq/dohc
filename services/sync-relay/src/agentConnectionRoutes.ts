@@ -501,6 +501,7 @@ export function createAgentConnectionRoutes(input: {
       });
       // Signing in again ended the agent's other connections; their running work ends with them.
       if (result.ok) personal.endAgent(result.connection.agentId, []);
+      else if (result.endedConnectionId) personal.endConnection(result.endedConnectionId);
       return result.ok;
     }
     if (body.grantType === "refresh_token") {
@@ -509,7 +510,7 @@ export function createAgentConnectionRoutes(input: {
       const owner = storage.personalCredentialOwner({ kind: "refresh", hash: refreshTokenHash });
       if (owner === null) return false;
       const fenceEpoch = await personal.readFence(owner);
-      return storage.refreshPersonalTokens({
+      const result = storage.refreshPersonalTokens({
         refreshTokenHash,
         clientId: text(body.clientId, AGENT_URI_CHAR_LIMIT),
         resourceHash: hash("resource", resource),
@@ -517,7 +518,9 @@ export function createAgentConnectionRoutes(input: {
         accessTokenHash: tokens.accessTokenHash,
         nextRefreshTokenHash: tokens.refreshTokenHash,
         nowMs: tokens.issuedAtMs,
-      }).ok;
+      });
+      if (!result.ok && result.endedConnectionId) personal.endConnection(result.endedConnectionId);
+      return result.ok;
     }
     throw new Refused();
   }

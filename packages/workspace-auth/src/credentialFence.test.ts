@@ -227,4 +227,37 @@ describe("the credential fence listener", () => {
       await listening.close();
     }
   });
+
+  it("releases a client lost while it starts listening once, then listens again", async () => {
+    vi.useFakeTimers();
+    const clients: FakeClient[] = [];
+    const pool = {
+      connect: async () => {
+        const client = new FakeClient();
+        if (clients.length === 0) {
+          client.query = async (text: string) => {
+            client.queries.push(text);
+            client.emit("error", new Error("The connection was lost."));
+            throw new Error("The connection was lost.");
+          };
+        }
+        clients.push(client);
+        return client;
+      },
+    } as unknown as pg.Pool;
+    const onDown = vi.fn();
+    const onUp = vi.fn();
+    const listening = createPostgresCredentialFence(pool, { verifyPassword: async () => false })
+      .listen({ onChange: vi.fn(), onDown, onUp });
+    try {
+      await vi.waitFor(() => expect(onDown).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(CREDENTIAL_FENCE_RETRY_MS);
+      await vi.waitFor(() => expect(onUp).toHaveBeenCalledTimes(1));
+      // By now the failed query's own cleanup has run too.
+      expect(clients[0]!.release).toHaveBeenCalledTimes(1);
+      expect(onDown).toHaveBeenCalledTimes(1);
+    } finally {
+      await listening.close();
+    }
+  });
 });
