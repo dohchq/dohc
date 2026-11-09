@@ -348,7 +348,8 @@ const serviceReplication = selfHostedLive && deployment && linkKey
   ? (() => {
       const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
       return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
-        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
+        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input}),
+        lookupUserDisplayName: userId => lookupUserDisplayName(userId)});
     })() : undefined;
 
 function createTestActorResolver(): ResolveActor {
