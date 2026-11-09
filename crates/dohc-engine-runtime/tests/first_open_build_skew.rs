@@ -29,7 +29,7 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_sync::{
-    AlwaysLive, ApplyDisposition, LeaseProbe, NoLiveLeases, ReplicationEnvelope,
+    AlwaysLive, ApplyDisposition, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError,
     apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -295,8 +295,9 @@ fn witnessed_cache(witness: &Arc<ReaderResolver>) -> WriterDocCache {
 }
 
 /// Apply relayed ops in order. Each must be answered for good: applied,
-/// skipped or, while the document is open, parked and then drained.
-fn deliver(
+/// skipped or, while the document is open, parked and then drained. A
+/// witness the reader is still checking is applied again once it settles.
+async fn deliver(
     store: &mut EngineStore,
     key: &DocKey,
     ops: &[(ReplicationEnvelope, Vec<u8>)],
@@ -304,17 +305,24 @@ fn deliver(
     witness: &Arc<ReaderResolver>,
     case: Case,
 ) {
-    let leases: &dyn LeaseProbe = if open { &AlwaysLive } else { &NoLiveLeases };
+    let leases: &(dyn LeaseProbe + Sync) = if open { &AlwaysLive } else { &NoLiveLeases };
     for (envelope, blob) in ops {
         store.put_binary_blob(blob).expect("copy blob");
-        let outcome = apply_ydoc_envelope(
-            store,
-            &mut witnessed_cache(witness),
-            envelope,
-            &NoFaults,
-            leases,
-        )
-        .unwrap_or_else(|error| panic!("{case:?}: {error:?}"));
+        let outcome = loop {
+            match apply_ydoc_envelope(
+                store,
+                &mut witnessed_cache(witness),
+                envelope,
+                &NoFaults,
+                leases,
+            ) {
+                Ok(outcome) => break outcome,
+                Err(SyncError::MarkdownWitnessCheckPending { pending, .. }) => {
+                    pending.resolve().await
+                }
+                Err(error) => panic!("{case:?}: {error:?}"),
+            }
+        };
         match outcome.primary {
             ApplyDisposition::Applied(result) => {
                 assert!(
@@ -330,9 +338,16 @@ fn deliver(
         }
     }
     if open {
-        let drained =
-            drain_deferred_ydoc_for_key(store, &mut witnessed_cache(witness), key, &NoFaults)
-                .unwrap_or_else(|error| panic!("{case:?}: drain {error:?}"));
+        let drained = loop {
+            match drain_deferred_ydoc_for_key(store, &mut witnessed_cache(witness), key, &NoFaults)
+            {
+                Ok(drained) => break drained,
+                Err(SyncError::MarkdownWitnessCheckPending { pending, .. }) => {
+                    pending.resolve().await
+                }
+                Err(error) => panic!("{case:?}: drain {error:?}"),
+            }
+        };
         assert!(
             drained.refusals.is_empty(),
             "{case:?}: {:?}",
@@ -484,7 +499,8 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         case.desktop_open,
         &witness,
         case,
-    );
+    )
+    .await;
     assert_eq!(
         journaled(&d_store).len(),
         desktop_ops.len(),
@@ -613,7 +629,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
 
     // A peer with no copy of the note pulls the whole log.
     let mut p_store = EngineStore::open(&p, 9_303).expect("open peer");
-    deliver(&mut p_store, &key, &log, false, &witness, case);
+    deliver(&mut p_store, &key, &log, false, &witness, case).await;
 
     let d_store = EngineStore::open(&d, 9_304).expect("open desktop");
     for store in [&d_store, &p_store] {
