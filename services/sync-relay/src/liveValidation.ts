@@ -90,7 +90,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
   const waiters = new Set<() => void>();
   let closed = false, yielding = 0;
   // Notes whose build an activation or restore ended. Each one's next build runs to the end,
-  // so a repeating activation delays a note's first open by at most one build.
+  // so a repeating activation delays a note's first open by at most one build. A note leaves only when
+  // its next build starts. Notes that were ended and never built again can fill it, and then foreground
+  // waits behind builds as it did before this change, until the relay restarts.
   const ended = new Set<string>();
   const hasCapacity = (auxiliary = false) => !closed && (!auxiliary || ![...slots].some(slot => slot.auxiliary)) && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
@@ -199,14 +201,10 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     const auxiliary = foreground || work.kind === "first-open" || work.kind === "first-open-history";
     // A first-open build can take a minute; an activation or restore ends it rather than
     // wait, unless it is its note's turn, and the build answers `busy`. No first-open job starts meanwhile.
-    const building = foreground ? [...slots].find((slot) => slot.work === "first-open" && !slot.protected) : undefined;
+    const building = foreground && ended.size < maxEndedBuilds ? [...slots].find((slot) => slot.work === "first-open" && !slot.protected) : undefined;
     if (building) {
       building.yielded = true;
-      if (building.note !== undefined) {
-        ended.delete(building.note);
-        ended.add(building.note);
-        if (ended.size > maxEndedBuilds) ended.delete(ended.values().next().value!);
-      }
+      if (building.note !== undefined) ended.add(building.note);
       yielding++;
       try {
         kill(building);
