@@ -89,8 +89,6 @@ final class PageEditingTests: XCTestCase {
   // text menu, so neither the emoji nor the sticker panel opens.
   @MainActor
   func testPastedEmojiReachThePageWhole() {
-    // Known failure: phone paste defect (a long press in a page shows no edit menu, so there's no Paste).
-    XCTExpectFailure("Phone paste defect: a long press in a page shows no edit menu, so there's no Paste")
     let emoji = "Pasted 👋🏽 🇵🇹 👨‍👩‍👧 here."
     UIPasteboard.general.string = emoji
     let app = XCUIApplication()
