@@ -24,7 +24,8 @@ Compare concrete workflows with existing tools. Product choices alone do not pro
 
 ### The job
 
-Agents can build apps; people still need somewhere to keep data, familiar controls, safe sharing, collaboration, and a record of changes.
+Agents can build apps; people still need somewhere to keep data, familiar controls, safe sharing, and collaboration.
+They also need a record of what each agent made and changed.
 dohc supplies these in one workspace. Prefer work that makes one of them easier.
 Documents, Collections, and chat must remain useful without an app.
 
@@ -34,7 +35,7 @@ Documents, Collections, and chat must remain useful without an app.
    Sync and sharing add capability; local work must not become a cache of a remote product.
    Keep data inspectable or exportable for recovery without dohc.
    Self-hosting must be meaningful. dohc Drive competes through managed operation, not restrictions on the local product.
-2. **Performance without compromise.** The desktop must feel native. Measure effects on startup and interaction; treat regressions as bugs.
+2. **Performance without compromise.** The desktop must feel native. Consider each change's performance impact; treat regressions as bugs.
    Being slower than Notion in a browser defeats a reason to choose dohc.
 3. **Collaboration on the work itself.** Humans and agents continue durable objects with context, history, permissions, and provenance.
    One person on one device must find the workspace useful.
@@ -57,7 +58,7 @@ Documents, Collections, and chat must remain useful without an app.
 8. **Rigid substrate, flexible workflow.** Keep ownership, authentication, permissions, sync, history, provenance, links, and isolation strict.
    Users choose folders, tools, rituals, agents, and workflows.
    App source and Collection automation definitions live in the workspace for any agent to read and change.
-   People customize dohc through settings and pinned apps, not by rewriting built-in parts.
+   People customize dohc through a settings file and pinned apps, not by rewriting built-in parts.
    Updates preserve settings and apps. The core supplies the reliable foundations.
 
 Keep the core free of prescribed workflows, hardcoded business apps, and mandatory templates.
@@ -66,7 +67,7 @@ Reusable examples help; making people conform to them is not the product. Activi
 
 ### Design for work nobody has read
 
-- Shape controls around the user's task. Show saved, synced, and shared state rather than engine or relay internals.
+- Shape each surface around the user's task. Show saved, synced, and shared state rather than engine or relay internals.
   Agents should edit with ordinary tools without knowing Y.Doc settlement.
 - Let people oversee unread work: show who made a change, what it can access, and how to reverse it without reading source.
 - Make invalid states impossible to express. Apps cannot request unexposed data; a rule telling them not to is insufficient.
@@ -91,12 +92,13 @@ dohc supplies sync, identity, permissions, and history. Agent orchestration is o
 
 ### Run a fundraiser
 
-A shared signup app stores real registrations, controls access, and keeps source editable in the event workspace.
+A signup app accepts registrations through a share link, using only data and capabilities its owner exposes.
+It stores registrations, controls access, and keeps source editable in the event workspace.
 Organizers discuss and continue the work there. A demo ending at a signup page is incomplete.
 
 ### Share work in progress
 
-Share relevant objects with data, app, chat, history, permissions, and declared dependencies so recipients and agents can continue them.
+Share relevant files, data, apps, chat, history, permissions, and declared dependencies so recipients and agents can continue the work.
 An export, zip, or pasted old chat transfers bytes without continuity.
 
 ### Tailor the workspace
@@ -156,7 +158,7 @@ If a direction is rejected, restore that change while preserving unrelated work.
 
 Read [dohc-interface](.agents/skills/dohc-interface/SKILL.md) before changing words, controls, tokens, or recipes.
 Finish layout, interaction, loading, failure, recovery, and transitions.
-Show what a control is, its state, and the next action through meaningful icons, placement, shape, and color.
+Show what a surface is, its state, and the next action through meaningful icons, placement, shape, and color.
 Keep words for the user's content and facts only words can state.
 Choose layouts for their content. Give comparisons enough room, consistent spacing, and varied composition.
 Develop one representative section before extending a broad redesign.
@@ -168,8 +170,8 @@ Measure affected startup and interactions alongside automated scores.
 
 Add a document only when a named reader needs it for work or a decision.
 Git records history; tests enforce rules code can break.
-Keep user and app-author docs in `docs/`; put maintainer procedures and security boundaries in `docs/engineering/`.
-Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`; remove them when no longer needed.
+Keep docs for users, app authors, and agents in `docs/`; put maintainer procedures and security boundaries in `docs/engineering/`.
+Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`; remove them when the task ends.
 Existing tracked plans may stay in `docs/engineering/plans/` while coordinating sessions need them.
 Release owners follow the [desktop release procedure](docs/engineering/desktop-release.md).
 
@@ -191,6 +193,7 @@ Preserve required evidence and source.
 ## Verification
 
 Read [the verification procedure](docs/engineering/verify-agent-work.md) for setup, desktop QA, debug access, and PR evidence.
+Run the smallest check that proves the change.
 Run affected-package typechecks and focused tests while editing and during review.
 For desktop QA, start with `pnpm run doctor`; use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before Playwright.
@@ -200,7 +203,8 @@ For Rust, use [rust-gate](.agents/skills/rust-gate/SKILL.md), never bare Cargo. 
 ## Pull requests and merging
 
 Keep required contracts, callers, and tests together.
-Finish implementation, simplification, self-review, and focused checks before opening a PR ready for review.
+Keep unfinished work on a branch.
+Finish implementation, simplification, self-review, and focused checks before requesting independent review or opening a PR ready for review.
 Use drafts only for specific early feedback or a dependency needing a PR link.
 State why the draft exists, what feedback is needed, and what remains. Drafts are not progress placeholders or backups.
 Use the [PR template](.github/pull_request_template.md). State the problem, resulting behavior, evidence, and unverified behavior.
@@ -251,13 +255,14 @@ Only `verify:pr` holds the verification lane. Run focused checks, benchmarks, an
 ### Review findings
 
 Verify findings against the current head and required behavior. Fix concrete regressions with the smallest safe change.
+That includes correctness, security, privacy, durability, compatibility, performance, and user-visible behavior.
 Decline false positives, speculative hardening, alternative designs, and out-of-scope requests with a technical reason.
 Do not add policy or machinery only to satisfy a reviewer.
 
 ### Complete the review
 
 Batch verified fixes and have the responsible reviewer inspect the affected delta.
-Apply the task's review-round limit. Further rounds need a new verified blocker or unresolved high-risk concern.
+Further rounds need a new verified blocker or unresolved high-risk concern.
 Unchanged rebases need a recorded comparison, not restarted review. Review conflict resolutions and substantive integration changes.
 Before merge, account for the full diff, later deltas, and every known finding on the final head. Resolve all verified blockers.
 Optional bot approval and reviewer unanimity are not merge conditions.
