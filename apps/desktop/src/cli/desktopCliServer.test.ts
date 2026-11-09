@@ -143,6 +143,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     agentYouRun: vi.fn(async (agentId: string) => agentId === "terminal" ? { name: "Terminal" } : null),
+    isOwnAgentId: vi.fn(async () => false),
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
     activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), agentWriteRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },

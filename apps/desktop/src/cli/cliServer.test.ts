@@ -25,7 +25,6 @@ import {
   type CliVerb,
 } from "@dohc/cli/protocol";
 import type {
-  ChatAgentRequestDetail,
   LinkedChatStore,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -78,7 +77,7 @@ import {
 } from "./cliServer";
 import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
 import { openedLocalState } from "../testing/preparedLocalState";
-import { agentHandle, agentYouRun, type DesktopUserSettings } from "../settings/userSettings";
+import { agentHandle, agentYouRun, isOwnAgentId, listAgents, type DesktopUserSettings } from "../settings/userSettings";
 import { testAgent } from "../testing/agentSettings";
 
 // Another spelling of one real folder, as Linux keeps it for a folder that
@@ -113,6 +112,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const WORKSPACE_ID = "workspace-cli-server";
+type AgentRequest = Awaited<ReturnType<LinkedChatStore["listAgentRequestsPage"]>>["requests"][number];
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
 
 type ArgsFor<Verb extends CliVerb> = Extract<CliRequest, { verb: Verb }>["args"];
@@ -515,7 +515,7 @@ describe("CLI socket server", () => {
         }),
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
-        agentDisplayName: async () => "Nova",
+        agentDisplayName: async (agentId) => listAgents(agentSettings).find(agent => agent.id === agentId)?.name ?? "Agent",
         agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
         isOwnAgentId: async () => false,
         localInstallationId: () => "install-local-user-id",
@@ -540,6 +540,7 @@ describe("CLI socket server", () => {
         const agent = workspaceId === WORKSPACE_ID ? agentYouRun(agentSettings, agentId) : null;
         return agent ? { agentId, name: agent.name, handle: agentHandle(agent.name), ...workspaceRequesters(chatRow) } : null;
       },
+      isOwnAgentId: async (name) => isOwnAgentId(agentSettings, name),
       async onWrite() {
         calls.writes += 1;
       },
@@ -598,7 +599,7 @@ describe("CLI socket server", () => {
     const first = await post({ group: "general", actor: "human", body: "@agent first" });
     const [template] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
     expect(cliThreadId(template!.threadId)).toBe(first.threadId);
-    let candidates: ChatAgentRequestDetail[] = [];
+    let candidates: AgentRequest[] = [];
     const requests = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async () => ({ requests: candidates, more: false }));
     let cursor: string | undefined;
     const watch = async () => {
@@ -800,13 +801,51 @@ describe("CLI socket server", () => {
       return messages.find(row => cliMessageId(row.id) === sent.messageId)?.authorAgentId;
     }
 
+    // The author of each Collection write and the origin of each document
+    // edit, in order.
+    function recordWriteAuthors(): unknown[] {
+      const authors: unknown[] = [];
+      context.collections = {
+        async query() {
+          throw new Error("reads are not under test");
+        },
+        async getRecord() {
+          throw new Error("reads are not under test");
+        },
+        writes: {
+          async setFields(input) {
+            authors.push(input.author);
+            return { path: input.recordPath };
+          },
+          async createRecord(input) {
+            authors.push(input.author);
+            return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+          },
+        },
+      };
+      context.documents = {
+        async read() {
+          throw new Error("reads are not under test");
+        },
+        async edit(input) {
+          authors.push(input.origin);
+          return { path: input.path, changed: true };
+        },
+        async create(input) {
+          authors.push(input.origin);
+          return { path: input.path };
+        },
+      };
+      return authors;
+    }
+
     it("is named only by an agent, without a run, from this computer's agents you run", async () => {
       const send = (verb: "inbox" | "post", args: Record<string, unknown>) =>
         rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: workspaceRoot, ...args } });
       const posted = { actor: "agent", group: "general", attachments: [], needsDecision: false, body: "Hello" };
       await expect(send("inbox", { actor: "agent", agentId: "terminal" })).resolves.toMatchObject({ ok: true });
-      // Nova and Codex are agents dohc starts.
-      for (const agentId of ["codex", "default", "unknown"]) {
+      // Nova and Codex are agents dohc starts. An id must match exactly.
+      for (const agentId of ["codex", "default", "unknown", "p-terminal"]) {
         await expect(send("inbox", { actor: "agent", agentId }), agentId).resolves.toMatchObject({
           ok: false, error: expect.stringContaining("No agent you run has this id in Settings › Agents."),
         });
@@ -921,6 +960,51 @@ describe("CLI socket server", () => {
       expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2 });
     });
 
+    it("writes, reacts and comments as itself, in no run, while a run dohc dispatched holds the workspace", async () => {
+      const authors = recordWriteAuthors();
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const asked = await personPosts(general.id, "Thanks, everyone");
+      dispatchedRun = "codex";
+      agentWriteRunId = "run-1";
+      agentRunDepth = 2;
+
+      await invoke("collectionSetFields", { ...terminalArgs(), recordPath: "tasks/a.md", fields: { status: "done" } });
+      await invoke("documentEdit", { ...terminalArgs(), path: "notes/plan.md", replacement: "Done." });
+      // The run's own write still names the run.
+      await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "parked" } });
+      expect(authors).toEqual([
+        { kind: "agent", agentId: "terminal", onBehalfOf: "person-local", depth: 2 },
+        { actorOriginId: "terminal", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 2 } },
+        { kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2, agentRunId: "run-1" },
+      ]);
+
+      // A reaction carries its author's name, not an agent id.
+      await invoke("react", { ...terminalArgs(), message: cliMessageId(asked.message.id), emoji: "👍" });
+      expect((await store!.listReactions({ workspaceId: WORKSPACE_ID, threadId: asked.thread.id })).map(reaction => reaction.author))
+        .toMatchObject([{ kind: "agent", displayName: "Terminal" }]);
+      const commented = await invoke("fileChatStart", { ...terminalArgs(), path: "tracked.md", title: "Review", body: "Looks right" });
+      if (!commented.ok) throw new Error(commented.reason);
+      await expect(store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: commented.threadId }))
+        .resolves.toMatchObject([{ authorAgentId: "terminal", author: { kind: "agent", displayName: "Terminal" } }]);
+    });
+
+    it("takes one of your agents' ids as a name only through its agent id", async () => {
+      const authors = recordWriteAuthors();
+      const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
+      context.stopSync = stop;
+      const named = { cwd: workspaceRoot, actor: "agent" as const, agent: "terminal" };
+
+      await invoke("collectionSetFields", { ...named, recordPath: "tasks/a.md", fields: { status: "done" } });
+      await invoke("documentEdit", { ...named, path: "notes/plan.md", replacement: "Done." });
+      await invoke("stopSync", named);
+      // The name is dropped, so each write is the unnamed agent's.
+      expect(authors).toEqual([
+        { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
+        { actorOriginId: "dohc-mcp", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
+      ]);
+      expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 });
+    });
+
     it("refuses a cursor from another reader", async () => {
       const unnamed = await waitFor(null);
       const own = await waitFor("terminal");
@@ -946,7 +1030,7 @@ describe("CLI socket server", () => {
     it("cuts a batch at its size and keeps seen requests past the cut", async () => {
       await post({ actor: "human", body: "@agent template" });
       const [template] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
-      const request = (messageId: string, createdAtMs: number, bytes = 10): ChatAgentRequestDetail =>
+      const request = (messageId: string, createdAtMs: number, bytes = 10): AgentRequest =>
         ({ ...template!, messageId, createdAtMs, body: "x".repeat(bytes) });
       let candidates = [request("a", 10), request("b", 11)];
       const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async () => ({ requests: candidates, more: false }));
@@ -3390,7 +3474,7 @@ describe("CLI socket server", () => {
       attachments: [], needsDecision: false,
     });
     const credited = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${named.threadId.slice("th_".length)}` });
-    expect(credited.map((message) => [message.authorAgentId, message.author.displayName])).toEqual([["codex", "Nova"], ["codex", "Nova"]]);
+    expect(credited.map((message) => [message.authorAgentId, message.author.displayName])).toEqual([["codex", "Codex"], ["codex", "Codex"]]);
 
     // Once the run lets go of the slot, the person's posts are theirs.
     dispatchedRun = null;

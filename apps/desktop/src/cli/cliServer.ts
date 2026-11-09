@@ -454,6 +454,8 @@ export interface CliServerOptions {
   // The agent you run with this id in this computer's settings, as it reads
   // and writes in the workspace, or null when no agent you run has the id.
   connectedAgent(workspaceId: string, agentId: string): Promise<CliConnectedAgent | null>;
+  // Whether a name is one of the person's agents' ids.
+  isOwnAgentId(name: string): Promise<boolean>;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -790,6 +792,13 @@ function claimedAgentName(
   return context.connected?.agentId ?? options.dispatchedAgent(context.workspaceId) ?? agent;
 }
 
+// The run an agent's write names. An agent you run is never part of a run,
+// even while one holds the workspace; its write still keeps the run's depth.
+function agentWriteRun(context: CliWorkspaceContext, options: CliServerOptions): { agentRunId?: string } {
+  const agentRunId = context.connected ? null : options.agentWriteRunId(context.workspaceId);
+  return agentRunId === null ? {} : { agentRunId };
+}
+
 // Who a chat write through this socket is. An agent you run writes as itself.
 // Any other agent's message during a run dohc dispatched is that run's
 // agent's. What an agent reported about itself rides beside its name; a
@@ -812,10 +821,10 @@ function cliChatWriter(
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic carries the id of the agent you run, else its claimed name, or
-// `dohc-mcp` when unnamed,
-// acting on behalf of the local owner, at the depth of the
-// agent run in progress and naming that run; a human write is attributed as
-// this device's local author under the workspace display name.
+// `dohc-mcp` when unnamed, acting on behalf of the local owner, at the depth
+// of the agent run in progress. Only a run's own write names that run. A
+// human write is attributed as this device's local author under the
+// workspace display name.
 function collectionWriteAuthor(
   actor: CliActor,
   context: CliWorkspaceContext,
@@ -823,13 +832,12 @@ function collectionWriteAuthor(
   agent: string | undefined,
 ): ChangeAuthor {
   if (writeActor(actor, context, options) === "agent") {
-    const agentRunId = options.agentWriteRunId(context.workspaceId);
     return {
       kind: "agent",
       agentId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
-      ...(agentRunId !== null ? { agentRunId } : {}),
+      ...agentWriteRun(context, options),
     };
   }
   return createLocalChangeAuthor(options.localUserDisplayName());
@@ -855,21 +863,21 @@ const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is re
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
 // local owner, recorded under its claimed name or the unnamed agent label,
-// at the depth of the agent run in progress and naming that run. Any process
-// holding the socket token could otherwise claim the person's typing.
+// at the depth of the agent run in progress. Only a run's own edit names
+// that run. Any process holding the socket token could otherwise claim the
+// person's typing.
 function documentEditOrigin(
   agent: string | undefined,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
-  const agentRunId = options.agentWriteRunId(context.workspaceId);
   return {
     actorOriginId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
     attribution: {
       actorKind: "agent",
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
-      ...(agentRunId !== null ? { agentRunId } : {}),
+      ...agentWriteRun(context, options),
     },
   };
 }
@@ -4078,6 +4086,10 @@ async function workspaceContextForRequest(
     connected = await options.connectedAgent(workspace.workspaceId, agentId);
     if (!connected) throw new CliCommandError("No agent you run has this id in Settings › Agents.");
     if (!connected.handle) throw new CliCommandError("Give this agent a name with a letter or digit in Settings › Agents, so @ can reach it.");
+  } else if ("agent" in request.args && request.args.agent !== undefined && await options.isOwnAgentId(request.args.agent)) {
+    // Only --agent-id makes a write one of the person's agents'. A name that
+    // is one of their ids is dropped, so the write is the unnamed agent's.
+    delete request.args.agent;
   }
   if ("runId" in request.args && request.args.runId) {
     const runWorkspaceId = options.agentRunWorkspace(request.args.runId);
@@ -4168,7 +4180,7 @@ async function watchMessages(
       const cursor = watchCursorSchema.parse(JSON.parse(Buffer.from(request.args.cursor, "base64url").toString("utf8")));
       if (cursor.workspaceId !== scope.workspaceId || cursor.group !== scope.group || cursor.thread !== scope.thread || cursor.reader !== scope.reader) throw new Error("scope");
       seen = cursor.seen;
-    } catch { throw new CliCommandError("This chat cursor is invalid for this agent, workspace or filter. Use its original agent, workspace and filters."); }
+    } catch { throw new CliCommandError("This chat cursor is invalid for this agent, workspace or filter. Watch again without a cursor."); }
   }
   const encode = (entries: WatchSeen[]) => {
     const cursor = Buffer.from(JSON.stringify({ ...scope, seen: entries })).toString("base64url");

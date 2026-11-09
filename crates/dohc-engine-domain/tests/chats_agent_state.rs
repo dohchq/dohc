@@ -495,6 +495,36 @@ fn each_reader_keeps_its_own_place() {
 }
 
 #[test]
+fn a_plain_at_agent_asks_an_agent_named_agent_and_unnamed_agents_apart() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    agent_chats(&mut chats);
+    ask(&mut chats, "channel", "group", "@agent", 10);
+    let helper = AgentReader::Connected {
+        agent_id: "helper".to_owned(),
+        handle: "agent".to_owned(),
+        requesters: vec!["ada".to_owned()],
+        unattributed_counts: false,
+    };
+    assert_eq!(requests_for(&chats, &helper), ["@agent"]);
+    assert_eq!(requests_for(&chats, &UNNAMED), ["@agent"]);
+
+    chats
+        .mark_thread_read_by_agent(WS, &helper, "group", 10, "@agent", None, 20, &NO_FAULTS)
+        .expect("connected read");
+    assert!(requests_for(&chats, &helper).is_empty());
+    assert_eq!(
+        requests_for(&chats, &UNNAMED),
+        ["@agent"],
+        "the agent you run reading leaves the unnamed place where it was."
+    );
+    chats
+        .mark_thread_read_by_agent(WS, &UNNAMED, "group", 10, "@agent", None, 30, &NO_FAULTS)
+        .expect("unnamed read");
+    assert!(requests_for(&chats, &UNNAMED).is_empty());
+}
+
+#[test]
 fn only_its_persons_posts_ask_an_agent_you_run() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);

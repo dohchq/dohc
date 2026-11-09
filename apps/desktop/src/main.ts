@@ -5120,6 +5120,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   chatFileMentions: (workspace, input) => workspaceChatFileMentions(workspace.workspaceId, input),
   findWorkspace,
   agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
+  isOwnAgentId: async (name) => isOwnAgentId((await readCachedUserSettingsFile(stateDir())).settings, name),
   listWorkspaces,
   openWorkspaceActivity,
   stopWorkspaceSync: async (operation, author) => {

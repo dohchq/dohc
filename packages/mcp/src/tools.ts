@@ -1937,8 +1937,9 @@ async function requestCli<Verb extends CliVerb>(
     args: {
       cwd: ctx.root,
       actor: "agent" as const,
-      ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
       ...args,
+      // The server's own agent id; no tool input replaces it.
+      ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
