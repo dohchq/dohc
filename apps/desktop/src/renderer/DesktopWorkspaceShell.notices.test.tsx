@@ -1808,7 +1808,12 @@ describe("crash report notice", () => {
     renderShell(bridge);
 
     await user.click(await screen.findByTestId("notice-center-toggle"));
-    bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: null });
+    // Main keeps the report until it is dismissed. Reaching the row to click
+    // Dismiss reads it first.
+    bridge.dismissCrashReport.mockImplementationOnce(async () => {
+      bridge.readCrashReport.mockResolvedValue({ report: null, sendTo: null });
+      return undefined;
+    });
     await user.click(await screen.findByTestId("notice-crash-report-dismiss"));
     await waitFor(() => expect(screen.queryByTestId("notice-crash-report")).toBeNull());
     expect(bridge.dismissCrashReport).toHaveBeenCalledWith({ through: 3 });
