@@ -4621,7 +4621,9 @@ impl<'a> LinkedChatStore<'a> {
         let sql = agent_requests_sql(&reader, detail);
         self.store.read_with(|conn| {
             let place = agent_reader(conn, workspace_id, &reader)?;
-            let mut stmt = conn.prepare_cached(&sql).map_err(DomainError::sql_corrupt)?;
+            let mut stmt = conn
+                .prepare_cached(&sql)
+                .map_err(DomainError::sql_corrupt)?;
             let rows = match &reader {
                 AgentReader::Connected {
                     handle,
