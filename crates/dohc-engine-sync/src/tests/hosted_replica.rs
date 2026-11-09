@@ -4830,6 +4830,342 @@ fn ready_on_one_file(store: &EngineStore) -> Pairs {
         .unwrap()
 }
 
+/// Each head a pass's changes write at a spelling of another document's
+/// head, paired with that document. A change brings its path to the head a
+/// path alias there names, so on a disk that ignores case that head lands on
+/// the other document's file.
+fn written_on_one_file(store: &EngineStore, outcome: &HostedPassOutcome) -> Pairs {
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT a.object_id,o.object_id FROM path_aliases a JOIN snapshots s \
+                   ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                  AND s.object_id=a.object_id \
+                 JOIN snapshots o ON o.workspace_id=a.workspace_id \
+                  AND o.version_id=a.version_id AND o.object_id<>a.object_id \
+                  AND lower(o.path)=lower(a.path) \
+                 WHERE a.workspace_id='ws' AND a.version_id=?1 AND a.path=?2",
+            )?;
+            let mut pairs = Pairs::new();
+            for change in &outcome.changed_paths {
+                pairs.extend(
+                    statement
+                        .query_map([&change.version_id, &change.path], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })?
+                        .collect::<rusqlite::Result<Pairs>>()?,
+                );
+            }
+            Ok::<_, rusqlite::Error>(pairs)
+        })
+        .unwrap()
+}
+
+/// [`sync`], checking each pass and commit as a disk that ignores case would
+/// see them: no pass writes a head at a spelling of another document's head,
+/// and no document is ready at one.
+fn sync_on_own_files(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
+    for _ in 0..64 {
+        let outcome = pass(client, store, &NoFaults).unwrap();
+        assert_eq!(written_on_one_file(store, &outcome), Pairs::new());
+        commit(client, store, &outcome);
+        assert_eq!(ready_on_one_file(store), Pairs::new());
+        if !outcome.has_more {
+            return;
+        }
+    }
+    panic!("the hosted replica did not catch up");
+}
+
+/// #2421 round 2, first finding: a pass that moves documents of a trade of
+/// spellings on again can leave two that are not ready at two spellings of
+/// one path, after an earlier change in the pass named that path free.
+/// `doc-a` moves first to `B.md`, `doc-c` leaves `Z.md`, `doc-a` moves on to
+/// `z.md`, and `doc-b` to `Z.md`; `doc-a` then stops on `doc-c` at `x.md`.
+/// Neither file of the two is written while both are held there. Once
+/// `doc-c` moves on, all three are ready.
+#[test]
+fn a_pass_writes_no_head_at_a_spelling_another_document_takes_later_in_it() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.create("owner", 3, "doc-c", "Z.md", "hosted c");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    feed.share("doc-c", "Z.md");
+    sync_on_own_files(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "B.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.rename(
+        "owner",
+        5,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-a", "B.md");
+    feed.share("doc-b", "A.md");
+    sync_on_own_files(&client, &mut store);
+    assert_eq!(hold(&store, "doc-a"), Some(path_held("B.md", "doc-b")));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
+
+    feed.rename(
+        "owner",
+        6,
+        "doc-c",
+        "Z.md",
+        "x.md",
+        "hosted c",
+        "moment-owner-3",
+    );
+    feed.rename(
+        "owner",
+        7,
+        "doc-a",
+        "B.md",
+        "z.md",
+        "hosted a",
+        "moment-owner-4",
+    );
+    feed.rename(
+        "owner",
+        8,
+        "doc-b",
+        "A.md",
+        "Z.md",
+        "hosted b",
+        "moment-owner-5",
+    );
+    feed.rename(
+        "owner",
+        9,
+        "doc-a",
+        "z.md",
+        "X.md",
+        "hosted a",
+        "moment-owner-7",
+    );
+    feed.share("doc-c", "x.md");
+    feed.share("doc-a", "X.md");
+    feed.share("doc-b", "Z.md");
+    sync_on_own_files(&client, &mut store);
+    assert!(!ready(&store, "doc-a"), "doc-c is still at x.md");
+
+    feed.rename(
+        "owner",
+        10,
+        "doc-c",
+        "x.md",
+        "c.md",
+        "hosted c",
+        "moment-owner-6",
+    );
+    feed.share("doc-c", "c.md");
+    sync_on_own_files(&client, &mut store);
+    sync_on_own_files(&client, &mut store);
+    for object_id in ["doc-a", "doc-b", "doc-c"] {
+        assert!(ready(&store, object_id), "{object_id} is ready");
+    }
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![
+            pair("doc-a", "X.md"),
+            pair("doc-b", "Z.md"),
+            pair("doc-c", "c.md")
+        ]
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[
+            ("doc-a", "hosted a"),
+            ("doc-b", "hosted b"),
+            ("doc-c", "hosted c")
+        ])
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+}
+
+/// #2421 round 2, second finding: `doc-a` moved first to `B.md` while
+/// `doc-b` still waits at `b.md`, and `doc-b` is unshared before it can
+/// park. Its file is still at `b.md`, so `doc-a` is not ready and writes
+/// nothing at `B.md` until `doc-b` parks and its file is gone.
+#[test]
+fn a_document_that_moved_first_waits_while_the_other_left_the_scope_unparked() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync_on_own_files(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "B.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.create("owner", 4, "doc-c", "a.md", "hosted c");
+    feed.rename(
+        "owner",
+        5,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-a", "B.md");
+    feed.share("doc-b", "A.md");
+    sync_on_own_files(&client, &mut store);
+    feed.share("doc-c", "a.md");
+    sync_on_own_files(&client, &mut store);
+    assert_eq!(hold(&store, "doc-a"), Some(path_held("B.md", "doc-b")));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-c")));
+
+    // It can't park yet, as with pushes the relay has not acknowledged.
+    feed.unshare("doc-b");
+    sync_on_own_files(&client, &mut store);
+    assert!(!ready(&store, "doc-a"), "doc-b's file is still at b.md");
+
+    assert!(park(&mut store), "doc-b parks");
+    sync_on_own_files(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+    assert!(is_parked(&store, "doc-b"));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "B.md"), pair("doc-c", "a.md")]
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+}
+
+/// #2421 round 2, third finding: a wait an earlier pass stored no longer
+/// stands once its document reached the path it waited for. `doc-x` waited at
+/// `x.md` for `doc-a` to leave `Notes.md`, and `doc-a` waited for `doc-t` to
+/// leave `TMP.md`. In one pass `doc-t` moves on, `doc-a` moves to `tmp.md`,
+/// `doc-x` to `notes.md`, and `doc-a` then wants `NOTES.md`. `doc-x` waits on
+/// nothing now, so `doc-a` does not move first: `doc-x` is ready, and only
+/// `doc-a` is held, until `doc-x` moves on.
+#[test]
+fn a_wait_that_no_longer_stands_lets_no_document_move_first() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-x", "x.md", "hosted x");
+    feed.create("owner", 2, "doc-a", "Notes.md", "hosted a");
+    feed.create("owner", 3, "doc-t", "TMP.md", "hosted t");
+    feed.share("doc-x", "x.md");
+    feed.share("doc-a", "Notes.md");
+    feed.share("doc-t", "TMP.md");
+    sync_on_own_files(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "Notes.md",
+        "tmp.md",
+        "hosted a",
+        "moment-owner-2",
+    );
+    feed.rename(
+        "owner",
+        5,
+        "doc-x",
+        "x.md",
+        "notes.md",
+        "hosted x",
+        "moment-owner-1",
+    );
+    feed.share("doc-a", "tmp.md");
+    feed.share("doc-x", "notes.md");
+    sync_on_own_files(&client, &mut store);
+    assert_eq!(hold(&store, "doc-a"), Some(path_held("tmp.md", "doc-t")));
+    assert_eq!(hold(&store, "doc-x"), Some(path_held("notes.md", "doc-a")));
+
+    feed.rename(
+        "owner",
+        6,
+        "doc-t",
+        "TMP.md",
+        "t.md",
+        "hosted t",
+        "moment-owner-3",
+    );
+    feed.rename(
+        "owner",
+        7,
+        "doc-a",
+        "tmp.md",
+        "NOTES.md",
+        "hosted a",
+        "moment-owner-4",
+    );
+    feed.share("doc-t", "t.md");
+    feed.share("doc-a", "NOTES.md");
+    sync_on_own_files(&client, &mut store);
+    sync_on_own_files(&client, &mut store);
+    assert!(ready(&store, "doc-x"));
+    assert_eq!(hold(&store, "doc-a"), Some(path_held("NOTES.md", "doc-x")));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![
+            pair("doc-a", "tmp.md"),
+            pair("doc-t", "t.md"),
+            pair("doc-x", "notes.md")
+        ]
+    );
+
+    feed.rename(
+        "owner",
+        8,
+        "doc-x",
+        "notes.md",
+        "y.md",
+        "hosted x",
+        "moment-owner-5",
+    );
+    feed.share("doc-x", "y.md");
+    sync_on_own_files(&client, &mut store);
+    sync_on_own_files(&client, &mut store);
+    for object_id in ["doc-a", "doc-t", "doc-x"] {
+        assert!(ready(&store, object_id), "{object_id} is ready");
+    }
+    assert_eq!(
+        paths(&store).0,
+        vec![
+            pair("doc-a", "NOTES.md"),
+            pair("doc-t", "t.md"),
+            pair("doc-x", "y.md")
+        ]
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+}
+
 /// Reports one document's live session.
 struct LiveSession(&'static str);
 
