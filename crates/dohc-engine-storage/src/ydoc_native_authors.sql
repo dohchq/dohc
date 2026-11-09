@@ -19,6 +19,16 @@ CREATE TABLE ydoc_native_authors (
         CHECK (agent_run_id IS NULL OR (actor_kind = 'agent' AND length(agent_run_id) > 0)),
     coverage         TEXT    NOT NULL DEFAULT 'update'
         CHECK (coverage IN ('update','interval','moment','replaced')),
+    -- The bytes admission counts for this author in a moment's author list:
+    -- its entry, with each identifier escaped as JSON escapes it, and room
+    -- for its depth to grow. The depth adds the same bytes at every value.
+    author_bytes     INTEGER GENERATED ALWAYS AS (
+        CASE actor_kind WHEN 'human' THEN 27 WHEN 'agent' THEN 38 ELSE 48 END
+        + length(CAST(json_quote(actor_origin_id) AS BLOB))
+        + CASE WHEN on_behalf_of IS NULL THEN 0
+               ELSE 14 + length(CAST(json_quote(on_behalf_of) AS BLOB)) END
+        + CASE WHEN agent_run_id IS NULL THEN 0
+               ELSE 14 + length(CAST(json_quote(agent_run_id) AS BLOB)) END) VIRTUAL,
     PRIMARY KEY (workspace_id, version_id, object_id, lineage_claim_id, update_digest),
     FOREIGN KEY (workspace_id, version_id, object_id)
       REFERENCES ydoc_docs(workspace_id, version_id, object_id)
@@ -49,6 +59,55 @@ CREATE TABLE ydoc_native_interval_authors (
       REFERENCES ydoc_docs(workspace_id, version_id, object_id)
       ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+-- How many identities an update still holds the author of on this document,
+-- and their author_bytes. A held lineage's release brings them all into its
+-- interval at once, so its admission counts a new identity with one read.
+ALTER TABLE ydoc_docs ADD COLUMN private_authors INTEGER NOT NULL DEFAULT 0
+    CHECK (private_authors >= 0);
+ALTER TABLE ydoc_docs ADD COLUMN private_author_bytes INTEGER NOT NULL DEFAULT 0
+    CHECK (private_author_bytes >= 0);
+-- An identity counts from its first 'update' row until its last one goes or
+-- leaves 'update'. No row returns to 'update'. Each check is one seek.
+CREATE TRIGGER ydoc_native_private_author_added AFTER INSERT ON ydoc_native_authors
+WHEN NEW.coverage = 'update' AND NOT EXISTS (
+    SELECT 1 FROM ydoc_native_authors o
+    WHERE o.workspace_id = NEW.workspace_id AND o.version_id = NEW.version_id
+      AND o.object_id = NEW.object_id AND o.coverage = 'update'
+      AND o.actor_origin_id = NEW.actor_origin_id AND o.actor_kind = NEW.actor_kind
+      AND o.on_behalf_of IS NEW.on_behalf_of AND o.agent_run_id IS NEW.agent_run_id
+      AND (o.lineage_claim_id <> NEW.lineage_claim_id OR o.update_digest <> NEW.update_digest))
+BEGIN
+    UPDATE ydoc_docs SET private_authors = private_authors + 1,
+        private_author_bytes = private_author_bytes + NEW.author_bytes
+    WHERE workspace_id = NEW.workspace_id AND version_id = NEW.version_id
+      AND object_id = NEW.object_id;
+END;
+CREATE TRIGGER ydoc_native_private_author_deleted AFTER DELETE ON ydoc_native_authors
+WHEN OLD.coverage = 'update' AND NOT EXISTS (
+    SELECT 1 FROM ydoc_native_authors o
+    WHERE o.workspace_id = OLD.workspace_id AND o.version_id = OLD.version_id
+      AND o.object_id = OLD.object_id AND o.coverage = 'update'
+      AND o.actor_origin_id = OLD.actor_origin_id AND o.actor_kind = OLD.actor_kind
+      AND o.on_behalf_of IS OLD.on_behalf_of AND o.agent_run_id IS OLD.agent_run_id)
+BEGIN
+    UPDATE ydoc_docs SET private_authors = private_authors - 1,
+        private_author_bytes = private_author_bytes - OLD.author_bytes
+    WHERE workspace_id = OLD.workspace_id AND version_id = OLD.version_id
+      AND object_id = OLD.object_id;
+END;
+CREATE TRIGGER ydoc_native_private_author_covered AFTER UPDATE OF coverage ON ydoc_native_authors
+WHEN OLD.coverage = 'update' AND NEW.coverage <> 'update' AND NOT EXISTS (
+    SELECT 1 FROM ydoc_native_authors o
+    WHERE o.workspace_id = OLD.workspace_id AND o.version_id = OLD.version_id
+      AND o.object_id = OLD.object_id AND o.coverage = 'update'
+      AND o.actor_origin_id = OLD.actor_origin_id AND o.actor_kind = OLD.actor_kind
+      AND o.on_behalf_of IS OLD.on_behalf_of AND o.agent_run_id IS OLD.agent_run_id)
+BEGIN
+    UPDATE ydoc_docs SET private_authors = private_authors - 1,
+        private_author_bytes = private_author_bytes - OLD.author_bytes
+    WHERE workspace_id = OLD.workspace_id AND version_id = OLD.version_id
+      AND object_id = OLD.object_id;
+END;
 -- Unsettled updates already in the journal keep their authors.
 INSERT OR IGNORE INTO ydoc_native_authors
     (workspace_id, version_id, object_id, lineage_claim_id, update_digest, seq,

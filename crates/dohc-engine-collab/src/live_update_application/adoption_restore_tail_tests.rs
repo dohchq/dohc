@@ -122,8 +122,9 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
     };
     let mut f = Fixture::new();
     f.adopt().unwrap();
-    // The accepted interval is full. The delivery's snapshot names only a
-    // person it already holds.
+    // The agent edits privately, then the accepted interval fills. The
+    // delivery's snapshot names only a person it already holds.
+    let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
     let full: Vec<Value> = std::iter::once(serde_json::to_value(&person).unwrap())
         .chain((1..crate::author_coverage::MAX_INTERVAL_AUTHORS).map(
             |index| serde_json::json!({"kind": "human", "humanId": format!("person-{index}")}),
@@ -145,7 +146,6 @@ fn adopted_agent_edit_accepted_into_a_full_interval_settles_before_its_agent_ent
             .map_err(write_sql)
         })
         .unwrap();
-    let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
     let mut event = native_tail_event(&f, edit.update, edit.delivery_id, 7);
     event.metadata.author_snapshot = Some(vec![person]);
     let interval = |f: &Fixture| {
@@ -247,6 +247,23 @@ fn held_admission_cost_does_not_grow_with_the_private_tail() {
         )
         .map(|_| ())
     };
+    // The relay accepted the only private edit of the same agent for the
+    // owner, so its next keystroke has no private update to find.
+    let drained = native_tail_edit(&mut f, "# Accepted\n", 10);
+    native_tail_apply(&mut f, drained.update, drained.delivery_id, 3);
+    let accepted = dohc_engine_domain::ChangeAttribution {
+        on_behalf_of: Some("owner".into()),
+        ..attribution.clone()
+    };
+    let returning = |conn: &rusqlite::Connection| {
+        crate::author_coverage::check_admission_in(
+            conn,
+            &key,
+            Some("native-agent"),
+            Some(&accepted),
+        )
+        .map(|_| ())
+    };
     let mut edits = 0;
     let mut steps = Vec::new();
     for tail in [10, 90] {
@@ -262,7 +279,12 @@ fn held_admission_cost_does_not_grow_with_the_private_tail() {
         // The first read prepares its statements.
         read_steps(&mut f, reserved);
         read_steps(&mut f, keystroke);
-        steps.push((read_steps(&mut f, reserved), read_steps(&mut f, keystroke)));
+        read_steps(&mut f, returning);
+        steps.push((
+            read_steps(&mut f, reserved),
+            read_steps(&mut f, keystroke),
+            read_steps(&mut f, returning),
+        ));
     }
     assert!(
         steps[1].0 <= steps[0].0 + steps[0].0 / 10,
@@ -272,6 +294,10 @@ fn held_admission_cost_does_not_grow_with_the_private_tail() {
         steps[1].1 <= steps[0].1 + steps[0].1 / 10,
         "a known author's held keystroke grew with the private tail: {steps:?}"
     );
+    assert!(
+        steps[1].2 <= steps[0].2 + steps[0].2 / 10,
+        "a drained author's held keystroke grew with the private tail: {steps:?}"
+    );
 }
 
 /// One private edit by its own run of one agent.
@@ -280,19 +306,36 @@ fn agent_run_edit(
     cache: &mut WriterDocCache,
     run: usize,
 ) -> Result<(), crate::CollabError> {
+    agent_edit(f, cache, run, &agent_run(format!("run-{run}"), None))
+}
+
+/// One run of the agent `agent`, for a person when it names one.
+fn agent_run(
+    agent_run_id: String,
+    on_behalf_of: Option<String>,
+) -> dohc_engine_domain::ChangeAttribution {
+    dohc_engine_domain::ChangeAttribution {
+        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+        on_behalf_of,
+        depth: 0,
+        run: None,
+        agent_run_id: Some(agent_run_id),
+    }
+}
+
+/// The `edit`th private edit of the agent `agent`.
+fn agent_edit(
+    f: &mut Fixture,
+    cache: &mut WriterDocCache,
+    edit: usize,
+    attribution: &dohc_engine_domain::ChangeAttribution,
+) -> Result<(), crate::CollabError> {
     let key = f.key.clone();
     let path = f.binding.current_path.clone();
     let update = f
         .doc
-        .richdoc_append_paragraph(&format!("Private run {run}."));
-    let attribution = dohc_engine_domain::ChangeAttribution {
-        actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
-        on_behalf_of: None,
-        depth: 0,
-        run: None,
-        agent_run_id: Some(format!("run-{run}")),
-    };
-    let now = 20 + run as i64;
+        .richdoc_append_paragraph(&format!("Private run {edit}."));
+    let now = 20 + edit as i64;
     crate::record_local_update(
         &mut f.store,
         cache,
@@ -300,7 +343,7 @@ fn agent_run_edit(
         &update,
         crate::LocalAppend {
             actor_origin_id: Some("agent"),
-            attribution: Some(&attribution),
+            attribution: Some(attribution),
             ..Default::default()
         },
         &NoFaults,
@@ -333,38 +376,103 @@ fn agent_runs(json: &str) -> Vec<String> {
     runs
 }
 
-/// Separate runs of an agent each make a private edit on a held lineage, and
-/// the relay refuses them. Retirement keeps them all, and the release brings
-/// every one of their authors into the interval at once. So the run that one
-/// moment could not name is refused when it edits, and writes nothing. After
-/// the release, the document settles and its moment names every run that was
-/// admitted.
-#[test]
-fn a_held_lineage_refuses_the_agent_run_one_moment_cannot_name() {
-    let mut f = Fixture::new();
+/// Adopts the document, and the relay accepts and settles one edit, so a
+/// release has an accepted state to return the Y.Doc to. No author is
+/// reserved.
+fn adopt_with_settled_edit(f: &mut Fixture) {
     f.adopt().unwrap();
-    // The relay accepted and settled one edit, so the release has an
-    // accepted state to return the Y.Doc to.
-    let covered = native_tail_edit(&mut f, "# Covered\n", 11);
-    native_tail_apply(
-        &mut f,
-        covered.update.clone(),
-        covered.delivery_id.clone(),
-        3,
-    );
+    let covered = native_tail_edit(f, "# Covered\n", 11);
+    native_tail_apply(f, covered.update.clone(), covered.delivery_id.clone(), 3);
     let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
-    acknowledge_entry(&mut f, &covered);
-    settled(&mut f, Some(covered), "covered").unwrap();
-    f.store
-        .write_with(&NoFaults, |tx| {
-            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
-        })
-        .unwrap();
+    acknowledge_entry(f, &covered);
+    settled(f, Some(covered), "covered").unwrap();
+    settle_accepted_prefix(f);
     assert!(f
         .store
         .read_with(|conn| crate::author_coverage::reserved_in(conn, &f.key))
         .unwrap()
         .is_empty());
+}
+
+/// The relay's settlement of what it accepted while the lineage is held.
+fn settle_accepted_prefix(f: &mut Fixture) {
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::advance_accepted_prefix_in(tx, &f.key, false)
+        })
+        .unwrap();
+}
+
+/// Every table a private edit writes.
+const PRIVATE_EDIT_WRITES: [&str; 4] = [
+    "ydoc_docs",
+    "ydoc_updates",
+    "ydoc_native_authors",
+    "owner_ydoc_outbox_entries",
+];
+
+/// Agent runs with the longest identifiers each make a private edit on a
+/// held lineage. The run whose author would pass the bytes one moment can
+/// hold is refused and writes nothing, while a run with a private edit keeps
+/// editing.
+#[test]
+fn a_held_lineage_refuses_the_agent_run_one_moment_has_no_bytes_for() {
+    let mut f = Fixture::new();
+    adopt_with_settled_edit(&mut f);
+    // Each quote doubles when escaped.
+    let long_run = |index: usize| {
+        let id = dohc_engine_storage::MAX_IDENTIFIER_BYTES;
+        agent_run(
+            format!("{index:04}{}", "\"".repeat(id - 4)),
+            Some("\"".repeat(id)),
+        )
+    };
+    let entry = dohc_engine_domain::moment_author_json(Some("agent"), Some(&long_run(0)))
+        .unwrap()
+        .len()
+        - "[]".len()
+        + r#","depth":64"#.len();
+    // The list adds its brackets and a comma between entries.
+    let list = |authors: usize| 1 + authors * (entry + 1);
+    let admitted = (crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES - 1) / (entry + 1);
+    assert!(admitted < crate::author_coverage::MAX_INTERVAL_AUTHORS);
+    assert!(list(admitted) <= crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
+    assert!(list(admitted + 1) > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
+    let mut cache = WriterDocCache::new();
+    for index in 0..admitted {
+        agent_edit(&mut f, &mut cache, index, &long_run(index)).unwrap();
+    }
+    agent_edit(&mut f, &mut cache, admitted, &long_run(0)).unwrap();
+    let before = rows(&f, &PRIVATE_EDIT_WRITES);
+    let refused = agent_edit(
+        &mut f,
+        &mut WriterDocCache::new(),
+        admitted + 1,
+        &long_run(admitted),
+    );
+    assert!(
+        matches!(refused, Err(crate::CollabError::AuthorCapacity)),
+        "the run past one moment's bytes is refused"
+    );
+    assert_eq!(
+        rows(&f, &PRIVATE_EDIT_WRITES),
+        before,
+        "a refused edit writes nothing"
+    );
+}
+
+/// Separate runs of an agent each make a private edit on a held lineage, and
+/// the relay refuses them. Retirement keeps them all, and the release brings
+/// every one of their authors into the interval at once. So the run that one
+/// moment could not name is refused when it edits, and writes nothing. It is
+/// still refused after sync accepts an edit that names it, because the
+/// relay's settlement consumes that author before the release. After the
+/// release, the document settles and its moment names every run that was
+/// admitted.
+#[test]
+fn a_held_lineage_refuses_the_agent_run_one_moment_cannot_name() {
+    let mut f = Fixture::new();
+    adopt_with_settled_edit(&mut f);
     let mut cache = WriterDocCache::new();
     let runs = crate::author_coverage::MAX_INTERVAL_AUTHORS;
     for run in 0..runs {
@@ -372,19 +480,39 @@ fn a_held_lineage_refuses_the_agent_run_one_moment_cannot_name() {
     }
     // A run that already has a private edit keeps editing.
     agent_run_edit(&mut f, &mut cache, 0).unwrap();
-    const WRITES: [&str; 4] = [
-        "ydoc_docs",
-        "ydoc_updates",
-        "ydoc_native_authors",
-        "owner_ydoc_outbox_entries",
-    ];
-    let before = rows(&f, &WRITES);
+    let before = rows(&f, &PRIVATE_EDIT_WRITES);
     let refused = agent_run_edit(&mut f, &mut WriterDocCache::new(), runs);
     assert!(
         matches!(refused, Err(crate::CollabError::AuthorCapacity)),
         "the run past one moment's authors is refused"
     );
-    assert_eq!(rows(&f, &WRITES), before, "a refused edit writes nothing");
+    assert_eq!(
+        rows(&f, &PRIVATE_EDIT_WRITES),
+        before,
+        "a refused edit writes nothing"
+    );
+    let accepted = dohc_engine_domain::moment_author_json(
+        Some("agent"),
+        Some(&agent_run(format!("run-{runs}"), None)),
+    )
+    .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::author_coverage::admit_accepted_in(tx, &f.key, &[accepted])
+        })
+        .unwrap();
+    let before = rows(&f, &PRIVATE_EDIT_WRITES);
+    let refused = agent_run_edit(&mut f, &mut WriterDocCache::new(), runs);
+    assert!(
+        matches!(refused, Err(crate::CollabError::AuthorCapacity)),
+        "an accepted author with no private edit still counts against the release"
+    );
+    assert_eq!(
+        rows(&f, &PRIVATE_EDIT_WRITES),
+        before,
+        "a refused edit writes nothing"
+    );
+    settle_accepted_prefix(&mut f);
     let deliveries: Vec<String> = f
         .store
         .read_with(|conn| {

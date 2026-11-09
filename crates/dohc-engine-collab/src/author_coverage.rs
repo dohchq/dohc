@@ -609,12 +609,26 @@ pub fn fold_in(conn: &Connection, key: &DocKey, through: i64) -> Result<(), Coll
     Ok(())
 }
 
-/// A seed restates the file, so it names no author.
-pub(crate) fn forget_seed_in(conn: &Connection, key: &DocKey, seq: i64) -> Result<(), CollabError> {
+/// A seed restates the file, so it names no author. Its append recorded the
+/// row under the current lineage and its digest.
+pub(crate) fn forget_seed_in(
+    conn: &Connection,
+    key: &DocKey,
+    update_digest: &str,
+    seq: i64,
+) -> Result<(), CollabError> {
     conn.execute(
         "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
-         AND object_id=?3 AND coverage='update' AND seq=?4",
-        params![key.workspace_id, key.version_id, key.object_id, seq],
+         AND object_id=?3 AND lineage_claim_id=(SELECT COALESCE(lineage_claim_id,'') \
+         FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) \
+         AND update_digest=?4 AND coverage='update' AND seq=?5",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            update_digest,
+            seq
+        ],
     )
     .map_err(sql)?;
     Ok(())
@@ -822,6 +836,73 @@ fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
     Ok(bytes)
 }
 
+/// What a held lineage's release brings into its interval at once: each
+/// identity an update still holds the author of, with the bytes admission
+/// counts for it, and the unknown-author marker if one is reserved, which a
+/// release without a settlement keeps. A settlement while held consumes the
+/// authors the relay accepted, but none of these.
+struct Release {
+    authors: usize,
+    bytes: usize,
+    /// The identities this check added.
+    added: std::collections::BTreeSet<String>,
+}
+
+impl Release {
+    fn read_in(conn: &Connection, key: &DocKey, reserved: &Authors) -> Result<Self, CollabError> {
+        let (authors, bytes): (i64, i64) = conn
+            .prepare_cached(
+                "SELECT private_authors, private_author_bytes FROM ydoc_docs \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            )
+            .map_err(sql)?
+            .query_row(
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(sql)?;
+        let size = |value: i64| {
+            usize::try_from(value).map_err(|_| corrupt("private author count is negative"))
+        };
+        let mut release = Self {
+            authors: size(authors)?,
+            bytes: size(bytes)?,
+            added: Default::default(),
+        };
+        if reserved.has_unattributed() {
+            release.add(UNATTRIBUTED)?;
+        }
+        Ok(release)
+    }
+
+    fn add(&mut self, json: &str) -> Result<(), CollabError> {
+        for (identity, author) in entry(json)?.0 {
+            if self.added.insert(identity) {
+                self.authors += 1;
+                self.bytes += entry_admission_bytes(&author);
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds an identity no update holds the author of yet, refusing it when
+    /// one moment could not name everything the release brings in. Whether
+    /// an accepted delivery already named it does not matter: the relay's
+    /// settlement consumes that entry first.
+    fn admit(&mut self, json: &str) -> Result<(), CollabError> {
+        self.add(json)?;
+        // The list adds its brackets and a comma between entries.
+        if self.authors > MAX_INTERVAL_AUTHORS
+            || 1 + self.authors + self.bytes > MAX_INTERVAL_AUTHOR_BYTES
+        {
+            return Err(CollabError::AuthorCapacity);
+        }
+        Ok(())
+    }
+}
+
+const UNATTRIBUTED: &str = r#"[{"kind":"unattributed"}]"#;
+
 pub fn check_admission_in(
     conn: &Connection,
     key: &DocKey,
@@ -842,8 +923,8 @@ pub(crate) fn check_batch_admission_in<'a>(
     // A held lineage's private authors enter its interval together at its
     // release, so they bound a new identity too. They never request a
     // settlement, which could not consume them.
-    let mut with_private = if accepted_only_in(conn, key)? {
-        Some(reserved_with_private_in(conn, key)?)
+    let mut release = if accepted_only_in(conn, key)? {
+        Some(Release::read_in(conn, key, &covered)?)
     } else {
         None
     };
@@ -852,12 +933,20 @@ pub(crate) fn check_batch_admission_in<'a>(
     for (actor, attribution) in credits {
         let json = dohc_engine_domain::moment_author_json(actor, attribution);
         let actorless = json.is_none();
-        let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
+        let json = json.unwrap_or_else(|| UNATTRIBUTED.to_owned());
         if !seen.insert(json.clone()) {
             continue;
         }
-        if let Some(with_private) = with_private.as_mut() {
-            admit(with_private, &json)?;
+        if let Some(release) = release.as_mut() {
+            let private = match (actor, attribution) {
+                (Some(actor), Some(attribution)) => {
+                    private_author_in(conn, key, actor, attribution)?
+                }
+                _ => false,
+            };
+            if !private {
+                release.admit(&json)?;
+            }
         }
         let bytes = admit(&mut covered, &json)?;
         if actorless {
@@ -882,17 +971,17 @@ fn check_admission_with_coverage_in(
 ) -> Result<Admission, CollabError> {
     let json = dohc_engine_domain::moment_author_json(actor, attribution);
     let actorless = json.is_none();
-    let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
+    let json = json.unwrap_or_else(|| UNATTRIBUTED.to_owned());
     // An adopted owner's edit is private until the relay accepts it, and no
-    // settlement while held consumes its author. A release can bring every
+    // settlement while held consumes its author. A release brings every
     // private author into the interval at once, so a new identity is counted
-    // with them. An identity with a private update already adds nothing, and
-    // one seek finds it.
+    // with them, from the document's totals. An identity with a private
+    // update already adds nothing, and one seek finds it.
     if accepted_only_in(conn, key)? {
         entry(&json)?;
         if let (Some(actor), Some(attribution)) = (actor, attribution) {
             if !private_author_in(conn, key, actor, attribution)? {
-                admit(&mut reserved_with_private_in(conn, key)?, &json)?;
+                Release::read_in(conn, key, &reserved_in(conn, key)?)?.admit(&json)?;
             }
         }
         return Ok(Admission {
@@ -993,7 +1082,7 @@ pub fn admit_accepted_in(
     authors: &[String],
 ) -> Result<(), CollabError> {
     // Missing recording context is coverage too, never proof of recipient-only edits.
-    let unattributed = [r#"[{"kind":"unattributed"}]"#.to_owned()];
+    let unattributed = [UNATTRIBUTED.to_owned()];
     let authors = if authors.is_empty() {
         &unattributed
     } else {
@@ -1457,6 +1546,132 @@ mod tests {
             admit(&mut covered, json).expect("a link applies");
         }
         assert_eq!(covered.len(), 2);
+    }
+
+    /// The store counts each identity an update still holds the author of
+    /// once, with the bytes admission counts for its entry, until its last
+    /// such update is forgotten, accepted or folded.
+    #[test]
+    fn private_authors_count_each_identity_with_its_admission_bytes() {
+        fn totals(conn: &Connection) -> Result<(usize, usize), CollabError> {
+            conn.query_row(
+                "SELECT private_authors, private_author_bytes FROM ydoc_docs",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as usize,
+                        row.get::<_, i64>(1)? as usize,
+                    ))
+                },
+            )
+            .map_err(sql)
+        }
+        let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 1).unwrap();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        crate::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &Ydoc::wire().plaintext_insert(0, "text"),
+            LocalAppend {
+                marker: Some(MarkerCreation {
+                    path: Some("note.txt"),
+                    content_kind: ContentKind::Plaintext,
+                    regime: Regime::LocalOnly,
+                }),
+                ..LocalAppend::default()
+            },
+            &NoFaults,
+            2,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        fn attribution(
+            actor_kind: ChangeActorKind,
+            on_behalf_of: Option<&str>,
+            depth: u32,
+            agent_run_id: Option<&str>,
+        ) -> ChangeAttribution {
+            ChangeAttribution {
+                actor_kind,
+                on_behalf_of: on_behalf_of.map(str::to_owned),
+                depth,
+                run: None,
+                agent_run_id: agent_run_id.map(str::to_owned),
+            }
+        }
+        // Quotes and backslashes escape to twice their size.
+        let escaped = "\"\\".repeat(256);
+        let identities = [
+            ("person", attribution(ChangeActorKind::Human, None, 0, None)),
+            (
+                "person",
+                attribution(ChangeActorKind::Human, Some("café"), 0, None),
+            ),
+            (
+                "agent",
+                attribution(ChangeActorKind::Agent, None, 0, Some("run")),
+            ),
+            (
+                "agent",
+                attribution(
+                    ChangeActorKind::Agent,
+                    Some(escaped.as_str()),
+                    64,
+                    Some(escaped.as_str()),
+                ),
+            ),
+            (
+                escaped.as_str(),
+                attribution(ChangeActorKind::Automation, Some("owner"), 7, None),
+            ),
+        ];
+        store
+            .write_with(&NoFaults, |tx| {
+                let mut entries = Vec::new();
+                for (index, &(actor, ref attribution)) in identities.iter().enumerate() {
+                    // Two updates by one identity count it once.
+                    for copy in 0..2 {
+                        let seq = 100 + 2 * index as i64 + copy;
+                        let digest = format!("{index}-{copy}");
+                        record_native_in(tx, &key, None, &digest, seq, actor, attribution)?;
+                    }
+                    let json =
+                        dohc_engine_domain::moment_author_json(Some(actor), Some(attribution))
+                            .unwrap();
+                    let bytes: usize = entry(&json)?.0.values().map(entry_admission_bytes).sum();
+                    let stored: i64 = tx
+                        .query_row(
+                            "SELECT author_bytes FROM ydoc_native_authors WHERE update_digest=?1",
+                            [format!("{index}-0")],
+                            |row| row.get(0),
+                        )
+                        .map_err(sql)?;
+                    assert_eq!(stored as usize, bytes, "{json}");
+                    entries.push((json, bytes));
+                }
+                let all: usize = entries.iter().map(|(_, bytes)| bytes).sum();
+                assert_eq!(totals(tx)?, (5, all));
+                // A delivery that names the author forgets one of its two
+                // updates, so the identity still counts.
+                accept_native_in(tx, &key, "", "0-0", &[entries[0].0.clone()])?;
+                assert_eq!(totals(tx)?, (5, all));
+                // One that does not moves its last update into the interval.
+                accept_native_in(tx, &key, "", "0-1", &[])?;
+                let rest = all - entries[0].1;
+                assert_eq!(totals(tx)?, (4, rest));
+                forget_seed_in(tx, &key, "1-0", 102)?;
+                forget_seed_in(tx, &key, "1-1", 103)?;
+                assert_eq!(totals(tx)?, (3, rest - entries[1].1));
+                fold_in(tx, &key, i64::MAX)?;
+                assert_eq!(totals(tx)?, (0, 0));
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
     }
 
     #[test]
