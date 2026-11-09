@@ -32,10 +32,9 @@ import {
   activationDescriptorReserve,
   ordinaryActivationEntryBytes,
   ordinaryActivationReadBytes,
-  verifyOrdinaryActivationCut,
-  readOrdinaryActivationHistory,
   type KnownActivationSource,
-} from "./storage/ordinaryActivationSource.js";
+} from "./storage/ordinaryActivationBytes.js";
+import { verifyOrdinaryActivationCut, readOrdinaryActivationHistory } from "./storage/ordinaryActivationSource.js";
 import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");

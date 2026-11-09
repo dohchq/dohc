@@ -22,7 +22,7 @@ import {createFirstOpenPublisher, type FirstOpenCheckHost, type FirstOpenNativeC
 import type {FirstOpenOutcome} from "@dohc/workspace-contracts/first-open";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import {readFirstOpenHistoryFile} from "./storage/firstOpenHistory";
-import {activationCaptureBytes, ordinaryActivationReadBytes} from "./storage/ordinaryActivationSource";
+import {activationCaptureBytes, ordinaryActivationReadBytes} from "./storage/ordinaryActivationBytes";
 import type {StorageContext} from "./storage/context";
 
 // The real route, the service host's facade, its queued client and the native engine binary.

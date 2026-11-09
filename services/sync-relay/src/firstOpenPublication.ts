@@ -15,7 +15,7 @@ import type {ServiceActivationConfig} from "./serviceActivationDriver";
 import type {AppendLogBatchGuardContext, SyncRelayStorage} from "./storage";
 import {firstOpenBasePayload, firstOpenOrigin, type FirstOpenPreparation} from "./storage/firstOpenEligibility";
 import type {FirstOpenSource} from "./storage/firstOpenHistory";
-import {activationDescriptorReserve, ordinaryActivationEntryBytes} from "./storage/ordinaryActivationSource";
+import {activationDescriptorReserve, ordinaryActivationEntryBytes} from "./storage/ordinaryActivationBytes";
 import {enforceWorkspaceIdentity, parseOptionalWorkspaceIdentity} from "./workspaceReplicationRoutes";
 
 /** Writer attempts per request: the first, then at most two after catching up. */

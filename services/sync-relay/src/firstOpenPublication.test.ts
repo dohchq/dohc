@@ -24,7 +24,7 @@ import {FIRST_OPEN_ORIGIN_PREFIX} from "./relayLogInputs";
 import {readFirstOpenHistoryFile, type FirstOpenHistoryReader} from "./storage/firstOpenHistory";
 import {firstOpenOrigin} from "./storage/firstOpenEligibility";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
-import {activationCaptureBytes, ordinaryActivationReadBytes} from "./storage/ordinaryActivationSource";
+import {activationCaptureBytes, ordinaryActivationReadBytes} from "./storage/ordinaryActivationBytes";
 import type {StorageContext} from "./storage/context";
 import {DEFAULT_WORKSPACE_QUOTA_BYTES} from "./storage";
 

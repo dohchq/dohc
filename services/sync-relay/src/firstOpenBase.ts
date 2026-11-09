@@ -9,7 +9,7 @@ import { encodeRichdocSeed, seedClientId } from "@dohc/ydoc-projection/richdoc-s
 import {
   activationCaptureBytes,
   ordinaryActivationReadBytes,
-} from "./storage/ordinaryActivationSource.js";
+} from "./storage/ordinaryActivationBytes.js";
 
 /** `dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES`. */
 export const MAX_YDOC_UPDATE_BYTES = 20 * 1024 * 1024;
