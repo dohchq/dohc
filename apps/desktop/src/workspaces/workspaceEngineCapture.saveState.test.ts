@@ -175,9 +175,10 @@ it("keeps typing a busy store refused in a typing checkpoint, retired once the e
   try {
     type("BUSY");
     await vi.waitFor(async () => expect((await saved())[0]?.text).toBe("BUSY"));
+    // The checkpoint has started, so its timer alone writes later typing.
     type(" MORE");
     await vi.waitFor(() => expect(refused).toHaveLength(2));
-    await flushTypingCheckpoints(workspaceId);
+    await vi.waitFor(async () => expect((await saved())[0]?.text).toBe("BUSY MORE"));
     const [checkpoint] = await saved();
     expect(checkpoint!.updates.map(update => update.requestId)).toEqual(refused);
     // After a crash, recovery replays these edits over the admitted base the
