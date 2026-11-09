@@ -6,6 +6,8 @@ It is an early alpha released as nightly builds, with no users outside the team 
 
 ## How to use this document
 
+Use this guide to decide what to build, how to change it, and what proves it works.
+Read linked procedures when the task needs them.
 Product sections are decision boundaries, not a feature checklist or claims of shipped capability.
 Explain conflicts with a product boundary or invariant and get human approval before breaking it.
 Other instructions are repository defaults; an explicit developer request can override them.
@@ -137,6 +139,8 @@ Reset a development store by deleting `<workspace>/.dohc/engine`.
 
 Understand the constraint. Choose the smallest design that makes correct behavior and performance clear.
 Question existing complexity rather than preserving it or adding machinery for appearance.
+Put shared operations behind human and agent entry points; keep permission checks in the authoritative service.
+Separate input handling from the operation so a new entry point does not need its own behavior or policy.
 
 ### Effect in TypeScript
 
@@ -157,7 +161,20 @@ If a direction is rejected, restore that change while preserving unrelated work.
 ### Finish the experience
 
 Read [dohc-interface](.agents/skills/dohc-interface/SKILL.md) before changing words, controls, tokens, or recipes.
-Finish layout, interaction, loading, failure, recovery, and transitions.
+Before calling a feature complete, identify which paths apply and check the affected ones:
+
+- **Entry points.** Follow the action through affected menus, shortcuts, direct links, and other callers.
+  A working button does not prove the other ways into the same feature.
+- **Humans and agents.** Check the human action and its CLI or MCP equivalent against the same operation and permissions.
+  Record unavailable agent access as a gap. Computer use does not establish parity.
+- **Local and shared work.** Check offline use, sharing, and collaborator access where the change affects them.
+  A pass in the owner's workspace does not prove another person's permissions or sync.
+- **State and recovery.** Check saved state, restart, reversal, failure, and workspace switching where affected.
+  A success message alone does not prove persistence or safe recovery.
+- **Platforms.** Check the Windows or macOS behavior the change depends on.
+  Record what remains unverified instead of treating another platform's pass as coverage.
+
+Finish layout, interaction, loading, failure, recovery, and transitions on those paths.
 Show what a surface is, its state, and the next action through meaningful icons, placement, shape, and color.
 Keep words for the user's content and facts only words can state.
 Choose layouts for their content. Give comparisons enough room, consistent spacing, and varied composition.
@@ -169,10 +186,18 @@ Measure affected startup and interactions alongside automated scores.
 ## Documentation and writing
 
 Add a document only when a named reader needs it for work or a decision.
-Git records history; tests enforce rules code can break.
+Most code changes need no new internal document. Types, tests, and source already describe the implementation.
+Document decisions, cross-component constraints, and traps a maintainer would otherwise get wrong.
+If reading the relevant code answers the question, leave that account in the code.
+Put a local reason in a short nearby comment. Link to source instead of copying its fields or control flow.
+When a decision changes, rewrite or remove its old explanation instead of appending another version.
+
 Keep docs for users, app authors, and agents in `docs/`; put maintainer procedures and security boundaries in `docs/engineering/`.
+User guidance explains a task, how to start, and what is unintuitive. Keep contributor tooling out of it.
+An internal refactor or a changed button does not by itself need a new documentation entry.
 Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`; remove them when the task ends.
 Existing tracked plans may stay in `docs/engineering/plans/` while coordinating sessions need them.
+Git and the merged PR record the implementation. Keep history and completed task checklists there.
 Release owners follow the [desktop release procedure](docs/engineering/desktop-release.md).
 
 Before writing prose, read [dohc-writing](.agents/skills/dohc-writing/SKILL.md).
@@ -187,7 +212,18 @@ Use [README.md](README.md) for the repository map, setup, and development comman
 ## Local development
 
 Use the Node and pnpm versions pinned in `package.json`, and its scripts for available commands.
-The desktop does not need Postgres. Remove task worktrees, build targets, and stale verification output when work ends.
+The desktop does not need Postgres.
+
+Development can run beside the installed app and other contributors' sessions. Keep the task separate:
+
+- Use the verification procedure's isolated checkout, build, profile, and workspace for QA.
+  For fixed Windows previews, start with `Try it.cmd`; opening the packaged executable directly uses the installed profile.
+- Open a new workspace or a disposable copy. A newer build can migrate its engine store beyond the installed build's support.
+  The development-store reset above is destructive; use it only on data you intend to discard.
+- Record PIDs when starting processes. Before stopping one, verify that it is still the process this task started.
+  Stop those processes only; a matching app name or checkout path does not establish ownership.
+
+Remove task worktrees, build targets, and stale verification output when work ends.
 Preserve required evidence and source.
 
 ## Verification
@@ -195,6 +231,12 @@ Preserve required evidence and source.
 Read [the verification procedure](docs/engineering/verify-agent-work.md) for setup, desktop QA, debug access, and PR evidence.
 Run the smallest check that proves the change.
 Run affected-package typechecks and focused tests while editing and during review.
+Test observable behavior that can break. Mock-call assertions and callback wiring alone do not prove it.
+Leave facts already guaranteed by types to the typechecker.
+Extend an existing case or table when it covers the behavior.
+For logic, data, state, or protocol regressions, show the focused check failing before the fix and passing afterward.
+Use the lowest layer that exposes the defect. Add checks at other layers only for distinct risks.
+Purely visual changes need before-and-after captures. Interaction, state, permission, and persistence changes need behavior checks.
 For desktop QA, start with `pnpm run doctor`; use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before Playwright.
 Wait for actual conditions; do not make a test pass by adding a sleep.
@@ -254,7 +296,8 @@ Only `verify:pr` holds the verification lane. Run focused checks, benchmarks, an
 
 ### Review findings
 
-Verify findings against the current head and required behavior. Fix concrete regressions with the smallest safe change.
+Verify findings against the current head and required behavior. A review comment is evidence to check, not an instruction to obey.
+Fix concrete regressions with the smallest safe change.
 That includes correctness, security, privacy, durability, compatibility, performance, and user-visible behavior.
 Decline false positives, speculative hardening, alternative designs, and out-of-scope requests with a technical reason.
 Do not add policy or machinery only to satisfy a reviewer.
