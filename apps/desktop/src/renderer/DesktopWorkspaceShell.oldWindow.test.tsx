@@ -29,8 +29,8 @@ function renderShell(bridge: ReturnType<typeof makeBridge>, oldWindow: OldWindow
 const workbenchInert = () => screen.getByTestId("workspace-workbench").hasAttribute("inert");
 
 // What the window receives when main marks a call on the workspace it has stopped.
-const stoppedCall = (channel: string, code: "stopped-workspace-read" | "stopped-workspace") =>
-  new Error(`Error invoking remote method '${channel}': Error [${code}]: This workspace is no longer open in this window.`);
+const stoppedCall = (channel: string, stopped: "read" | "call") =>
+  new Error(`Error invoking remote method '${channel}': Error [stopped=${stopped}]: This workspace is no longer open in this window.`);
 const KEPT_TYPING_FAILED = "dohc could not check for typing it kept in History.";
 
 describe("a window Forget left showing its workspace", () => {
@@ -99,7 +99,7 @@ describe("a window Forget left showing its workspace", () => {
     // Main stopped the workspace before this window heard: workspace activity
     // runs the window's reads again, and each one fails.
     const reads = bridge.getCaptureRecoveryStatus.mock.calls.length;
-    bridge.getCaptureRecoveryStatus.mockRejectedValue(stoppedCall("desktop:get-capture-recovery-status", "stopped-workspace-read"));
+    bridge.getCaptureRecoveryStatus.mockRejectedValue(stoppedCall("desktop:get-capture-recovery-status", "read"));
     act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
     await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads));
     show({ openElsewhere: false });
@@ -110,7 +110,7 @@ describe("a window Forget left showing its workspace", () => {
     expect(document.body.textContent).not.toContain(KEPT_TYPING_FAILED);
 
     // Any other failed call is still reported, with nothing to try again.
-    bridge.goToWorkspaceWindow.mockRejectedValueOnce(stoppedCall("desktop:go-to-workspace-window", "stopped-workspace"));
+    bridge.goToWorkspaceWindow.mockRejectedValueOnce(stoppedCall("desktop:go-to-workspace-window", "call"));
     show({ openElsewhere: true });
     await userEvent.setup().click(await screen.findByRole("button", { name: "Go to that window" }));
     const toast = await screen.findByTestId("workspace-shell-error");

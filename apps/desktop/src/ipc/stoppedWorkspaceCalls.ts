@@ -2,13 +2,15 @@ import { accessOperations } from "./accessOperations";
 import {
   agentRunStateOperations,
   captureRecoveryOperations,
+  folderAppOfferOperations,
   historyOperations,
   liveDraftRecoveryOperations,
   workspaceVersionOperations,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { chatOperations } from "./chatOperations";
-import { STOPPED_WORKSPACE, STOPPED_WORKSPACE_READ } from "./errorWords";
+import { datasetOperations } from "./datasetOperations";
+import type { StoppedWorkspaceCall } from "./errorWords";
 import { settingsOperations } from "./settingsOperations";
 import { relayShareOperations, sharedChannelOperations, shareProposalOperations } from "./shareOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
@@ -41,6 +43,8 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
     workspaceFileOperations.listWorkspaceFiles,
     workspaceFileOperations.readWorkspaceText,
     workspaceVersionOperations.compareWorkspaceVersions,
+    workspaceVersionOperations.countWorkspaceVersionChanges,
+    folderAppOfferOperations.getFolderApp,
     workspaceVersionOperations.listKeptCopies,
     workspaceVersionOperations.listRetainedCopies,
     workspaceVersionOperations.listWorkspaceVersionConflicts,
@@ -81,20 +85,28 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
   CHANNELS.readWorkspaceDatabasePage,
 ]);
 
-// A call on the workspace the sending window has stopped cannot succeed
-// until the stop ends. It keeps its words and gains a code: the window drops
-// a failed read, which lost nothing, and reports any other failure without
-// Try again. `stoppedWorkspaceId` runs only for a failed call that names a
-// workspace.
-export function markStoppedWorkspaceCall(
+// The dataset operation's actions that change nothing. Its other actions
+// change a Collection.
+const DATASET_READS: ReadonlySet<unknown> = new Set([
+  "list", "describe", "history", "historyRevision", "lifecycle", "pendingAttempts", "permissions",
+]);
+
+const field = (payload: unknown, name: string): unknown =>
+  typeof payload === "object" && payload !== null ? Reflect.get(payload, name) : undefined;
+
+// A failed call on the workspace the sending window has stopped cannot
+// succeed until the stop ends. The window drops a failed read, which lost
+// nothing, and reports any other failure without Try again.
+// `stoppedWorkspaceId` runs only for a call that names a workspace.
+export function stoppedWorkspaceCall(
   channel: string,
   payload: unknown,
-  error: unknown,
   stoppedWorkspaceId: () => string | null,
-): unknown {
-  const workspaceId: unknown = typeof payload === "object" && payload !== null ? Reflect.get(payload, "workspaceId") : undefined;
-  if (!(error instanceof Error) || typeof workspaceId !== "string" || workspaceId !== stoppedWorkspaceId()) return error;
-  const marked = new Error(error.message, { cause: error });
-  marked.name = error.name;
-  return Object.assign(marked, { code: READ_CHANNELS.has(channel) ? STOPPED_WORKSPACE_READ : STOPPED_WORKSPACE });
+): StoppedWorkspaceCall | undefined {
+  const workspaceId = field(payload, "workspaceId");
+  if (typeof workspaceId !== "string" || workspaceId !== stoppedWorkspaceId()) return undefined;
+  const read = channel === datasetOperations.dataset.channel
+    ? DATASET_READS.has(field(payload, "action"))
+    : READ_CHANNELS.has(channel);
+  return read ? "read" : "call";
 }

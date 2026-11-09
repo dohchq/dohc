@@ -16,7 +16,7 @@ import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
 import { appViewOperations, engineStoreRefusalRecovery, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
-import { markStoppedWorkspaceCall } from "./ipc/stoppedWorkspaceCalls";
+import { stoppedWorkspaceCall } from "./ipc/stoppedWorkspaceCalls";
 import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLinks";
 import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
@@ -6287,7 +6287,7 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       if (counted) telemetry.track(counted);
       return result;
     } catch (error) {
-      throw ipcWireError(markStoppedWorkspaceCall(channel, args[0], withPrivacyDenial(error), () => workspaceStoppedIn(event.sender)));
+      throw ipcWireError(withPrivacyDenial(error), stoppedWorkspaceCall(channel, args[0], () => workspaceStoppedIn(event.sender)));
     }
   });
 }

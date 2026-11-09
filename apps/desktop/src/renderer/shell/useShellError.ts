@@ -733,8 +733,9 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // stale until unrelated workspace activity happened to refresh it.
   const reportLaneFailure = useCallback(
     (lane: string, error: unknown, retry: () => void) => {
+      if (isStoppedWorkspaceRead(error)) return;
       const { cause } = readError(error);
-      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry });
+      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry: isStoppedWorkspaceCall(error) ? null : retry });
     },
     [push],
   );

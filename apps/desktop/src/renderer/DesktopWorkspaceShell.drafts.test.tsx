@@ -290,6 +290,28 @@ describe("workspace switch admission", () => {
       }
     });
 
+    it("stops waiting for them once a read fails because the window stopped using the workspace", async () => {
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        bridge.getWorkspaceUiState
+          .mockRejectedValueOnce(refused())
+          .mockRejectedValueOnce(new Error(
+            "Error invoking remote method 'desktop:get-workspace-ui-state': Error [stopped=read]: This workspace is no longer open in this window.",
+          ));
+        renderShell(bridge);
+        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
+        await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS + 1_000));
+        act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+
+        expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
+        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+        expect(notices()).toBe("Notices");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps the Restore tabs row until it is picked, while the 4-minute row keeps Dismiss", async () => {
       const second = deferred<WorkspaceUiState | null>();
       const bridge = makeBridge(second.promise);
