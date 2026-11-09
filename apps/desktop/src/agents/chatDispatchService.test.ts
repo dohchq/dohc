@@ -968,7 +968,8 @@ describe("chatDispatchService", () => {
   });
 
   it("provisions the agent channel after the runner is enabled", async () => {
-    const fixture = await createFixture({ runner: { enabled: false, command: "" } });
+    // An agent dohc starts, so it has a command. One without is an agent you run.
+    const fixture = await createFixture({ runner: { enabled: false, command: "node agent.mjs" } });
 
     fixture.service.setPaused(true);
     await activate(fixture);

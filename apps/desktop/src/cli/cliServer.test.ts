@@ -707,6 +707,9 @@ describe("CLI socket server", () => {
 
   it.each(["mention", "posted-thread reply"])("uses the cloud-pull wake mechanism for a %s that predates the cursor", async (kind) => {
     const first = await post({ group: "general", actor: "human", body: "@agent first" });
+    // The request as the engine lists it, taken before a reply acknowledges it.
+    const [current] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
+    expect(cliThreadId(current!.threadId)).toBe(first.threadId);
     if (kind === "posted-thread reply") await invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: first.threadId, body: "Joining the thread", attachments: [], needsDecision: false });
     const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
     const queried = deferred<void>();
@@ -717,8 +720,6 @@ describe("CLI socket server", () => {
     try {
       const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor });
       await queried.promise;
-      const [current] = (await original({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
-      expect(cliThreadId(current!.threadId)).toBe(first.threadId);
       const older = { ...current!, messageId: "synced-message", createdAtMs: 0, body: kind === "mention" ? "@agent synced" : "A synced reply" };
       const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
       const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
@@ -4897,8 +4898,9 @@ describe("CLI socket server", () => {
       if (claim?.run.triggerMessageId !== messageId) throw new Error(`Expected a run for ${messageId}`);
       return claim;
     };
+    // The desktop names the DM's agent in each person's message, as chatWrites does.
     const chat = await store.startChannelThread({
-      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: sam, body: "Draft the agenda",
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: sam, body: "Draft the agenda", wakeAgentIds: ["default"],
     });
     const opening = await claimFor(chat.message.id);
     expect((await reply({ thread: chat.thread.id, runId: opening.run.runId })).parentMessageId).toBeUndefined();
@@ -4906,6 +4908,7 @@ describe("CLI socket server", () => {
 
     const asked = await store.sendMessage({
       authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: chat.thread.id, parentMessageId: chat.message.id, author: sam, body: "Add a break?",
+      wakeAgentIds: ["default"],
     });
     const claim = await claimFor(asked.id);
     expect((await reply({ thread: chat.thread.id, runId: claim.run.runId })).parentMessageId).toBe(cliMessageId(chat.message.id));
