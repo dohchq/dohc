@@ -79,6 +79,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# The Markdown reader hashes its 90+ MB Node runtime inside its 5 s start
+# deadline. Unoptimized sha2 took 2.3 s idle and up to 5.6 s on busy cores, so
+# debug engines in JS tests missed the deadline. Optimized, it takes 0.1 s.
+[profile.dev.package.sha2]
+opt-level = 2
+
 # Large-history tests parse, hash, and validate real persisted proofs.
 # Optimize these paths while retaining the test profile's assertions and
 # overflow checks.
