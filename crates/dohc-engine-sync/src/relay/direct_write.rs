@@ -300,7 +300,10 @@ fn read_planned_creations(
         for row in rows {
             let (path, text, object_id, seq) = row.map_err(SyncError::corrupt)?;
             if seen.insert(object_id.clone()) {
-                creations.entry(path).or_default().push((text, object_id, seq));
+                creations
+                    .entry(path)
+                    .or_default()
+                    .push((text, object_id, seq));
             }
         }
         Ok(creations)

@@ -335,13 +335,11 @@ fn a_refused_creation_gives_no_status_to_a_received_record_with_its_id() {
                 "payloadAfterPath": path, "payloadAfterBlobSha256": sha, "payloadAfterContentKind": "text" }),
         }], next_cursor: 1, has_more: false,
     })]).with_view_blobs([(sha.clone(), accepted.as_bytes().to_vec())]);
-    relay
-        .collection_write_answers
-        .lock()
-        .unwrap()
-        .push_back(Ok(ShareCollectionWriteResponse::Refused {
+    relay.collection_write_answers.lock().unwrap().push_back(Ok(
+        ShareCollectionWriteResponse::Refused {
             reason: "records go through proposals".to_owned(),
-        }));
+        },
+    ));
     let client = RelaySyncClient::new(relay);
     assert!(matches!(
         push(&client, &mut engine).writes[0].result,
