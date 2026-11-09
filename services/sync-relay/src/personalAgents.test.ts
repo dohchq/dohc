@@ -1532,6 +1532,7 @@ describe("a personal agent's wait", () => {
   });
 
   it("holds at most its account's share of waits across its agents, and frees a place when one ends", async () => {
+    expect(MAX_PERSONAL_WAITS_PER_ACCOUNT % MAX_AGENT_CHAT_WAITS_PER_CONNECTION).toBe(0);
     const f = await fixture();
     const agents: Signed[] = [];
     for (let index = 0; index <= MAX_PERSONAL_WAITS_PER_ACCOUNT / MAX_AGENT_CHAT_WAITS_PER_CONNECTION; index++) {
