@@ -11,6 +11,12 @@ import { engineSaveState } from "./engineYDocSaveState";
 import { flushTypingCheckpoints, readTypingCheckpoints, retireTypingCheckpoint, typingRecoveryStateVectorSha256, writeTypingCheckpoint, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import { createTestScratch } from "./testTemp";
 
+// Counts checkpoint snapshots: only a snapshot hashes its base's state vector.
+vi.mock("./outageTypingRecovery", async importOriginal => {
+  const actual = await importOriginal<typeof import("./outageTypingRecovery")>();
+  return { ...actual, typingRecoveryStateVectorSha256: vi.fn(actual.typingRecoveryStateVectorSha256) };
+});
+
 it.each(["clean", "outside", "unchecked"])("publishes only checked save states on open and lineage replacement (%s)", async mode => {
   const rootPath = await createTestScratch("dohc-save-state-");
   const workspaceId = "save-state-test";
@@ -112,7 +118,8 @@ it.each(["empty", "nonempty", "missing", "update"])("checks a fresh absent-head 
   }
 });
 
-it("keeps typing a busy store refused in a typing checkpoint, retired once the engine records all of it", async () => {
+// A note whose engine connection refuses every edit as busy, with real checkpoint files.
+async function openBusyNote() {
   const rootPath = await createTestScratch("dohc-busy-typing-");
   const workspaceId = "busy-typing-test";
   const directory = join(rootPath, "recovery");
@@ -155,6 +162,16 @@ it("keeps typing a busy store refused in a typing checkpoint, retired once the e
     session.applyLocalUpdate(Y.encodeStateAsUpdate(renderer, before));
   };
   const saved = async () => (await readTypingCheckpoints(directory, workspaceId)).map(row => row.checkpoint);
+  const close = async () => {
+    await session.close({ settle: false });
+    await capture.stop();
+    renderer.destroy();
+  };
+  return { workspaceId, refused, recorded: (id: string) => recorded(id), retire, type, saved, close };
+}
+
+it("keeps typing a busy store refused in a typing checkpoint, retired once the engine records all of it", async () => {
+  const { workspaceId, refused, recorded, retire, type, saved, close } = await openBusyNote();
   try {
     type("BUSY");
     await vi.waitFor(async () => expect((await saved())[0]?.text).toBe("BUSY"));
@@ -182,8 +199,25 @@ it("keeps typing a busy store refused in a typing checkpoint, retired once the e
     await vi.waitFor(async () => expect(await saved()).toEqual([]));
     expect(retire).toHaveBeenCalledOnce();
   } finally {
-    await session.close({ settle: false });
-    await capture.stop();
-    renderer.destroy();
+    await close();
+  }
+});
+
+// Each snapshot copies the whole note on the main thread. After the first
+// refusal, typing reaches the checkpoint on its 100 ms timer.
+it("builds one checkpoint snapshot for a burst of edits a busy store refused", async () => {
+  const { workspaceId, refused, type, saved, close } = await openBusyNote();
+  const snapshots = vi.mocked(typingRecoveryStateVectorSha256);
+  try {
+    snapshots.mockClear();
+    for (let key = 0; key < 20; key += 1) type(String.fromCharCode(65 + key));
+    await vi.waitFor(() => expect(refused).toHaveLength(20));
+    expect(snapshots.mock.calls.length).toBeLessThanOrEqual(2);
+    await flushTypingCheckpoints(workspaceId);
+    const [checkpoint] = await saved();
+    expect(checkpoint!.text).toBe("ABCDEFGHIJKLMNOPQRST");
+    expect(checkpoint!.updates.map(update => update.requestId)).toEqual(refused);
+  } finally {
+    await close();
   }
 });

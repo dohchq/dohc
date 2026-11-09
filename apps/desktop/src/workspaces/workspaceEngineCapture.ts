@@ -3590,10 +3590,11 @@ export function createWorkspaceEngineCapture(
           //
           // Until the resend is recorded, the typing lives only in memory, so
           // it goes to the typing checkpoint, as in an outage. The engine's
-          // acknowledgement retires it. A drawing has no checkpoint, and a
-          // moment's wait does not warrant its outage notice.
+          // acknowledgement retires it. Once the checkpoint has started,
+          // later typing reaches it on its timer. A drawing has no
+          // checkpoint, and a moment's wait does not warrant its outage notice.
           if (isTransientEngineCause(error)) {
-            if (checkpointContentKind !== "scene") checkpointUnresolved();
+            if (checkpointContentKind !== "scene" && !checkpointBase) checkpointUnresolved();
             armed();
             return true;
           }
