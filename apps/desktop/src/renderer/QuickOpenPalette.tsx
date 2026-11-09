@@ -64,6 +64,5 @@ export function QuickOpenPalette(props: {
 }
 
 function quickOpenEmptyText(query: string): string {
-  const search = query.trim();
-  return search ? `No files match "${search}". Try a shorter search.` : "No files yet.";
+  return query ? `No files match "${query}". Try a shorter search.` : "No files yet.";
 }

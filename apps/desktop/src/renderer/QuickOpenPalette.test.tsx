@@ -109,7 +109,8 @@ it("rebuilds derived file data when each ranking input identity changes", () => 
 });
 
 it.each([
-  { files, query: "  zzz ", text: 'No files match "zzz". Try a shorter search.' },
+  { files, query: "zzz", text: 'No files match "zzz". Try a shorter search.' },
+  { files, query: " ", text: 'No files match " ". Try a shorter search.' },
   { files: [], query: "", text: "No files yet." },
 ])("says what is missing when no file matches $query", ({ files: listed, query, text }) => {
   render(palette({ files: listed }));
