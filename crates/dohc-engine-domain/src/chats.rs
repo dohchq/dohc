@@ -1994,10 +1994,15 @@ fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8>
     out
 }
 
-/// `normalizeDisplayName`: trim, 1..=200 chars.
-/// Trim and validate a chat sender display name.
+/// A chat sender display name without characters that hide or reorder text,
+/// trimmed, 1..=200 UTF-16 units. Joining characters and variation selectors
+/// stay, so Persian names and emoji show as typed.
 pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
-    let normalized = display_name.trim_matches(is_js_trim_ws);
+    let shown: String = display_name
+        .chars()
+        .filter(|&ch| !crate::names::hides_text(ch) || joins_name_text(ch))
+        .collect();
+    let normalized = shown.trim_matches(is_js_trim_ws);
     if normalized.is_empty() || normalized.encode_utf16().count() > MAX_DISPLAY_NAME_CHARS {
         return Err(DomainError::chat(
             "invalid-sender",
@@ -2005,6 +2010,13 @@ pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError>
         ));
     }
     Ok(normalized.to_owned())
+}
+
+/// ZWNJ, ZWJ and the Variation_Selector characters.
+fn joins_name_text(ch: char) -> bool {
+    matches!(ch,
+        '\u{200C}' | '\u{200D}' | '\u{180B}'..='\u{180D}' | '\u{180F}'
+        | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
 }
 
 /// The person an agent or automation message acts for. A human message

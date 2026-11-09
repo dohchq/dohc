@@ -6216,6 +6216,126 @@ fn imported_agent_message_keeps_its_owner_display_name() {
     assert_eq!(stored, "Ada");
 }
 
+/// A name from another device reaches chat without characters that hide or
+/// reorder text, for a person, an agent and the person it acts for, a
+/// reaction, and a post that waited for its thread. Joining characters and
+/// variation selectors stay.
+#[test]
+fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let posts = [
+        (
+            3,
+            "person",
+            "human",
+            "Ana\u{202E}lisa",
+            None,
+            "thread-imported",
+        ),
+        (
+            4,
+            "agent",
+            "agent",
+            "No\u{200B}va\u{2066}",
+            Some("Sam\u{0007}"),
+            "thread-imported",
+        ),
+        (
+            5,
+            "joined",
+            "human",
+            "Ali\u{200C}reza 👩\u{200D}💻 ❤\u{FE0F}",
+            None,
+            "thread-imported",
+        ),
+        (
+            6,
+            "parked",
+            "agent",
+            "\u{3164}Sc\u{2028}out",
+            Some("A\u{2069}da"),
+            "late-thread",
+        ),
+    ];
+    for (seq, id, author_kind, name, owner, thread_id) in posts {
+        let mut payload = json!({
+            "messageId": id, "threadId": thread_id, "authorKind": author_kind,
+            "authorDisplayName": name, "body": "Hi", "createdAtMs": 30
+        });
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        apply_chat_envelope(
+            &mut engine,
+            &envelope("peer", seq, "chat.message.append", payload),
+            &NoFaults,
+        )
+        .expect("a post with such a name applies");
+    }
+    let reaction = envelope(
+        "peer",
+        7,
+        "chat.reaction.set",
+        json!({
+            "reactionId": "reaction-hidden", "messageId": "person", "threadId": "thread-imported",
+            "emoji": "👍", "authorId": "ana", "authorKind": "human",
+            "authorDisplayName": "Ana\u{2067}lisa", "atMs": 40, "state": "added"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &reaction, &NoFaults).expect("reaction");
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({ "threadId": "late-thread", "title": "Late thread", "createdAtMs": 20, "channelSlug": "imported" }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let name = |id: &str| -> (String, Option<String>) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_display_name, author_owner_display_name FROM chat_messages WHERE message_id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("stored post")
+    };
+    assert_eq!(name("person"), ("Analisa".to_owned(), None));
+    assert_eq!(name("agent"), ("Nova".to_owned(), Some("Sam".to_owned())));
+    assert_eq!(
+        name("joined"),
+        ("Ali\u{200C}reza 👩\u{200D}💻 ❤\u{FE0F}".to_owned(), None)
+    );
+    assert_eq!(name("parked"), ("Scout".to_owned(), Some("Ada".to_owned())));
+    let reacted: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_display_name FROM chat_reactions WHERE reaction_id = 'reaction-hidden'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("stored reaction");
+    assert_eq!(reacted, "Analisa");
+
+    // A name made only of such characters is no name.
+    let blank = envelope(
+        "peer",
+        8,
+        "chat.message.append",
+        json!({
+            "messageId": "blank", "threadId": "thread-imported", "authorKind": "human",
+            "authorDisplayName": "\u{200B}\u{3164}", "body": "Hi", "createdAtMs": 31
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &blank, &NoFaults));
+}
+
 #[test]
 fn received_and_parked_messages_wake_no_agent_here() {
     let (_scratch, _path, mut engine) = open_store();

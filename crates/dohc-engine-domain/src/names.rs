@@ -26,6 +26,24 @@ fn is_default_ignorable(ch: char) -> bool {
         | '\u{E0000}'..='\u{E0FFF}')
 }
 
+/// A character that can hide or reorder text: a control, format, line or
+/// paragraph separator, or default-ignorable character. This matches the
+/// desktop's `HIDDEN_TEXT` class for agent names.
+pub fn hides_text(ch: char) -> bool {
+    ch.is_control()
+        || matches!(ch, '\u{2028}' | '\u{2029}')
+        || is_default_ignorable(ch)
+        || is_format_outside_default_ignorable(ch)
+}
+
+fn is_format_outside_default_ignorable(ch: char) -> bool {
+    // General_Category=Cf code points that are not Default_Ignorable.
+    matches!(ch,
+        '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}')
+}
+
 pub fn truncate_name(value: &str, max_bytes: usize) -> &str {
     for (offset, grapheme) in value.grapheme_indices(true) {
         if offset + grapheme.len() > max_bytes {
