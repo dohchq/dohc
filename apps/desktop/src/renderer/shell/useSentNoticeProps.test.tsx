@@ -122,10 +122,11 @@ function setup(
       case "file": opens.openFile(target.path); return null;
       case "folder": opens.openFolder(target.path); return null;
       case "chat": {
-        const nav = await findNoticeChat(workspaceId, target);
+        const place = await findNoticeChat(workspaceId, target);
         if (signal.aborted) return null;
-        if (nav === null) return CHAT_NOT_FOUND_NOTE;
-        opens.openChat(nav);
+        if (place === null) return CHAT_NOT_FOUND_NOTE;
+        if (place.open !== "chats") throw new Error(`Unexpected chat place ${place.open}`);
+        opens.openChat(place.nav);
         return null;
       }
       case "chats-invitation": opens.openChatsInvitation({ shareId: target.shareId, inputs: target.inputs }); return null;

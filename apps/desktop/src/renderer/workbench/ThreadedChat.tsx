@@ -4,6 +4,7 @@ import type { ChatMessageRecord, ChatRunRecord, WorkspaceHeadingRecord } from ".
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu } from "../ui/Menu";
+import { CopyMessageLink } from "./messageLinks";
 import { ChatMessageList, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { EMPTY_ART } from "./EmptyArt";
 import { ChatThreadPanel, splitThreads, ThreadSummary, WorkingLine, WorkingRow, type ChatWorking } from "./ChatThreadPanel";
@@ -262,12 +263,14 @@ export function ThreadedChat(props: {
         <MessageSquareText size={15} strokeWidth={1.9} aria-hidden />
       </button>
       <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-copy-text`} />
+      <CopyMessageLink messageId={message.id} testId={`${prefix}-copy-link`} />
       {moreAction(message, `${prefix}-more`)}
     </>
   ), [moreAction, openThread, prefix]);
   const threadActions = useCallback((message: ChatMessageRecord) => (
     <>
       <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-thread-copy-text`} />
+      <CopyMessageLink messageId={message.id} testId={`${prefix}-thread-copy-link`} />
       {moreAction(message, `${prefix}-thread-more`)}
     </>
   ), [moreAction, prefix]);

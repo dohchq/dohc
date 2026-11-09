@@ -21,6 +21,7 @@ import {
   mentionRoster,
 } from "./ChatsView.testHarness";
 import { runnerProgram } from "./ChatsView";
+import { MessageLinks, useMessageLinkMaker } from "./messageLinks";
 import { formatChatTime, formatClockDigits } from "../time";
 
 describe("ChatsView agents' chats", () => {
@@ -661,6 +662,51 @@ describe("ChatsView document thread", () => {
     // The comment list draws with the post, where the divider would.
     expect((await screen.findByTestId("chats-comments")).children).toHaveLength(0);
     expect(screen.queryByTestId("chats-comments-divider")).toBeNull();
+  });
+
+  // The shell's Copy link maker, for a workspace that syncs or one that is local only.
+  function PostsWithLinks(props: { sync: "on" | undefined }) {
+    const make = useMessageLinkMaker({ workspaceId: "workspace-a", sync: props.sync });
+    return <MessageLinks.Provider value={make}>{navigatorView(0)}</MessageLinks.Provider>;
+  }
+
+  async function openPost(sync: "on" | undefined) {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const comment = message({ id: "comment-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: "First" });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 2 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, comment] });
+    render(<PostsWithLinks sync={sync} />);
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-comments-divider");
+    const post = screen.getAllByTestId("chats-message").find((element) => element.tagName === "ARTICLE")!;
+    const bubble = screen.getAllByTestId("chats-comment-bubble")[0]!;
+    return { user, post, bubble };
+  }
+
+  it("puts Copy link in the post's and each comment's toolbar, and copies the link main makes", async () => {
+    const link = `https://dohc.example/l/${"a".repeat(43)}`;
+    const makeMessageLink = vi.fn(async (_payload: { workspaceId: string; messageId: string }) => ({ url: link }));
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, makeMessageLink });
+    const { user, post, bubble } = await openPost("on");
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+
+    expect(post.querySelector('[data-testid="chats-message-toolbar"] [data-testid="chats-message-copy-link"]')?.getAttribute("aria-label"))
+      .toBe("Copy link");
+    const copy = bubble.querySelector<HTMLElement>('[data-testid="chats-message-toolbar"] [data-testid="chats-comment-copy-link"]')!;
+    expect(copy.getAttribute("aria-label")).toBe("Copy link");
+    await user.click(copy);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(link));
+    expect(makeMessageLink).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a", messageId: "comment-1" });
+  });
+
+  it("offers no Copy link on a post or its comments in a workspace that doesn't sync", async () => {
+    const { post, bubble } = await openPost(undefined);
+    expect(post.querySelector('[data-testid="chats-message-copy-link"]')).toBeNull();
+    expect(bubble.querySelector('[data-testid="chats-comment-copy-link"]')).toBeNull();
+    // The rest of the toolbar is still there.
+    expect(bubble.querySelector('[data-testid="chats-comment-reply"]')).not.toBeNull();
   });
 
   it("keeps agent, then link holder, for screen readers on a link agent's continued comment", async () => {

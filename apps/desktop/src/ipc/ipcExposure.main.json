@@ -183,6 +183,7 @@
     "desktop:list-workspace-versions",
     "desktop:live-draft-recovery-changed",
     "desktop:locate-record-history-run",
+    "desktop:make-message-link",
     "desktop:mark-chat-thread-read",
     "desktop:mark-notices",
     "desktop:mark-personal-chat-feed-seen",
@@ -255,6 +256,7 @@
     "desktop:reset-user-settings",
     "desktop:reset-workspace-settings",
     "desktop:resolve-automation-controls",
+    "desktop:resolve-work-link",
     "desktop:resolve-workspace-version-conflict",
     "desktop:restore-engine-moment-file",
     "desktop:restore-usage-record",
@@ -395,6 +397,8 @@
     "desktop:keep-collections-here": "active-workspace",
     "desktop:links-in": "active-workspace",
     "desktop:links-resolve": "active-workspace",
-    "desktop:links-edges": "active-workspace"
+    "desktop:links-edges": "active-workspace",
+    "desktop:make-message-link": "active-workspace",
+    "desktop:resolve-work-link": "active-workspace"
   }
 }

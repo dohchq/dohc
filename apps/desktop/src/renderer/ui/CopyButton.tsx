@@ -56,9 +56,10 @@ function write(text: string): Promise<void> {
 export type CopySecret = { what: string; again: string };
 
 // A failure's words: what happened, why if the error says, then, for a secret
-// whose control is gone, where to copy it again.
-function failureWords(secret: CopySecret | undefined, error: unknown, gone: boolean): string {
-  const said = withErrorWords(secret ? `dohc could not copy ${secret.what}.` : COPY_FAILURE, error);
+// whose control is gone, where to copy it again. `failure` names what could
+// not be copied when the text comes from dohc rather than the screen.
+function failureWords(secret: CopySecret | undefined, error: unknown, gone: boolean, failure = COPY_FAILURE): string {
+  const said = withErrorWords(secret ? `dohc could not copy ${secret.what}.` : failure, error);
   return secret && gone ? `${said} ${secret.again}` : said;
 }
 
@@ -79,6 +80,7 @@ function retryAfter(
   secret: CopySecret | undefined,
   error: unknown,
   text: string | null,
+  failure: string | undefined,
 ): () => void {
   return () => {
     if (control.copy) {
@@ -86,11 +88,11 @@ function retryAfter(
       return;
     }
     if (text === null) {
-      report({ message: failureWords(secret, error, true), cause: error, retry: null });
+      report({ message: failureWords(secret, error, true, failure), cause: error, retry: null });
       return;
     }
     write(text).catch((next: unknown) =>
-      report({ message: failureWords(secret, next, true), cause: next, retry: retryAfter(control, report, secret, next, text) }),
+      report({ message: failureWords(secret, next, true, failure), cause: next, retry: retryAfter(control, report, secret, next, text, failure) }),
     );
   };
 }
@@ -104,8 +106,9 @@ export function createCopy(options: {
   report: () => ReportShellFailure | null;
   show: (feedback: CopyFeedback | null) => void;
   secret?: (() => CopySecret | undefined) | undefined;
+  failure?: string | undefined;
 }): { copy: () => Promise<void>; dispose: () => void } {
-  const { report: reporter, show, secret: secretOf } = options;
+  const { report: reporter, show, secret: secretOf, failure } = options;
   let read: typeof options.getText | null = options.getText;
   const control: { copy: (() => Promise<void>) | null } = { copy: null };
   let attempts = 0;
@@ -127,13 +130,13 @@ export function createCopy(options: {
     if (!report) return;
     const secret = secretOf?.();
     if (secret && !live) {
-      report({ message: failureWords(secret, error, true), cause: error, retry: null });
+      report({ message: failureWords(secret, error, true, failure), cause: error, retry: null });
       return;
     }
     report({
-      message: failureWords(secret, error, false),
+      message: failureWords(secret, error, false, failure),
       cause: error,
-      retry: retryAfter(control, report, secret, error, secret ? null : text),
+      retry: retryAfter(control, report, secret, error, secret ? null : text, failure),
     });
   }
 
@@ -193,6 +196,9 @@ export function CopyButton(props: {
   // code: what it is called, and where to copy it again once Try again
   // cannot.
   sensitive?: CopySecret | undefined;
+  // What a failure says first when dohc makes the text, such as a link.
+  // Default "dohc could not copy to the clipboard."
+  failure?: string | undefined;
   testId?: string | undefined;
   disabled?: boolean;
   ref?: Ref<HTMLButtonElement> | undefined;
@@ -212,6 +218,7 @@ export function CopyButton(props: {
   secret.current = props.sensitive;
   const action = useRef<ReturnType<typeof createCopy> | null>(null);
   const mountedGetText = props.getText;
+  const failure = props.failure;
   // In the commit that puts the button on screen, so a click that comes
   // before React's passive effects run still counts.
   useLayoutEffect(() => {
@@ -223,6 +230,7 @@ export function CopyButton(props: {
       getText: () => getText.current?.() ?? null,
       report: () => reportTo.current,
       secret: () => secret.current,
+      failure,
       show: (next) => {
         setFeedback(next);
         // Cleared now and set in a later task, so a second answer inside

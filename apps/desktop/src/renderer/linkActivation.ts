@@ -1,5 +1,6 @@
 import { bridge } from "./bridge";
 import { confirmExternalOpen } from "./ExternalLinkConfirm";
+import { openWorkLinkInDohc } from "./workLinkOpener";
 
 const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 // Anything that already looks like `scheme:...` (mailto:, javascript:,
@@ -57,6 +58,16 @@ export async function openLinkExternally(rawUrl: string): Promise<void> {
   } catch (error) {
     console.warn("[dohc] could not open external link:", error);
   }
+}
+
+/** Opens a link from a chat or a document. A work link to a message in one
+ *  of this computer's workspaces opens there; any other link leaves dohc
+ *  through openLinkExternally. */
+export async function openLink(rawUrl: string): Promise<void> {
+  const normalized = normalizeLinkUrl(rawUrl);
+  if (!normalized) return;
+  if (await openWorkLinkInDohc(normalized)) return;
+  await openLinkExternally(normalized);
 }
 
 function percentByteAt(value: string, index: number): number | null {
@@ -187,7 +198,7 @@ export function activateReadOnlyLinkHref(
   event.preventDefault();
   if (event.detail > 1 || event.repeat) return true;
   const target = parseReadOnlyLinkHref(href);
-  if (target.kind === "external") void openLinkExternally(target.href);
+  if (target.kind === "external") void openLink(target.href);
   if (target.kind === "workspace") openWorkspaceLink?.(target.target);
   return true;
 }

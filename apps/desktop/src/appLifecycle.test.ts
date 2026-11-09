@@ -54,6 +54,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     app,
     runtime: { platform: "win32", argv: [process.execPath], execPath: process.execPath },
     handoff: { slot, pendingCodeChanged: vi.fn() },
+    workLinks: { open: vi.fn(async (link) => { log.push(`work-link:${link.reference}`); }) },
     windows: {
       create: vi.fn(() => {
         log.push("window");
@@ -502,6 +503,7 @@ describe("desktop bootstrap", () => {
 });
 
 const handoffUrl = `dohc://open/${"a".repeat(43)}?relay=${encodeURIComponent("https://relay.example")}`;
+const workLinkUrl = `dohc://l/${"b".repeat(43)}?server=${encodeURIComponent("https://dohc.example")}`;
 
 describe("desktop open intents", () => {
   it("captures cold and pre-ready handoffs without creating another window", async () => {
@@ -545,6 +547,39 @@ describe("desktop open intents", () => {
     f.app.emit("second-instance", {}, [process.execPath, "dohc://invalid", "--open-workspace=next"]);
     await opened.promise;
     expect(f.dependencies.workspaces.openPath).toHaveBeenCalledWith("next", { id: 1, zoom: 1.5 });
+  });
+
+  it("opens a launch work link once the first window loads", async () => {
+    const opened = deferred<string>();
+    const f = fixture((d) => {
+      d.runtime.argv.push(workLinkUrl);
+      d.workLinks.open = vi.fn(async (link) => { opened.resolve(link.server); });
+    });
+    await boot(f);
+    expect(f.dependencies.workLinks.open).not.toHaveBeenCalled();
+    f.loaded.resolve(true);
+    await expect(opened.promise).resolves.toBe("https://dohc.example");
+    expect(f.dependencies.workLinks.open).toHaveBeenCalledOnce();
+  });
+
+  it("opens a work link from the OS at once after startup, without another window", async () => {
+    const f = fixture();
+    await boot(f);
+    f.app.emit("open-url", event(), workLinkUrl);
+    expect(f.dependencies.workLinks.open).toHaveBeenCalledWith({ server: "https://dohc.example", reference: "b".repeat(43) });
+    expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
+    expect(f.slot.pending()).toBeNull();
+  });
+
+  it("opens a second instance's work link and ignores a malformed one", async () => {
+    const f = fixture();
+    await boot(f);
+    f.app.emit("second-instance", {}, [process.execPath, `dohc://l/${"b".repeat(43)}?server=https://dohc.example`]);
+    expect(f.dependencies.workLinks.open).not.toHaveBeenCalled();
+    expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
+    f.app.emit("second-instance", {}, [process.execPath, workLinkUrl]);
+    expect(f.dependencies.workLinks.open).toHaveBeenCalledOnce();
+    expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
   });
 
   it.each(["argv", "open-file", "second-instance"])("retains %s failures and reports each once after renderer readiness", async (source) => {

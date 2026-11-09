@@ -192,6 +192,8 @@ export const CAPABILITIES = {
   "chat.thread.read.mark": capability("Mark a thread read through a message sequence.", {ipc: ["markChatThreadRead"]}),
   "chat.reactions.list": capability("List a thread's reactions for the current viewer.", {ipc: ["listChatReactions"]}),
   "chat.reaction.set": capability("Set the local person's reaction to added or removed.", {ipc: ["setChatReaction"]}),
+  "chat.message.link": capability("Make a web link to a message in a workspace that syncs.", {ipc: ["makeMessageLink"]}),
+  "work.link.resolve": capability("Find the message a work link names, in the window's workspace or another on the link's server.", {ipc: ["resolveWorkLink"]}),
   "group.list": capability("List the Groups in this workspace.", {ipcReason: "No IPC channel carries this capability.", mcp: {owner: ["dohc_list_groups"], view: ["dohc_list_groups"], comment: ["dohc_list_groups"], edit: ["dohc_list_groups"]}}),
   "chat.threads.list": capability("List the threads in a Group.", {ipc: ["listChannelThreads"]}),
   "chat.inbox.read": capability("List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.", {ipc: ["listPersonalChatFeed"], mcp: {owner: ["dohc_wait_for_messages"]}}),
