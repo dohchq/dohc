@@ -10,7 +10,7 @@ import * as Latch from "effect/Latch";
 import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
 import type {Event, JsonValue} from "@dohc/workspace-engine-client";
-import {createEngineClient, type EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {createEngineClient, EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {SyncRelayStorage} from "./storage";
 import {
   AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS,
@@ -53,6 +53,10 @@ const REQUEST_DEADLINE_MS = 30_000;
 const ROUNDS_PER_PASS = 4;
 const RETRY_FIRST_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
+// A busy engine asks a copy to try again after a backoff, as when every copy
+// catches up at startup, and a retry recovers. Like the executor's own sync,
+// a copy reports that answer only once it comes back this many times in a row.
+const BUSY_REFUSALS_REPORTED = 3;
 // The longest a deadline timer waits before it looks again.
 const DEADLINE_MAX_WAIT_MS = 24 * 60 * 60 * 1000;
 
@@ -118,6 +122,8 @@ export async function startAutomationReplicas(options: {
   let reconciled = false;
   // The workspaces whose part of the last pass failed, with why.
   const failedSyncs = new Map<string, unknown>();
+  // How many busy answers in a row each workspace in failedSyncs got.
+  const busyRefusals = new Map<string, number>();
   // Sync failures wait on elapsed time, independently of retention's nowMs clock.
   const syncRetries = new Map<string, { at: number; delay: number; incarnation: number }>();
   const canSync = (workspaceId: string) => (syncRetries.get(workspaceId)?.at ?? 0) <= performance.now();
@@ -225,6 +231,7 @@ export async function startAutomationReplicas(options: {
         }
         syncRetries.delete(row.workspaceId);
         failedSyncs.delete(row.workspaceId);
+        busyRefusals.delete(row.workspaceId);
         if (pushMore || pullMore) return false;
         replica.pulledHead = Math.max(replica.pulledHead, head);
         return true;
@@ -266,6 +273,7 @@ export async function startAutomationReplicas(options: {
         return closing ??= (async () => {
           replicas.delete(row.workspaceId);
           failedSyncs.delete(row.workspaceId);
+          busyRefusals.delete(row.workspaceId);
           syncRetries.delete(row.workspaceId);
           closed.abort();
           await Promise.all([recordChain, syncChain]);
@@ -291,9 +299,9 @@ export async function startAutomationReplicas(options: {
 
   /**
    * Runs one workspace's part of a pass. A failure is that workspace's
-   * alone: it is kept in failedSyncs and reported, and the pass goes on to
-   * the others, so one tenant cannot stop another's copy, or keep a copy
-   * past its time. Answers whether it succeeded.
+   * alone: it is kept in failedSyncs and reported, a busy answer only once it
+   * repeats, and the pass goes on to the others, so one tenant cannot stop
+   * another's copy, or keep a copy past its time. Answers whether it succeeded.
    */
   async function each(workspaceId: string, work: () => Promise<void>): Promise<boolean> {
     signal.throwIfAborted();
@@ -301,6 +309,7 @@ export async function startAutomationReplicas(options: {
       await work();
       if (syncRetries.has(workspaceId)) return canSync(workspaceId);
       failedSyncs.delete(workspaceId);
+      busyRefusals.delete(workspaceId);
       return true;
     } catch (error) {
       if (signal.aborted) throw error;
@@ -311,7 +320,10 @@ export async function startAutomationReplicas(options: {
         retry.at = now + retry.delay;
       }
       failedSyncs.set(workspaceId, error);
-      observe(() => options.onError?.(error, workspaceId));
+      const busy = error instanceof EngineRequestError && error.wireError?.retry === "afterBackoff";
+      const refusals = busy ? (busyRefusals.get(workspaceId) ?? 0) + 1 : 0;
+      busyRefusals.set(workspaceId, refusals);
+      if (!busy || refusals >= BUSY_REFUSALS_REPORTED) observe(() => options.onError?.(error, workspaceId));
       return false;
     }
   }
@@ -391,6 +403,7 @@ export async function startAutomationReplicas(options: {
     }
     for (const workspaceId of [...failedSyncs.keys()]) if (!rowIds.has(workspaceId) && !wanted.has(workspaceId)) {
       failedSyncs.delete(workspaceId);
+      busyRefusals.delete(workspaceId);
       syncRetries.delete(workspaceId);
     }
     const kept = JSON.stringify(rows.map((row) => row.workspaceId));
@@ -565,7 +578,7 @@ export async function startAutomationReplicas(options: {
       for (const id of workspaceIds) {
         await replicas.get(id)?.close();
         await rm(folderOf(id), {recursive: true, force: true});
-        failedSyncs.delete(id); syncRetries.delete(id);
+        failedSyncs.delete(id); busyRefusals.delete(id); syncRetries.delete(id);
       }
     },
     /** The daemon is running and a pass completed, even if individual workspaces failed. */
