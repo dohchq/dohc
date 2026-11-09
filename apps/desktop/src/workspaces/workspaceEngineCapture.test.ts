@@ -4774,7 +4774,8 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
     await write(root, ".env", "TOKEN=old\n");
     const writer = createDefaultDiskWriter(root);
     // The app stops after the temp is flushed and before the rename, so
-    // nothing renames or removes the temp.
+    // nothing renames or removes the temp. The mocked `rm` is the cleanup in
+    // atomicReplaceFile's catch; an earlier `rm` in the write would use it up.
     vi.mocked(rename).mockRejectedValueOnce(new Error("the app stopped"));
     vi.mocked(rm).mockResolvedValueOnce(undefined);
     try {
