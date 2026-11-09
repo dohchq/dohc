@@ -471,6 +471,7 @@ export function redeemPersonalAuthorizationCode(storage: StorageContext, input: 
     if (!row) return { ok: false };
     if (row.status === "redeemed") {
       deleteConnection(storage, String(row.connection_id));
+      signOutAgentsWithoutCredentials(storage, String(row.owner_user_id));
       return { ok: false };
     }
     const spend = (): { ok: false } => {
@@ -564,7 +565,10 @@ export function refreshPersonalTokens(storage: StorageContext, input: {
     if (!row) return { ok: false };
     const connection = rowToConnection(row);
     if (row.used_at_ms !== null) {
-      if (usedRefreshTokenIsRecent(row.used_at_ms, nowMs)) deleteConnection(storage, connection.connectionId);
+      if (usedRefreshTokenIsRecent(row.used_at_ms, nowMs)) {
+        deleteConnection(storage, connection.connectionId);
+        signOutAgentsWithoutCredentials(storage, connection.ownerUserId);
+      }
       return { ok: false };
     }
     if (connection.clientId !== input.clientId || !constantTimeHashEqual(input.resourceHash, String(row.resource_hash)) ||

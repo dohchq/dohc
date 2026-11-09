@@ -665,6 +665,8 @@ describe("revocation", () => {
     await expectRefused(await refresh(f, agent.clientId, String(rotated.refreshToken), agent.resource));
     await expectPersonal(f, { accessToken: String(rotated.accessToken), resource: agent.resource }).rejects.toMatchObject({ code: "not_found" });
     expect(count(f, "sync_relay_personal_agent_connections", "connection_id = ?", agent.connectionId)).toBe(0);
+    // With nothing left to sign in with, the roster shows it signed out.
+    expect((await roster(f)).agents).toEqual([expect.objectContaining({ agentId: agent.agentId, status: "signed_out" })]);
   });
 
   it("refuses a refresh from another client, and keeps the token for its own", async () => {
