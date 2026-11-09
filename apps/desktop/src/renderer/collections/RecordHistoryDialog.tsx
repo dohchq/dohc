@@ -1,5 +1,6 @@
 import { History as HistoryIcon, LoaderCircle, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { RecordHistoryEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
@@ -76,9 +77,10 @@ function AuthorName(props: { author: Author; id: string }) {
   }
   // A link holder has no name dohc can confirm, so the row names the role.
   if (author.kind === "link") {
-    if (author.agentName !== undefined) {
+    const agentName = shownAgentName(author.agentName);
+    if (agentName !== undefined) {
       return <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
-        <span className="truncate text-agent">{author.agentName}</span>
+        <span className="truncate text-agent">{agentName}</span>
         <span className="truncate text-muted"> for a link holder</span>
       </span>;
     }

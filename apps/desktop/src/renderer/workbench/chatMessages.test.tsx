@@ -172,6 +172,29 @@ describe("chat authorship display", () => {
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
   });
 
+  // Every connected agent of one account shares that account's unnamed agent group, so only its name tells two apart.
+  it.each([
+    ["your", "Claude", "Codex", { group: "unnamed-agent", hue: null, self: true, connected: true }],
+    ["another person's", "Scout", "Helper", { group: "7", hue: null, self: false, connected: true }],
+  ] as const)("starts a new run when %s connected agent with another name posts next", (_owner, first, second, presentation) => {
+    const at = new Date(2026, 8, 17, 12).getTime();
+    const post = (id: string, authorDisplayName: string, minute: number): ChatMessageRecord => ({
+      id, threadId: "thread", presentation,
+      authorKind: "agent", authorDisplayName, body: "Done.", createdAtMs: at + minute * 60_000,
+    });
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[post("a", first, 0), post("b", second, 1), post("c", second, 2)]}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    expect(screen.getAllByTestId("test-chat-message").map((row) => row.dataset.continues)).toEqual(["false", "false", "true"]);
+    expect(screen.getAllByTestId("test-chat-message-author").map((author) => author.textContent)).toEqual([first, second]);
+  });
+
   it("fits a continued message's time in the avatar's column, without AM or PM", () => {
     // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
     const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;

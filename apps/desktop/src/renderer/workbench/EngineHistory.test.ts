@@ -88,6 +88,9 @@ describe("momentDescription", () => {
       .toMatch(/^Edited plan\.md, Agent Nova, /);
     expect(momentDescription(moment({ id: "unnamed", agentAuthorName: "Agent", authors: [{ kind: "agent", agentId: "a" }] })))
       .toMatch(/^Edited plan\.md, Agent, /);
+    const connected = { group: "g-connected", hue: null, self: true, connected: true } as const;
+    expect(momentDescription(moment({ id: "connected", agentAuthorName: "Claude", authors: [{ kind: "agent", agentId: "dohc-mcp", agentName: "Claude" }],
+      authorPresentations: [connected] }))).toMatch(/^Edited plan\.md, Connected agent Claude, /);
     expect(momentDescription(moment({ id: "person", namedAuthor: { userId: "sam", label: "Sam Rivera" } })))
       .toMatch(/^Edited plan\.md, Sam Rivera, /);
     expect(momentDescription(moment({ id: "local" }))).toMatch(/^Edited plan\.md, Local file edit, /);
@@ -201,6 +204,14 @@ describe("groupAgentAuthorName", () => {
     expect(groupAgentAuthorName([moment({ id: "m1" })])).toBeUndefined();
     expect(groupAgentAuthorName([])).toBeUndefined();
   });
+
+  it("names no group a connected agent shares with your agent of the same name", () => {
+    const connected = { group: "g-connected", hue: null, self: true, connected: true } as const;
+    const yours = { group: "g-claude", hue: null, self: true } as const;
+    const by = (id: string, presentation: typeof connected | typeof yours) => moment({ id, agentAuthorName: "Claude", authorPresentations: [presentation] });
+    expect(groupAgentAuthorName([by("m1", connected), by("m2", yours)])).toBeUndefined();
+    expect(groupAgentAuthorName([by("m1", connected), by("m2", connected)])).toBe("Claude");
+  });
 });
 
 // The file groups `groupTimeline` builds, for entries that are all files.
@@ -296,6 +307,14 @@ describe("groupTimeline", () => {
     // A name with no agent identity behind it never folds either.
     expect(groupEngineMoments([moment({ id: "m2", agentAuthorName: "Nova" }), moment({ id: "m1", agentAuthorName: "Nova" })])
       .map((group) => group.moments.length)).toEqual([1, 1]);
+  });
+
+  // Every connected agent is the unnamed agent; the name it gave tells them apart.
+  it("folds a connected agent's edits only under the name it gave", () => {
+    const connected = (id: string, agentName: string) =>
+      moment({ id, agentAuthorName: agentName, authors: [{ kind: "agent", agentId: "dohc-mcp", agentName }] });
+    expect(groupEngineMoments([connected("m3", "Codex"), connected("m2", "Codex"), connected("m1", "Claude")])
+      .map((group) => group.moments.map((entry) => entry.id))).toEqual([["m3", "m2"], ["m1"]]);
   });
 
   // An agent's file write is its own one-moment operation.

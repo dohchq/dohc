@@ -82,8 +82,9 @@ interface WatchedWorkspace {
  */
 export class WorkspaceActivityState {
   entry: WatchedWorkspace | null = null;
-  // The run outlives capture when stopping sync restarts local activity.
-  agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun } | null = null;
+  // The run outlives capture when stopping sync restarts local activity. The
+  // secret is the one a run dohc dispatched got; it stays in this slot only.
+  agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun; secret?: string } | null = null;
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
   // Sync paused while Collection updates waited, and the reopen that ends
@@ -245,9 +246,10 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
     workspace: ActivityWorkspace,
     run: ActiveAgentRun | null,
+    secret?: string,
   ): void {
     const was = isAgentAtWork(state.agentRun?.run ?? null);
-    state.agentRun = run ? { workspace, run } : null;
+    state.agentRun = run ? { workspace, run, ...(secret === undefined ? {} : { secret }) } : null;
     const active = isAgentAtWork(run);
     if (active !== was) {
       publishAgentRunState(workspace.workspaceId, active);
@@ -905,6 +907,7 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
     run: ActiveAgentRun,
     expectedRootPath?: string,
+    secret?: string,
   ): Promise<boolean> {
     const { workspaceId } = workspace;
     const entry = state.entry;
@@ -918,7 +921,7 @@ export function createWorkspaceActivity(
       );
     }
     if (state.agentRun !== null) return false;
-    assignAgentRun(state, workspace, run);
+    assignAgentRun(state, workspace, run, secret);
     try {
       await entry.capture?.setActiveAgentRun(run);
       return true;
@@ -942,6 +945,8 @@ export function createWorkspaceActivity(
       return;
     }
     if (slot.run.agentRunId !== agentRunId) return;
+    // The run's secret stops working now, even if capture fails to let the run go.
+    delete slot.secret;
     await state.entry?.capture?.setActiveAgentRun(null);
     if (state.agentRun === slot) releaseAgentRun(state, slot.workspace, agentRunId);
   }
@@ -965,11 +970,18 @@ export function createWorkspaceActivity(
   }
 
   // The agent of a run dohc dispatched while it holds the slot, or null. The
-  // CLI writes as that agent whatever name a write claims, so the run stays
-  // one actor.
+  // CLI writes as that agent for a request that proves it is the run's,
+  // whatever name the request gives, so the run stays one actor.
   function dispatchedAgent(state: WorkspaceActivityState): string | null {
     const run = state.agentRun?.run;
     return run?.dispatch !== undefined ? run.agentId : null;
+  }
+
+  // The secret dohc gave the process of the run it dispatched, while that run
+  // holds the slot, or null. Only a request that carries it is the run's.
+  function dispatchedRunSecret(state: WorkspaceActivityState): string | null {
+    const slot = state.agentRun;
+    return slot?.run.dispatch !== undefined ? slot.secret ?? null : null;
   }
 
   // The engine's id for the run dohc dispatched while it holds the slot, or
@@ -1074,6 +1086,7 @@ export function createWorkspaceActivity(
     hasAgentRun,
     agentRunDepth,
     dispatchedAgent,
+    dispatchedRunSecret,
     dispatchedRunId,
     agentWriteRunId,
     agentRun,

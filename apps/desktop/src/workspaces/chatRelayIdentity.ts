@@ -183,16 +183,21 @@ export function readLocalChatActor(message: Pick<ChatMessage, "authorActorKey" |
   };
 }
 
-export async function resolveThreadActorIssuer(input: {
+// A thread's account issuer, and whether its posts come through a share,
+// which serves no run id.
+export type ThreadActorSource = { issuer: ActorIssuer | null; shared: boolean };
+
+export async function resolveThreadActorSource(input: {
   readWorkspace(): Pick<RegistryEntry, "workspaceId" | "remote" | "pausedRemote" | "sharedChannels" | "shareView"> | null;
   store: ChatRelayIdentityStore;
   threadId: string;
   // Fence caller attachment/session replacement as well as registry replacement.
   assertCurrent?: () => void;
-}): Promise<ActorIssuer | null> {
+}): Promise<ThreadActorSource> {
   const { store, threadId } = input;
+  const unknown = { issuer: null, shared: false };
   const workspace = input.readWorkspace();
-  if (workspace === null) return null;
+  if (workspace === null) return unknown;
   const workspaceId = workspace.workspaceId;
   const changed = new Error("Chat issuer binding changed");
   const check = () => {
@@ -216,20 +221,21 @@ export async function resolveThreadActorIssuer(input: {
   try {
     check();
     // A received file share has no admitted account issuer in its registry.
-    if (workspace.shareView) return null;
+    if (workspace.shareView) return { issuer: null, shared: true };
     const joined = await joinedSharedChannelForTarget({
       workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target: { threadId },
     });
     check();
+    const shared = joined !== null;
     const serverUrl = joined ? joined.serverUrl : (workspace.remote ?? workspace.pausedRemote)?.serverUrl;
-    if (!serverUrl) return null;
+    if (!serverUrl) return { issuer: null, shared };
     try {
-      return createActorIssuer(serverUrl);
+      return { issuer: createActorIssuer(serverUrl), shared };
     } catch {
-      return null;
+      return { issuer: null, shared };
     }
   } catch (error) {
-    if (error === changed) return null;
+    if (error === changed) return unknown;
     throw error;
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { readLocalChatActor, resolveThreadActorIssuer, type ChatRelayIdentityStore } from "./chatRelayIdentity";
+import { readLocalChatActor, resolveThreadActorSource, type ChatRelayIdentityStore } from "./chatRelayIdentity";
 import type { RegistryEntry, JoinedSharedChannel } from "./registryStore";
 import { join } from "node:path";
 import { createRegistryStore } from "./registryStore";
@@ -18,41 +18,41 @@ function fixture() {
     findThreadChannelId: vi.fn(async ({ threadId }) => threadId),
     getChannelWireId: vi.fn(async ({ channelId }) => `wire-${channelId}`),
   };
-  return { workspace, channels, store, resolve: (threadId: string) => resolveThreadActorIssuer({ readWorkspace: () => workspace, store, threadId }) };
+  return { workspace, channels, store, resolve: (threadId: string) => resolveThreadActorSource({ readWorkspace: () => workspace, store, threadId }) };
 }
 
 describe("thread ActorIssuer", () => {
   it("keeps joined Groups from two account servers separate from their relays and workspace owner", async () => {
     const test = fixture();
-    expect(await test.resolve("a")).toBe("https://accounts-a.test/base");
-    expect(await test.resolve("b")).toBe("https://accounts-b.test");
-    expect(await test.resolve("local")).toBe("https://owner.test");
+    expect(await test.resolve("a")).toEqual({ issuer: "https://accounts-a.test/base", shared: true });
+    expect(await test.resolve("b")).toEqual({ issuer: "https://accounts-b.test", shared: true });
+    expect(await test.resolve("local")).toEqual({ issuer: "https://owner.test", shared: false });
   });
 
   it("preserves the joined issuer through registry restart", async () => {
     const test = fixture();
     const workspace = JSON.parse(JSON.stringify(test.workspace)) as typeof test.workspace;
-    expect(await resolveThreadActorIssuer({ readWorkspace: () => workspace, store: test.store, threadId: "a" })).toBe("https://accounts-a.test/base");
+    expect(await resolveThreadActorSource({ readWorkspace: () => workspace, store: test.store, threadId: "a" })).toEqual({ issuer: "https://accounts-a.test/base", shared: true });
   });
 
   it("keeps older joined rows unknown instead of borrowing relay or workspace issuer", async () => {
     const test = fixture();
     delete test.channels[0]!.serverUrl;
-    expect(await test.resolve("a")).toBeNull();
+    expect(await test.resolve("a")).toEqual({ issuer: null, shared: true });
   });
 
   it.each(["not a URL", "file:///accounts", "https://accounts.test?query=1"])("keeps malformed stored issuers unknown (%s)", async (serverUrl) => {
     const test = fixture();
     test.channels[0]!.serverUrl = serverUrl;
     test.workspace.remote!.serverUrl = serverUrl;
-    expect(await test.resolve("a")).toBeNull();
-    expect(await test.resolve("local")).toBeNull();
+    expect(await test.resolve("a")).toEqual({ issuer: null, shared: true });
+    expect(await test.resolve("local")).toEqual({ issuer: null, shared: false });
   });
 
-  it("does not infer received-share provenance from the mounting workspace", async () => {
+  it("does not infer received-share provenance from the mounting workspace, and marks its threads shared", async () => {
     const test = fixture();
     test.workspace.shareView = { shareId: "received", granterEmail: null, genericChatWritable: false, grantedSelector: { paths: ["notes"], versionId: null, access: "view" } };
-    expect(await test.resolve("local")).toBeNull();
+    expect(await test.resolve("local")).toEqual({ issuer: null, shared: true });
   });
 
   it.each(["thread", "wire"])("discards a registry binding changed during the %s await", async (step) => {
@@ -63,31 +63,31 @@ describe("thread ActorIssuer", () => {
     else test.store.getChannelWireId = async () => { entered.resolve(); await release.promise; return "wire-a"; };
     const registry = createRegistryStore(join(await createTestScratch("chat-issuer-"), "registry.json"));
     registry.register({ ...test.workspace, rootPath: "/workspace", kind: "personal", mode: "local-first" });
-    const pending = resolveThreadActorIssuer({ store: test.store, threadId: "a",
+    const pending = resolveThreadActorSource({ store: test.store, threadId: "a",
       readWorkspace: () => registry.find("workspace") });
     await entered.promise;
     // The old entry stays untouched: the registry publishes a replacement.
     registry.setSharedChannels("workspace", []);
     release.resolve();
-    expect(await pending).toBeNull();
+    expect(await pending).toEqual({ issuer: null, shared: false });
   });
 
   it("resolves the immutable thread and wire binding once", async () => {
     const test = fixture();
-    expect(await test.resolve("a")).toBe("https://accounts-a.test/base");
+    expect(await test.resolve("a")).toEqual({ issuer: "https://accounts-a.test/base", shared: true });
     expect(test.store.findThreadChannelId).toHaveBeenCalledTimes(1);
     expect(test.store.getChannelWireId).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a removed workspace unknown", async () => {
-    expect(await resolveThreadActorIssuer({ readWorkspace: () => null, store: fixture().store, threadId: "a" })).toBeNull();
+    expect(await resolveThreadActorSource({ readWorkspace: () => null, store: fixture().store, threadId: "a" })).toEqual({ issuer: null, shared: false });
   });
 
   it("rechecks the caller's attachment after awaits", async () => {
     const test = fixture();
     let current = true;
     test.store.getChannelWireId = async () => { current = false; return "wire-a"; };
-    await expect(resolveThreadActorIssuer({ readWorkspace: () => test.workspace, store: test.store, threadId: "a", assertCurrent: () => { if (!current) throw new Error("attachment changed"); } })).rejects.toThrow("attachment changed");
+    await expect(resolveThreadActorSource({ readWorkspace: () => test.workspace, store: test.store, threadId: "a", assertCurrent: () => { if (!current) throw new Error("attachment changed"); } })).rejects.toThrow("attachment changed");
   });
 });
 

@@ -974,6 +974,21 @@ describe("workspace engine IPC registrations", () => {
     });
   });
 
+  it("names another person's agent Agent when its label could hide or reorder text", async () => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue({
+      moments: ["Pat", `Pat${String.fromCodePoint(0x202e)}`].map((agentId, index) => ({
+        id: `moment-${index}`, versionId: "main", path: "notes/a.md", recordedAtMs: 1,
+        operation: "write", metadata: { origin: "local-file" }, protected: false, momentOrder: index,
+        authors: [{ kind: "agent", agentId, onBehalfOf: "user-pat" }],
+      })),
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({
+      moments: [{ agentAuthorName: "Pat" }, { agentAuthorName: "Agent" }],
+    });
+  });
+
   it("uses Settings names for your agents and handshake names for other agents", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({

@@ -134,6 +134,12 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
   origin: ActorNeutralWriteOrigin | "ydoc" | "capture-recovery" | "capture-recovery-cleared";
 }
 
+/**
+ * The agent a write names when an agent outside a run dohc dispatched gives
+ * no name. A dispatched run's writes name its agent's id instead.
+ */
+export const UNNAMED_AGENT_ID = "dohc-mcp";
+
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
 // stays actor-neutral). A moment names a nonempty list of authors, one per
 // person or agent whose edits it covers. Tracked agent runs stamp the agent
@@ -222,10 +228,11 @@ export type MomentAuthor =
   | AutomationMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
-// write names the person the agent works for. An automation names its run's
-// person, and none when its run has none.
+// write names the person the agent works for, and the name the agent gave
+// itself when no run holds the slot. An automation names its run's person,
+// and none when its run has none.
 export type MomentWriteAuthor =
-  | (Omit<AgentMomentAuthor, "agentName"> & { onBehalfOf: string })
+  | (AgentMomentAuthor & { onBehalfOf: string })
   | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName" | "relayConfirmed">
   | AutomationMomentAuthor;
 

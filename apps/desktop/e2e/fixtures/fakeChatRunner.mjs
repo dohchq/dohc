@@ -122,7 +122,7 @@ function codexReplyServer(args) {
   const codexTail = args.at(-2) === "--json" ? ["--skip-git-repo-check", "--ephemeral", "--json", "-"] : CODEX_TAIL;
   const tail = readOnly ? ["--ignore-rules", ...codexTail] : codexTail;
   const sandbox = process.platform === "win32" && (readOnly || config.has("windows.sandbox")) ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.env_vars", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
   if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
     owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
     (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false" || config.get("approvals_reviewer") !== "'user'"))) {
@@ -142,6 +142,7 @@ function codexReplyServer(args) {
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     (sandbox.length > 1 && config.get("windows.allow_mxc") !== "false") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
+    config.get("mcp_servers.dohc.env_vars") !== "['DOHC_RUN_SECRET']" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-tail.length)) !== JSON.stringify(tail) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
@@ -175,19 +176,17 @@ function startCodexOutput(args) {
   else console.error(`OpenAI Codex v0.166.0\n--------\nworkdir: ${process.cwd()}\n--------\nuser\n${prompt}`);
 }
 
-// Reply as Claude Code and Codex do: start the dohc MCP server the launch
-// names, outside the runner's environment, and call the reply tool once.
-function replyThroughMcp(args, body) {
-  const launch = profileTool === "codex" ? codexReplyServer(args) : claudeReplyServer(args);
-  if (!launch || !existsSync(launch.command)) {
-    console.error("Unexpected profile arguments", args);
-    process.exit(2);
-  }
-  if (profileTool === "codex") startCodexOutput(args);
+// Start the dohc MCP server a launch names, outside the runner's environment,
+// check the tools it offers with `offersTools`, and make each of `calls` in
+// order. The server keeps the run's secret: Claude Code passes its own
+// environment, and Codex the variables the launch names, which
+// codexReplyServer checks. With `printResults`, each result goes to the run's log.
+function callMcpTools(launch, offersTools, calls, printResults = false) {
   const server = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../packages/mcp/bin/dohc-mcp.js");
   const { DOHC_RUN_ID: _runId, DOHC_CHAT_THREAD: _thread, ...env } = process.env;
   const child = spawn(process.execPath, [server, ...launch.args], { cwd: launch.cwd, env, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
   const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+  const call = (index) => send({ id: 3 + index, method: "tools/call", params: calls[index] });
   let buffer = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => {
     buffer += chunk;
@@ -198,28 +197,45 @@ function replyThroughMcp(args, body) {
         send({ method: "notifications/initialized" });
         send({ id: 2, method: "tools/list" });
       } else if (message.id === 2) {
-        // A self-test's server offers the reply tool and nothing else. A
-        // run's offers it alone or with every other dohc tool, as its launch
-        // says, and only a run with every tool may write.
-        const names = message.result?.tools?.map((tool) => tool.name) ?? [];
-        const replyOnly = launch.args.includes("--tool");
-        if ((selfTestMarker && !replyOnly) || launch.readOnly !== replyOnly ||
-          !names.includes("dohc_reply_to_chat") ||
-          replyOnly !== (names.length === 1)) {
+        if (!offersTools(message.result?.tools?.map((tool) => tool.name) ?? [])) {
           console.error("Unexpected dohc tools", JSON.stringify(message));
           child.kill();
           process.exit(2);
         }
-        send({ id: 3, method: "tools/call", params: { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } } });
-      } else if (message.id === 3) {
-        if (message.error || message.result?.isError) console.error("dohc_reply_to_chat failed", JSON.stringify(message));
+        call(0);
+      } else if (message.id >= 3) {
+        const index = message.id - 3;
+        const failed = Boolean(message.error || message.result?.isError);
+        if (failed) console.error(`${calls[index].name} failed`, JSON.stringify(message));
+        else if (printResults) console.error(JSON.stringify(message.result));
+        if (!failed && index + 1 < calls.length) {
+          call(index + 1);
+          continue;
+        }
         child.kill();
-        process.exit(message.error || message.result?.isError ? 1 : 0);
+        process.exit(failed ? 1 : 0);
       }
     }
   });
   child.on("exit", (code) => { console.error(`dohc-mcp exited early: ${code}`); process.exit(1); });
   send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-codex", version: "0" } } });
+}
+
+// Reply as Claude Code and Codex do, through the dohc MCP server the launch names.
+function replyThroughMcp(args, body) {
+  const launch = profileTool === "codex" ? codexReplyServer(args) : claudeReplyServer(args);
+  if (!launch || !existsSync(launch.command)) {
+    console.error("Unexpected profile arguments", args);
+    process.exit(2);
+  }
+  if (profileTool === "codex") startCodexOutput(args);
+  // A self-test's server offers the reply tool and nothing else. A run's
+  // offers it alone or with every other dohc tool, as its launch says, and
+  // only a run with every tool may write.
+  const replyOnly = launch.args.includes("--tool");
+  const offersRunTools = (names) => !(selfTestMarker && !replyOnly) && launch.readOnly === replyOnly &&
+    names.includes("dohc_reply_to_chat") && replyOnly === (names.length === 1);
+  callMcpTools(launch, offersRunTools, [{ name: "dohc_reply_to_chat", arguments: { threadId, runId, body } }]);
 }
 
 if (profileTool) {
@@ -233,6 +249,21 @@ if (profileTool) {
   replyThroughMcp(args, body);
 } else if (selfTestMarker) {
   runCommand(`dohc chat reply ${threadId} --as-agent "${selfTestMarker}"`);
+} else if (mode === "write-report") {
+  // Leave the run's secret where the test finds it, outside the workspace and
+  // dohc's folders. Then write a file and reply as the run, printing each
+  // result to the run's log.
+  writeFileSync(process.env.FAKE_RUNNER_RUN_FILE, JSON.stringify({ secret: process.env.DOHC_RUN_SECRET, threadId, runId }));
+  callMcpTools(
+    { args: ["--workspace", process.cwd(), "--home", process.env.DOHC_STATE_DIR, "--tool", "dohc_write_file", "--tool", "dohc_reply_to_chat"], cwd: process.cwd() },
+    // The server offers these tools and nothing else.
+    (names) => names.length === 2 && names.includes("dohc_write_file") && names.includes("dohc_reply_to_chat"),
+    [
+      { name: "dohc_write_file", arguments: { path: "notes/run.txt", content: "Run notes.\n" } },
+      { name: "dohc_reply_to_chat", arguments: { threadId, runId, body: "done: checked the exports" } },
+    ],
+    true,
+  );
 } else {
 
 if (mode !== "report" && mode !== "ask") {

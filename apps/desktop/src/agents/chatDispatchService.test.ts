@@ -1315,9 +1315,13 @@ describe("chatDispatchService", () => {
     await activate(fixture);
     const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(personRun.chainDepth).toBe(0);
+    // The run's slot and its process get the same secret.
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    const personSecret = fixture.spawnCalls[0]!.options.env.DOHC_RUN_SECRET;
+    expect(personSecret).toMatch(/^[a-f0-9]{64}$/u);
     expect(fixture.attributions.at(-1)).toEqual({
       workspaceId: WORKSPACE_ID,
-      run: { agentId: "default", agentRunId: personRun.run.runId, depth: 0, dispatch: "run" },
+      run: { agentId: "default", agentRunId: personRun.run.runId, depth: 0, dispatch: "run", secret: personSecret },
     });
     await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(0);
@@ -1344,8 +1348,12 @@ describe("chatDispatchService", () => {
     await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
     const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(wokenRun.run.triggerMessageId).toBe(wake.message.id);
+    // Each run gets a secret of its own.
+    const wokenSecret = fixture.spawnCalls[1]!.options.env.DOHC_RUN_SECRET;
+    expect(wokenSecret).toMatch(/^[a-f0-9]{64}$/u);
+    expect(wokenSecret).not.toBe(personSecret);
     expect(fixture.attributions.at(-1)?.run).toEqual({
-      agentId: "default", agentRunId: wokenRun.run.runId, depth: 3, dispatch: "run",
+      agentId: "default", agentRunId: wokenRun.run.runId, depth: 3, dispatch: "run", secret: wokenSecret,
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
@@ -2586,20 +2594,6 @@ describe("chatDispatchService", () => {
       failureHandled: true,
     });
     expect(await fixture.dispatch.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
-  });
-
-  it("keeps the workspace of a run it started after the run ends, and of no other id", async () => {
-    const fixture = await createFixture();
-    await createAgentThread(fixture, { body: "Publish the trip app.", authorUserId: "user_local" });
-    await activate(fixture);
-    const runId = fixture.spawnCalls[0]!.options.env.DOHC_RUN_ID!;
-    expect(fixture.service.runWorkspace(runId)).toBe(WORKSPACE_ID);
-
-    fixture.spawnCalls[0]!.process.emitExit(0);
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
-    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false);
-    expect(fixture.service.runWorkspace(runId)).toBe(WORKSPACE_ID);
-    expect(fixture.service.runWorkspace("run_never_issued")).toBeUndefined();
   });
 
   it("mutation proof: retains a finalized run until attribution teardown succeeds", async () => {
@@ -3862,7 +3856,6 @@ describe("chatDispatchService", () => {
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         agentIdsNamedIn: async () => [],
-        isOwnAgentId: async () => false,
         localInstallationId: () => "install-local",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -4335,6 +4328,11 @@ describe("chatDispatchService", () => {
     expect(threadId).toEqual(expect.any(String));
     const runId = call.options.env.DOHC_RUN_ID;
     if (!runId) throw new Error("Expected self-test attribution.");
+    // The run's secret reaches only its environment: not its prompt or arguments.
+    const secret = call.options.env.DOHC_RUN_SECRET;
+    expect(secret).toMatch(/^[a-f0-9]{64}$/u);
+    expect(call.process.stdinText).not.toContain(secret);
+    expect(call.args.join(" ")).not.toContain(secret);
     if (profile) {
       expect(call.command).toBe(profile.executable);
       // The run starts the dohc MCP server it replies through.
@@ -4346,6 +4344,7 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
+        "mcp_servers.dohc.env_vars=['DOHC_RUN_SECRET']",
         "mcp_servers.dohc.default_tools_approval_mode='approve'",
       ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [], managedPreferences: [] }, readOnly: true, replyOnly: true })) : ["--mcp-config", configPath], true));
       if (profile.tool === "claude") {
@@ -4360,7 +4359,7 @@ describe("chatDispatchService", () => {
     expect(call.process.stdinText).toContain(expectedReply(form, threadId, runId, marker));
     if (form === "mcp") expect(call.process.stdinText).toContain(`\`body\` \`${marker}\``);
     expect(runId).toBe("run_self_test_self_test_id_1");
-    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: "default", agentRunId: runId, depth: 0, dispatch: "self-test" });
+    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: "default", agentRunId: runId, depth: 0, dispatch: "self-test", secret });
 
     expect(await fixture.chat.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toEqual([
       expect.objectContaining({ author: expect.objectContaining({ kind: "human" }), body: "Reply here to check the agent connection." }),
@@ -4371,6 +4370,7 @@ describe("chatDispatchService", () => {
       threadId,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
+      authorAgentId: "default",
       body: marker,
     });
     call.process.emitExit(0);
@@ -4402,6 +4402,7 @@ describe("chatDispatchService", () => {
       threadId,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
+      authorAgentId: "default",
       body: retryMarker,
     });
     retryCall.process.emitExit(0);
@@ -4418,6 +4419,36 @@ describe("chatDispatchService", () => {
       ),
     ).toHaveLength(1);
     expect((await fixture.chat.getThread({ workspaceId: WORKSPACE_ID, threadId })).thread.lane).toBe("posts");
+  });
+
+  it("ends a runner self-test as unconfirmed when its reply did not come from the run", async () => {
+    const fixture = await createFixture({ runner: { command: "claude -p" } });
+
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
+    });
+    const call = fixture.spawnCalls[0]!;
+    // A reply sent without the run's secret posts as the unnamed agent, with no agent id.
+    await fixture.chat.sendMessage({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId: call.options.env.DOHC_CHAT_THREAD!,
+      author: { kind: "agent", displayName: "Sam" },
+      origin: "cli",
+      body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
+    });
+
+    // The check ends on that reply, without waiting for the runner to exit.
+    await expect(resultPromise).resolves.toEqual({
+      ok: false,
+      unconfirmed: true,
+      detail: "Nova's Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in Nova's details.",
+      logPath: join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log`),
+    });
+    expect(fixture.killCalls).toContainEqual({ pid: -call.process.pid!, signal: "SIGTERM" });
+    call.process.emitExit(null, "SIGTERM");
   });
 
   it("refuses a runner self-test on a workspace without a capture before resolving a store", async () => {
@@ -4472,6 +4503,7 @@ describe("chatDispatchService", () => {
       threadId: call.options.env.DOHC_CHAT_THREAD!,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
+      authorAgentId: "default",
       body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
     });
     call.process.emitExit(0);

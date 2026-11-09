@@ -80,6 +80,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
       profile,
       dohcTools,
       prompt: "",
+      runSecret: "a".repeat(64),
       assertMayStart,
     });
   return { calls, checks, root, spawn };
@@ -487,6 +488,7 @@ describe("chat runner process", () => {
         command: `"${shim}"`,
         dohcTools: "reply",
         prompt: "",
+        runSecret: "a".repeat(64),
         assertMayStart: () => undefined,
       });
       const exitCode = await new Promise<number | null>((resolveExit) => child.onExit(resolveExit));
@@ -517,6 +519,7 @@ describe("chat runner process", () => {
       profile: { tool: "codex", executable: codex },
       dohcTools: "reply",
       prompt: "",
+      runSecret: "a".repeat(64),
       assertMayStart: () => undefined,
     });
     await expect(start(root)).rejects.toThrow(
@@ -564,6 +567,7 @@ describe("chat runner process", () => {
         profile: { tool: "codex", executable: join(scratch, executable) },
         dohcTools: "all",
         prompt: "",
+        runSecret: "a".repeat(64),
         assertMayStart: () => undefined,
       });
     }
@@ -673,7 +677,7 @@ describe("Windows run owner", () => {
       const logPath = join(root, "logs", `run-${agentOwner ? "broken" : "none"}.log`);
       await expect(runner.spawnConfiguredRunner({
         rootPath: root, runId: "run-1", agentName: "Nova", logPath, command: `"${process.execPath}"`, dohcTools: "reply",
-        prompt: "", assertMayStart: () => undefined,
+        prompt: "", runSecret: "a".repeat(64), assertMayStart: () => undefined,
       })).rejects.toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
       expect(readFileSync(logPath, "utf8")).toContain("Reinstall dohc");
       expect(reportError.mock.calls).toEqual(agentOwner ? [[missing]] : []);

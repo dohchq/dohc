@@ -58,13 +58,19 @@ import type { createVersionRounds } from "../versionRounds";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
-import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import { UNNAMED_AGENT_ID, VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
   const { depth = 0, onBehalfOf, agentRunId } = origin.attribution;
   if (onBehalfOf === undefined) throw new Error("The agent write has no local person identity.");
-  return { kind: "agent", agentId: origin.actorOriginId ?? "dohc-mcp", onBehalfOf,
-    ...(agentRunId !== undefined ? { agentRunId } : {}), ...(depth > 0 ? { depth } : {}) };
+  return {
+    kind: "agent",
+    agentId: origin.actorOriginId ?? UNNAMED_AGENT_ID,
+    ...(origin.agentName !== undefined ? { agentName: origin.agentName } : {}),
+    onBehalfOf,
+    ...(agentRunId !== undefined ? { agentRunId } : {}),
+    ...(depth > 0 ? { depth } : {}),
+  };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -123,6 +129,7 @@ interface DesktopCliServerDependencies<State> {
     dispatchedAgent(workspaceId: string): string | null;
     dispatchedRunId(workspaceId: string): string | null;
     agentWriteRunId(workspaceId: string): string | null;
+    dispatchedRunSecret(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
@@ -705,6 +712,7 @@ export function createDesktopCliServer<State>(
       dispatchedAgent: (workspaceId) => activity.dispatchedAgent(workspaceId),
       dispatchedRunId: (workspaceId) => activity.dispatchedRunId(workspaceId),
       agentWriteRunId: (workspaceId) => activity.agentWriteRunId(workspaceId),
+      dispatchedRunSecret: (workspaceId) => activity.dispatchedRunSecret(workspaceId),
       agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,

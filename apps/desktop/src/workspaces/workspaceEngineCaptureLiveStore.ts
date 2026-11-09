@@ -634,7 +634,8 @@ function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
       depth: author.depth,
     };
   }
-  return captureAuthor(author);
+  const agent = captureAuthor(author);
+  return author.agentName !== undefined ? { ...agent, agentName: author.agentName } : agent;
 }
 
 // The author capture stamps on this computer's own edits: an agent run only.

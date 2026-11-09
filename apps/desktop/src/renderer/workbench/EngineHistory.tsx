@@ -1,6 +1,6 @@
 import { formatChatDay, formatChatTime, formatClock, formatDayClock } from "../time";
 import { basenameOf, dirnameOf } from "../path";
-import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, FilePen, Info, Keyboard, Layers, Lock, PenLine, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, Cloud, Database, FileArchive, FilePen, Info, Keyboard, Layers, Lock, PenLine, Plug, RotateCcw, Search, TriangleAlert, X, Zap, type LucideIcon } from "lucide-react";
 import { EmptyState, SecondaryButton } from "../ui/controls";
 import { EMPTY_ART } from "./EmptyArt";
 import { NameLine } from "../ui/NameLine";
@@ -161,24 +161,30 @@ function sourceName(moment: SourcedMoment): string | undefined {
 }
 
 // The group-level author: the shared agent author name when every moment in
-// the group carries the same one, else undefined (mixed or neutral groups
-// stay unlabeled — never a guessed attribution).
+// the group carries the same one from the same kind of agent, else undefined
+// (mixed or neutral groups stay unlabeled — never a guessed attribution).
 export function groupAgentAuthorName(
-  moments: readonly Pick<EngineMomentRecord, "agentAuthorName">[],
+  moments: readonly Pick<EngineMomentRecord, "agentAuthorName" | "authorPresentations">[],
 ): string | undefined {
-  const first = moments[0]?.agentAuthorName;
-  if (first === undefined) return undefined;
-  return moments.every((moment) => moment.agentAuthorName === first)
-    ? first
+  const first = moments[0];
+  if (first?.agentAuthorName === undefined) return undefined;
+  return moments.every((moment) => moment.agentAuthorName === first.agentAuthorName && connectedAuthor(moment, 0) === connectedAuthor(first, 0))
+    ? first.agentAuthorName
     : undefined;
 }
 
+// Whether a moment's author at `index` is a connected agent, which takes the plug.
+function connectedAuthor(moment: Pick<EngineMomentRecord, "authorPresentations">, index: number): boolean {
+  return moment.authorPresentations?.[index]?.connected === true;
+}
+
 // The one agent or person that made a moment, by their stable id. Two agents
-// can share a name, so a run never compares names.
+// can share a name, so a name never joins two ids. Every connected agent is
+// the unnamed agent, so the name each gave keeps them apart.
 function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
   if (author === undefined || others.length > 0) return undefined;
-  if (author.kind === "agent") return `agent:${author.agentId}`;
+  if (author.kind === "agent") return `agent:${JSON.stringify([author.agentId, author.agentName ?? null])}`;
   // A person the owner shared with, writing directly.
   if (author.kind === "named") return `named:${author.userId}`;
   return author.kind === "human" ? `human:${author.humanId}` : undefined;
@@ -497,13 +503,15 @@ export function engineMomentAuthorName(moment: SourcedMoment): string | undefine
 
 // One author in words: an agent and an automation say what they are, so
 // they never read as a person.
-function authorWords(kind: "agent" | "automation" | undefined, label: string): string {
+function authorWords(kind: "agent" | "connected agent" | "automation" | undefined, label: string): string {
+  if (kind === "connected agent") return label === "Agent" ? "Connected agent" : `Connected agent ${label}`;
   if (kind === "agent") return label === "Agent" ? label : `Agent ${label}`;
   return kind === "automation" ? `Automation ${label}` : label;
 }
 
-function agentOrAutomation(kind: string | undefined): "agent" | "automation" | undefined {
-  return kind === "agent" || kind === "automation" ? kind : undefined;
+function agentOrAutomation(kind: string | undefined, connected: boolean): "agent" | "connected agent" | "automation" | undefined {
+  if (kind === "agent") return connected ? "connected agent" : "agent";
+  return kind === "automation" ? kind : undefined;
 }
 
 // What a screen reader hears after a change's name: what it did, who made
@@ -511,9 +519,9 @@ function agentOrAutomation(kind: string | undefined): "agent" | "automation" | u
 // order the change recorded them.
 export function momentDescription(moment: EngineMomentRecord): string {
   const who = moment.authorLabels
-    ? moment.authorLabels.map((label, index) => authorWords(agentOrAutomation(moment.authors?.[index]?.kind), label)).join(", ")
+    ? moment.authorLabels.map((label, index) => authorWords(agentOrAutomation(moment.authors?.[index]?.kind, connectedAuthor(moment, index)), label)).join(", ")
     : authorWords(
-      moment.agentAuthorName !== undefined ? "agent" : moment.automationAuthor ? "automation" : undefined,
+      moment.agentAuthorName !== undefined ? agentOrAutomation("agent", connectedAuthor(moment, 0)) : moment.automationAuthor ? "automation" : undefined,
       momentAuthorLabel(moment),
     );
   return `${engineMomentSummary(moment)}, ${who}, ${formatChatTime(moment.recordedAtMs).label}`;
@@ -799,6 +807,7 @@ function GroupRow(props: {
   // Uniform agent authorship surfaces on the group row itself; mixed or
   // neutral groups show no author (never a guess).
   const agentAuthorName = groupAgentAuthorName(group.moments);
+  const groupConnected = agentAuthorName !== undefined && group.moments.every((moment) => connectedAuthor(moment, 0));
   const Chevron = expanded ? ChevronDown : ChevronRight;
   // A collapsed pass holding the open change says so, as a run does.
   const holdsOpen = !expanded && group.moments.some((moment) => moment.id === props.openMomentId);
@@ -821,8 +830,14 @@ function GroupRow(props: {
         </span>
         <span className={LINE_TWO}>
           {agentAuthorName !== undefined ? (
-            <span data-testid="engine-moment-group-source" className="min-w-0 max-w-[45%] shrink-0 truncate">
-              {chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}
+            <span data-testid="engine-moment-group-source" className="inline-flex min-w-0 max-w-[45%] shrink-0 items-center gap-1">
+              {groupConnected ? (
+                <span data-agent-mark="connected" className="inline-flex shrink-0 text-subtle">
+                  <Plug size={12} strokeWidth={1.9} aria-hidden />
+                  <span className="sr-only">Connected agent </span>
+                </span>
+              ) : null}
+              <span className="min-w-0 truncate">{chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}</span>
             </span>
           ) : null}
           <span className="min-w-0 truncate">{group.summary}</span>
