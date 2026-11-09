@@ -233,10 +233,10 @@ import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCente
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
-import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "./shell/noticeTarget";
+import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
-import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
+import { serverHoldNoticesKey } from "../notices/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
 import { useVersionRounds } from "./shell/useVersionRounds";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";

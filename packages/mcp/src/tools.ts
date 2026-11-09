@@ -79,6 +79,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_stop_workspace_sync: ["workspace.sync.stop"],
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
+  dohc_list_notices: ["notice.list"],
   dohc_save_kept_copy: ["file.kept.save"],
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
@@ -2346,6 +2347,12 @@ export async function createRecord(
     fields: fields.value,
     ...(args.recordId ? { recordId: args.recordId } : {}),
   });
+}
+
+// The person's Notices rows that open in this workspace, through the
+// resolver the desktop's Open uses. Listing marks nothing read.
+export async function listNotices(ctx: ToolContext) {
+  return requestCli(ctx, "notices", {});
 }
 
 // Files dohc moved aside while it saved, because another program changed them
