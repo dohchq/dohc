@@ -407,6 +407,10 @@ jobs:
       - name: Engine
         run: cargo build --locked -p dohc-workspace-engine --bin dohc-workspace-engine
 
+      # The relay imports this package's built files, as the verifier prepares them.
+      - name: App backend runtime
+        run: pnpm --filter @dohc/app-backend-runtime build
+
       # The compose service's security options, with Docker's default seccomp profile.
       # Ubuntu 24.04 matches the runner, so the runner's Node and engine run unchanged.
       - name: Relay replicas
