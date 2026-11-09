@@ -497,7 +497,7 @@ function AddPeople(props: {
           >
             {options.length === 0 ? (
               <li role="presentation" className={MENU_EMPTY}>
-                No one matches "{text.trim()}". Enter their full email.
+                {text.trim() === "" ? "No suggestions yet. Enter a full email." : `No one matches "${text.trim()}". Enter their full email.`}
               </li>
             ) : (
               options.map((option, index) => (

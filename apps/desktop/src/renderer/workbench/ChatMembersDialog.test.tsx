@@ -167,6 +167,14 @@ describe("ChatMembersDialog", () => {
     expect((screen.getByTestId("chats-share-back") as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("says there is no one to suggest yet when the field is empty", async () => {
+    dialog({ known: [] });
+    await userEvent.keyboard("{ArrowDown}");
+    expect(screen.getByTestId("chats-share-suggestions").textContent).toBe("No suggestions yet. Enter a full email.");
+    await userEvent.type(field(), "zed");
+    expect(screen.getByTestId("chats-share-suggestions").textContent).toBe('No one matches "zed". Enter their full email.');
+  });
+
   it("lets a paste replace the selected text", async () => {
     dialog();
     await userEvent.type(field(), "ana@example.com");
