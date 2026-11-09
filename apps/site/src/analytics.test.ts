@@ -39,8 +39,16 @@ it("asks PostHog not to look up a location, and drops the address after its ? or
   const { before_send } = posthog.init.mock.calls[0]![1];
   if (typeof before_send !== "function") throw new Error("before_send is not one function");
   for (const event of ["$pageview", "$pageleave", "$autocapture", "download_clicked"]) {
-    const sent = before_send({ uuid: "u", event, properties: { $current_url: "https://dohc.computer/?utm_source=x#top" } });
-    expect(sent?.properties).toEqual({ $current_url: "https://dohc.computer/", $geoip_disable: true });
+    const sent = before_send({
+      uuid: "u",
+      event,
+      properties: { $current_url: "https://dohc.computer/?utm_source=x#top", $referrer: "https://dohc.computer/privacy?a=b" },
+    });
+    expect(sent?.properties).toEqual({
+      $current_url: "https://dohc.computer/",
+      $referrer: "https://dohc.computer/privacy",
+      $geoip_disable: true,
+    });
   }
 });
 

@@ -43,7 +43,12 @@ function loadAnalytics(): Promise<PostHog> {
         // PostHog's GeoIP step skips an event that carries this, so no report
         // gains a location, whatever the order of PostHog's pipeline.
         const properties: Record<string, unknown> = { ...event.properties, $geoip_disable: true };
-        if (typeof properties.$current_url === "string") properties.$current_url = properties.$current_url.split(/[?#]/)[0];
+        // The referrer too: from another page of this site, the browser sends
+        // that page's whole address.
+        for (const key of ["$current_url", "$referrer"]) {
+          const value = properties[key];
+          if (typeof value === "string") properties[key] = value.split(/[?#]/)[0];
+        }
         return { ...event, properties };
       },
       // Anyone can send a link that turns these on, and each keeps a setting
