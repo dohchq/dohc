@@ -22,6 +22,7 @@ import {
 } from "./types";
 import { rowToLinkPrincipalRow, rowToShareDiscussionMessageRow } from "./rows";
 import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment } from "./linkEnrollment";
+import { agentName, agentWriteAuthorityInTransaction, recordAgentConnectionActionInTransaction, type AgentAccessCheck } from "./agentConnections";
 
 function normalizeDiscussionDisplayName(value: unknown): string | null {
   const result = normalizeShareDiscussionDisplayName(value);
@@ -93,27 +94,38 @@ function utf8Bytes(...values: Array<string | null>): number {
   );
 }
 
-export function appendLinkDiscussionMessage(storage: StorageContext, input: {
-    capabilityHash: string;
-    profileTokenHash: string;
-    claimedName?: string | null;
-    body: string;
-    idempotencyKey: string;
-    createdAtMs: number;
-    guard?: () => void;
-  }): AppendLinkDiscussionMessageResult {
+/**
+ * A link holder writes with its capability and profile. An agent writes
+ * with its access token and MCP address, under its connection's principal,
+ * and never claims a name. Its token is checked with the clock read inside
+ * the write, so a token that expired while the write waited writes nothing.
+ */
+export type AppendLinkDiscussionMessageInput = (
+  | { capabilityHash: string; profileTokenHash: string; agent?: undefined; now?: undefined }
+  | { agent: AgentAccessCheck; now: () => number; capabilityHash?: undefined; profileTokenHash?: undefined }
+) & {
+  claimedName?: string | null;
+  body: string;
+  idempotencyKey: string;
+  createdAtMs: number;
+  guard?: () => void;
+};
+
+export function appendLinkDiscussionMessage(storage: StorageContext, input: AppendLinkDiscussionMessageInput): AppendLinkDiscussionMessageResult {
     const body = normalizeShareDiscussionBody(input.body);
     const hasClaimedName =
       input.claimedName !== undefined && input.claimedName !== null;
     const claimedName = hasClaimedName
       ? normalizeDiscussionDisplayName(input.claimedName)
       : null;
+    const holder = input.agent === undefined
+      ? { capabilityHash: input.capabilityHash, profileTokenHash: input.profileTokenHash }
+      : null;
     if (
       body === null ||
-      (hasClaimedName && claimedName === null) ||
+      (hasClaimedName && (claimedName === null || holder === null)) ||
       !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
-      !input.capabilityHash ||
-      !input.profileTokenHash ||
+      (holder !== null && (!holder.capabilityHash || !holder.profileTokenHash)) ||
       !Number.isSafeInteger(input.createdAtMs) ||
       input.createdAtMs < 0
     ) {
@@ -127,7 +139,8 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
     // the final live-authority decision below.
     input.guard?.();
     return storage.tx(() => {
-      const enrollment = readLinkEnrollment(storage, input, createdAtMs);
+      const agent = input.agent === undefined ? null : agentWriteAuthorityInTransaction(storage, input.agent, input.now());
+      const enrollment = holder ? readLinkEnrollment(storage, holder, createdAtMs) : agent?.enrollment ?? null;
       if (!enrollment) return { ok: false, reason: "not-authorized" };
       const { authority } = enrollment;
       let { principal } = enrollment;
@@ -231,11 +244,12 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
         throw new Error("discussion id generator returned an invalid identifier");
       }
       const committedName = principal?.displayName ?? claimedName;
-      const displayNameSnapshot = committedName ?? "Anonymous";
-      const principalAddedBytes = principal
+      const displayNameSnapshot = committedName ?? (agent ? agentName(agent.connection.reportedName) : "Anonymous");
+      const agentConnectionId = agent?.connection.connectionId ?? null;
+      const principalAddedBytes = principal || !holder
         ? 0
-        : linkPrincipalStorageBytes(principalId, grantId, input.profileTokenHash);
-      const messageStorageBytes = discussionMessageStorageBytes({
+        : linkPrincipalStorageBytes(principalId, grantId, holder.profileTokenHash);
+      const messageStorageBytes = utf8Bytes(agentConnectionId) + discussionMessageStorageBytes({
         messageId,
         shareId,
         idempotencyKey: input.idempotencyKey,
@@ -255,7 +269,8 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
       }
       const discussionRevision = nextShareDiscussionRevision(storage, shareId);
 
-      principal = commitLinkEnrollment(storage, { ...input, enrollment, principalId,
+      // An agent's principal is its connection's, already enrolled when it signed in.
+      principal = agent ? agent.enrollment.principal : commitLinkEnrollment(storage, { ...holder!, enrollment, principalId,
         displayName: committedName, createdAtMs, discussionRevision });
 
       storage.db
@@ -264,8 +279,8 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
              message_id, share_id, idempotency_key, request_hash, author_kind,
              author_user_id, link_grant_id, link_principal_id,
              display_name_snapshot, body, created_at_ms, deleted_at_ms,
-             deleted_by_user_id, discussion_revision, storage_bytes
-           ) VALUES (?, ?, ?, ?, 'link', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+             deleted_by_user_id, discussion_revision, storage_bytes, agent_connection_id
+           ) VALUES (?, ?, ?, ?, 'link', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
         )
         .run(
           messageId,
@@ -279,7 +294,9 @@ export function appendLinkDiscussionMessage(storage: StorageContext, input: {
           createdAtMs,
           discussionRevision,
           messageStorageBytes,
+          agentConnectionId,
         );
+      if (agentConnectionId !== null) recordAgentConnectionActionInTransaction(storage, agentConnectionId, createdAtMs);
       const message = storage.db
         .prepare(
           `SELECT message_id, share_id, idempotency_key, request_hash,

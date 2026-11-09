@@ -3,6 +3,7 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
+import { signInAgent } from "./mcpSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 import {
   appendLog,
@@ -12,6 +13,7 @@ import {
   linkSecret,
   moment,
   putBlob,
+  RELAY_EXCHANGE_KEY,
   request,
   testHandler,
   testStorage,
@@ -28,7 +30,7 @@ it.each(["view", "comment"] as const)(
   "enforces current-only %s through the browser proxy and a real MCP client",
   async (access) => {
     const storage = await testStorage();
-    const relay = testHandler(storage);
+    const relay = testHandler(storage, { relayExchangeKey: RELAY_EXCHANGE_KEY });
     expect(
       (
         await relay(
@@ -82,6 +84,7 @@ it.each(["view", "comment"] as const)(
     const app = createShareWebApplication({
       relayUrl: "https://relay.example.test",
       publicRelayUrl: "https://relay.example.test",
+      relayExchangeKey: RELAY_EXCHANGE_KEY,
       publicHosts: new Set([host]),
       nowMs: () => 2000,
       fetchRelay: relay,
@@ -120,15 +123,14 @@ it.each(["view", "comment"] as const)(
     );
     expect(JSON.stringify(changes)).not.toContain(old);
 
-    const bearer = String(
-      (await json(await send("/api/mcp/exchange", jsonBody({ secret }))))
-        .bearer,
-    );
+    const agent = await signInAgent(send, origin, secret);
     const client = new Client({ name: "history-agent", version: "1" });
     try {
       await client.connect(
-        new StreamableHTTPClientTransport(new URL(origin + "/mcp"), {
-          requestInit: { headers: { authorization: `Bearer ${bearer}` } },
+        new StreamableHTTPClientTransport(new URL(agent.resource), {
+          requestInit: {
+            headers: { authorization: `Bearer ${agent.accessToken}` },
+          },
           fetch: async (input, init) => {
             const request = new Request(input, init);
             request.headers.set("host", host);

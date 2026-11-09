@@ -28,14 +28,18 @@ export function snapshotLiveTicketScope(value: unknown): LiveBrowserContext {
   if (typeof value !== "object" || value === null || types.isProxy(value)) throw new TypeError("Invalid live-ticket scope.");
   const kind = Object.getOwnPropertyDescriptor(value, "kind")?.value;
   if (kind !== "named" && kind !== "link") throw new TypeError("Invalid live-ticket scope kind.");
+  const agent = kind === "link" && Object.getOwnPropertyDescriptor(value, "agentConnectionId") !== undefined;
   const scope = ticketRecord(value, kind === "named" ? ["kind", "workspaceId", "shareId", "grantId", "userId"] :
+    agent ? ["kind", "workspaceId", "shareId", "grantId", "agentConnectionId", "accessTokenHash", "resourceHash"] :
     ["kind", "workspaceId", "shareId", "grantId", "sessionId", "capabilityHash", "profileTokenHash"]);
   const common = {
     workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
     shareId: parseLiveUpdateIdentifier(scope.shareId, "share ID"),
     grantId: parseLiveUpdateIdentifier(scope.grantId, "grant ID"),
   };
-  return kind === "named" ? { ...common, kind, userId: parseLiveUpdateIdentifier(scope.userId, "user ID") } :
+  if (kind === "named") return { ...common, kind, userId: parseLiveUpdateIdentifier(scope.userId, "user ID") };
+  return agent ? { ...common, kind, agentConnectionId: parseLiveUpdateIdentifier(scope.agentConnectionId, "agent connection ID"),
+      accessTokenHash: parseTicketHash(scope.accessTokenHash), resourceHash: parseTicketHash(scope.resourceHash) } :
     { ...common, kind, sessionId: parseLiveUpdateIdentifier(scope.sessionId, "link session ID"),
       capabilityHash: parseTicketHash(scope.capabilityHash), profileTokenHash: parseTicketHash(scope.profileTokenHash) };
 }

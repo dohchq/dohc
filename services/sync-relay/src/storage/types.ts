@@ -55,7 +55,10 @@ export interface CurrentLiveBindingRequest {
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
     | { readonly kind: "link"; readonly sessionId: string;
-        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string };
+        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string }
+    // An agent connected through its link edits as the link principal its connection holds.
+    | { readonly kind: "link"; readonly agentConnectionId: string; readonly accessTokenHash: string;
+        readonly resourceHash: string; readonly grantId: string; readonly workspaceId: string };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {
@@ -699,6 +702,7 @@ export interface SyncRelayStorage {
   takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): import("./automationHosts").AutomationGroupHandover;
   authorizeLinkCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
+  authorizeAgentCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeAgentCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
   automationHostRecord(workspaceId: string): import("@dohc/workspace-contracts/relay").RelayAutomationHost | null;
   readAutomationServerSchedules(workspaceId: string): import("./automationHosts").AutomationServerSchedules | null;
   beginAutomationServerCopy(input: { workspaceId: string; incarnation: number }): void;
@@ -951,6 +955,7 @@ export interface SyncRelayStorage {
   redeemAgentAuthorizationCode(input: Parameters<typeof import("./agentConnections").redeemAgentAuthorizationCode>[1]): import("./agentConnections").AgentTokenGrantResult;
   refreshAgentTokens(input: Parameters<typeof import("./agentConnections").refreshAgentTokens>[1]): import("./agentConnections").AgentTokenGrantResult;
   authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
+  authenticateAgentAuthority(check: import("./agentConnections").AgentAccessCheck, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
   recordAgentConnectionAction(connectionId: string, atMs: number): void;
   listAgentConnections(input: Parameters<typeof import("./agentConnections").listAgentConnections>[1]): import("./agentConnections").AgentConnectionPage;
   disconnectAgentConnection(input: Parameters<typeof import("./agentConnections").disconnectAgentConnection>[1]): import("./agentConnections").AgentConnectionRow | null;
@@ -1066,15 +1071,7 @@ export interface SyncRelayStorage {
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null;
-  appendLinkDiscussionMessage(input: {
-    capabilityHash: string;
-    profileTokenHash: string;
-    claimedName?: string | null;
-    body: string;
-    idempotencyKey: string;
-    createdAtMs: number;
-    guard?: () => void;
-  }): AppendLinkDiscussionMessageResult;
+  appendLinkDiscussionMessage(input: import("./discussion").AppendLinkDiscussionMessageInput): AppendLinkDiscussionMessageResult;
   appendAuthenticatedDiscussionMessage(input: {
     shareId: string;
     authorUserId: string;

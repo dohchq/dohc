@@ -15,7 +15,9 @@ export interface ServeFetchHandlerOptions {
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
   oversized: (url: URL) => Response;
   /** The answer when the handler throws. */
-  failure: () => Response;
+  failure: (url: URL) => Response;
+  /** The answer to a buffered upload that does not arrive in time; a bare 408 without it. */
+  timedOut?: (url: URL) => Response;
   /** Sets request headers the handler trusts, such as the client address. */
   prepareHeaders?: (headers: Headers, incoming: IncomingMessage, url: URL) => void;
 }
@@ -63,7 +65,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       void options.handler(request)
         .then(response => writeResponse(response, outgoing, incoming.readableEnded ? undefined : incoming))
         .catch(() => {
-          if (!outgoing.destroyed) void writeResponse(options.failure(), outgoing, incoming);
+          if (!outgoing.destroyed) void writeResponse(options.failure(url), outgoing, incoming);
         });
       return;
     }
@@ -72,7 +74,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       rejected = true;
       chunks.length = 0;
       disconnect.abort(new DOMException("Request body timed out", "TimeoutError"));
-      void writeResponse(new Response(null, { status: 408 }), outgoing, incoming);
+      void writeResponse(options.timedOut?.(url) ?? new Response(null, { status: 408 }), outgoing, incoming);
     }, 300_000) : undefined;
     bodyTimer?.unref();
     const clearBodyTimer = () => clearTimeout(bodyTimer);
@@ -115,7 +117,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         .handler(request)
         .then((response) => writeResponse(response, outgoing))
         .catch(() => {
-          if (!outgoing.destroyed) void writeResponse(options.failure(), outgoing);
+          if (!outgoing.destroyed) void writeResponse(options.failure(url), outgoing);
         });
     });
   });

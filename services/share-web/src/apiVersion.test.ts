@@ -17,7 +17,7 @@ afterEach(() => release(1, 1));
 const host = "share.example.com", origin = "https://" + host;
 const header = "x-dohc-share-web-api-version";
 const versionHeader = (version: string | undefined): Record<string, string> => version === undefined ? {} : {[header]: version};
-const secret = "A".repeat(43), capability = "B".repeat(43);
+const secret = "A".repeat(43), capability = "B".repeat(43), accessToken = "C".repeat(43), mcpPath = "/mcp/s/" + secret;
 const routes = [
   ["POST", "/api/exchange"], ["POST", "/api/handoff"],
   ["GET", "/api/view/meta"], ["GET", "/api/view/current"], ["GET", "/api/view/log"],
@@ -27,7 +27,7 @@ const routes = [
   ["POST", "/api/account/sign-in"], ["POST", "/api/account/sign-out"],
   ...["link-document", "link-ticket", "named-session", "named-ticket", "named-documents"].map(path => ["POST", "/api/live/" + path]),
   ["GET", "/api/apps"], ["POST", "/api/apps/launch"], ["POST", "/api/apps/summary"],
-  ["POST", "/api/mcp/exchange"], ["GET", "/mcp"], ["POST", "/mcp"], ["DELETE", "/mcp"],
+  ["GET", mcpPath], ["POST", mcpPath], ["DELETE", mcpPath],
 ];
 function fixture(extra: Partial<CreateShareWebApplicationOptions> = {}) {
   const calls: Request[] = [];
@@ -44,11 +44,13 @@ function fixture(extra: Partial<CreateShareWebApplicationOptions> = {}) {
     return Response.json({ok: true});
   });
   const app = createShareWebApplication({relayUrl: "https://relay.test", publicRelayUrl: "https://relay.test", publicHosts: new Set([host]),
+    relayExchangeKey: "exchange-key-at-least-thirty-two-bytes",
     fetchRelay: relay, appLaunch: {viewerOrigin: origin, appDomain: "example.net"}, ...extra});
   const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host, ...init.headers}}));
-  const exchange = (version?: string, agent = false) => send(agent ? "/api/mcp/exchange" : "/api/exchange", {method: "POST",
+  const exchange = (version?: string) => send("/api/exchange", {method: "POST",
     headers: {"content-type": "application/json", ...versionHeader(version)}, body: JSON.stringify({secret})});
-  const mcp = (bearer: string, version?: string) => send("/mcp", {method: "POST", headers: {authorization: "Bearer " + bearer,
+  // The relay checks the agent's token on every call; this fake accepts any until `revoke`.
+  const mcp = (bearer: string, version?: string) => send(mcpPath, {method: "POST", headers: {authorization: "Bearer " + bearer,
     "content-type": "application/json", accept: "application/json, text/event-stream", ...versionHeader(version)},
     body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
   return {app, send, exchange, mcp, relay, calls, revoke() {revoked = true;}};
@@ -129,8 +131,7 @@ it.each([undefined, "1", "2"])("keeps authorization, revocation and body/rate bo
   expect((await f.send("/api/view/meta", {headers: authorized})).status).toBe(200);
   expect((await f.send("/api/view/collection-writes", {method: "POST", headers: {...authorized, origin, "content-type": "application/json"}, body: "{}"})).status).toBe(404);
   expect(new URL(f.calls.at(-1)!.url).pathname).toBe("/sync/link/share");
-  const {bearer} = await (await f.exchange(version, true)).json();
-  expect((await f.mcp(bearer, version)).status).toBe(200);
+  expect((await f.mcp(accessToken, version)).status).toBe(200);
   const calls = f.calls.length;
   const oversized = JSON.stringify({secret, padding: "x".repeat(8192)});
   for (let i = 0; i < 12; i++) expect((await f.send("/api/exchange", {method: "POST", headers: {...headers, "content-type": "application/json"}, body: oversized})).status).toBe(404);
@@ -138,7 +139,9 @@ it.each([undefined, "1", "2"])("keeps authorization, revocation and body/rate bo
   expect(f.calls).toHaveLength(calls);
   f.revoke();
   expect((await f.send("/api/view/meta", {headers: authorized})).status).toBe(404);
-  expect((await f.mcp(bearer, version)).status).toBe(404);
+  const refusedAgent = await f.mcp(accessToken, version);
+  expect(refusedAgent.status).toBe(401);
+  expect(refusedAgent.headers.get("www-authenticate")).toContain('error="invalid_token"');
 });
 
 it("forwards only relay log keys and never interprets query versions", async () => {
@@ -149,9 +152,10 @@ it("forwards only relay log keys and never interprets query versions", async () 
   const result = await f.send("/api/view/log?since=7&limit=500&hold=0&current=true&session=" + session + "&apiVersion=99&other=secret", {headers});
   expect(result.status).toBe(200);
   expect(new URL(f.calls.at(-1)!.url).search).toBe("?since=7&limit=500&hold=0&current=true");
-  for (const path of ["/api/mcp?apiVersion=1", "/mcp?apiVersion=1", "/api/mcp/exchange?apiVersion=1", "/api/account/session?apiVersion=1"]) {
-    expect((await f.send(path, {method: path.includes("exchange") ? "POST" : "GET"})).status).toBe(404);
+  for (const path of ["/api/mcp?apiVersion=1", mcpPath + "?apiVersion=1", "/api/account/session?apiVersion=1"]) {
+    expect((await f.send(path, {headers: {authorization: "Bearer " + accessToken}})).status).toBe(404);
   }
+  expect((await f.mcp(accessToken)).status).toBe(200);
 });
 
 it("returns the same public refusal with account routes enabled or disabled", async () => {
@@ -167,7 +171,7 @@ it("returns the same public refusal with account routes enabled or disabled", as
 });
 
 // Production buffers every other body before `handle` runs (`streamBody` in main.ts).
-it.each(["/mcp", "/api/view/collection-writes"])("does not consume a streamed %s body before refusing its wire version", async path => {
+it.each([mcpPath, "/api/view/collection-writes"])("does not consume a streamed %s body before refusing its wire version", async path => {
   let pulled = 0;
   const stream = new ReadableStream<Uint8Array>({pull() {pulled++;}}, {highWaterMark: 0});
   const f = fixture();
@@ -181,9 +185,8 @@ it.each(["/mcp", "/api/view/collection-writes"])("does not consume a streamed %s
 it("keeps headerless MCP working when a later build retires ordinary HTTP v1", async () => {
   release(2, 2);
   const f = fixture();
-  const {bearer} = await (await f.exchange(undefined, true)).json();
   expect((await f.exchange()).status).toBe(409);
-  const result = await f.mcp(bearer);
+  const result = await f.mcp(accessToken);
   expect(result.status).toBe(200);
   expect(await result.text()).toContain("dohc_list_files");
 });

@@ -7,8 +7,9 @@ const origin = "https://share.example.test";
 const clients: Client[] = [];
 afterEach(async () => {await Promise.all(clients.splice(0).map(client => client.close()));});
 
-const metadata = {ok: true, subjectName: "Team", access: "view", effectiveSelector: {versionId: null, paths: [], access: "view"},
-  lastSettledKnown: true, lastSettledAtMs: 1, channel: {channelWireId: "wire-team", access: "read-write"}};
+const shareMetadata = {ok: true, subjectName: "Team", access: "view", effectiveSelector: {versionId: null, paths: [], access: "view"},
+  lastSettledKnown: true, lastSettledAtMs: 1};
+const metadata = {...shareMetadata, channel: {channelWireId: "wire-team", access: "read-write"}};
 const message = (relaySeq: number, fields: Record<string, unknown> = {}) => ({relaySeq, messageId: `message-${String(relaySeq)}`,
   threadId: "thread-team", authorDisplayName: "Ada", authorKind: "human", linkAgent: false, authorOwnerDisplayName: null,
   createdAtMs: 1_000, body: "hello", bodyTooLarge: false, ...fields});
@@ -16,7 +17,7 @@ const message = (relaySeq: number, fields: Record<string, unknown> = {}) => ({re
 type WaitCall = {input: Parameters<AgentChatClient["wait"]>[0]; signal: AbortSignal};
 type PostCall = {input: Parameters<AgentChatClient["post"]>[0]; signal: AbortSignal};
 
-function fixture(options: {agentChat?: boolean; deadlineMs?: number; wait?: (call: WaitCall) => Response | Promise<Response>} = {}) {
+function fixture(options: {channel?: boolean; deadlineMs?: number; wait?: (call: WaitCall) => Response | Promise<Response>} = {}) {
   const waits: WaitCall[] = [], posts: PostCall[] = [], viewCalls: string[] = [], controllers: AbortController[] = [];
   const agentChat: AgentChatClient = {
     post: async (input, signal) => {
@@ -34,21 +35,21 @@ function fixture(options: {agentChat?: boolean; deadlineMs?: number; wait?: (cal
     const controller = new AbortController();
     controllers.push(controller);
     const result = await serveRemoteMcp(request, {
-      discriminator: "agent", cookie: "", signal: controller.signal, deadlineAtMs: Date.now() + (options.deadlineMs ?? 35_000),
+      signal: controller.signal, deadlineAtMs: Date.now() + (options.deadlineMs ?? 35_000),
       admitLargeBody: () => null,
       request: async (path) => {
         viewCalls.push(path);
-        if (path === "/api/view/meta") return Response.json(metadata);
+        if (path === "/api/view/meta") return Response.json(options.channel === false ? shareMetadata : metadata);
         return new Response(null, {status: 404});
       },
-      ...(options.agentChat === false ? {} : {agentChat}),
+      agentChat,
     });
     return new Response(result.body, {status: result.status, headers: result.headers});
   }
   async function connect() {
     const client = new Client({name: "test-agent", version: "1"});
     clients.push(client);
-    await client.connect(new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${origin}/mcp/s/${"A".repeat(43)}`), {
       fetch: async (input, init) => serve(new Request(input, init)),
     }));
     return client;
@@ -59,9 +60,9 @@ function fixture(options: {agentChat?: boolean; deadlineMs?: number; wait?: (cal
 const structured = (result: unknown) => (result as {structuredContent?: Record<string, unknown>}).structuredContent;
 const textOf = (result: unknown) => (result as {content: Array<{text: string}>}).content[0]!.text;
 
-it("offers the wait tool only to an agent that signed in, and posts as that agent", async () => {
-  const exchanged = await fixture({agentChat: false}).connect();
-  expect((await exchanged.listTools()).tools.map(tool => tool.name)).not.toContain("dohc_wait_for_messages");
+it("offers the wait tool only with a channel, and posts as the signed-in agent", async () => {
+  const noChannel = await fixture({channel: false}).connect();
+  expect((await noChannel.listTools()).tools.map(tool => tool.name)).not.toContain("dohc_wait_for_messages");
 
   const f = fixture();
   const client = await f.connect();

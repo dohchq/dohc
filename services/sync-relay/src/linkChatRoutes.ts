@@ -3,7 +3,8 @@ import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { linkRefusal } from "./linkRefusal";
-import { hashLinkProfileSecret, type ValidatedLinkCapability } from "./linkSecurity";
+import { isAgentRequest, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
+import { hashLinkProfileSecret } from "./linkSecurity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE, messageFromOp, readSharedChannelPage, type NamedChatMessage } from "./namedRecipientChat";
 import { parseString } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
@@ -73,16 +74,8 @@ export function createLinkChatRoutes(options: {
   >;
   linkKey: string | Uint8Array | undefined;
   nowMs: () => number;
-  requireLinkRead: (
-    request: Request,
-    capabilityRateLimiter: TokenBucketLimiter,
-    grantRateLimiter: TokenBucketLimiter,
-  ) => { capabilityToken: string; capability: ValidatedLinkCapability };
-  requireFreshLinkRead: (
-    capabilityToken: string,
-    expected: { shareId: string; grantId: string; generation: number },
-  ) => ValidatedLinkCapability;
-  linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response;
+  linkAuthority: Pick<LinkAuthorityResolver, "require" | "fresh">;
+  linkJsonResponse: LinkJsonResponse;
   readLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
   followLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
   activity: Pick<DiscussionActivityHub, "wait" | "wake" | "wakeLog">;
@@ -103,7 +96,7 @@ export function createLinkChatRoutes(options: {
     const secret = request.headers.get("x-dohc-link-profile-secret");
     if (!options.linkKey || request.headers.has("cookie") || new URL(request.url).search !== "" ||
         !secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
-    const { capabilityToken, capability } = options.requireLinkRead(request, options.readLimiters.capability, options.readLimiters.grant);
+    const capability = options.linkAuthority.require(request, options.readLimiters.capability, options.readLimiters.grant);
     if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
       throw badRequest("invalid request");
     }
@@ -123,9 +116,11 @@ export function createLinkChatRoutes(options: {
         (threadId !== undefined && typeof threadId !== "string") ||
         (claimedName !== undefined && typeof claimedName !== "string")) throw badRequest("invalid request");
     const channelWireId = parseString(input.channelWireId, "channelWireId", 256);
-    const fresh = options.requireFreshLinkRead(capabilityToken, capability);
+    const fresh = options.linkAuthority.fresh(capability);
+    // An agent posts through agent chat, under its connection.
+    if (fresh.credential.kind !== "holder") throw notFound();
     const result = storage.appendLinkChatPost({
-      capabilityHash: fresh.session.capabilityHash,
+      capabilityHash: fresh.credential.capability.session.capabilityHash,
       profileTokenHash: hashLinkProfileSecret(secret, options.linkKey),
       grantId: fresh.grantId,
       generation: fresh.generation,
@@ -142,7 +137,7 @@ export function createLinkChatRoutes(options: {
     const message = messageFromOp({ relaySeq: result.row.relaySeq, opKind: result.row.opKind, payload: JSON.parse(result.row.payloadJson) },
       result.row.originId);
     if (!message) throw new Error("stored link post is not a chat message");
-    const response = options.linkJsonResponse(fresh.shareId, fresh.grantId, { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) });
+    const response = options.linkJsonResponse(fresh, { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) }, request.signal);
     response.headers.set("cache-control", "private, no-store");
     return response;
   };
@@ -152,7 +147,9 @@ export function createLinkChatRoutes(options: {
     const url = new URL(request.url);
     const channels = route.route === "link-chat-channels";
     const limiters = channels ? options.readLimiters : options.followLimiters;
-    const { capabilityToken, capability } = options.requireLinkRead(request, limiters.capability, limiters.grant);
+    // An agent reads the channel's messages; the channel list and its profile name are a browser's.
+    if (channels && isAgentRequest(request)) throw notFound();
+    const capability = options.linkAuthority.require(request, limiters.capability, limiters.grant);
     const allowed = channels ? [] : ["channelWireId", "before", "since", "hold", "limit"];
     if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) {
       throw badRequest("invalid query");
@@ -160,7 +157,7 @@ export function createLinkChatRoutes(options: {
     // Revoking or rotating the link, or the channel ceasing to be an
     // ordinary channel, fails this on the next read.
     const current = () => {
-      const fresh = options.requireFreshLinkRead(capabilityToken, capability);
+      const fresh = options.linkAuthority.fresh(capability);
       const authorized = authorizeLinkChatAction({ storage, grantId: fresh.grantId, action: "read" });
       if (!authorized.ok) throw notFound();
       return authorized;
@@ -169,7 +166,7 @@ export function createLinkChatRoutes(options: {
     const { share } = authority;
     const { channelWireId } = authority.effectiveSelector;
     const respond = (body: unknown) => {
-      const response = options.linkJsonResponse(share.shareId, capability.grantId, body);
+      const response = options.linkJsonResponse(capability, body, request.signal);
       response.headers.set("cache-control", "private, no-store");
       return response;
     };
@@ -201,7 +198,7 @@ export function createLinkChatRoutes(options: {
         recheck: () => {
           if (current().effectiveSelector.channelWireId !== channelWireId) throw notFound();
         },
-        activity: options.activity, waiter: `link:${capability.session.capabilityHash}`, signal: request.signal,
+        activity: options.activity, waiter: `link:${capability.callerKey}`, signal: request.signal,
         maxResponseBytes: options.maxResponseBytes ?? LINK_CHAT_MAX_RESPONSE_BYTES, busyCode: "link_read_rate_limited",
         project: linkChatMessage,
       }));

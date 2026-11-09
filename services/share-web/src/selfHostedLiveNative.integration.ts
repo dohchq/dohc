@@ -33,6 +33,7 @@ import {readyOwnerDeliveryDocuments} from "../../../apps/desktop/src/workspaces/
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLinkLiveHttp } from "../../sync-relay/src/linkLiveHttp.js";
 import { hashLinkBearer } from "../../sync-relay/src/linkSecurity.js";
+import { holderLinkAuthority } from "../../sync-relay/src/liveTickets.test-helper.js";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
 import { createNamedFrameChanges } from "../../sync-relay/src/liveHostChanges.js";
@@ -1524,11 +1525,11 @@ it("detaches a store restored from an older copy before anyone edits it", () => 
   expect(proof.storage.mintLinkSession({session: {sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, linkKey), grantId: "link-grant",
     generation: 1, mintedAtMs: now, expiresAtMs: now + 600_000}})).toBe(true);
   const linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage: proof.storage, linkKey, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey,
-    limits: routeLimits, sessionHostBlocked: proof.sessionHostBlocked});
+    limits: routeLimits, sessionHostBlocked: proof.sessionHostBlocked, linkAuthority: holderLinkAuthority(proof.storage, linkKey, exchangeKey)});
   const openLive = async () => {
     const response = await linkHttp(new Request("https://relay.test/sync/live/link-document", {method: "POST",
       body: JSON.stringify({discriminator: "abcdefghijkl", path: "docs/a.md"}), headers: {host: "relay.test", origin: audience, "content-type": "application/json",
-        "x-dohc-relay-exchange-key": exchangeKey, authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": Buffer.alloc(32, 2).toString("base64url")}}));
+        "x-dohc-relay-exchange-key": exchangeKey, authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": Buffer.alloc(32, 2).toString("base64url")}}));
     return {status: response.status, body: await response.json() as unknown};
   };
   expect(await openLive()).toEqual({status: 200, body: {objectId}});

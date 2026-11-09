@@ -4,6 +4,7 @@ import {
   chatChannelCreate, chatMessageAppend, chatThreadCreate, closeTestStorages, jsonBody, linkSecret, RELAY_EXCHANGE_KEY,
   request, sequenced, testHandler, testStorage,
 } from "../../sync-relay/src/testing";
+import { signInAgent } from "./mcpSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 
 // A link on a Group share reads the Group's channel, and a read-write link
@@ -51,6 +52,8 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
   expect(shared.status, await shared.clone().text()).toBe(200);
   const shareId = String(((await shared.json()) as { shareId: string }).shareId);
   const relayPaths: string[] = [];
+  // "METHOD /path" of each relay call.
+  const relayCalls: string[] = [];
   // "METHOD /path" of relay calls whose next answer is lost after the relay made it:
   // before its response arrives, with its body broken, or replaced by a JSON 429 whose body breaks.
   const lost = new Map<string, "connection" | "body" | "refusal">();
@@ -60,6 +63,7 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
     fetchRelay: async (incoming) => {
       const path = new URL(incoming.url).pathname, call = `${incoming.method} ${path}`, loss = lost.get(call);
       relayPaths.push(path);
+      relayCalls.push(call);
       lost.delete(call);
       const answered = await relay(incoming);
       if (!loss) return answered;
@@ -89,7 +93,7 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
     const page = (await (await relay(request(OWNER, `/sync/${WORKSPACE}/log?since=0`))).json()) as { ops: LoggedOp[] };
     return page.ops.filter((op) => op.opKind === "chat.message.append" && op.originId.startsWith("relay:share-link:"));
   };
-  return { send, link, revoke, linkPosts, relayPaths, handle: app.handle, lost, storage, shareId };
+  return { send, link, revoke, linkPosts, relayPaths, relayCalls, handle: app.handle, lost, storage, shareId };
 }
 
 type Stack = Awaited<ReturnType<typeof stack>>;
@@ -115,15 +119,13 @@ async function browser(s: Stack, secret: string) {
   };
 }
 
-/** An agent given only the link. */
-async function agent(s: Stack, secret: string): Promise<Client> {
-  const exchanged = await s.send("/api/mcp/exchange", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret }) });
-  expect(exchanged.status).toBe(200);
-  const { bearer } = (await exchanged.json()) as { bearer: string };
+/** An agent given only the link, signed in as its client reports itself, and allowed by a person. */
+async function agent(s: Stack, secret: string, clientName = "Planner"): Promise<Client> {
+  const signedIn = await signInAgent(s.send, ORIGIN, secret, clientName);
   const client = new Client({ name: "link-agent", version: "1" });
   clients.push(client);
-  await client.connect(new StreamableHTTPClientTransport(new URL(ORIGIN + "/mcp"), {
-    requestInit: { headers: { authorization: `Bearer ${bearer}` } },
+  await client.connect(new StreamableHTTPClientTransport(new URL(signedIn.resource), {
+    requestInit: { headers: { authorization: `Bearer ${signedIn.accessToken}` } },
     fetch: (input, init) => {
       const incoming = new Request(input, init);
       incoming.headers.set("host", HOST);
@@ -215,22 +217,29 @@ it("lets an agent with only a read-write link read the channel and post, with th
   const read = (await mcp.callTool({ name: "dohc_read_channel", arguments: {} })).structuredContent as { messages: unknown[]; nextCursor: number };
   expect(read.messages).toEqual([expect.objectContaining({ messageId: "owner-first", body: "Welcome" })]);
 
-  const posted = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "On it", idempotencyKey: "agent-1", claimedName: "Planner", threadId: "thread-team" } });
+  // The post shows the name the agent's client reported when it signed in.
+  const posted = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "On it", idempotencyKey: "agent-1", threadId: "thread-team" } });
   expect(posted.isError).toBeFalsy();
   expect((posted.structuredContent as { message: Record<string, unknown> }).message)
-    .toMatchObject({ threadId: "thread-team", authorKind: "link", authorDisplayName: "Planner", body: "On it" });
+    .toMatchObject({ threadId: "thread-team", authorKind: "link", authorDisplayName: "Planner", linkAgent: true, body: "On it" });
   const [stored] = await s.linkPosts();
-  expect(stored?.payload).toMatchObject({ threadId: "thread-team", authorKind: "link", linkGrantId: link.grantId, body: "On it" });
+  expect(stored?.payload).toMatchObject({ threadId: "thread-team", authorKind: "link", linkGrantId: link.grantId, body: "On it",
+    agentConnectionId: expect.any(String) });
   expect(stored?.payload).not.toHaveProperty("authorUserId");
+  // It posted through its own agent chat, never the viewer's post route. It reads through the viewer's read route.
+  expect(s.relayCalls).toContain("POST /sync/link/agent-chat/post");
+  expect(s.relayCalls).not.toContain("POST /sync/link/chat/messages");
+  expect(s.relayCalls).toContain("GET /sync/link/chat/messages");
 
   const followed = (await mcp.callTool({ name: "dohc_read_channel", arguments: { since: read.nextCursor } })).structuredContent as { messages: unknown[] };
   expect(followed.messages).toEqual([expect.objectContaining({ authorKind: "link", body: "On it" })]);
 
   // A refusal reaches the agent as a sentence it can act on.
-  const renamed = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "Again", idempotencyKey: "agent-2", claimedName: "Other" } });
-  expect(renamed.isError).toBe(true);
-  expect(renamed.structuredContent).toEqual({ ok: false, code: "link_name_already_set",
-    error: "This link holder already has a name. Post with that name, or with none." });
+  expect(s.storage.setShareLinkWritesPaused({ shareId: s.shareId, workspaceId: WORKSPACE, actorUserId: OWNER, pausedAtMs: Date.now() })).toBe(true);
+  const paused = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "Again", idempotencyKey: "agent-2" } });
+  expect(paused.isError).toBe(true);
+  expect(paused.structuredContent).toEqual({ ok: false, code: "link_discussion_paused",
+    error: "The owner paused posts from share links. Try again later." });
 });
 
 it("answers a post whose answer was lost as retryable, and its retry with the same key posts once", async () => {
@@ -249,7 +258,7 @@ it("answers a post whose answer was lost as retryable, and its retry with the sa
   // An agent hears that the post may have landed, and that the same key is safe.
   const mcp = await agent(s, (await s.link("read-write")).secret);
   const post = { name: "dohc_post_channel", arguments: { body: "On it", idempotencyKey: "agent-1" } };
-  s.lost.set("POST /sync/link/chat/messages", "connection");
+  s.lost.set("POST /sync/link/agent-chat/post", "connection");
   const unknown = await mcp.callTool(post);
   expect(unknown.isError).toBe(true);
   expect(unknown.structuredContent).toEqual({ ok: false, code: "link_unavailable",

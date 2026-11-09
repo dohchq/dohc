@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import {fileURLToPath} from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import {LIVE_TICKET_TABLE} from "../../sync-relay/src/storage/schema.js";
-import {createLinkLiveBrowserResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
+import {createLinkLiveResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
 import {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
 import {readPublicWorkload} from "./publicLinkWorkload.integration-helper.js";
@@ -201,10 +201,11 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const membership = createLiveMembershipRegistry({maxSessions: routeLimits.maxConnections, maxMembers: routeLimits.maxConnections,
       maxSnapshotBytes: frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage)), sharedAdmission = createLiveConnectionAdmission();
     routes = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
-      bounds: capacity.bounds, validate, sessions: createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage, linkKey}), tickets, captureNative, membership, admission: sharedAdmission});
+      bounds: capacity.bounds, validate, sessions: createLinkLiveResolver({publicEditRelease:{version:1},storage, linkKey, linkAuthority: relayApp.linkAuthority}), tickets, captureNative, membership, admission: sharedAdmission});
     namedRoutes = createNamedLiveRoutes({kind: "named", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: capacity.bounds, validate, sessions: {resolve: relayApp.resolveNamedBrowserSession}, tickets, captureNative, membership, admission: sharedAdmission});
-    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
+    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits,
+      linkAuthority: relayApp.linkAuthority});
     closes.push(async () => routes.close());
     closes.push(async () => namedRoutes.close());
     relayHttp.on("upgrade", (request, socket, head) => {upgrades.push((new URL(request.url!, relayUrl).pathname === "/sync/live/link" ? routes : namedRoutes).handleUpgrade(request, socket, head));});

@@ -1,7 +1,9 @@
+import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
+import { AGENT_REDIRECT_URI_LIMIT, AGENT_URI_CHAR_LIMIT } from "@dohc/security-contract/wire-patterns";
 import type { StorageContext } from "./context";
-import type { SqliteDb } from "./types";
+import type { SqliteDb, SyncRelayLinkPrincipalRow } from "./types";
 import { currentShareGrantSql } from "./currentShareGrant";
-import { linkPrincipalStorageBytes } from "./linkEnrollment";
+import { linkPrincipalStorageBytes, type LinkEnrollment } from "./linkEnrollment";
 import { nullableText } from "./rows";
 import { upsertLinkUsage } from "./shares";
 import { workspaceUsageBytes } from "./workspaces";
@@ -10,21 +12,22 @@ import { constantTimeHashEqual } from "../linkSecurity";
 // An agent connection is one agent's MCP sign-in through one share link. It
 // binds the link's grant, its current credential and generation, and a link
 // principal the relay mints for it. Its refresh tokens are one family: reusing
-// a rotated refresh token ends the connection. The relay keeps only HMACs of
-// request ids, codes, tokens, and the secret-bearing resource address.
+// a rotated refresh token within 30 days of its use ends the connection. The
+// relay keeps only keyed hashes of request ids, codes, tokens, and the
+// secret-bearing resource address.
 
 export const AGENT_AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1_000;
 export const AGENT_AUTHORIZATION_CODE_TTL_MS = 60 * 1_000;
 export const AGENT_ACCESS_TOKEN_TTL_MS = 60 * 60 * 1_000;
+// How long a used refresh token's hash stays, so its reuse ends the connection.
+// After that it is unknown, and a refresh prunes it.
+export const AGENT_USED_REFRESH_TOKEN_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 export const AGENT_PENDING_AUTHORIZATIONS_PER_GRANT_LIMIT = 32;
 export const AGENT_REDEEMED_AUTHORIZATION_RETENTION_MS = 24 * 60 * 60 * 1_000;
-export const AGENT_USED_REFRESH_TOKENS_PER_CONNECTION_LIMIT = 16;
 export const AGENT_CLIENT_LIMIT = 50_000;
 export const AGENT_UNUSED_CLIENT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export const AGENT_CONNECTION_PAGE_SIZE = 50;
 export const AGENT_CLIENT_NAME_LIMIT = 100;
-export const AGENT_REDIRECT_URI_LIMIT = 10;
-export const AGENT_URI_CHAR_LIMIT = 2_048;
 export const AGENT_STATE_CHAR_LIMIT = 512;
 
 export function initializeAgentConnectionSchema(db: SqliteDb): void {
@@ -126,6 +129,18 @@ export function initializeAgentConnectionSchema(db: SqliteDb): void {
           WHERE log.workspace_id = sync_relay_agent_connections.workspace_id);`);
     }
     db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(marker, Date.now());
+  }
+  // A discussion message or collection write an agent made through its
+  // connection names that connection. Null for everything else.
+  const provenance = "agent-write-provenance-v1";
+  if (!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(provenance)) {
+    for (const table of ["sync_relay_share_discussion_messages", "sync_relay_collection_writes"]) {
+      const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name)));
+      if (!columns.has("agent_connection_id")) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN agent_connection_id TEXT`);
+      }
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(provenance, Date.now());
   }
 }
 
@@ -427,14 +442,15 @@ function getConnection(storage: StorageContext, connectionId: string): AgentConn
 }
 
 /**
- * Redeems a code once. Every binding must match: client, redirect address,
- * resource, PKCE, expiry, and the link's current credential. Any mismatch
- * spends the code. Replaying a redeemed code ends the connection it made.
+ * Redeems a code once. Every binding must match: client, redirect address
+ * when the client sends one (OAuth 2.1 lets it leave it out), resource, PKCE,
+ * expiry, and the link's current credential. Any mismatch spends the code.
+ * Replaying a redeemed code ends the connection it made.
  */
 export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
   codeHash: string;
   clientId: string;
-  redirectUri: string;
+  redirectUri: string | null;
   resourceHash: string;
   verifierChallenge: string;
   connectionId: string;
@@ -464,7 +480,7 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
       row.status === "allowed" &&
       Number(row.expires_at_ms) > nowMs &&
       authorization.clientId === input.clientId &&
-      authorization.redirectUri === input.redirectUri &&
+      (input.redirectUri === null || authorization.redirectUri === input.redirectUri) &&
       constantTimeHashEqual(input.resourceHash, String(row.resource_hash)) &&
       constantTimeHashEqual(input.verifierChallenge, String(row.code_challenge)) &&
       linkBindingIsCurrent(storage, authorization) &&
@@ -503,7 +519,11 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
   });
 }
 
-/** Rotates a refresh token. Reusing a rotated one ends its connection. */
+/**
+ * Rotates a refresh token. Reusing one used in the last 30 days ends its
+ * connection; one used before that is unknown. The refresh prunes the
+ * connection's older used tokens, so their number stays bounded.
+ */
 export function refreshAgentTokens(storage: StorageContext, input: {
   refreshTokenHash: string;
   clientId: string;
@@ -521,8 +541,11 @@ export function refreshAgentTokens(storage: StorageContext, input: {
       WHERE token.token_hash = ? AND token.kind = 'refresh'`).get(input.refreshTokenHash);
     if (!row) return { ok: false };
     const connection = rowToConnection(row);
+    const forgottenBeforeMs = nowMs - AGENT_USED_REFRESH_TOKEN_RETENTION_MS;
     if (row.used_at_ms !== null) {
-      retireConnections(storage, "connection_id", connection.connectionId, "retired", nowMs);
+      if (Number(row.used_at_ms) > forgottenBeforeMs) {
+        retireConnections(storage, "connection_id", connection.connectionId, "retired", nowMs);
+      }
       return { ok: false };
     }
     if (
@@ -535,25 +558,25 @@ export function refreshAgentTokens(storage: StorageContext, input: {
       return { ok: false };
     }
     storage.db.prepare("UPDATE sync_relay_agent_tokens SET used_at_ms = ? WHERE token_hash = ?").run(nowMs, input.refreshTokenHash);
-    storage.db.prepare(`DELETE FROM sync_relay_agent_tokens WHERE connection_id = ? AND kind = 'access' AND expires_at_ms <= ?`)
-      .run(connection.connectionId, nowMs);
-    storage.db.prepare(`DELETE FROM sync_relay_agent_tokens WHERE token_hash IN (
-        SELECT token_hash FROM sync_relay_agent_tokens
-        WHERE connection_id = ? AND kind = 'refresh' AND used_at_ms IS NOT NULL
-        ORDER BY used_at_ms DESC, token_hash DESC LIMIT -1 OFFSET ?)`)
-      .run(connection.connectionId, AGENT_USED_REFRESH_TOKENS_PER_CONNECTION_LIMIT);
+    storage.db.prepare(`DELETE FROM sync_relay_agent_tokens WHERE connection_id = ? AND
+      ((kind = 'access' AND expires_at_ms <= ?) OR (kind = 'refresh' AND used_at_ms <= ?))`)
+      .run(connection.connectionId, nowMs, forgottenBeforeMs);
     insertTokens(storage, connection.connectionId, { accessTokenHash: input.accessTokenHash, refreshTokenHash: input.nextRefreshTokenHash }, nowMs);
     return { ok: true, connection };
   });
 }
 
-/** Call inside the caller's transaction: the token's active connection, while its link is current. */
-export function activeAgentConnectionInTransaction(storage: StorageContext, accessTokenHash: string, nowMs: number): AgentConnectionRow | null {
-  const row = storage.db.prepare(`SELECT ${CONNECTION_COLUMNS}
+function activeConnectionRow(storage: StorageContext, accessTokenHash: string, nowMs: number): Record<string, unknown> | undefined {
+  return storage.db.prepare(`SELECT ${CONNECTION_COLUMNS}, c.resource_hash
     FROM sync_relay_agent_tokens AS token
     JOIN sync_relay_agent_connections AS c ON c.connection_id = token.connection_id
     WHERE token.token_hash = ? AND token.kind = 'access' AND token.expires_at_ms > ? AND c.status = 'active'`)
     .get(accessTokenHash, Math.trunc(nowMs));
+}
+
+/** Call inside the caller's transaction: the token's active connection, while its link is current. */
+function activeAgentConnectionInTransaction(storage: StorageContext, accessTokenHash: string, nowMs: number): AgentConnectionRow | null {
+  const row = activeConnectionRow(storage, accessTokenHash, nowMs);
   if (!row) return null;
   const connection = rowToConnection(row);
   return linkBindingIsCurrent(storage, connection) ? connection : null;
@@ -562,6 +585,59 @@ export function activeAgentConnectionInTransaction(storage: StorageContext, acce
 /** The active connection an unexpired access token belongs to, while its link is current. */
 export function authenticateAgentAccessToken(storage: StorageContext, accessTokenHash: string, nowMs: number): AgentConnectionRow | null {
   return storage.readTx(() => activeAgentConnectionInTransaction(storage, accessTokenHash, nowMs));
+}
+
+/** An agent's credential on a link route: its access token and the MCP address it was sent to, both hashed. */
+export interface AgentAccessCheck {
+  accessTokenHash: string;
+  resourceHash: string;
+}
+
+/**
+ * The token is an unexpired access token of an active connection, the
+ * request names the address the agent signed in at, and the connection's
+ * link is still current. It opens no transaction, as a link holder's
+ * capability check opens none: inside a read's snapshot, such as a replica
+ * read's, it reads that snapshot, and inside a write it reads the write's.
+ */
+export function readAgentAuthority(storage: StorageContext, check: AgentAccessCheck, nowMs: number): AgentConnectionRow | null {
+  const row = activeConnectionRow(storage, check.accessTokenHash, nowMs);
+  if (!row || !constantTimeHashEqual(check.resourceHash, String(row.resource_hash))) return null;
+  const connection = rowToConnection(row);
+  return linkBindingIsCurrent(storage, connection) ? connection : null;
+}
+
+/**
+ * Call inside a write's transaction. The agent's authority in the shape a
+ * link holder's enrollment has, so the same pause and block checks apply.
+ * The principal is the connection's own, never enrolled lazily, and no link
+ * session is bound to it.
+ */
+export function agentWriteAuthorityInTransaction(
+  storage: StorageContext,
+  check: AgentAccessCheck,
+  nowMs: number,
+): { connection: AgentConnectionRow; enrollment: LinkEnrollment & { principal: SyncRelayLinkPrincipalRow } } | null {
+  const connection = readAgentAuthority(storage, check, nowMs);
+  if (!connection) return null;
+  const authority = storage.db.prepare(`SELECT grant.grant_id, grant.share_id, grant.generation AS grant_generation,
+      grant.access, share.workspace_id, share.link_writes_paused_at_ms, share.discussion_revision
+    FROM sync_relay_share_grants AS grant
+    JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+    WHERE grant.grant_id = ? AND grant.share_id = ?`).get(connection.grantId, connection.shareId);
+  const principal = storage.getLinkPrincipal(connection.principalId);
+  if (!authority || !principal || principal.grantId !== connection.grantId) return null;
+  return { connection, enrollment: { authority, principal, sessionPrincipalId: principal.principalId } };
+}
+
+/**
+ * The one name an agent carries in chat, discussion and Collection writes:
+ * the name its client reported, held to a link holder's display-name rules,
+ * or "Agent".
+ */
+export function agentName(reportedName: string | null): string {
+  const name = reportedName?.isWellFormed() ? normalizeShareDiscussionDisplayName(reportedName) : null;
+  return name?.ok ? name.value : "Agent";
 }
 
 export function recordAgentConnectionActionInTransaction(storage: StorageContext, connectionId: string, atMs: number): void {

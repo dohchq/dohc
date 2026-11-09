@@ -165,7 +165,7 @@ export async function openLiveFolderMoveFixture(input: {
     expect(exchanged.status).toBe(200);
     const { capabilityToken } = await exchanged.json() as { capabilityToken: string };
     const discriminator = randomBytes(9).toString("base64url");
-    const linkHeaders = { authorization: `Bearer ${capabilityToken}`, "x-dohc-link-profile-secret": randomBytes(32).toString("base64url"),
+    const linkHeaders = { authorization: `LinkCapability ${capabilityToken}`, "x-dohc-link-profile-secret": randomBytes(32).toString("base64url"),
       "x-dohc-relay-exchange-key": exchangeKey, origin: proxy.origin };
     const sockets = new Set<WebSocket>();
     let publicPrincipalId: string | undefined;

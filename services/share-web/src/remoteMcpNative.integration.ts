@@ -20,8 +20,9 @@ import {createNamedLiveRoutes} from "../../sync-relay/src/namedLiveRoutes.js";
 import {createLiveTickets} from "../../sync-relay/src/liveTickets.js";
 import {createLiveHostReports} from "../../sync-relay/src/namedLiveHostReports.js";
 import {createNamedFrameChanges} from "../../sync-relay/src/liveHostChanges.js";
-import {createLinkLiveBrowserResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
+import {createLinkLiveResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
+import {signInAgent} from "./mcpSignIn.test-helper.js";
 import {createShareWebApplication} from "./server.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -100,8 +101,9 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     const tickets = createLiveTickets({storage, audience, key: ticketKey, hostReports: createLiveHostReports({storage, captureNative})});
     routes = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: {maxClientVectorBytes: 100000, maxSyncOutputBytes: 1000000, maxAppliedUpdateBytes: 1000000, maxSubmissionBytes: 1000000, maxAdmissionBytes: 4000000},
-      validate, sessions: createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage, linkKey}), tickets, captureNative});
-    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
+      validate, sessions: createLinkLiveResolver({publicEditRelease:{version:1},storage, linkKey, linkAuthority: relayApp.linkAuthority}), tickets, captureNative});
+    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits,
+      linkAuthority: relayApp.linkAuthority});
     closes.push(async () => routes.close());
     relayHttp.on("upgrade", (request, socket, head) => {upgrades.push(routes.handleUpgrade(request, socket, head));});
     const application = createShareWebApplication({publicEditRelease: {version: 1}, relayUrl, publicRelayUrl: audience,
@@ -139,19 +141,16 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     }
     async function openLink(access: "view" | "edit") {
       const link = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/a.md"], access});
-      const exchange = await publicFetch(audience + "/api/mcp/exchange", {method: "POST", headers: {"content-type": "application/json"},
-        body: JSON.stringify({secret: new URL(link.url).hash.slice(1)})});
-      expect(exchange.status).toBe(200);
-      const {bearer} = await exchange.json() as {bearer: string};
+      const agent = await signInAgent((path, init) => publicFetch(audience + path, init), audience, new URL(link.url).hash.slice(1), "Test agent");
       const client = new Client({name: "native-proof-agent", version: "1"}); clients.push(client);
-      await client.connect(new StreamableHTTPClientTransport(new URL(audience + "/mcp"), {requestInit: {headers: {authorization: `Bearer ${bearer}`}}, fetch: publicFetch}));
+      await client.connect(new StreamableHTTPClientTransport(new URL(agent.resource), {requestInit: {headers: {authorization: `Bearer ${agent.accessToken}`}}, fetch: publicFetch}));
       return {client, link};
     }
     const edit = await openLink("edit"), view = await openLink("view");
     const call = (client: Client, name: string, args: Record<string, unknown> = {}) => client.callTool({name, arguments: args});
     expect(await call(edit.client, "dohc_list_files")).toMatchObject({structuredContent: {files: [{path: "a.md", blobSha256: hash(markdown)}]}});
     expect(await call(edit.client, "dohc_read_file", {blobSha256: hash(markdown)})).toMatchObject({structuredContent: {ok: true, content: "Hello **world**."}});
-    expect(await call(edit.client, "dohc_post_discussion", {body: "Agent reviewed the document.", idempotencyKey: "mcp-proof-comment", claimedName: "Test agent"})).not.toMatchObject({isError: true});
+    expect(await call(edit.client, "dohc_post_discussion", {body: "Agent reviewed the document.", idempotencyKey: "mcp-proof-comment"})).not.toMatchObject({isError: true});
     expect(JSON.stringify(await call(edit.client, "dohc_read_discussion"))).toContain("Agent reviewed the document.");
     expect(await call(edit.client, "dohc_read_document", {path: "a.md"})).toMatchObject({structuredContent: {ok: true, markdown: "Hello **world**."}});
     const edited = await call(edit.client, "dohc_edit_document", {path: "a.md", find: "world", replacement: "agent"});

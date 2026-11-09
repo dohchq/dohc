@@ -8,7 +8,8 @@ import {
 } from "./discussionActivity";
 import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
-import type { LinkEgressRateLimiter, ValidatedLinkCapability } from "./linkSecurity";
+import type { LinkAuthorityResolver, LinkJsonResponse } from "./linkAuthority";
+import type { LinkEgressRateLimiter } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
 import { targetVersionId } from "./shareFilter";
@@ -40,16 +41,8 @@ export function createLinkReadRoutes(
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
-  requireLinkRead: (
-    request: Request,
-    capabilityRateLimiter: TokenBucketLimiter,
-    grantRateLimiter: TokenBucketLimiter,
-  ) => { capabilityToken: string; capability: ValidatedLinkCapability },
-  requireFreshLinkRead: (
-    capabilityToken: string,
-    expected: { shareId: string; grantId: string; generation: number },
-  ) => ValidatedLinkCapability,
-  linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response,
+  linkAuthority: Pick<LinkAuthorityResolver, "require" | "fresh">,
+  linkJsonResponse: LinkJsonResponse,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   newestFilteredOpFreshness: ReturnType<typeof createShareReadQueries>["newestFilteredOpFreshness"],
   linkRevisionByteLength: ReturnType<typeof createShareReadQueries>["linkRevisionByteLength"],
@@ -82,11 +75,12 @@ export function createLinkReadRoutes(
       route.route === "link-log"
         ? linkGrantLogReadRateLimiter
         : linkGrantReadRateLimiter;
-    const { capabilityToken, capability } = requireLinkRead(
+    const capability = linkAuthority.require(
       request,
       capabilityRateLimiter,
       grantRateLimiter,
     );
+    const requireFresh = () => linkAuthority.fresh(capability);
     if (request.method !== "GET") throw relayError("method_not_allowed");
     const share = storage.getShare(capability.shareId);
     if (!share) throw notFound();
@@ -98,11 +92,11 @@ export function createLinkReadRoutes(
         capability.effectiveSelector,
         epochLogFloor,
       );
-      const fresh = requireFreshLinkRead(capabilityToken, capability);
+      const fresh = requireFresh();
       const presentation = createAccountlessPathProjection(
         fresh.effectiveSelector,
       );
-      return linkJsonResponse(fresh.shareId, fresh.grantId, {
+      return linkJsonResponse(fresh, {
         ok: true,
         receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
         effectiveSelector: presentation.selector,
@@ -110,15 +104,18 @@ export function createLinkReadRoutes(
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
         ...linkChannel(fresh.grantId),
         ...freshness,
-      });
+        // share-web learns a holder's grant at exchange. It learns an agent's
+        // here, to count the agent with the link's holders, and keeps it to itself.
+        ...(fresh.credential.kind === "agent" ? { grantId: fresh.grantId } : {}),
+      }, request.signal);
     }
 
     if (route.route === "link-current") {
       if(replica) {
         const body=replica.inventory({grantId:capability.grantId,generation:capability.generation},
-          ()=>requireFreshLinkRead(capabilityToken,capability),new URL(request.url).searchParams.get("collectionPath"));
+          ()=>requireFresh(),new URL(request.url).searchParams.get("collectionPath"));
         if(body.files.length>linkCurrentFileLimit)throw notFound();
-        return linkJsonResponse(capability.shareId,capability.grantId,{...body,...linkChannel(capability.grantId)});
+        return linkJsonResponse(capability,{...body,...linkChannel(capability.grantId)},request.signal);
       }
       const snapshot = storage.readCurrentFileState({
         workspaceId: share.workspaceId,
@@ -132,7 +129,7 @@ export function createLinkReadRoutes(
         capability.effectiveSelector,
         snapshot.epochLogFloor,
       );
-      const fresh = requireFreshLinkRead(capabilityToken, capability);
+      const fresh = requireFresh();
       const presentation = createAccountlessPathProjection(
         fresh.effectiveSelector,
       );
@@ -158,7 +155,7 @@ export function createLinkReadRoutes(
         };
       });
       storage.indexReceivedWorkTargets(observed);
-      return linkJsonResponse(fresh.shareId, fresh.grantId, {
+      return linkJsonResponse(fresh, {
         ok: true,
         effectiveSelector: presentation.selector,
         access: fresh.access,
@@ -168,7 +165,7 @@ export function createLinkReadRoutes(
         nextCursor: snapshot.nextCursor,
         epochLogFloor: snapshot.epochLogFloor,
         ...freshness,
-      });
+      }, request.signal);
     }
 
     const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
@@ -181,12 +178,12 @@ export function createLinkReadRoutes(
         if(!Number.isSafeInteger(since))throw notFound();
         const limit=parseLimit(url.searchParams.get("limit")),hold=parseLinkLogHold(url.searchParams.get("hold"));
         const deadline=Date.now()+hold;
-        const read=()=>replica.feed(input,()=>requireFreshLinkRead(capabilityToken,capability),since,limit);
+        const read=()=>replica.feed(input,()=>requireFresh(),since,limit);
         let page=read();
         while(hold>0 && !page.ops.length && !page.hasMore && Date.now()<deadline && !request.signal.aborted) {
           since=page.nextCursor;
           try {
-            await discussionActivity.wait(linkLogWaitGroup(share.workspaceId),`link:${capability.session.capabilityHash}`,{
+            await discussionActivity.wait(linkLogWaitGroup(share.workspaceId),`link:${capability.callerKey}`,{
               holdMs:Math.max(0,deadline-Date.now()),signal:request.signal,shouldPark:()=>{
                 try {const checked=read();return !checked.ops.length && !checked.hasMore;}catch{return false;}
               }});
@@ -196,11 +193,11 @@ export function createLinkReadRoutes(
           }
           page=read();
         }
-        return linkJsonResponse(capability.shareId,capability.grantId,{ok:true,...page});
+        return linkJsonResponse(capability,{ok:true,...page},request.signal);
       }
       if (!currentOnly && capability.access !== "edit") throw notFound();
       const freshRead = () => {
-        const fresh = requireFreshLinkRead(capabilityToken, capability);
+        const fresh = requireFresh();
         if (!currentOnly && fresh.access !== "edit") throw notFound();
         return fresh;
       };
@@ -237,7 +234,7 @@ export function createLinkReadRoutes(
           try {
             await discussionActivity.wait(
               linkLogWaitGroup(share.workspaceId),
-              `link:${capability.session.capabilityHash}`,
+              `link:${capability.callerKey}`,
               {
                 holdMs: remainingHoldMs,
                 signal: request.signal,
@@ -305,11 +302,11 @@ export function createLinkReadRoutes(
             request.signal.aborted
           ) {
             freshRead();
-            return linkJsonResponse(capability.shareId, capability.grantId, {
+            return linkJsonResponse(capability, {
               ok: true,
               ...page,
               epochLogFloor: currentEpochLogFloor,
-            });
+            }, request.signal);
           }
         }
         const fresh = freshRead();
@@ -331,23 +328,23 @@ export function createLinkReadRoutes(
           currentEpochLogFloor,
         );
         freshRead();
-        return linkJsonResponse(capability.shareId, capability.grantId, {
+        return linkJsonResponse(capability, {
           ok: true,
           ...page,
           epochLogFloor: currentEpochLogFloor,
-        });
+        }, request.signal);
       }
       freshRead();
-      return linkJsonResponse(capability.shareId, capability.grantId, {
+      return linkJsonResponse(capability, {
         ok: true,
         ...page,
         epochLogFloor,
-      });
+      }, request.signal);
     }
 
     assertSha256(route.sha256);
     const replicaInput={grantId:capability.grantId,generation:capability.generation};
-    const readReplicaBlob=(includeBytes=true)=>replica!.blob(replicaInput,()=>requireFreshLinkRead(capabilityToken,capability),route.sha256,includeBytes);
+    const readReplicaBlob=(includeBytes=true)=>replica!.blob(replicaInput,()=>requireFresh(),route.sha256,includeBytes);
     let historicalByteLength:number|null|undefined;
     const historicalLength=()=>historicalByteLength===undefined ? historicalByteLength=capability.access === "edit" ? linkRevisionByteLength(
       share.workspaceId,capability.effectiveSelector,route.sha256,epochLogFloor) : null : historicalByteLength;
@@ -393,8 +390,13 @@ export function createLinkReadRoutes(
       const replicaBlob=replicaMetadata ? readReplicaBlob() : null;
       const blob = replicaMetadata ? replicaBlob?.bytes : storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
-      const fresh = requireFreshLinkRead(capabilityToken, capability);
+      const fresh = requireFresh();
       if (currentByteLength === null && fresh.access !== "edit") throw notFound();
+      // An agent's download checks its token before every chunk, so it stops
+      // once the token expires or its connection or link ends.
+      const replicaGuard = replicaBlob?.guard;
+      const agentGuard = capability.credential.kind === "agent" ? () => { requireFresh(); } : undefined;
+      const guard = replicaGuard && agentGuard ? () => { replicaGuard(); agentGuard(); } : replicaGuard ?? agentGuard;
       const response = respondWithLinkBytes(
         blob,
         capability.shareId,
@@ -405,7 +407,7 @@ export function createLinkReadRoutes(
           "content-length": String(byteLength),
           "content-type": "application/octet-stream",
         },
-        replicaBlob ? {signal:request.signal,guard:replicaBlob.guard} : undefined,
+        guard ? {signal:request.signal,guard} : undefined,
       );
       streamOwnsAdmission = true;
       return response;

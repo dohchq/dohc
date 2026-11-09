@@ -9,6 +9,7 @@ import { messageFromOp } from "./namedRecipientChat";
 import { LINK_CHAT_MESSAGE_ID_PREFIX, LINK_CHAT_ORIGIN_PREFIX } from "./relayLogInputs";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import { AGENT_ACCESS_TOKEN_TTL_MS } from "./storage/agentConnections";
 import {
   RELAY_EXCHANGE_KEY,
   SHARE_WEB_ORIGIN,
@@ -19,6 +20,7 @@ import {
   closeTestStorages,
   createShare,
   inspectDatabase,
+  interceptStorage,
   json,
   jsonBody,
   linkSecret,
@@ -55,7 +57,7 @@ type Fixture = {
   storage: SyncRelayStorage; h: SyncRelayHandler; activity: DiscussionActivityHub; shareId: string; clock: { value: number };
 };
 type Link = { grantId: string; shareId: string; secret: string };
-type Agent = Link & { accessToken: string; connectionId: string };
+type Agent = Link & { accessToken: string; resource: string; connectionId: string };
 type WaitAnswer = {
   ok: true; group: { channelWireId: string; name: string | null }; mention: string; cursor: number; messages: Array<Record<string, unknown>>;
 };
@@ -133,15 +135,17 @@ async function connect(f: Fixture, access: string, given?: Link): Promise<Agent>
   }));
   const accessToken = String(tokens.accessToken);
   const { connectionId } = await ok(await internal(f, "agent-introspect", { accessToken }));
-  return { ...link, accessToken, connectionId: String(connectionId) };
+  return { ...link, accessToken, resource, connectionId: String(connectionId) };
 }
 
 function post(f: Fixture, agent: Agent, fields: Record<string, unknown> = {}): Promise<Response> {
-  return internal(f, "agent-chat/post", { accessToken: agent.accessToken, body: "from the agent", idempotencyKey: "post-1", ...fields });
+  return internal(f, "agent-chat/post", {
+    accessToken: agent.accessToken, resource: agent.resource, body: "from the agent", idempotencyKey: "post-1", ...fields,
+  });
 }
 
 function wait(f: Fixture, agent: Agent, fields: Record<string, unknown> = {}, signal?: AbortSignal): Promise<Response> {
-  return internal(f, "agent-chat/wait", { accessToken: agent.accessToken, ...fields }, signal ? { signal } : {});
+  return internal(f, "agent-chat/wait", { accessToken: agent.accessToken, resource: agent.resource, ...fields }, signal ? { signal } : {});
 }
 
 // Counts each time a wait parks, so a test can act once it is held.
@@ -238,8 +242,8 @@ describe("an agent's posts through its link", () => {
     const f = await fixture();
     const agent = await connect(f, "read-write");
     const bodies = {
-      post: { accessToken: agent.accessToken, body: "from the agent", idempotencyKey: "post-1" },
-      wait: { accessToken: agent.accessToken, timeoutMs: 0 },
+      post: { accessToken: agent.accessToken, resource: agent.resource, body: "from the agent", idempotencyKey: "post-1" },
+      wait: { accessToken: agent.accessToken, resource: agent.resource, timeoutMs: 0 },
     };
     const before = ownerLog(f).length;
     for (const [action, body] of Object.entries(bodies)) {
@@ -251,6 +255,23 @@ describe("an agent's posts through its link", () => {
     expect(ownerLog(f)).toHaveLength(before + 2);
     expect(await ok(await internal(f, "agent-chat/wait", bodies.wait)))
       .toMatchObject({ group: { channelWireId, name: "Team" }, mention: "@Helper", messages: [] });
+  });
+
+  it("answers an agent only at the MCP address it signed in at", async () => {
+    const f = await fixture();
+    const agent = await connect(f, "read-write");
+    const other = await connect(f, "read-write");
+    const before = ownerLog(f).length;
+    // Another link's address, a longer one, a malformed one, and none.
+    for (const resource of [other.resource, `${agent.resource}x`, `${agent.resource}\n`, undefined]) {
+      await expectRefused(await post(f, agent, { resource }));
+      await expectRefused(await wait(f, agent, { resource, timeoutMs: 0 }));
+    }
+    expect(ownerLog(f)).toHaveLength(before);
+    // Its own address posts and waits.
+    expect((await ok(await post(f, agent))).message).toMatchObject({ linkAgent: true });
+    expect(ownerLog(f)).toHaveLength(before + 2);
+    expect(await ok(await wait(f, agent, { timeoutMs: 0 }))).toMatchObject({ mention: "@Helper", messages: [] });
   });
 
   it("refuses an agent's post once its link principal is blocked or the share is paused", async () => {
@@ -268,6 +289,23 @@ describe("an agent's posts through its link", () => {
     expect(f.storage.setShareLinkWritesPaused({ shareId: f.shareId, workspaceId, actorUserId: OWNER, pausedAtMs: 2_500 })).toBe(true);
     const before = ownerLog(f).length;
     await expectCode(await post(f, other, { idempotencyKey: "post-2" }), 403, "link_discussion_paused");
+    expect(ownerLog(f)).toHaveLength(before);
+  });
+
+  it("refuses a post whose token expires while it waits for the write, reading the clock inside the write", async () => {
+    const f = await fixture();
+    const agent = await connect(f, "read-write");
+    await ok(await post(f, agent));
+    const before = ownerLog(f).length;
+    // The route reads the clock for the message's time; the token expires before the write reads it again.
+    const storage = interceptStorage(f.storage, {
+      appendAgentChatPost: (target, input) => {
+        f.clock.value += AGENT_ACCESS_TOKEN_TTL_MS;
+        return target.appendAgentChatPost(input);
+      },
+    });
+    const h = testHandler(storage, { ...released, discussionActivity: f.activity, nowMs: () => f.clock.value });
+    await expectRefused(await post({ ...f, h }, agent, { idempotencyKey: "post-2" }));
     expect(ownerLog(f)).toHaveLength(before);
   });
 

@@ -15,7 +15,7 @@ import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, createLiveFrameSession, decodeLiv
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createSyncRelayHandler } from "./server.js";
 import { createOwnerLiveRoutes, createNamedLiveRoutes, parseNamedLiveRouteLimits, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
-import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth.js";
+import { createLinkLiveResolver } from "./linkLiveBrowserAuth.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
 import { createLiveMembershipRegistry, type LiveMembershipPolicy } from "./liveMembership.js";
@@ -24,7 +24,7 @@ import { captureNamedLiveFrameHost } from "./namedLiveFrameHost.js";
 import { createLiveTickets } from "./liveTickets.js";
 import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
-import { fixture as ticketFixture, audience, binding, host, key, scope } from "./liveTickets.test-helper.js";
+import { fixture as ticketFixture, audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
@@ -319,7 +319,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, person || 2).toString("base64url");
   const currentScope = link ? { kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key) } : scope;
-  const linkHeaders: Record<string, string> = link ? { authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile } : {};
+  const holderHeaders: Record<string, string> = link ? { authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile } : {};
+  let linkHeaders = holderHeaders;
   if (link) {
     vi.spyOn(Date, "now").mockReturnValue(1000);
     state.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL");
@@ -352,6 +353,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     return { userId: population && /^account=reader-\d+$/.test(cookie) ? cookie.slice("account=".length) : cookie === "account=reader" ? scope.userId : "other-user", workspaceId };
   });
   const application = createSyncRelayHandler({ storage: state.storage, resolveActor: actor, shareWebOrigin: audience, relayExchangeKey: exchangeKey, nowMs: () => 1000,
+    ...(link ? {linkKey: key, publicEditRelease: {version: 1}} : {}),
     namedBrowserSessionLimits: { maxSessions: population ? liveProfile.browserSessions.maxSessions : 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: createLiveHostReports({ storage: state.storage, captureNative }) });
   const desktopAdmission = desktop ? createNamedDesktopLive({ storage: state.storage, resolveActor: actor,
@@ -362,7 +364,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       maxHttpResponseBytes: 4096, maxSocketBufferedBytes: 4096, connectTimeoutMs: 1000, sendTimeoutMs: 1000, drainPollMs: 10} }) : undefined;
   const routes = owner ? createOwnerLiveRoutes({storage: state.storage, resolveActor: actor, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
     frames, bounds, limits: routeLimits, validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), captureNative, admission}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
-    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission, sessionHostBlocked });
+    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveResolver({publicEditRelease:{version:1},storage: state.storage, linkKey: key, linkAuthority: application.linkAuthority}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission, sessionHostBlocked });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/desktop-open" && desktopAdmission ? desktopAdmission.handle(request) : new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
   const upgrades: Promise<void>[] = [], sockets: WebSocket[] = [];
@@ -370,10 +372,12 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
   http.listen(0, "127.0.0.1"); await once(http, "listening");
   const port = (http.address() as { port: number }).port;
-  async function post(path: string, body: unknown, cookie = "account=reader", extra: Record<string, string> = {}) {
+  // A link request sends a cookie only when a test names one: an agent's is refused, a holder's ignored.
+  const defaultCookie = link ? "" : "account=reader";
+  async function post(path: string, body: unknown, cookie = defaultCookie, extra: Record<string, string> = {}) {
     return new Promise<Response>((resolve, reject) => {
       const request = httpRequest(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: {
-        host: relayHost, "content-type": "application/json", ...(desktop ? {authorization: "Bearer reader-token"} : {origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders}), ...extra } }, response => {
+        host: relayHost, "content-type": "application/json", ...(desktop ? {authorization: "Bearer reader-token"} : {origin: audience, "x-dohc-relay-exchange-key": exchangeKey, ...(cookie ? {cookie} : {}), ...linkHeaders}), ...extra } }, response => {
         const bytes: Buffer[] = []; response.on("data", chunk => bytes.push(Buffer.from(chunk)));
         response.once("end", () => resolve(new Response(Buffer.concat(bytes), { status: response.statusCode })));
         response.once("error", reject);
@@ -399,10 +403,10 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number; publicPrincipalId?: string };
   }
-  function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
+  function connect(token: string, cookie = defaultCookie, extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
     const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
     const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`], {
-      headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, cookie, ...linkHeaders, ...extra }, perMessageDeflate: false });
+      headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, ...(cookie ? {cookie} : {}), ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
     const received: LiveFrame[] = [], watchers = new Set<() => void>();
     ws.on("message", bytes => { received.push(decodeLiveFrame(Buffer.from(bytes as Buffer), frames.receive.maxFrameBytes)); for (const notify of watchers) notify(); });
@@ -427,7 +431,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   async function peer(person: number, document: number) {
     const grantId = link ? scope.grantId : "edit-" + person, cookie = "account=reader-" + person;
     const profile = Buffer.alloc(32, person).toString("base64url"), bearer = Buffer.alloc(32, person).toString("base64url");
-    const headers: Record<string, string> = link ? {authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile} : {};
+    const headers: Record<string, string> = link ? {authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile} : {};
     const bootstrap = link ? Response.json({discriminator}) : await post("/sync/live/named-sessions", {grantId}, cookie);
     expect(bootstrap.status).toBe(200);
     const session = (await bootstrap.json() as {discriminator: string}).discriminator;
@@ -446,7 +450,9 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       connect: (token: string) => connect(token, cookie, headers, "", session),
     };
   }
-  return { ...state, frames, binding, post, discriminator, mint, connect, peer, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked };
+  /** Later requests present `headers` instead of the link holder's, or the holder's again without them. */
+  const useCredentials = (headers = holderHeaders) => { linkHeaders = headers; };
+  return { ...state, frames, binding, post, discriminator, mint, connect, peer, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked, useCredentials };
 }
 
 it.each([false, true])("refuses a ticket for a document the session host blocked until the block lifts; link=%s", async link => {
@@ -662,6 +668,173 @@ it.each<Record<string, string>>([
   expect(await f.connect(minted.token, "anonymous").status).toBe(101);
 });
 
+// A connected agent opens the link's live documents through the same ticket
+// and socket routes, with its access token and the MCP address it signed in at.
+type LinkFixture = Awaited<ReturnType<typeof fixture>>;
+type SeededAgent = ReturnType<typeof seedLinkAgent>;
+// The agent signed in nearly an hour ago: its token expires before a link holder's session (61 s).
+const agentExpiresAtMs = 2000;
+function linkAgent(f: LinkFixture, connectionId = "agent-connection") {
+  const {workspaceId, shareId, grantId} = f.currentScope;
+  return seedLinkAgent(f.raw, {connectionId, workspaceId, shareId, grantId, generation: 4, expiresAtMs: agentExpiresAtMs});
+}
+const liveDocument = {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
+
+// What ends an agent's access. Each commits straight in storage, as a racing
+// owner request would, after the request's own authentication passed: only
+// the live checks that present the agent's token again can stop it. The
+// last value says whether a link holder under the same grant keeps access.
+const agentEnds: Array<[string, (f: LinkFixture, agent: SeededAgent) => void, boolean]> = [
+  ["the owner disconnects it", (f, agent) => {
+    expect(f.storage.disconnectAgentConnection({workspaceId: agent.workspaceId, shareId: agent.shareId, grantId: agent.grantId,
+      connectionId: agent.connectionId, nowMs: 1001, guard: () => undefined})).not.toBeNull();
+  }, true],
+  ["the owner resets the link", (f, agent) => {
+    expect(f.storage.rotateLinkGrant({shareId: agent.shareId, grantId: agent.grantId, rotatedAtMs: 1001, expectedDependentGrantIds: [], guard: () => {},
+      mintCredential: () => ({credentialId: "raced-credential", secretHash: "raced-secret-hash"})}).ok).toBe(true);
+  }, false],
+  ["the owner ends the link", (f, agent) => {
+    expect(f.storage.revokeShareGrant({shareId: agent.shareId, grantId: agent.grantId, revokedAtMs: 1001}).ok).toBe(true);
+  }, false],
+  // The relay's own clock stays at 1000, so its sign-in check still passes.
+  ["its access token expires", (_f, agent) => { vi.spyOn(Date, "now").mockReturnValue(agent.expiresAtMs); }, true],
+];
+
+it("opens an agent's live session as its own link principal while a holder under the same grant still opens", async () => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  const held = await f.mint();
+  f.useCredentials(agent.headers);
+  const minted = await f.mint();
+  expect(minted.publicPrincipalId).toMatch(/^public_/);
+  expect(minted.publicPrincipalId).not.toBe(held.publicPrincipalId);
+  expect(f.raw.prepare("SELECT principal_id, link_session_id, agent_connection_id FROM sync_relay_live_session_tickets WHERE agent_connection_id IS NOT NULL").get())
+    .toEqual({principal_id: agent.principalId, link_session_id: null, agent_connection_id: agent.connectionId});
+  expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_link_principals").get()).toEqual({count: 2});
+  const browser = f.connect(minted.token);
+  expect(await browser.status).toBe(101);
+  await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
+  expect(browser.received[0]).toMatchObject({kind: "welcome", hostEpoch: host.hostEpoch});
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document: liveDocument, actor: agent.actor}))
+    .toMatchObject({kind: "current", authority: {principalKind: "link", principalId: agent.principalId, grantId: agent.grantId, grantGeneration: 4}});
+  f.useCredentials();
+  const holder = f.connect(held.token);
+  expect(await holder.status).toBe(101);
+  expect(browser.ws.readyState).toBe(WebSocket.OPEN);
+});
+
+it("submits an agent's live edit under its connection and link principal, never the holder's", async () => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  f.useCredentials(agent.headers);
+  const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+  await openProductionSync(f, socket);
+  const updateBytes = Uint8Array.of(0, 0);
+  vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockReturnValue({kind: "cut", cut: {checkpoint: {bytes: Uint8Array.of(0, 0)}, suffix: []} as unknown as LiveUpdateJournalCut});
+  const commit = vi.spyOn(f.storage, "commitLiveUpdateJournal").mockReturnValue({result: {kind: "accepted", receipt: {deliveryId: "agent-edit",
+    updateDigest: createHash("sha256").update(updateBytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: host.hostEpoch}}} as never);
+  submitUpdate(f, socket, "agent-edit", 2);
+  await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce());
+  expect(commit.mock.calls[0]![0]).toMatchObject({actor: agent.actor,
+    expectedAuthority: {principalKind: "link", principalId: agent.principalId, grantId: agent.grantId, grantGeneration: 4}});
+  expect(JSON.stringify(commit.mock.calls[0]![0].actor)).not.toContain("link-session");
+});
+
+it("refuses an agent's ticket for another MCP address, and a token for another link, without consuming its ticket", async () => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  f.raw.exec(`INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms)
+      VALUES ('other-share', '${binding.workspaceId}', 'owner-1', '{"paths":["other"],"versionId":null}', 0);
+    INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES ('other-grant', 'other-share', 'link', NULL, NULL, 'edit', 1, 'active', 0, NULL, NULL)`);
+  const other = seedLinkAgent(f.raw, {connectionId: "other-connection", workspaceId: binding.workspaceId, shareId: "other-share", grantId: "other-grant",
+    generation: 1, expiresAtMs: agentExpiresAtMs});
+  const elsewhere = {...agent.headers, "x-dohc-agent-resource": `${audience}/mcp/s/elsewhere`};
+  const ticket = {discriminator: f.discriminator, objectId: binding.objectId};
+  for (const headers of [elsewhere, other.headers]) {
+    f.useCredentials(headers);
+    expect((await f.post("/sync/live/link-tickets", ticket)).status).toBe(404);
+  }
+  f.useCredentials(agent.headers);
+  const minted = await f.mint();
+  for (const headers of [elsewhere, other.headers]) {
+    f.useCredentials(headers);
+    expect(await f.connect(minted.token).status).toBe(404);
+  }
+  expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({redeemed_at_ms: null});
+  f.useCredentials(agent.headers);
+  expect(await f.connect(minted.token).status).toBe(101);
+});
+
+it("refuses an agent that also sends a link holder's profile", async () => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  f.useCredentials({...agent.headers, "x-dohc-link-profile-secret": f.profile});
+  expect((await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: binding.objectId})).status).toBe(404);
+  f.useCredentials(agent.headers);
+  expect(await f.connect((await f.mint()).token).status).toBe(101);
+});
+
+it("refuses an agent request that also sends a cookie, on the ticket and socket routes, without consuming its ticket", async () => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  f.useCredentials(agent.headers);
+  expect((await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: binding.objectId}, "account=reader")).status).toBe(404);
+  const minted = await f.mint();
+  expect(await f.connect(minted.token, "account=reader").status).toBe(404);
+  expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({redeemed_at_ms: null});
+  expect(await f.connect(minted.token).status).toBe(101);
+});
+
+it.each(agentEnds)("refuses an agent's ticket at redemption once %s", async (_name, end, holderKeeps) => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  const held = await f.mint();
+  f.useCredentials(agent.headers);
+  const first = await f.mint(), second = await f.mint();
+  const redeem = f.tickets.redeem.bind(f.tickets);
+  let ending = false;
+  // After the socket's own authentication, before the ticket's storage checks.
+  vi.spyOn(f.tickets, "redeem").mockImplementation(async (token, context, signal) => {
+    if (ending) end(f, agent);
+    return redeem(token, context, signal);
+  });
+  expect(await f.connect(first.token).status).toBe(101);
+  ending = true;
+  expect(await f.connect(second.token).status).toBe(404);
+  expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets WHERE redeemed_at_ms IS NOT NULL").get()).toEqual({count: 1});
+  if (!holderKeeps) return;
+  // Under the same clock and rows, the holder's ticket still redeems: only the agent's access ended.
+  ending = false;
+  f.useCredentials();
+  expect(await f.connect(held.token).status).toBe(101);
+});
+
+it.each(agentEnds)("closes an agent's open live session at its next check once %s", async (_name, end) => {
+  const f = await fixture(limits, true), agent = linkAgent(f);
+  f.useCredentials(agent.headers);
+  const browser = f.connect((await f.mint()).token);
+  expect(await browser.status).toBe(101);
+  await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document: liveDocument, actor: agent.actor})).toMatchObject({kind: "current"});
+  const closed = once(browser.ws, "close");
+  end(f, agent);
+  // A relay write wakes every live session; the test stands in for it.
+  f.changes.notify(); await closed;
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document: liveDocument, actor: agent.actor})).toEqual({kind: "refused", reason: "not-authorized"});
+  expect(f.invalidated.signal.aborted).toBe(false);
+  expect(f.changes.listenerCount()).toBe(0);
+});
+
+it("closes only the disconnected agent's live session and keeps the holder's and another agent's open", async () => {
+  const f = await fixture(limits, true), agent = linkAgent(f), staying = linkAgent(f, "staying-connection");
+  const holder = f.connect((await f.mint()).token); expect(await holder.status).toBe(101);
+  f.useCredentials(staying.headers);
+  const kept = f.connect((await f.mint()).token); expect(await kept.status).toBe(101);
+  f.useCredentials(agent.headers);
+  const ended = f.connect((await f.mint()).token); expect(await ended.status).toBe(101);
+  const closed = once(ended.ws, "close");
+  agentEnds[0]![1](f, agent);
+  f.changes.notify(); await closed;
+  for (const socket of [holder, kept]) {
+    const pong = once(socket.ws, "pong"); socket.ws.ping("still-open"); await pong;
+  }
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document: liveDocument, actor: staying.actor})).toMatchObject({kind: "current"});
+});
 
 async function startProvider(browser: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>) {
   const provider = createNamedLiveProvider({frames, maxPendingUpdateBytes: 4096, maxPendingUpdates: 4, maxDeliveryAttempts: 2});
@@ -683,7 +856,7 @@ async function namedMember(f: Awaited<ReturnType<typeof fixture>>) {
     selectorJson: JSON.stringify({paths: [binding.currentPath], versionId: null}), createdAtMs: 1},
     grant: {grantId: "named-other-grant", shareId: "named-other-share", principalKind: "user", principalUserId: scope.userId,
       principalEmail: null, access: "edit", generation: 1, status: "active", revokedAtMs: null, createdAtMs: 1, parentGrantId: null}});
-  const boot = await f.post("/sync/live/named-sessions", {grantId: "named-other-grant"});
+  const boot = await f.post("/sync/live/named-sessions", {grantId: "named-other-grant"}, "account=reader");
   const {discriminator} = await boot.json() as {discriminator: string};
   const context = await f.application.resolveNamedBrowserSession(new Request("https://relay.example.test", {headers: {cookie: "account=reader"}}), discriminator);
   if (!context) throw new Error("Named member authentication missing");

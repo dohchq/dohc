@@ -34,6 +34,7 @@ import {
   readLinkEnrollment,
   type LinkEnrollment,
 } from "./linkEnrollment";
+import { agentName, agentWriteAuthorityInTransaction, recordAgentConnectionActionInTransaction, type AgentConnectionRow } from "./agentConnections";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -151,6 +152,16 @@ export type CollectionWriter =
       content: ReadonlyMap<string, Uint8Array>;
       /** The relay's clock, read inside the write, so a session that expired while it waited writes nothing. */
       now(): number;
+    }
+  | {
+      // An agent connected through an Edit link, authorized again inside the
+      // write from its access token and MCP address, under its own principal.
+      kind: "agent";
+      accessTokenHash: string;
+      resourceHash: string;
+      content: ReadonlyMap<string, Uint8Array>;
+      /** The relay's clock, read inside the write, so a token that expired or was ended while it waited writes nothing. */
+      now(): number;
     };
 
 export interface CommitCollectionWriteInput {
@@ -196,7 +207,7 @@ export function commitCollectionWrite(
   // The writer's authority first, so content checks answer nobody who may
   // not write. The transaction checks it again, and decides.
   storage.readTx(() => currentWriter(storage, input));
-  const unchecked = validateContent(storage, workspaceId, input.write, writer.kind === "link"
+  const unchecked = validateContent(storage, workspaceId, input.write, writer.kind !== "named"
     ? suppliedBytes(writer.content)
     : storedBytes(storage, workspaceId, input.write));
 
@@ -218,7 +229,7 @@ export function commitCollectionWrite(
     }
     checkBases(storage, workspaceId, decision.write);
     if (decision.write.kind === "new-record") {
-      checkRecordCreation(storage, workspaceId, decision.write, writer.kind === "link"
+      checkRecordCreation(storage, workspaceId, decision.write, writer.kind !== "named"
         ? suppliedBytes(writer.content) : storedBytes(storage, workspaceId, decision.write));
     }
 
@@ -248,7 +259,17 @@ export function commitCollectionWrite(
       linkAuthor = {kind: "link", publicPrincipalId: collectionLinkPublicPrincipal(storage,
         current.authorized.share.workspaceId, input.grantId, principal.principalId),
         label: principal.displayName ?? "Anonymous"};
+    } else if (current.kind === "agent") {
+      // The connection's principal, enrolled when the agent signed in.
+      principalId = current.connection.principalId;
+      addedBytes += newBlobBytes(storage, workspaceId, current.content);
+      assertWorkspaceQuota(storage, workspaceId, addedBytes);
+      insertNewBlobs(storage, workspaceId, current.content, input.nowMs);
+      linkAuthor = {kind: "link", publicPrincipalId: collectionLinkPublicPrincipal(storage,
+        current.authorized.share.workspaceId, input.grantId, principalId),
+        label: agentName(current.connection.reportedName)};
     }
+    const agentConnectionId = current.kind === "agent" ? current.connection.connectionId : null;
     const author: DirectWriteMomentAuthor = current.kind === "named"
       ? { kind: "named", userId: current.userId, grantId: input.grantId, grantGeneration: input.grantGeneration }
       : { kind: "link", grantId: input.grantId, grantGeneration: input.grantGeneration, principalId: principalId! };
@@ -271,21 +292,22 @@ export function commitCollectionWrite(
     const authorId = author.kind === "named" ? author.userId : author.principalId;
     const storageBytes = Buffer.byteLength(pathsJson) + Buffer.byteLength(receiptJson) +
       Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) +
-      256;
+      Buffer.byteLength(agentConnectionId ?? "") + 256;
     // The ledger row goes first, so the append's quota check counts it.
     storage.db.prepare(
       `INSERT INTO sync_relay_collection_writes (
          grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
-         storage_bytes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         storage_bytes, agent_connection_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, author.kind,
       author.kind === "named" ? author.userId : null, author.kind === "link" ? author.principalId : null,
       payloadSha256, originId, firstOriginSeq, firstOriginSeq + ops.length - 1, pathsJson, receiptJson,
-      input.nowMs, storageBytes,
+      input.nowMs, storageBytes, agentConnectionId,
     );
     appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
+    if (agentConnectionId !== null) recordAgentConnectionActionInTransaction(storage, agentConnectionId, input.nowMs);
     return { receipt, created: true };
   });
 }
@@ -366,6 +388,13 @@ type CurrentWriter =
       capabilityHash: string;
       profileTokenHash: string;
       content: ReadonlyMap<string, Uint8Array>;
+    }
+  | {
+      kind: "agent";
+      authorized: AuthorizedShareAction;
+      enrollment: LinkEnrollment;
+      connection: AgentConnectionRow;
+      content: ReadonlyMap<string, Uint8Array>;
     };
 
 function currentWriter(storage: StorageContext, input: CommitCollectionWriteInput): CurrentWriter {
@@ -373,6 +402,9 @@ function currentWriter(storage: StorageContext, input: CommitCollectionWriteInpu
   if (writer.kind === "named") {
     const authorized = currentCollectionEditGrant(storage, { ...input, userId: writer.userId });
     return { kind: "named", userId: writer.userId, authorized };
+  }
+  if (writer.kind === "agent") {
+    return { kind: "agent", content: writer.content, ...authorizeAgentCollectionWrite(storage, { ...input, ...writer, nowMs: writer.now() }) };
   }
   return { ...writer, ...authorizeLinkCollectionWrite(storage, {
     ...input, ...writer, nowMs: writer.now(),
@@ -399,6 +431,29 @@ export function authorizeLinkCollectionWrite(storage: StorageContext, input: {
   const authorized = authorizeLinkShareAction({ storage, grantId: input.grantId, action: "direct-write" });
   if (!authorized.ok || authorized.grant.generation !== input.grantGeneration) throw notFound();
   return { authorized, enrollment };
+}
+
+// The same checks for an agent: its token is an unexpired access token of
+// an active connection at this address, on this link at this generation,
+// with Edit access, not paused, and its principal not blocked.
+export function authorizeAgentCollectionWrite(storage: StorageContext, input: {
+  shareId: string;
+  grantId: string;
+  grantGeneration: number;
+  accessTokenHash: string;
+  resourceHash: string;
+  nowMs: number;
+}) {
+  const agent = agentWriteAuthorityInTransaction(storage, input, input.nowMs);
+  if (
+    !agent || linkWriteRefusal(agent.enrollment) || agent.connection.grantId !== input.grantId ||
+    agent.connection.shareId !== input.shareId || agent.connection.generation !== input.grantGeneration
+  ) {
+    throw notFound();
+  }
+  const authorized = authorizeLinkShareAction({ storage, grantId: input.grantId, action: "direct-write" });
+  if (!authorized.ok || authorized.grant.generation !== input.grantGeneration) throw notFound();
+  return { authorized, enrollment: agent.enrollment, connection: agent.connection };
 }
 
 // A submit id names one write by one author under one grant. A named

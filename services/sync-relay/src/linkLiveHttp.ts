@@ -1,7 +1,8 @@
 import type {BinaryLike} from "node:crypto";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import {readBoundedJson} from "@dohc/service-http";
-import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
+import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
+import type {LinkAuthorityResolver} from "./linkAuthority";
 import {createAccountlessPathProjection} from "./accountlessPathProjection";
 import {authorizeLinkShareAction} from "./shareAuthorization";
 import {hashRelayExchangeKey, verifyRelayExchangeKey} from "./linkSecurity";
@@ -13,11 +14,13 @@ import {linkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey: BinaryLike; publicEditRelease: PublicEditRelease | undefined;
   hosts: ReadonlySet<string>; publicOrigin: string; exchangeKey: string; limits: NamedLiveRouteLimits;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
-  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean}) {
+  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
+  /** Authenticates a connected agent, as the link's other routes do. */
+  linkAuthority: Pick<LinkAuthorityResolver, "resolve">}) {
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
   const origin = new URL(options.publicOrigin);
   if (origin.protocol !== "https:" || origin.origin !== options.publicOrigin || options.exchangeKey.length < 32 || !hosts.size) throw new TypeError("Invalid link live metadata configuration.");
-  const exchangeHash = hashRelayExchangeKey(options.exchangeKey), resolver = createLinkLiveBrowserResolver(options);
+  const exchangeHash = hashRelayExchangeKey(options.exchangeKey), resolver = createLinkLiveResolver(options);
   const refused = opaqueLinkRefusal;
   let pending = 0;
   return async (request: Request): Promise<Response> => {
@@ -54,6 +57,8 @@ export function createLinkLiveHttp(options: {storage: SyncRelayStorage; linkKey:
           if (current.kind !== "current" || current.binding.currentPath !== path) return null;
           return options.sessionHostBlocked?.({workspaceId: context.workspaceId, objectId}) ? linkRefusal("link_live_unavailable") : {objectId};
         }
+        // Only a browser gateway opens a link session; an agent has no profile.
+        if ("agentConnectionId" in context) return null;
         // Ticket minting has already enrolled this profile before a gateway can open.
         const principal = options.storage.getLinkPrincipalForGrantProfile(context.grantId, context.profileTokenHash);
         const session = options.storage.findLinkSessionByCapabilityHash(context.capabilityHash);

@@ -14,8 +14,9 @@ const METHODS: Readonly<Record<string, readonly string[]>> = {
   "/api/live/link-document": ["POST"], "/api/live/link-ticket": ["POST"],
   "/api/live/named-session": ["POST"], "/api/live/named-ticket": ["POST"], "/api/live/named-documents": ["POST"],
   "/api/apps": ["GET"], "/api/apps/launch": ["POST"], "/api/apps/summary": ["POST"],
-  "/api/mcp/exchange": ["POST"], "/mcp": ["GET", "POST", "DELETE"],
 };
+// A share link's MCP address, `/mcp/s/<secret>`.
+const MCP_METHODS: readonly string[] = ["GET", "POST", "DELETE"];
 
 export function mcpApiVersions(versions: ApiVersionRange): ApiVersionRange {
   // Retiring headerless MCP v1 requires a separate product decision.
@@ -24,8 +25,10 @@ export function mcpApiVersions(versions: ApiVersionRange): ApiVersionRange {
 
 export function shareWebApiVersionRefusal(request: Request, versions: ApiVersionRange): Response | null {
   const path = new URL(request.url).pathname;
-  if (!Object.hasOwn(METHODS, path) || !METHODS[path]!.includes(request.method)) return null;
-  const range = path === "/mcp" || path === "/api/mcp/exchange" ? mcpApiVersions(versions) : versions;
+  const mcp = path.startsWith("/mcp/s/");
+  const methods = mcp ? MCP_METHODS : Object.hasOwn(METHODS, path) ? METHODS[path]! : null;
+  if (!methods?.includes(request.method)) return null;
+  const range = mcp ? mcpApiVersions(versions) : versions;
   const check = checkApiVersion(request.headers.get(SHARE_WEB_API_VERSION_HEADER), range);
   if (check === "accepted") return null;
   const code = check === "malformed" ? "bad_request" : check === "too_old" ? "api_version_too_old" : "api_version_too_new";

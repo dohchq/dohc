@@ -314,7 +314,7 @@ test("@ui-audit link agent and link holder marks", async () => {
       grantType: "authorization_code", clientId, code, redirectUri: LINK_REDIRECT, codeVerifier: LINK_VERIFIER, resource,
     }, exchange);
     const agentPost = (body: string, threadId: string, idempotencyKey: string) =>
-      relayPost(relay!.baseUrl, "/sync/link/agent-chat/post", { accessToken, body, threadId, idempotencyKey }, exchange);
+      relayPost(relay!.baseUrl, "/sync/link/agent-chat/post", { accessToken, resource, body, threadId, idempotencyKey }, exchange);
 
     // --- A person opens the link in a browser -----------------------------
     const { capabilityToken } = await relayPost(relay.baseUrl, "/sync/link-exchange", { secret }, exchange);

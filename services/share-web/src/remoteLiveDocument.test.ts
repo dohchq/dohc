@@ -17,13 +17,15 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {for (const stop of cleanup.splice(0)) await stop();});
+// The agent's own token and MCP address, which go on every relay call and socket.
+const accessToken = "A".repeat(43), resource = `https://share.example.test/mcp/s/${"S".repeat(43)}`;
 
 it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("returns the same scoped message to an agent: %s", async code => {
   const client = createLinkLiveClient({relayUrl: "https://relay.test", publicOrigin: "https://share.test", exchangeKey: "x".repeat(32),
     limits: {maxPendingRequests: 1, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 1000}, browserLimits: limits,
-    resolveMaterial: async () => ({ok: false, status: 404}), fetchRelay: async () => {throw Error("unused");}});
-  const result = await remoteLiveDocument({client, limits, discriminator: "abcdefghijkl", cookie: "", signal: new AbortController().signal,
-    request: async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})}, "docs/a.md");
+    resolveMaterial: async () => ({ok: false, status: 404}),
+    fetchRelay: async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})});
+  const result = await remoteLiveDocument({live: client.agent({accessToken, resource}), limits, signal: new AbortController().signal}, "docs/a.md");
   expect(result).toMatchObject({ok: false, outcome: "not-applied", error: LINK_REFUSALS[code].error});
 });
 
@@ -39,8 +41,9 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
   const failures: unknown[] = [];
   const frames = limits.provider.frames;
   server.on("connection", (socket, request) => {
-    expect(request.headers.authorization).toBe(`Bearer ${"A".repeat(43)}`);
-    expect(request.headers["x-dohc-link-profile-secret"]).toBe("B".repeat(43));
+    expect(request.headers.authorization).toBe(`DohcAgent ${accessToken}`);
+    expect(request.headers["x-dohc-agent-resource"]).toBe(resource);
+    expect(request.headers["x-dohc-link-profile-secret"]).toBeUndefined();
     const protocol = createLiveFrameSession("server", frames);
     socket.on("close", () => protocol.close());
     let chain = Promise.resolve();
@@ -87,10 +90,15 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
   // edit gets 20 s so each 10 s step stays inside it.
   const client = createLinkLiveClient({relayUrl: `http://127.0.0.1:${address.port}`, publicOrigin: "https://share.example.test", exchangeKey: "test-exchange-key-at-least-thirty-two-bytes",
     limits: {maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 10_000}, browserLimits: limits,
-    async resolveMaterial() {return {ok: true, capabilityToken: "A".repeat(43), profileSecret: "B".repeat(43), setCookie: null, currentCapability: async () => "A".repeat(43)};},
-    async fetchRelay() {throw Error("Not used");}});
-  return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(20_000),
-    async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32), publicPrincipalId: "public-link-agent", expiresAtMs: Date.now() + 60_000});}}, "doc.md", {find: "world", replacement: "friend"})};
+    async resolveMaterial() {throw Error("An agent has no viewer material.");},
+    // The relay's document and ticket answers, for this agent's token at its address.
+    async fetchRelay(relayRequest) {
+      expect([relayRequest.headers.get("authorization"), relayRequest.headers.get("x-dohc-agent-resource")]).toEqual([`DohcAgent ${accessToken}`, resource]);
+      return Response.json(new URL(relayRequest.url).pathname === "/sync/live/link-document" ? {objectId: "document"}
+        : {token: "ab".repeat(32), publicPrincipalId: "public-link-agent", expiresAtMs: Date.now() + 60_000});
+    }});
+  return {doc, submitted, ack, run: () => remoteLiveDocument({live: client.agent({accessToken, resource}),
+    limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, signal: AbortSignal.timeout(20_000)}, "doc.md", {find: "world", replacement: "friend"})};
 }
 
 it("waits for host acknowledgement over the real live socket", async () => {

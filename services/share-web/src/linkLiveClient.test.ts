@@ -44,11 +44,29 @@ it("derives private credentials from the selected cookie and exposes only object
   expect(f.resolveMaterial).toHaveBeenCalledWith(discriminator, "protected=cookie", expect.any(AbortSignal));
   const sent = f.fetchRelay.mock.calls[0]![0];
   expect(sent.url).toBe("https://relay.example.test/sync/live/link-document");
-  expect(sent.headers.get("authorization")).toBe(`Bearer ${capabilityToken}`);
+  expect(sent.headers.get("authorization")).toBe(`LinkCapability ${capabilityToken}`);
   expect(sent.headers.get("x-dohc-link-profile-secret")).toBe(profileSecret);
   expect(sent.headers.get("x-dohc-relay-exchange-key")).toBe(exchangeKey);
   expect(sent.headers.has("cookie")).toBe(false);
   expect(await sent.json()).toEqual(metadata);
+});
+it("sends an agent's own token and address, with one session name per address and no profile", async () => {
+  const f = fixture(), accessToken = "C".repeat(43), resource = `${origin}/mcp/s/${"A".repeat(43)}`;
+  const agent = f.client.agent({accessToken, resource});
+  const opened = await agent.document("docs/a.md", AbortSignal.timeout(1000));
+  expect([opened.status, await opened.json()]).toEqual([200, {objectId: "object-a", limits: browserLimits}]);
+  expect((await f.client.agent({accessToken, resource}).document("docs/a.md", AbortSignal.timeout(1000))).status).toBe(200);
+  const [first, second] = f.fetchRelay.mock.calls.map(([sent]) => sent);
+  expect([first!.headers.get("authorization"), first!.headers.get("x-dohc-agent-resource"), first!.headers.get("x-dohc-relay-exchange-key")])
+    .toEqual([`DohcAgent ${accessToken}`, resource, exchangeKey]);
+  expect(first!.headers.has("x-dohc-link-profile-secret") || first!.headers.has("cookie")).toBe(false);
+  const bodies = [await first!.json(), await second!.json()] as Array<{discriminator: string; path: string}>;
+  expect(bodies[0]!.discriminator).toMatch(/^[A-Za-z0-9_-]{12}$/u);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(f.resolveMaterial).not.toHaveBeenCalled();
+  // Only a live document's path: the agent cannot name another file kind.
+  expect((await agent.document("a.excalidraw", AbortSignal.timeout(1000))).status).toBe(404);
+  expect(f.fetchRelay).toHaveBeenCalledTimes(2);
 });
 it.each([
   {origin: "https://attacker.test"}, {origin: "null"}, {host: "attacker.test"},

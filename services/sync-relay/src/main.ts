@@ -54,7 +54,7 @@ import { createNamedFrameChanges } from "./liveHostChanges";
 import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
-import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
+import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
 import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 import {isLinkEndpointPath, isLinkLivePath} from "./linkEndpointPath";
 import {createLinkLiveHttp} from "./linkLiveHttp";
@@ -687,8 +687,9 @@ if (namedLiveConfig) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!, publicEditRelease}), tickets, captureNative, membership, admission, sessionHostBlocked});
-    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, publicEditRelease, sessionHostBlocked});
+      sessions: createLinkLiveResolver({storage, linkKey: linkKey!, publicEditRelease, linkAuthority: relayApplication.linkAuthority}), tickets, captureNative, membership, admission, sessionHostBlocked});
+    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, publicEditRelease, sessionHostBlocked,
+      linkAuthority: relayApplication.linkAuthority});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
   }
   if (desktopEditorLimits) {

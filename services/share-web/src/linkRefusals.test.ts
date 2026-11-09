@@ -2,7 +2,7 @@ import {afterEach, expect, it, vi} from "vitest";
 import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp";
 import {hashLinkBearer} from "../../sync-relay/src/linkSecurity";
-import {audience, fixture, key, scope} from "../../sync-relay/src/liveTickets.test-helper";
+import {audience, fixture, holderLinkAuthority, key, scope} from "../../sync-relay/src/liveTickets.test-helper";
 import {createLinkLiveClient} from "./linkLiveClient";
 
 const transport = {maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
@@ -25,7 +25,8 @@ it.each(["missing", "bad", "expired", "revoked", "outside", "absent", "view", "c
     if (mode === "revoked") f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1000});
     if (mode === "view" || mode === "comment") f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(mode);
     if (mode === "offline") vi.spyOn(f.storage, "resolveLiveObjectHostBinding").mockReturnValue({kind: "refused", reason: "host-unavailable"});
-    const relay = createLinkLiveHttp({publicEditRelease:{version:1},storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits: transport});
+    const relay = createLinkLiveHttp({publicEditRelease:{version:1},storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits: transport,
+      linkAuthority: holderLinkAuthority(f.storage, key, exchangeKey)});
     const client = createLinkLiveClient({relayUrl: "https://relay.test", publicOrigin: audience, exchangeKey, browserLimits: editor,
       limits: {maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, timeoutMs: 1000},
       resolveMaterial: async () => mode === "missing" ? {ok: false, status: 404} : {

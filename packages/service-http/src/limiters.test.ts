@@ -15,6 +15,17 @@ describe("TokenBucketLimiter", () => {
     expect(limiter.allow("a", 2_000)).toBe(true);
   });
 
+  it("checks a bucket without spending it or adding one", () => {
+    const limiter = new TokenBucketLimiter(1, 1, 2);
+    expect(limiter.has("a", 0)).toBe(true);
+    expect(limiter.size).toBe(0);
+    expect(limiter.allow("a", 0)).toBe(true);
+    expect(limiter.has("a", 0)).toBe(false);
+    expect(limiter.has("a", 1_000)).toBe(true);
+    expect(limiter.has("a", 1_000)).toBe(true);
+    expect(limiter.allow("a", 1_000)).toBe(true);
+  });
+
   it("refuses non-positive limits", () => {
     expect(() => new TokenBucketLimiter(0, 1, 1)).toThrow(/positive/u);
   });

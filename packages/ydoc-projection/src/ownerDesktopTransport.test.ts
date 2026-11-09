@@ -329,7 +329,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       expect(deployment.storage.mintLinkSession({session: {sessionId: "private-link-session",capabilityHash: hashLinkBearer(bearer,ticketKey),grantId: "private-link-grant",
         generation: 1,mintedAtMs: now,expiresAtMs: now + 15 * 60_000}})).toBe(true);
       const resolver = createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage: deployment.storage,linkKey: ticketKey});
-      const resolved = await resolver.resolve(new Request(`https://localhost:${sharePort}/private`,{headers: {authorization: `Bearer ${bearer}`,"x-dohc-link-profile-secret": profile}}),"abcdefghijkl");
+      const resolved = await resolver.resolve(new Request(`https://localhost:${sharePort}/private`,{headers: {authorization: `LinkCapability ${bearer}`,"x-dohc-link-profile-secret": profile}}),"abcdefghijkl");
       if (!resolved) throw new Error("Native proof link authentication was refused.");
       scope = resolved;
       expect(deployment.storage.getLinkPrincipalForGrantProfile(scope.grantId,scope.profileTokenHash)).toBeNull();
