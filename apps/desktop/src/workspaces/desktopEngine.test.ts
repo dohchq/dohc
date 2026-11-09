@@ -2258,8 +2258,8 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledWith(expect.objectContaining({document})));
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
       expect(f.engine.ownerLiveFirstOpen("owner")).toEqual([firstOpen("good.md", "native-disagreement")]);
-      expect(log).toHaveBeenCalledWith("[desktop] owner live first-open status is invalid:", expect.anything());
-      expect(log).toHaveBeenCalledWith("[desktop] owner live first-open status does not match its reason:", "live-first-open-refused");
+      expect(log).toHaveBeenCalledWith("[desktop] live first-open status is invalid:", expect.anything());
+      expect(log).toHaveBeenCalledWith("[desktop] live first-open status does not match its reason:", "live-first-open-refused");
       expect(log).not.toHaveBeenCalledWith("[desktop] server owner delivery failed:", expect.anything());
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); log.mockRestore();}
   });

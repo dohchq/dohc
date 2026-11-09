@@ -399,9 +399,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               for (const row of rows) {
                 if (row.status !== "unavailable" || (row.reason !== "live-first-open-refused" && row.reason !== "live-first-open-retry-stopped")) continue;
                 const parsed = OwnerLiveFirstOpenStatus.safeParse(row.firstOpen);
-                if (!parsed.success) console.error("[desktop] owner live first-open status is invalid:", parsed.error);
+                if (!parsed.success) console.error("[desktop] live first-open status is invalid:", parsed.error);
                 else if ((parsed.data.reason === "retry-stopped") !== (row.reason === "live-first-open-retry-stopped")) {
-                  console.error("[desktop] owner live first-open status does not match its reason:", row.reason);
+                  console.error("[desktop] live first-open status does not match its reason:", row.reason);
                 } else firstOpen.set(row, parsed.data);
               }
               setOwnerFirstOpen(workspaceId, [...firstOpen.values()].filter(status => status.source.workspaceId === workspaceId));

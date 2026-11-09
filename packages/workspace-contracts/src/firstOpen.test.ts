@@ -55,10 +55,10 @@ describe("first-open reports", () => {
     expect([...FIRST_OPEN_REFUSAL_REASONS].sort()).toEqual(refusals.sort());
   });
 
-  // Proves: an engine's own code reaches the owner and their agents in one
+  // Proves: an engine's own code reaches Live documents and agents in one
   // stable shape. Uppercase and underscores map to their lowercase, hyphenated
   // form; anything else maps to one unknown code, so no refused activation
-  // carries a code the owner's IPC or the CLI would reject.
+  // carries a code the desktop's IPC or the CLI would reject.
   it.each([
     ["LIMIT_EXCEEDED", "limit-exceeded"], ["CONFLICT", "conflict"], ["Native_Disagreement", "native-disagreement"],
     ["live-application-conflict", "live-application-conflict"], ["a".repeat(128), "a".repeat(128)],
