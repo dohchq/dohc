@@ -3351,6 +3351,50 @@ it("keeps a no-retirement restore route for a document that moves back and away 
   expect(leaving(o)).toContain("liveApplication.unloadDocument");
 });
 
+// Proves (#2965): a running host gives a restore a route when the document moves
+// and departs before its hosted target loaded. That departure removes the target,
+// which a later restore step would otherwise need. Declining the restore still
+// reaches the engine without a restart, and the route ends with the restore once
+// the engine unloaded what it loaded.
+it("keeps a restore route for a document that moves and departs before its hosted target loaded", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  // Another Edit grant keeps the document covered, so no retirement opens and only the restore keeps the route.
+  anotherEditGrant(o);
+  o.beginRestore();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  await o.host.close(); log.mockClear();
+  // The next daemon hosts the document, but its target never loads.
+  const activate = ServiceActivationDriver.prototype.activate, held: string[] = [];
+  let driver: ServiceActivationDriver | undefined;
+  vi.spyOn(ServiceActivationDriver.prototype, "activate").mockImplementation(async function (this: ServiceActivationDriver, ...args) {
+    driver = this;
+    if (args[0].path !== o.sibling.path) return activate.apply(this, args);
+    held.push(args[0].path);
+    return {kind: "pending" as const, reason: "The test holds this activation."};
+  });
+  const host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => host.close());
+  await host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(held.length).toBeGreaterThan(0), {timeout: 10_000});
+  const hostedTargets = () => driver!.targets.filter(target => target.path === o.sibling.path);
+  expect(hostedTargets()).toHaveLength(1);
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  moveAway(o);
+  await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(hostedTargets()).toEqual([]), {timeout: 10_000});
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+  await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+  expect(o.ownerCalls().map(([method]) => method)).toContain("liveApplication.cancelRestoreFence");
+  await vi.waitFor(() => expect(host.retains(o.sibling)).toBe(false), {timeout: 10_000});
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
+  expect(leaving(o)).toContain("liveApplication.unloadDocument");
+  expect(leaving(o)).not.toContain("liveApplication.releaseActivation");
+});
+
 // Proves: activation reads that name an object, as departure recovery's do for
 // a document it holds without a target, find that object's activation and not
 // another's at the same path.
