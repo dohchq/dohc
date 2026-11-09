@@ -486,6 +486,16 @@ describe("LiveDocumentsDialog", () => {
           reason: "conflict-parent-withheld",
           canResume: false,
         }),
+        row("docs/first-open-refused.md", {
+          status: "unavailable",
+          reason: "live-first-open-refused",
+          canResume: true,
+        }),
+        row("docs/first-open-stopped.md", {
+          status: "unavailable",
+          reason: "live-first-open-retry-stopped",
+          canResume: true,
+        }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
     );
@@ -507,8 +517,15 @@ describe("LiveDocumentsDialog", () => {
       "Server copy doesn't match",
       "Server copy is missing an edit",
       "Can't resume",
+      "Can't start",
+      "Server timed out",
       "Stopped",
       "Stopped",
+    ]);
+    // A stop after repeated build deadlines is temporary: Resume asks the server to try again.
+    expect(actions("docs/first-open-stopped.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
     ]);
     // Only a document whose server copy is missing an owner edit says so, and
     // that a Resume tries it again.

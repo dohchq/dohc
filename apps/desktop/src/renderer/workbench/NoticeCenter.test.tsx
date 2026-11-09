@@ -1854,6 +1854,11 @@ describe("notice center", () => {
     const source = { workspaceId: "ws-status-test", objectId: "object-1", path: "docs/notes.md", sourceMomentId: "moment-1", sourceDigest: "a".repeat(64) };
     const refusal = (change: Partial<LiveFirstOpen> = {}): LiveFirstOpen =>
       ({ reason: "unsupported-source", code: "settlement-mismatch", recovery: "none", source, ...change }) as LiveFirstOpen;
+    // The server stopped trying after repeated build deadlines, until Try again or an edit.
+    const stopped = (change: Partial<LiveFirstOpen> = {}): LiveFirstOpen =>
+      ({ reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, recovery: "retry-later", source, ...change }) as LiveFirstOpen;
+    // Try again runs the same way for a refusal and for a stop.
+    const kinds = [["refusal", refusal], ["stop", stopped]] as const;
     // A fresh object every call, so a rerender models a new status read.
     const firstOpenStatus = (...ownerLiveFirstOpen: LiveFirstOpen[]): SyncStatusResult => ({
       state: "synced",
@@ -1904,6 +1909,46 @@ describe("notice center", () => {
       expect(await navigator.clipboard.readText()).toBe(fromToast);
     });
 
+    // A stop is temporary: it says live editing did not start, that the server
+    // gave up after its build ran out of time, and that the file is untouched.
+    // It never reads as a refusal of the file, and asks for no report.
+    it("names the file and says the server stopped trying for a stop after repeated deadlines", async () => {
+      const user = userEvent.setup();
+      const body = "The server took too long to prepare this file 3 times, so it stopped trying. The file is unchanged, and you can still edit it normally.";
+      renderNotices({ syncStatus: firstOpenStatus(stopped()), onRetryLiveFirstOpen: vi.fn(async () => null) });
+      const toast = screen.getByTestId("owner-live-first-open-toast");
+      expect(toast.textContent).toContain(`Live editing did not start for notes.md. ${body}`);
+      expect(toast.textContent).not.toMatch(/can't start|refused|send them/i);
+      expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+      await user.click(screen.getByTestId("owner-live-first-open-toast-details"));
+      await user.click(screen.getByTestId("owner-live-first-open-toast-details-copy"));
+      const fromToast = await navigator.clipboard.readText();
+      for (const line of [`Detail: ${body}`, "File: docs/notes.md", "Reason: retry-stopped", "Code: build-deadline", "Recovery: retry-later"]) {
+        expect(fromToast).toContain(line);
+      }
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect(row().textContent).toContain("Live editing did not start for notes.md");
+      expect(row().textContent).toContain(body);
+      expect(within(row()).getByRole("button", { name: "Try again" })).toBeTruthy();
+      await user.click(screen.getByTestId("notice-owner-live-first-open-object-1-details"));
+      await user.click(screen.getByTestId("notice-owner-live-first-open-object-1-details-copy"));
+      expect(await navigator.clipboard.readText()).toBe(fromToast);
+    });
+
+    // Live editing that started in the end takes back its stop, and a refusal
+    // that follows a stop replaces it as news.
+    it("replaces a stop with a later refusal and clears it once the file goes live", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(stopped()) });
+      await user.click(screen.getByRole("button", { name: "Close notice for docs/notes.md" }));
+      rerender(noticeElement({ syncStatus: firstOpenStatus(refusal()) }));
+      expect(screen.getByTestId("owner-live-first-open-toast").textContent).toContain("Live editing can't start for notes.md");
+      rerender(noticeElement({ syncStatus: firstOpenStatus() }));
+      expect(screen.queryByTestId("owner-live-first-open-toast")).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("notice-owner-live-first-open-object-1")).toBeNull();
+    });
+
     it("keeps one toast and one row for a repeated status, and keeps them closed and dismissed", async () => {
       const user = userEvent.setup();
       const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()) });
@@ -1946,10 +1991,10 @@ describe("notice center", () => {
     // Try again sends one request and waits for the server's answer; it never
     // says the file will go live. If the request never reached the server, the
     // row says so and offers Try again again. The answer is announced again.
-    it("makes one checked request per Try again and announces the answer", async () => {
+    it.each(kinds)("makes one checked request per Try again and announces the answer, for a %s", async (_kind, make) => {
       const user = userEvent.setup(), asked = deferred<string | null>();
       const onRetryLiveFirstOpen = vi.fn((_workspaceId: string, _path: string) => asked.promise);
-      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen });
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen });
       const retry = () => screen.getByTestId("owner-live-first-open-toast-retry") as HTMLButtonElement;
       await user.click(retry());
       await user.click(retry());
@@ -1967,18 +2012,18 @@ describe("notice center", () => {
       // The server took it: the file prepares, then the same refusal comes back.
       rerender(noticeElement({ syncStatus: firstOpenStatus(), onRetryLiveFirstOpen }));
       expect(screen.queryByTestId("owner-live-first-open-toast")).toBeNull();
-      rerender(noticeElement({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen }));
+      rerender(noticeElement({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen }));
       expect(retry().disabled).toBe(false);
       expect(screen.getByTestId("owner-live-first-open-toast").textContent).not.toContain("could not ask");
     });
 
     // A Try again still on its way when the person switches workspace must
     // not repaint the next workspace's notice for a file with the same name.
-    it("never lets a slow Try again for one workspace repaint another", async () => {
+    it.each(kinds)("never lets a slow Try again for one workspace repaint another, for a %s", async (_kind, make) => {
       const user = userEvent.setup(), first = deferred<string | null>(), second = deferred<string | null>();
       const onRetryLiveFirstOpen = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-      const other = refusal({ source: { ...source, workspaceId: "ws-status-other", objectId: "object-1" } });
-      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen });
+      const other = make({ source: { ...source, workspaceId: "ws-status-other", objectId: "object-1" } });
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen });
       await user.click(screen.getByTestId("owner-live-first-open-toast-retry"));
       rerender(noticeElement({ workspaceId: "ws-status-other", syncStatus: firstOpenStatus(other), onRetryLiveFirstOpen }));
       const retry = () => screen.getByTestId("owner-live-first-open-toast-retry") as HTMLButtonElement;
@@ -1994,15 +2039,15 @@ describe("notice center", () => {
 
     // The server can answer the checked attempt with the same refusal before
     // the next status read ever shows the file preparing.
-    it("frees Try again once the request settles, even when the same refusal comes straight back", async () => {
+    it.each(kinds)("frees Try again once the request settles, even when the same %s comes straight back", async (_kind, make) => {
       const user = userEvent.setup(), asked = deferred<string | null>();
       const onRetryLiveFirstOpen = vi.fn((_workspaceId: string, _path: string) => asked.promise);
-      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen });
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen });
       const retry = () => screen.getByTestId("owner-live-first-open-toast-retry") as HTMLButtonElement;
       await user.click(retry());
       expect(retry().disabled).toBe(true);
       await act(async () => asked.resolve(null));
-      rerender(noticeElement({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen }));
+      rerender(noticeElement({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen }));
       expect(retry().disabled).toBe(false);
       await user.click(retry());
       expect(onRetryLiveFirstOpen).toHaveBeenCalledTimes(2);
@@ -2010,10 +2055,11 @@ describe("notice center", () => {
 
     // Each file waits for its own request: starting one never frees another,
     // and each answer settles only its own file.
-    it("keeps each file's Try again apart while both are on their way", async () => {
+    it.each(kinds)("keeps each file's Try again apart while both are on their way, for a %s", async (_kind, make) => {
       const user = userEvent.setup(), first = deferred<string | null>(), second = deferred<string | null>();
       const onRetryLiveFirstOpen = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-      const other = refusal({ source: { ...source, objectId: "object-2", path: "docs/other.md" } });
+      // The other file's status is a stop on one pass, so a refusal and a stop also wait apart.
+      const other = make({ source: { ...source, objectId: "object-2", path: "docs/other.md" } });
       renderNotices({ syncStatus: firstOpenStatus(refusal(), other), onRetryLiveFirstOpen });
       const row = async (objectId: string) => {
         if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
@@ -2035,15 +2081,15 @@ describe("notice center", () => {
 
     // Back in the first workspace, an answer to the request made before
     // leaving it must not settle the request made since.
-    it("ignores an earlier request's answer after leaving the workspace and coming back", async () => {
+    it.each(kinds)("ignores an earlier request's answer after leaving the workspace and coming back, for a %s", async (_kind, make) => {
       const user = userEvent.setup(), first = deferred<string | null>(), second = deferred<string | null>();
       const onRetryLiveFirstOpen = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-      const other = refusal({ source: { ...source, workspaceId: "ws-status-other" } });
-      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen });
+      const other = make({ source: { ...source, workspaceId: "ws-status-other" } });
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen });
       const retry = () => screen.getByTestId("owner-live-first-open-toast-retry") as HTMLButtonElement;
       await user.click(retry());
       rerender(noticeElement({ workspaceId: "ws-status-other", syncStatus: firstOpenStatus(other), onRetryLiveFirstOpen }));
-      rerender(noticeElement({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen }));
+      rerender(noticeElement({ syncStatus: firstOpenStatus(make()), onRetryLiveFirstOpen }));
       expect(retry().disabled).toBe(false);
       await user.click(retry());
       await act(async () => first.resolve("dohc could not ask the server to try again."));
