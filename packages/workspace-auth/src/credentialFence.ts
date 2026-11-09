@@ -1,9 +1,9 @@
 import type { Pool, PoolClient } from "pg";
 
 // An account's credential fence lives in Postgres beside Better Auth's tables
-// (migration 0005). Its epoch increases in the transaction that changes the
-// account's stored password. The relay reads it on every request a personal
-// agent makes, and listens for changes so it can end running work at once.
+// (migration 0005). Its epoch increases in the transaction that changes or
+// deletes the account's stored password. The relay reads it on every request a
+// personal agent makes, and listens for changes so it can end running work at once.
 
 export const CREDENTIAL_FENCE_CHANNEL = "dohc_credential_fence";
 /** How long a dropped `LISTEN` connection waits before it connects again. */
@@ -20,7 +20,7 @@ export interface ConsentCredentials {
   /** The account's email-and-password hash; null when it has no password. */
   passwordHash: string | null;
   epoch: number;
-  /** The session exists, is the account's, is unexpired, and began after the last fence change. */
+  /** The session exists, is the account's, is unexpired, and began at or after the last fence change. */
   sessionCurrent: boolean;
 }
 
@@ -79,7 +79,7 @@ export function createPostgresCredentialFence(pool: Pool, options: {
       const result = await pool.query<{ password_hash: string | null; epoch: string; session_current: boolean }>(
         `select a."password" as password_hash,
            coalesce(f.epoch, 0) as epoch,
-           (s.id is not null and s."expiresAt" > now() and (f.changed_at is null or s."createdAt" > f.changed_at)) as session_current
+           (s.id is not null and s."expiresAt" > now() and (f.changed_at is null or s."createdAt" >= f.changed_at)) as session_current
          from "user" u
          left join "account" a on a."userId" = u.id and a."providerId" = 'credential'
          left join dohc_credential_fences f on f.user_id = u.id
@@ -134,14 +134,21 @@ export function createPostgresCredentialFence(pool: Pool, options: {
             return;
           }
           client = next;
-          next.on("notification", (message) => {
-            const change = message.channel === CREDENTIAL_FENCE_CHANNEL && message.payload ? parseChange(message.payload) : null;
-            if (change) listener.onChange(change);
-          });
           const held = next;
           const lost = () => {
             if (client === held) drop();
           };
+          next.on("notification", (message) => {
+            const change = message.channel === CREDENTIAL_FENCE_CHANNEL && message.payload ? parseChange(message.payload) : null;
+            if (!change) return;
+            try {
+              listener.onChange(change);
+            } catch {
+              // A change the listener couldn't apply counts as a lost connection,
+              // so the listener stops trusting the channel and catches up again.
+              lost();
+            }
+          });
           next.on("error", lost);
           next.on("end", lost);
           await next.query(`listen ${CREDENTIAL_FENCE_CHANNEL}`);

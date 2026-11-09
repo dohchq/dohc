@@ -8,12 +8,13 @@ import type {
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
-import { pkceS256Challenge } from "./linkSecurity";
+import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
 import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, PERSONAL_PASSWORD_ATTEMPTS, type PersonalRunningEntry } from "./personalAgents";
 import type { createSyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
+import { PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT } from "./storage/personalAgents";
 import {
   claimWorkspace,
   closeTestStorage,
@@ -218,12 +219,15 @@ function cookie(session: string): Record<string, string> {
   return { cookie: `session=${session}` };
 }
 
-function internal(f: Fixture, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
-  return f.h(request(null, `/sync/link/${path}`, {
+/** A call from share-web. `ip` is the address share-web reports for the caller. */
+function internal(f: Fixture, path: string, body: unknown, headers: Record<string, string> = {}, ip?: string): Promise<Response> {
+  const forwarded = request(null, `/sync/link/${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY, ...headers },
     body: JSON.stringify(body),
-  }));
+  });
+  if (ip !== undefined) forwarded.headers.set("x-dohc-relay-client-ip", ip);
+  return f.h(forwarded);
 }
 
 async function registerClient(f: Fixture): Promise<string> {
@@ -231,7 +235,7 @@ async function registerClient(f: Fixture): Promise<string> {
   return String(body.clientId);
 }
 
-function begin(f: Fixture, clientId: string, resource: string): Promise<Response> {
+function begin(f: Fixture, clientId: string, resource: string, ip?: string): Promise<Response> {
   return internal(f, "agent-authorizations", {
     clientId,
     resource,
@@ -239,11 +243,11 @@ function begin(f: Fixture, clientId: string, resource: string): Promise<Response
     codeChallenge: pkceS256Challenge(VERIFIER),
     codeChallengeMethod: "S256",
     state: "agent-state",
-  });
+  }, {}, ip);
 }
 
-async function beginRequest(f: Fixture, clientId: string, workspaceId = WS_A): Promise<string> {
-  return String((await ok(await begin(f, clientId, resourceFor(workspaceId)))).requestId);
+async function beginRequest(f: Fixture, clientId: string, workspaceId = WS_A, ip?: string): Promise<string> {
+  return String((await ok(await begin(f, clientId, resourceFor(workspaceId), ip))).requestId);
 }
 
 function consent(f: Fixture, requestId: string, session = "owner-session"): Promise<Response> {
@@ -374,6 +378,23 @@ describe("personal agent sign-in", () => {
 
     const withoutFence = await fixture({ credentialFence: undefined });
     await expectRefused(await begin(withoutFence, await registerClient(withoutFence), resourceFor(WS_A)));
+  });
+
+  it("counts every personal sign-in begun from an address, so a flood can't push out the owner's request", async () => {
+    const f = await fixture();
+    const clientId = await registerClient(f);
+    const owners = await beginRequest(f, clientId, WS_A, "198.51.100.7");
+    // Enough begins to fill the workspace's pending requests, all from one address.
+    const statuses: number[] = [];
+    for (let begun = 0; begun < PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT; begun += 1) {
+      statuses.push((await begin(f, clientId, resourceFor(WS_A), "203.0.113.9")).status);
+    }
+    expect(statuses.filter((status) => status === 200)).toHaveLength(LINK_EXCHANGE_BUCKET_CAPACITY);
+    await expectCode(await begin(f, clientId, resourceFor(WS_A), "203.0.113.9"), 429, "link_read_rate_limited");
+
+    // The owner's request is still there, and another address can still begin.
+    await ok(await consent(f, owners));
+    await ok(await begin(f, clientId, resourceFor(WS_A), "198.51.100.8"));
   });
 
   it("asks only the workspace's owner, and offers View and Comment over the workspaces it owns", async () => {
@@ -520,6 +541,14 @@ describe("families never mix", () => {
     await expect(f.h.linkAuthority.personal(withoutKey)).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("refuses a token at another workspace's address, even one in the agent's reach", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
+    await expect(f.h.linkAuthority.personal(agentRequest(agent.accessToken, resourceFor(WS_B))))
+      .rejects.toMatchObject({ code: "not_found" });
+    await expectPersonal(f, agent).resolves.toMatchObject({ connectionId: agent.connectionId });
+  });
+
   it("refuses an agent's token at the owner's routes", async () => {
     const f = await fixture();
     const signed = await signIn(f);
@@ -638,6 +667,14 @@ describe("revocation", () => {
     expect(count(f, "sync_relay_personal_agent_connections", "connection_id = ?", agent.connectionId)).toBe(0);
   });
 
+  it("refuses a refresh from another client, and keeps the token for its own", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const otherClientId = await registerClient(f);
+    await expectRefused(await refresh(f, otherClientId, agent.refreshToken, agent.resource));
+    await ok(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
+  });
+
   it("refuses a request, write, redemption, and refresh once a reset commits, before any notification", async () => {
     const f = await fixture();
     const agent = await signIn(f);
@@ -697,6 +734,7 @@ describe("revocation", () => {
     expect(current.fenceEpoch).toBe(1);
     const currentLive = running(f, current, [WS_A], "live");
     const currentStream = running(f, current, [WS_A]);
+    const before = (await roster(f)).revision;
 
     f.fence.listener!.onChange(change);
     expect(oldStream).toHaveBeenCalledTimes(1);
@@ -707,6 +745,41 @@ describe("revocation", () => {
     expect(connectionTokens(f, current.connectionId)).toBe(2);
     await expectPersonal(f, current).resolves.toMatchObject({ connectionId: current.connectionId });
     expect(f.storage.readCredentialFencePosition()).toBe(change.changedAtMs);
+    // The owner sees the old agent signed out, and the one signed in at the new fence still active.
+    const after = await roster(f);
+    expect(after.revision).toBe(before + 1);
+    expect(new Map(after.agents.map((agent) => [agent.agentId, agent.status]))).toEqual(new Map([
+      [old.agentId, "signed_out"],
+      [current.agentId, "active"],
+    ]));
+  });
+
+  it("signs out each agent a password change left with nothing to sign in with, once", async () => {
+    const f = await fixture();
+    const left = await signIn(f);
+    const again = await signIn(f);
+    const waiting = await signIn(f);
+    const change = f.fence.changePassword(OWNER, NEW_PASSWORD);
+    // After the change, one agent signs in again, and the owner approves another's sign-in that it hasn't redeemed.
+    const newSignIn = { password: NEW_PASSWORD, session: "owner-new-session" };
+    await signIn(f, { ...newSignIn, clientId: again.clientId, agent: { kind: "existing", agentId: again.agentId } });
+    const code = await approve(f, { ...newSignIn, clientId: waiting.clientId, agent: { kind: "existing", agentId: waiting.agentId } });
+    const before = (await roster(f)).revision;
+
+    f.fence.listener!.onChange(change);
+    const after = await roster(f);
+    expect(after.revision).toBe(before + 1);
+    expect(new Map(after.agents.map((agent) => [agent.agentId, agent.status]))).toEqual(new Map([
+      [left.agentId, "signed_out"],
+      [again.agentId, "active"],
+      [waiting.agentId, "active"],
+    ]));
+
+    // The same notice again changes nothing.
+    f.fence.listener!.onChange(change);
+    expect((await roster(f)).revision).toBe(after.revision);
+    // The approved sign-in still redeems: its agent kept its epoch.
+    await ok(await redeem(f, { clientId: waiting.clientId, ...code }));
   });
 
   it("ends running work while the notification channel is down, and keeps checking the fence directly", async () => {

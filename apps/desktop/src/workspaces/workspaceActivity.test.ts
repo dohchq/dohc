@@ -8,6 +8,7 @@ import {
   createWorkspaceActivity as createPhysicalWorkspaceActivity,
   WorkspaceActivityState,
   type ActivityWorkspace,
+  type WorkspaceActivityOptions,
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity, idleObservation } from "./workspaceActivity.testSupport";
@@ -1090,6 +1091,87 @@ describe("workspaceActivity cloud sync nudge", () => {
       expect(status.state).not.toBe("sign-in-expired");
       expect(engines.built).toHaveLength(1);
       await service.stop(state);
+    });
+  });
+
+  describe("the workspace name the server shows the owner", () => {
+    type SendWorkspaceName = NonNullable<WorkspaceActivityOptions["sendWorkspaceName"]>;
+    const syncEngine = () => ({
+      start: vi.fn(async () => {}), queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
+      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      snapshot: () => ({
+        syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
+        conflictCount: 0, authExpired: false, sharingDeclined: [],
+      }),
+      stop: async () => {},
+    });
+
+    it("sends the name once each time a sync engine attaches, and not without one", async () => {
+      let signedIn = true;
+      const build = () => (signedIn ? syncEngine() : null);
+      const sendWorkspaceName = vi.fn<SendWorkspaceName>(async () => {});
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => ({}),
+        engineFor: build,
+        sendWorkspaceName,
+      });
+      const state = new WorkspaceActivityState();
+      await service.open(workspace(), state);
+      expect(sendWorkspaceName).toHaveBeenCalledTimes(1);
+      expect(sendWorkspaceName).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "activity-test", rootPath: root }));
+
+      // Signing in again attaches a new engine. Reconciling while one is attached sends nothing.
+      await service.stopEngine(state, false);
+      service.reconcileCloud(state, build, false);
+      service.reconcileCloud(state, build, false);
+      expect(sendWorkspaceName).toHaveBeenCalledTimes(2);
+
+      // Turning sync on attaches one more, and only once.
+      await service.stopEngine(state, false);
+      await service.enableCloud(workspace(), state);
+      await service.enableCloud(workspace(), state);
+      expect(sendWorkspaceName).toHaveBeenCalledTimes(3);
+
+      // Signed out, no engine attaches and no name goes out.
+      await service.stopEngine(state, false);
+      signedIn = false;
+      service.reconcileCloud(state, build, false);
+      expect(sendWorkspaceName).toHaveBeenCalledTimes(3);
+      await service.stop(state);
+    });
+
+    it("starts sync when the name can't be sent", async () => {
+      const refused = new Error("not found");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const engines: ReturnType<typeof syncEngine>[] = [];
+      const sendWorkspaceName = vi.fn<SendWorkspaceName>()
+        .mockRejectedValueOnce(refused)
+        .mockImplementationOnce(() => { throw refused; });
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => ({}),
+        engineFor: () => {
+          const engine = syncEngine();
+          engines.push(engine);
+          return engine;
+        },
+        sendWorkspaceName,
+      });
+      const state = new WorkspaceActivityState();
+      try {
+        await service.open(workspace(), state);
+        await service.stopEngine(state, false);
+        await service.enableCloud(workspace(), state);
+        await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("workspace name"), refused);
+        expect(engines).toHaveLength(2);
+        for (const engine of engines) expect(engine.start).toHaveBeenCalledOnce();
+        expect(SyncStatusResult.parse(service.getStatus(workspace(), state)).state).toBe("synced");
+      } finally {
+        warn.mockRestore();
+        await service.stop(state);
+      }
     });
   });
 

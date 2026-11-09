@@ -238,6 +238,9 @@ export function createAgentConnectionRoutes(input: {
     if (body.codeChallengeMethod !== "S256" || !PKCE_CHALLENGE_PATTERN.test(codeChallenge)) throw new Refused();
     const state = optionalText(body.state, AGENT_STATE_CHAR_LIMIT);
     if (isPersonalResource(resource)) {
+      // Anyone who knows a workspace id can begin one, and each pushes out the
+      // workspace's oldest pending request at the cap, so every begin counts.
+      if (!input.linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
       const workspaceId = personalWorkspaceFromResource(resource);
       const requestId = newLinkBearer();
       // Personal sign-in needs the fence store, which consent checks the password against.
@@ -252,10 +255,7 @@ export function createAgentConnectionRoutes(input: {
         workspaceId,
         nowMs: nowMs(),
       });
-      if (!begun) {
-        if (!input.linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
-        throw new Refused();
-      }
+      if (!begun) throw new Refused();
       return jsonResponse({ ok: true, requestId });
     }
     const link = linkFromResource(resource);

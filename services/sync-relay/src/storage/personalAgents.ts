@@ -702,11 +702,26 @@ export function changePersonalAgent(storage: StorageContext, input: {
 // --- revocation ----------------------------------------------------------------
 
 /**
+ * Signs out the account's active agents left with no connection and no
+ * unredeemed code, at a new epoch. Bumps the roster once if any changed.
+ */
+function signOutAgentsWithoutCredentials(storage: StorageContext, ownerUserId: string): void {
+  const signedOut = storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'signed_out', epoch = epoch + 1
+    WHERE owner_user_id = ? AND status = 'active'
+      AND NOT EXISTS (SELECT 1 FROM sync_relay_personal_agent_connections AS c
+        WHERE c.agent_id = sync_relay_personal_agents.agent_id)
+      AND NOT EXISTS (SELECT 1 FROM sync_relay_personal_agent_authorizations AS a
+        WHERE a.agent_id = sync_relay_personal_agents.agent_id AND a.status != 'redeemed')`).run(ownerUserId);
+  if (signedOut.changes > 0) bumpRoster(storage, ownerUserId);
+}
+
+/**
  * After a password change commits at `epoch`: deletes the account's
- * connections, tokens, and unredeemed authorizations from an earlier fence.
- * Credentials at `epoch` or later stay, so a late notice can't remove an
- * agent that signed in after the change. Returns the reach of the agents
- * that held them.
+ * connections, tokens, and unredeemed authorizations from an earlier fence,
+ * then signs out each active agent left with none. Credentials at `epoch` or
+ * later stay, and so does their agent's status, so a late notice can't remove
+ * an agent that signed in after the change. Returns the reach of the agents
+ * that held the deleted credentials.
  */
 export function revokePersonalCredentialsBelowFence(storage: StorageContext, ownerUserId: string, epoch: number): string[] {
   return storage.tx(() => {
@@ -721,6 +736,7 @@ export function revokePersonalCredentialsBelowFence(storage: StorageContext, own
     storage.db.prepare("DELETE FROM sync_relay_personal_agent_connections WHERE owner_user_id = ? AND fence_epoch < ?").run(ownerUserId, epoch);
     storage.db.prepare(`DELETE FROM sync_relay_personal_agent_authorizations
       WHERE owner_user_id = ? AND fence_epoch < ? AND status != 'redeemed'`).run(ownerUserId, epoch);
+    signOutAgentsWithoutCredentials(storage, ownerUserId);
     return reachWorkspaces(storage, agentIds);
   });
 }
@@ -731,10 +747,8 @@ export function signOutAccountPersonalAgents(storage: StorageContext, ownerUserI
     const agentIds = storage.db.prepare("SELECT agent_id FROM sync_relay_personal_agents WHERE owner_user_id = ?")
       .all(ownerUserId).map(row => String(row.agent_id));
     for (const agentId of agentIds) endAgentCredentials(storage, agentId);
-    storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'signed_out', epoch = epoch + 1
-      WHERE owner_user_id = ? AND status = 'active'`).run(ownerUserId);
     storage.db.prepare("DELETE FROM sync_relay_personal_agent_authorizations WHERE owner_user_id = ? AND status != 'redeemed'").run(ownerUserId);
-    if (agentIds.length > 0) bumpRoster(storage, ownerUserId);
+    signOutAgentsWithoutCredentials(storage, ownerUserId);
     return reachWorkspaces(storage, agentIds);
   });
 }
