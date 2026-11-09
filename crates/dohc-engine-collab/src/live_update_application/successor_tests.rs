@@ -324,6 +324,60 @@ fn a_capture_follows_the_released_chain_tail() {
     assert!(!stale, "a stale capture releases by its exact ID");
 }
 
+/// Capture `f`'s document once with room, then at its exact bytes: the
+/// baseline, the full state and the descriptor, as the relay counts them.
+/// One byte short refuses and writes nothing; the exact bytes capture the
+/// same activation. Returns that capture.
+fn capture_at_its_exact_bytes(f: &mut Fixture, predecessor: Option<&str>) -> ImportedOwnerActivation {
+    let roomy = capture_imported(f, 1_000_000).unwrap();
+    assert_eq!(roomy.source.predecessor_activation_id.as_deref(), predecessor);
+    let descriptor = serde_json::to_string(&roomy.source).unwrap();
+    assert_eq!(roomy.activation_id, format!("ordinary-activation-{}", hex_sha256(descriptor.as_bytes())));
+    let exact = roomy.baseline_bytes.len() + roomy.full_state.len() + descriptor.len();
+    let before = rows(f, &SUCCESSION_WRITES);
+    let short = capture_imported(f, exact - 1);
+    assert!(matches!(short, Err(ApplicationError::ConfiguredByteBudgetExceeded)), "{predecessor:?}: {short:?}");
+    assert_eq!(rows(f, &SUCCESSION_WRITES), before, "{predecessor:?}");
+    let captured = capture_imported(f, exact).unwrap();
+    assert_eq!(captured.activation_id, roomy.activation_id, "{predecessor:?}");
+    captured
+}
+
+/// Round 3b: a capture's descriptor names its predecessor, and the capture
+/// fits at exactly the bytes that descriptor adds, for a root and for each
+/// successor of a chain. Native releases a stopped and a paused activation
+/// the same way, so the two successions stand for Stop then Resume and
+/// Pause then Resume. Each succession keeps the root as the chain's origin
+/// and the accepted history, and leaves only its own activation current.
+#[test]
+fn each_capture_of_a_chain_fits_at_exactly_its_descriptor() {
+    let mut f = imported_fixture();
+    let root = capture_at_its_exact_bytes(&mut f, None).activation_id;
+    f.cut.adoption_id = root.clone();
+    f.adopt().unwrap();
+    let origin = root_adoption(&f);
+    let history = rows(&f, &["live_accepted_updates", "live_accepted_checkpoints"]);
+    let mut predecessor = root.clone();
+    for resumed in ["after Stop", "after Pause"] {
+        release_parked(&mut f);
+        returned(&mut f);
+        let captured = capture_at_its_exact_bytes(&mut f, Some(&predecessor));
+        let id = follow(&mut f, captured);
+        assert!(!f.adopt().unwrap().adoption_replayed, "{resumed}");
+        assert_eq!(root_adoption(&f), origin, "{resumed}: the root stays the chain's origin");
+        assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 1, "{resumed}");
+        assert_eq!(rows(&f, &["live_accepted_updates", "live_accepted_checkpoints"]), history, "{resumed}");
+        let (origin_id, named, _, current, _) = succession_row(&f, &id);
+        assert_eq!(
+            (origin_id.as_deref(), named.as_deref(), current),
+            (Some(root.as_str()), Some(predecessor.as_str()), true),
+            "{resumed}"
+        );
+        assert!(!succession_row(&f, &predecessor).3, "{resumed}: its predecessor stays released");
+        predecessor = id;
+    }
+}
+
 /// Sol's plan §5, adoption: the successor of the exact released tail adopts
 /// its prefix. It inserts its own activation under the lineage's origin,
 /// names the binding, and leaves the root adoption and the accepted history

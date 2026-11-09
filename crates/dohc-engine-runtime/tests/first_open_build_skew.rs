@@ -6,10 +6,14 @@
 //! names differs, so the parent's settles to the engine's canonical text and
 //! today's to the file.
 //!
-//! The first base on the relay wins. In both arrival orders, with the
-//! desktop's document closed or open, every device ends on that one lineage,
-//! every relayed op is answered for good, what the owner typed survives, and
-//! a capture of the settled file completes. An untouched seed adopts a winner
+//! The relay writes its base under the `service-host:first-open:` origin it
+//! derives from the source. The first base on the relay wins. In both arrival
+//! orders, with the desktop's document closed or open, every device, an
+//! ordinary peer and a hosted replica among them, ends on that one lineage,
+//! imports and answers that origin's base, and answers every relayed op for
+//! good. What the owner typed survives, a capture of the settled file
+//! completes, and each replica holding the winner as an import captures one
+//! activation of it with the same Y.Doc state. An untouched seed adopts a winner
 //! whose bytes are the file's quietly; the parent's base, which settles to
 //! other bytes, opens a conflict beside the file.
 //!
@@ -42,7 +46,10 @@ const WS: &str = "workspace";
 const OBJECT: &str = "object";
 const HEAD_MOMENT: &str = "head-moment";
 const PATH: &str = "docs/a.md";
-const RELAY_ORIGIN: &str = "relay-first-open";
+const NAMESPACE: &str = "relay";
+const RELAY_EPOCH: &str = "epoch-relay";
+const RELAY_STREAM: &str = "stream-relay";
+const HOST: &str = "service-host:host";
 const TYPED_BEFORE: &str = "Typed before adoption";
 const TYPED_AFTER: &str = "Typed after adoption";
 const TYPED_STALE: &str = "Typed on the seeded claim after takeover";
@@ -155,6 +162,86 @@ fn prepare(db: &Path, head: Option<&str>) {
     }
 }
 
+/// A hosted replica that hosts the note before any of it arrives.
+fn prepare_host(db: &Path) {
+    prepare(db, None);
+    let mut store = EngineStore::open(db, 9_310).expect("open host");
+    dohc_engine_sync::create_hosted_replica(
+        &mut store,
+        WS,
+        HOST,
+        RELAY_EPOCH,
+        RELAY_STREAM,
+        1,
+        &NoFaults,
+    )
+    .expect("become a hosted replica");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO hosted_documents (workspace_id, object_id, path, state, scope_generation) \
+                 SELECT workspace_id, ?2, ?3, 'ready', scope_generation FROM hosted_replicas \
+                 WHERE workspace_id = ?1",
+                [WS, OBJECT, PATH],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("host the note");
+}
+
+/// Where a pull of the first `through` relayed ops committed `db`'s fetch.
+fn commit_fetch(db: &Path, through: usize) {
+    let mut store = EngineStore::open(db, 9_311).expect("open store");
+    let hosted = dohc_engine_sync::is_hosted_replica(&store, WS).expect("replica type");
+    let through = i64::try_from(through).expect("cursor");
+    store
+        .write_with(&NoFaults, |tx| {
+            if hosted {
+                tx.execute(
+                    "UPDATE hosted_replicas SET main_cursor = ?2 WHERE workspace_id = ?1",
+                    rusqlite::params![WS, through],
+                )
+            } else {
+                tx.execute(
+                    "INSERT INTO sync_relay_cursors \
+                     (workspace_id, cursor, replication_epoch, stream_identity) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT(workspace_id) DO UPDATE SET \
+                     cursor = excluded.cursor, replication_epoch = excluded.replication_epoch, \
+                     stream_identity = excluded.stream_identity",
+                    rusqlite::params![WS, through.to_string(), RELAY_EPOCH, RELAY_STREAM],
+                )
+            }
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("commit the fetch");
+}
+
+/// Capture the note as an ordinary activation, as the relay asks a replica to.
+async fn capture(
+    db: &Path,
+    reader: &ScratchDir,
+    key: &DocKey,
+) -> Result<dohc_engine_collab::live_update_application::ImportedOwnerActivation, RuntimeError> {
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(db, 1).expect("open actor").actor;
+    support::configure_witness_reader(&handle, reader).await;
+    let captured = handle
+        .capture_imported_owner_activation(
+            NAMESPACE.to_owned(),
+            key.clone(),
+            PATH.to_owned(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await;
+    supervisor.close(db).expect("close actor");
+    captured
+}
+
 /// Record `update` as the desktop editor's next write, made on `lineage`.
 async fn record(
     handle: &ActorHandle,
@@ -242,14 +329,43 @@ fn is_base(envelope: &ReplicationEnvelope) -> bool {
     envelope.payload["isBaseState"] == serde_json::Value::Bool(true)
 }
 
+/// The origin the relay writes the note's first base under, as
+/// `firstOpenOrigin` in `storage/firstOpenEligibility.ts` derives it from the
+/// source it read.
+fn first_open_origin(markdown: &str) -> String {
+    let identity = serde_json::to_string(&[
+        "dohc-first-open-v1",
+        NAMESPACE,
+        WS,
+        "main",
+        OBJECT,
+        RELAY_EPOCH,
+        RELAY_STREAM,
+        PATH,
+        HEAD_MOMENT,
+        &hex_sha256(markdown.as_bytes()),
+    ])
+    .expect("identity");
+    let origin = format!(
+        "service-host:first-open:{}",
+        hex_sha256(identity.as_bytes())
+    );
+    assert!(origin.starts_with(dohc_engine_sync::SERVICE_HOST_ORIGIN_PREFIX));
+    origin
+}
+
 /// The relay's first-open base, shaped like the desktop's.
-fn relay_base(desktop_base: &ReplicationEnvelope, bytes: &[u8]) -> (ReplicationEnvelope, Vec<u8>) {
+fn relay_base(
+    desktop_base: &ReplicationEnvelope,
+    origin: &str,
+    bytes: &[u8],
+) -> (ReplicationEnvelope, Vec<u8>) {
     let claim = hex_sha256(bytes);
     let mut payload = desktop_base.payload.clone();
     payload["updateBlobSha256"] = claim.clone().into();
     payload["lineageClaimId"] = claim.into();
     let envelope = ReplicationEnvelope {
-        origin_id: RELAY_ORIGIN.to_owned(),
+        origin_id: origin.to_owned(),
         origin_seq: 0,
         payload,
         recorded_at_ms: 300,
@@ -361,6 +477,20 @@ async fn deliver(
     );
 }
 
+/// The ops `store` imported under `origin`, each with how it was answered.
+fn imported(store: &EngineStore, origin: &str) -> Vec<(i64, String)> {
+    store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_seq, apply_disposition FROM replication_log \
+                 WHERE origin_id = ?1 AND imported = 1 ORDER BY origin_seq",
+            )?
+            .query_map([origin], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()
+        })
+        .expect("read imported ops")
+}
+
 fn count(store: &EngineStore, sql: &str) -> i64 {
     store
         .read_with(|conn| conn.query_row(sql, [], |row| row.get(0)))
@@ -411,14 +541,18 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     } else {
         (&current.1, &parent.1)
     };
-    let (d_scratch, p_scratch) = (
+    let (d_scratch, p_scratch, h_scratch) = (
+        ScratchDir::new().expect("scratch"),
         ScratchDir::new().expect("scratch"),
         ScratchDir::new().expect("scratch"),
     );
     let d = engine_db_path(&d_scratch).expect("desktop db");
     let p = engine_db_path(&p_scratch).expect("peer db");
+    let h = engine_db_path(&h_scratch).expect("host db");
     prepare(&d, Some(markdown));
     prepare(&p, None);
+    prepare_host(&h);
+    let origin = first_open_origin(markdown);
     let witness = support::witness_reader(&d_scratch);
 
     // The desktop opens the note and seeds it under the client the engine names.
@@ -461,7 +595,7 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         is_base(&desktop_ops[0].0),
         "{case:?}: the desktop originated its base"
     );
-    let relayed = relay_base(&desktop_ops[0].0, relay_bytes);
+    let relayed = relay_base(&desktop_ops[0].0, &origin, relay_bytes);
     let mut log = if case.relay_base_first {
         [vec![relayed], desktop_ops.clone()].concat()
     } else {
@@ -484,12 +618,12 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     // applies the relay's base. Its own ops are not delivered back.
     let own_base = log
         .iter()
-        .find(|(op, _)| op.origin_id != RELAY_ORIGIN && is_base(op))
+        .find(|(op, _)| op.origin_id != origin && is_base(op))
         .expect("own base");
     learn_own_base_position(&mut d_store, &key, &own_base.0);
     let from_relay: Vec<_> = log
         .iter()
-        .filter(|(op, _)| op.origin_id == RELAY_ORIGIN)
+        .filter(|(op, _)| op.origin_id == origin)
         .cloned()
         .collect();
     deliver(
@@ -627,23 +761,55 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
     }
     log.extend(typed);
 
-    // A peer with no copy of the note pulls the whole log.
+    // A peer with no copy of the note and a host that serves it pull the
+    // whole log.
     let mut p_store = EngineStore::open(&p, 9_303).expect("open peer");
     deliver(&mut p_store, &key, &log, false, &witness, case).await;
+    let mut h_store = EngineStore::open(&h, 9_307).expect("open host");
+    deliver(&mut h_store, &key, &log, false, &witness, case).await;
 
     let d_store = EngineStore::open(&d, 9_304).expect("open desktop");
-    for store in [&d_store, &p_store] {
+    for store in [&d_store, &p_store, &h_store] {
         assert_eq!(
             active_lineage(store),
             (Some(winner.clone()), "exact".to_owned()),
             "{case:?}: one lineage"
         );
+        assert_eq!(
+            document(store, &key),
+            document(&d_store, &key),
+            "{case:?}: one document"
+        );
+    }
+    // Each replica takes the relay's first-open base as another origin's op
+    // and answers it for good. An ordinary replica acknowledges the origin;
+    // a hosted one answers through its log row alone and writes nothing
+    // under its own origin.
+    for (name, store, ack) in [
+        ("desktop", &d_store, 0),
+        ("peer", &p_store, 0),
+        ("host", &h_store, -1),
+    ] {
+        assert_eq!(
+            imported(store, &origin),
+            [(0, "applied".to_owned())],
+            "{case:?}: {name}"
+        );
+        assert_eq!(
+            dohc_engine_sync::read_replication_acked_seq(store, WS, &origin).expect("ack"),
+            ack,
+            "{case:?}: {name}"
+        );
     }
     assert_eq!(
-        document(&d_store, &key),
-        document(&p_store, &key),
-        "{case:?}: one document"
+        count(
+            &h_store,
+            "SELECT COUNT(*) FROM replication_log WHERE imported = 0"
+        ),
+        0,
+        "{case:?}: the host writes nothing of its own"
     );
+    drop(h_store);
     let conflicts = count(
         &d_store,
         "SELECT COUNT(*) FROM conflicts WHERE status='open'",
@@ -767,6 +933,69 @@ async fn race(case: Case, parent: &(String, Vec<u8>), current: &(String, Vec<u8>
         conflicts,
         "{case:?}"
     );
+    drop(d_store);
+    if case.typing != Typing::Untouched {
+        return;
+    }
+
+    // Each replica holding the winner's base as an import captures the
+    // settled note as an activation of that one lineage, on that base, with
+    // one Y.Doc state. The desktop holds an imported base only where the
+    // relay's won, and an open conflict refuses its capture.
+    let base = &log[0].0;
+    let mut captured = Vec::new();
+    for (name, db) in [("peer", &p), ("host", &h)] {
+        commit_fetch(db, log.len());
+        let activation = capture(db, &d_scratch, &key)
+            .await
+            .unwrap_or_else(|error| panic!("{case:?}: {name} capture {error:?}"));
+        captured.push((name, activation));
+    }
+    if desktop_lost {
+        commit_fetch(&d, log.len());
+        let activation = capture(&d, &d_scratch, &key).await;
+        if conflict_opens {
+            assert!(
+                matches!(
+                    activation,
+                    Err(RuntimeError::Domain(
+                        dohc_engine_domain::DomainError::InvalidInput {
+                            reason: "ydoc-conflict-open"
+                        }
+                    ))
+                ),
+                "{case:?}: {activation:?}"
+            );
+        } else {
+            let activation =
+                activation.unwrap_or_else(|error| panic!("{case:?}: desktop capture {error:?}"));
+            captured.push(("desktop", activation));
+        }
+    }
+    let state = captured[0].1.source.full_state_digest.clone();
+    for (name, activation) in &captured {
+        let source = &activation.source;
+        assert_eq!(
+            (
+                source.lineage_claim_id.as_str(),
+                source.base_origin_id.as_str(),
+                source.base_origin_seq,
+                Some(source.base_relay_seq),
+            ),
+            (
+                winner.as_str(),
+                base.origin_id.as_str(),
+                base.origin_seq,
+                base.relay_seq,
+            ),
+            "{case:?}: {name}"
+        );
+        assert_eq!(source.predecessor_activation_id, None, "{case:?}: {name}");
+        assert_eq!(
+            source.full_state_digest, state,
+            "{case:?}: {name} converges"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
