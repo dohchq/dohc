@@ -52,7 +52,7 @@ type FirstOpenIntegrityCode = (typeof FIRST_OPEN_INTEGRITY_CODES)[number];
 /** The shape of the code a service host gives an `ordinary-activation-refused` answer, at most 128 characters. */
 export const FIRST_OPEN_ACTIVATION_CODE = /^[a-z0-9][a-z0-9-]{0,127}$/;
 /** The code an `ordinary-activation-refused` answer carries for an engine code that has no stable shape. */
-export const FIRST_OPEN_UNKNOWN_ACTIVATION_CODE = "unknown";
+const FIRST_OPEN_UNKNOWN_ACTIVATION_CODE = "unknown";
 
 /**
  * The stable code for an engine's own refusal code, such as `LIMIT_EXCEEDED`:

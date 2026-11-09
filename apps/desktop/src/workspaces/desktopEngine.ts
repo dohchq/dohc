@@ -350,7 +350,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             activeOwnerWorkspace = workspaceId;
             try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
               const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
-              if (!session) {setOwnerDeliveryStatus(workspaceId, undefined); setOwnerFirstOpenRefusals(workspaceId, []); return {documentCount: 0, acknowledged: false};}
+              if (!session) {setOwnerDeliveryStatus(workspaceId, undefined); setOwnerFirstOpen(workspaceId, []); return {documentCount: 0, acknowledged: false};}
               const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
               const check = () => {
                 signal.throwIfAborted(); operation.assertCurrent(); session.assertCurrent();
