@@ -1,12 +1,16 @@
-import { lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
 // Replicas need Landlock and the relay's outer seccomp filter. PR checks run these files
 // in their confinement job, under Docker's default profile, and leave them out elsewhere.
 const confinementSuites = ["src/replicaJournal.integration.test.ts", "src/replicaJournal.native.test.ts",
   "src/replicaSupervisor.native.test.ts", "src/replicaSupervisor.test.ts"];
+// A renamed suite would otherwise drop out of the confinement job without failing it.
+const missing = confinementSuites.filter(suite => !existsSync(fileURLToPath(new URL(suite, import.meta.url))));
+if (missing.length) throw new Error(`Confinement suites not found: ${missing.join(", ")}.`);
 const selection = process.env.DOHC_CONFINEMENT_SUITES;
 if (selection !== undefined && selection !== "only" && selection !== "exclude") {
   throw new Error(`DOHC_CONFINEMENT_SUITES must be "only" or "exclude", not ${JSON.stringify(selection)}.`);
