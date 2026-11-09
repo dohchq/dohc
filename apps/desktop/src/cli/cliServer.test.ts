@@ -1469,6 +1469,8 @@ describe("CLI socket server", () => {
     notices.mockResolvedValueOnce([
       { id: "file", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
         createdAtMs: 1, read: false, opens: { to: "file" as const, path: "plans/day-1.md" } },
+      { id: "done", kind: "mention", title: "Bea mentioned you in done", body: "When done, close the window.", sender: null,
+        createdAtMs: 1, read: false, opens: { to: "file" as const, path: "done" } },
       { id: "switch", kind: "automation-switched-off", title: "Reminders stopped", body: "", sender: null,
         createdAtMs: 0, read: false, opens: { to: "automation-controls" as const, automation: "reminders", sharedFile: "trip/automations.yaml" } },
     ] as never);
@@ -1476,8 +1478,10 @@ describe("CLI socket server", () => {
     const nested = await invokeAny("notices", { cwd: join(workspaceRoot, "plans"), actor: "agent" });
     expect(nested.notices.map(({ opens }) => opens)).toEqual([
       { to: "file", path: "day-1.md" },
+      { to: "file", path: "../done" },
       { to: "automation-controls", automation: "reminders", sharedFile: "../trip/automations.yaml" },
     ]);
+    expect(nested.notices[1]?.body).toBe("When done, close the window.");
     const outside = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "notices", args: { cwd: tempRoot, actor: "agent" } });
     expect(outside).toMatchObject({ ok: false, error: expect.stringContaining("not inside a dohc workspace") });
     expect(notices).toHaveBeenCalledTimes(2);

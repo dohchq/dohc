@@ -2507,7 +2507,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["notices", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2647,8 +2647,11 @@ async function dispatchWorkspace(
   switch (request.verb) {
     case "notices": {
       if (!options.notices) throw new CliCommandError("Notices are unavailable.");
+      // Only where a row opens is a path. Its title and text stay as sent.
+      const paths = await callerPaths(context, request.args.cwd);
       const notices = await options.notices(context.workspaceId);
-      return { notices: notices.map(({ opens, ...notice }) => ({ ...notice, opens: opens && cliNoticeOpens(opens) })) };
+      return { notices: notices.map(({ opens, ...notice }) => ({ ...notice,
+        opens: opens && (opens.to === "chat" ? cliNoticeOpens(opens) : paths.result(opens) as CliNoticeOpens) })) };
     }
     case "stopSync":
       if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
