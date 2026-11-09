@@ -17,7 +17,7 @@ export interface ShareRowAction {
 // One share, as on the desktop: what it covers, then a second line with its status, if it isn't live, and who
 // can do what. VoiceOver reads it as one element: name, who, status. A row with actions opens them in a sheet
 // on tap; VoiceOver has the same actions in the rotor. At accessibility text sizes the text takes the row's width and
-// the faces and ellipsis move to a line under it, as Notices' controls do (the DL's b1).
+// the faces and ellipsis move to a line under it, as Notices' controls do.
 export const ShareRow = memo(function ShareRow({ kind, name, who, spokenWho, status, people, actions, onAction, copied = false }: {
   kind: string; name: string; who: string | null; spokenWho?: string; status: ShareStatus | null; people: readonly SamplePerson[];
   actions: readonly ShareRowAction[]; onAction(name: string | null): void;

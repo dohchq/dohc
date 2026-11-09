@@ -1,6 +1,6 @@
 import XCTest
 
-// An agent's mark and name open its card as a small sheet, as the desktop's badge does (the DL's ruling C, Nov 8). The
+// An agent's mark and name open its card as a small sheet, as the desktop's badge does. The
 // sheet closes by swiping down or tapping outside it, and the header has no "Members and details".
 final class AgentCardTests: XCTestCase {
   private let scoutCard = "Scout, Connected agent, Claude Code 2.1 · Claude Opus 5.5 (as reported)"

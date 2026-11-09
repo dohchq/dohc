@@ -21,9 +21,11 @@ Android has been run since the host was added.
 
 ## Controls that act
 
-Every pill, Copy and menu item in a row a person can see must act. A sample shown only in development builds
-may keep a control the server will drive later; any installable build (TestFlight included) hides what can't
-act. `src/notices/rowAccessibility.test.ts` holds that each action a Notices row offers has a handler.
+The app shows its sample data only in a sample build: a development build, or one made with
+`EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`). Any other build shows one screen
+saying it can't connect to a server yet, so an installable build never presents sample data as someone's work. A
+sample build may keep a control the server will drive later. `src/notices/rowAccessibility.test.ts` holds that each
+action a Notices row offers has a handler.
 
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to
 expo-clipboard before an upgrade removes it.

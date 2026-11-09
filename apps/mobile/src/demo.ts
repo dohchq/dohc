@@ -48,7 +48,7 @@ export function useSyncProblem(): SyncProblem | null {
       return () => { clearTimeout(show); clearTimeout(clear); };
     }
     // For the return trace: the band shows 2 s in, then turns off and on every 15 s, so one launch holds many returns.
-    // A trial needs up to about 10 s to put the list in place before it leaves (round 54), so 6 s was too short.
+    // A trial needs up to about 10 s to put the list in place before it leaves, so 6 s was too short.
     if (demoMode === "band-cycle" || demoMode === "band-cycle-scroll") {
       let shown = false;
       const start = setTimeout(() => setProblem("serverUnreachable"), 2000);

@@ -63,7 +63,7 @@ final class PageEditingTests: XCTestCase {
   // A taller keyboard (emoji) covers more of the page; the line being typed stays above it.
   @MainActor
   func testSwitchingToTheEmojiKeyboardKeepsTheLineAboveIt() throws {
-    // The RO's ruling (d), round 51: skipped until a round runs with no new report. Not covered, not passed.
+    // Skipped, so this covers nothing until it is re-enabled. Not covered, not passed.
     throw XCTSkip("Not covered: the system's emoji keyboard crashes iMessageAppsViewService in this simulator (iMessageAppsViewService-2026-11-06-015440.ips)")
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "page"]
@@ -120,7 +120,7 @@ final class PageEditingTests: XCTestCase {
 
   // The page scrolls inside its own container, so the status bar's scroll-to-top has nothing to move. Known limit:
   // react-native-webview keeps its own scroll view as a status-bar target, and with a second target on screen iOS
-  // ignores the tap, so a stand-in can't take it without native code (round 34). This fails until that changes.
+  // ignores the tap, so a stand-in can't take it without native code. This fails until that changes.
   @MainActor
   func testStatusBarTapScrollsThePageToTheTop() {
     XCTExpectFailure("Known limit: a status bar tap doesn't reach a page's own scroll container")

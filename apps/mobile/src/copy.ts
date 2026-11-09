@@ -8,7 +8,7 @@ import { AccessibilityInfo, Clipboard } from "react-native";
 // desktop's "Copied"; the control that copied shows a check for a moment.
 export function copyText(text: string) {
   Clipboard.setString(text);
-  // A light tap, as the check is neutral: a copy is a small acknowledgment, not a finished task (the DL).
+  // A light tap, as the check is neutral: a copy is a small acknowledgment, not a finished task.
   void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   AccessibilityInfo.announceForAccessibility(documentWords.copied);
 }

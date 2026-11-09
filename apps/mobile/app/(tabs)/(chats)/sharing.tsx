@@ -18,7 +18,7 @@ import { useTheme } from "../../../src/theme";
 
 // Stands in for when the server last answered; the simulator's clock reads 9:41.
 const CHECKED_AT = "9:41";
-// A failed End share's toast title fits 2 lines (the DL's ruling): the file's name and each person's are cut in the
+// A failed End share's toast title fits 2 lines: the file's name and each person's are cut in the
 // middle to these many characters, and the title stops at 2 lines.
 const TOAST_FILE = 20;
 const TOAST_PERSON = 16;
@@ -32,7 +32,7 @@ const actionsOf = (share: GrantedShare) => endable(share) ? [
 
 // The desktop's Sharing view: what this workspace shares, then what's shared with you. A share named to
 // people ends here, with Undo for 10 minutes. Links and chats end where they were made. The sync band is drawn as
-// on Notices (the DL's round 3 item 9): fixed at the bar's bottom in the native host, over the lanes.
+// on Notices: fixed at the bar's bottom in the native host, over the lanes.
 export default function Sharing() {
   const theme = useTheme();
   const band = useSyncBandHost({ ready: true, opened: useIsFocused() });

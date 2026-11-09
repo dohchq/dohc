@@ -4,7 +4,7 @@ import { useEffect, type RefObject } from "react";
 import { useFrameCallback, useSharedValue } from "react-native-reanimated";
 import { demoMode } from "./demo";
 
-// Design review only, on the first screen, for the design lead's launch numbers:
+// Review only, on the first screen, for launch numbers:
 // - "delay-<ms>" opens a page that long after the first screen draws, timed from that moment.
 // - "frames" scrolls the list from the first draw and records UI-thread frame intervals for 2 s, written to
 //   frames.json: how smooth the first screen stays while WebKit starts.

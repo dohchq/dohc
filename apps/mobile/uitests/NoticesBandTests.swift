@@ -6,7 +6,7 @@ import XCTest
 // holds the rows whether or not the band shows, so nothing remounts. When the band arrives or leaves, at the start or
 // mid-list, the row at the top of the view stays the top row and moves once by exactly the band's height; under
 // Reduce Motion it moves at once. VoiceOver reads the title, then the band, then the rows. With the band,
-// the list still ends at the tab bar, and Mark all read stays in the bar. Frames are kept for the design lead.
+// the list still ends at the tab bar, and Mark all read stays in the bar. Frames are kept for review.
 final class NoticesBandTests: XCTestCase {
   private func keep(_ app: XCUIApplication, _ name: String) {
     let theme = XCUIDevice.shared.appearance == .dark ? "dark" : "light"
@@ -121,7 +121,7 @@ final class NoticesBandTests: XCTestCase {
   }
 
   /// Drags the list itself down, from just under the band to just above the tab bar. An app-wide swipe starts mid-screen,
-  /// which at AX5 is on the capped band, and scrolls the band instead (round 53c's probe).
+  /// which at AX5 is on the capped band, and scrolls the band instead.
   private func dragListDown(_ app: XCUIApplication) {
     let from = band(app).frame.maxY + 16, to = app.tabBars.firstMatch.frame.minY - 16
     guard to - from > 40 else { return }
@@ -318,7 +318,7 @@ final class NoticesBandTests: XCTestCase {
         assertRightUnderTheBand(app, first, "\(name), \(step)")
         if by > 0 { XCTAssertFalse(folded(app, from: open), "\(name), \(step): the title should be partway, not folded") }
         let tryAgain = app.buttons["Try again"]
-        // Capped at AX5, Try again sits below the words' region, in view without scrolling the band (the DL's a2).
+        // Capped at AX5, Try again sits below the words' region, in view without scrolling the band.
         XCTAssertTrue(band(app).frame.contains(tryAgain.frame.insetBy(dx: 1, dy: 1)), "\(name), \(step): Try again should be wholly in the band at rest (Try again at \(tryAgain.frame), band \(band(app).frame))")
         let middle = CGPoint(x: tryAgain.frame.midX, y: tryAgain.frame.midY)
         XCTAssertTrue(tryAgain.isHittable && band(app).frame.contains(middle), "\(name), \(step): Try again should be tappable where it's drawn (Try again at \(tryAgain.frame), band \(band(app).frame))")
@@ -327,7 +327,7 @@ final class NoticesBandTests: XCTestCase {
         } else if by > 0 {
           XCTAssertGreaterThanOrEqual(indicator(app).frame.minY, band(app).frame.maxY - 1, "\(name), \(step): the indicator should start below the band")
         } else {
-          // The DL, 11:51Z: overscrolled past its start, the band follows the pull and iOS keeps the indicator at the
+          // Overscrolled past its start, the band follows the pull and iOS keeps the indicator at the
           // covered strip's bottom. Released, the list goes back to its start and the indicator to the band's bottom.
           let strip = rest + band(app).frame.height
           XCTAssertGreaterThanOrEqual(indicator(app).frame.minY, strip - 1, "\(name), \(step): overscrolled, the indicator should start at the covered strip's bottom (\(strip))")
@@ -345,9 +345,9 @@ final class NoticesBandTests: XCTestCase {
     }
   }
 
-  // The DL's check of the resting edge the host computes (the bar frame's top plus its sizeThatFits height): at rest, with
+  // Checks the resting edge the host computes (the bar frame's top plus its sizeThatFits height): at rest, with
   // the title open, it must equal the bar's measured edge within 1 pt. The test prints the edge and the tab bar's top;
-  // the round reads the last space the host sent (band-space.json) and checks tab bar top − space against the edge.
+  // a script reads the last space the host sent (band-space.json) and checks tab bar top − space against the edge.
   @MainActor
   private func printRestingEdge(_ size: String?) {
     let app = launch(demo: "band", size.map { ["-UIPreferredContentSizeCategoryName", $0] } ?? [])
@@ -360,8 +360,8 @@ final class NoticesBandTests: XCTestCase {
   @MainActor func testRestingEdgeAtTheLargestDefaultTextSize() { printRestingEdge("UICTContentSizeCategoryXXXL") }
   @MainActor func testRestingEdgeAtAX5() { printRestingEdge("UICTContentSizeCategoryAccessibilityXXXL") }
 
-  // The DL's case: an ordinary scroll through the fold sends no space, since the space between the bar's resting edge and
-  // the tab bar doesn't change with a fold. The test prints when its scrolling starts; the round counts the sends in
+  // An ordinary scroll through the fold sends no space, since the space between the bar's resting edge and
+  // the tab bar doesn't change with a fold. The test prints when its scrolling starts; a script counts the sends in
   // band-space.json after that time and requires none.
   @MainActor
   func testAScrollThroughTheFoldSendsNoSpace() {
@@ -378,7 +378,7 @@ final class NoticesBandTests: XCTestCase {
     print("NOTICES SPACE SCROLL TO \(Int(Date().timeIntervalSince1970 * 1000))")
   }
 
-  // The RO's case: Text Size grows to AX5 while the title is folded. Back at the top, the band is within half the space at
+  // Text Size grows to AX5 while the title is folded. Back at the top, the band is within half the space at
   // the new size, so the resting edge the cap uses wasn't left at the old size, and folded the band stays at the bar.
   @MainActor
   func testChangingTextSizeWhileFoldedKeepsTheCapAndTheFloor() throws {
@@ -392,7 +392,7 @@ final class NoticesBandTests: XCTestCase {
     print("NOTICES TEXT SIZE READY")
     XCTAssertTrue(waitUntil(60) { self.band(app).frame.height > usual * 1.5 }, "The band should grow with Text Size")
     assertUnderTheBar(app, "Folded, after Text Size changed")
-    // At AX5 the list is several thousand points tall (round 53c): drag the list itself until the first row reaches the
+    // At AX5 the list is several thousand points tall: drag the list itself until the first row reaches the
     // band's bottom.
     let first = row(app, titles[0])
     for _ in 0..<30 where !(first.exists && first.frame.minY >= band(app).frame.maxY - 1) { dragListDown(app) }
@@ -413,7 +413,7 @@ final class NoticesBandTests: XCTestCase {
     XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
     let usual = band(app).frame.height
     // On iOS 27 the bar's frame stays at rest partway through the fold, so the band 20 pt above it means the list moved.
-    // A failed precondition ends the test before it signals, so the round never changes Text Size at rest.
+    // A failed precondition ends the test before it signals, so the script never changes Text Size at rest.
     guard waitUntil(5, { abs(self.band(app).frame.minY - (self.barEdge(app) - 20)) <= 1 }) else {
       return XCTFail("Before the change, the band should be 20 pt into the fold (band at \(band(app).frame.minY), bar edge \(barEdge(app)))")
     }
@@ -460,7 +460,7 @@ final class NoticesBandTests: XCTestCase {
 
   // The band's arrival waits while a finger holds the list, so content never jumps under a finger. The drag holds across
   // the moment the band would arrive; the band shows only after the finger lifts. The app records, on its own clock,
-  // when the last finger lifted and when the band first applied, in band-hold.json; the round compares the two.
+  // when the last finger lifted and when the band first applied, in band-hold.json; a script compares the two.
   @MainActor
   func testTheBandWaitsWhileAFingerHoldsTheList() {
     let app = launch(demo: "band-toggle")
@@ -537,7 +537,7 @@ final class NoticesBandTests: XCTestCase {
     // The demo clears the band 32 s after it arrived; Notices is away meanwhile.
     XCTAssertTrue(waitUntil(45) { Date().timeIntervalSince(arrived) > 33 }, "The band's time should pass")
     notices.tap()
-    // The DL's condition: no frame after the return shows the list past its end. Every snapshot for 2 s, as fast as the
+    // No frame after the return shows the list past its end. Every snapshot for 2 s, as fast as the
     // accessibility snapshot allows, has the last row at the tab bar, never above it.
     var readings = 0, gaps: [CGFloat] = [], largest: CGFloat = 0
     let watchUntil = Date().addingTimeInterval(2)
@@ -567,7 +567,7 @@ final class NoticesBandTests: XCTestCase {
   // end. The band-return-scroll demo sends the list to its top the moment Notices regains focus, with no finger on it,
   // within the host's settling. The host must end its settling at that scroll, not pull it back to the end when the
   // title's unfolding changes the inset. The jump unfolds the title, and iOS adds the inset the title gains to the
-  // offset (round 58's trace: the offset at -220 with the inset at 168), so the first row comes to rest between the bar
+  // offset (measured: the offset at -220 with the inset at 168), so the first row comes to rest between the bar
   // and the bar plus the unfolding, and stays there.
   @MainActor
   func testAScrollDuringTheReturnHoldIsNotPulledBack() {
@@ -596,8 +596,8 @@ final class NoticesBandTests: XCTestCase {
   }
 
   // In the middle of the list, the band leaves while Notices is away. Back on Notices, the list has moved up once by the
-  // band's height, into the space the band left, as it does when the band leaves on screen (the DL, Nov 7): the row that
-  // was first below the band is the first row at the top, and it never moves twice (round 56 caught a double move). At
+  // band's height, into the space the band left, as it does when the band leaves on screen: the row that
+  // was first below the band is the first row at the top, and it never moves twice. At
   // the default text size, the largest default one and AX5.
   @MainActor
   func testReturningMidListAfterTheBandLeftKeepsTheFirstVisibleRow() {
@@ -711,7 +711,7 @@ final class NoticesBandTests: XCTestCase {
       let fold = rest - barEdge(app)
       app.terminate()
       // Scrolled by the fold, the title folds. iOS then adds the inset the fold removed to the offset, so the list rests
-      // that far past its start, under the band at its floor (round 53c's probe).
+      // that far past its start, under the band at its floor.
       app = launch(demo: "band-half-fold", extra + ["-dohcBandScroll", "\(fold)"])
       defer { app.terminate() }
       let first = row(app, titles[0])
@@ -719,7 +719,7 @@ final class NoticesBandTests: XCTestCase {
       XCTAssertTrue(waitUntil(5) { self.folded(app, from: open) }, "\(name): scrolled by the fold (\(fold) pt), the title should be folded")
       assertUnderTheBar(app, "Folded, \(name)")
       keep(app, "07-notices-band-folded-\(name.replacingOccurrences(of: " ", with: "-"))")
-      // The DL, 11:51Z: no rest state may hide part of the first row where scrolling can't reveal it. A slow drag back past
+      // No rest state may hide part of the first row where scrolling can't reveal it. A slow drag back past
       // the hidden part, released, must leave the first row whole, right under the band, however the title then rests.
       let hidden = max(0, band(app).frame.maxY - first.frame.minY)
       let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
@@ -731,7 +731,7 @@ final class NoticesBandTests: XCTestCase {
     }
   }
 
-  // The RO's record for round 52: at AX5, Notices opened for the first time from the tab bar with a problem already
+  // At AX5, Notices opened for the first time from the tab bar with a problem already
   // active. Notices is built off screen, so the band shows uncapped and shrinks once when the host reports the space.
   // Records the band's height and the first row's top from the first snapshot on, frames before and after, and
   // requires the move to be one shrink with the row never under the band.
@@ -796,7 +796,7 @@ final class NoticesBandTests: XCTestCase {
     XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
     let tabBar = app.tabBars.firstMatch
     let cap = (tabBar.frame.minY - barEdge(app)) / 2
-    // The DL's a2: the words scroll in a region of whole lines, and Try again stays below them, always in view.
+    // The words scroll in a region of whole lines, and Try again stays below them, always in view.
     let words = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Server unreachable.")).firstMatch
     let tryAgain = app.buttons["Try again"]
     XCTAssertTrue(words.waitForExistence(timeout: 5), "The band's words should be one element")
@@ -835,7 +835,7 @@ final class NoticesBandTests: XCTestCase {
     var rests: [CGFloat] = [], restedTop = startTop
     for _ in 0..<12 {
       // On the words' region: only the words scroll, and a swipe that starts on Try again or the band's edge begins no
-      // drag there (round 61's probe).
+      // drag there.
       region.swipeUp(velocity: .slow)
       guard let top = restingWordsTop(within: 4) else { XCTFail("After a swipe the band's words should come to rest (now \(words.frame.minY))"); break }
       let offset = area.minY - top
@@ -876,7 +876,7 @@ final class NoticesBandTests: XCTestCase {
   }
 
   // With nothing wrong and no notices, the empty list says All clear. Under a problem band it says "No other notices."
-  // instead, without the all-clear check (the DL, 13:58Z), and sits below the band, moved down by exactly the band's
+  // instead, without the all-clear check, and sits below the band, moved down by exactly the band's
   // height: the band's space adds no gap of its own.
   @MainActor
   func testWithTheBandAndNoNoticesTheEmptyListMovesDownByTheBandOnly() {

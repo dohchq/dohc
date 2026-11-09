@@ -9,7 +9,7 @@ const person = (who: string, level: ShareLevel): ShareGrant => ({ via: "named", 
 const link = (level: ShareLevel): ShareGrant => ({ via: "link", level, who: "" });
 
 describe("who can do what with a share", () => {
-  it("says the DL's examples", () => {
+  it("says the desktop's examples", () => {
     expect(grantedWho([person("Maya", "edit")])).toBe("Maya can edit");
     expect(grantedWho([link("view")])).toBe("Anyone with the link can view");
     expect(grantedWho([person("a", "edit"), person("b", "view"), person("c", "edit")])).toBe("2 people can edit, 1 can view");

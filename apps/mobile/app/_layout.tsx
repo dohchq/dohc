@@ -5,6 +5,8 @@ import { Platform, Settings, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { demoMode } from "../src/demo";
+import { NotConnected } from "../src/NotConnected";
+import { sampleBuild } from "../src/sampleBuild";
 import { WarmEditor } from "../src/pages/WarmEditor";
 import { useTheme } from "../src/theme";
 
@@ -21,7 +23,7 @@ export default function RootLayout() {
   // Agent testing on the iOS Simulator, where a link asks before opening the app:
   // `simctl spawn <device> defaults write app.dohc.mobile dohcTestRoute <checks | chat | notices | home | sharing | page | page-budget | page-days | page-journal | page-missing | chat-file | chat-agent>`.
   useEffect(() => {
-    if (Platform.OS !== "ios") return;
+    if (!sampleBuild || Platform.OS !== "ios") return;
     const route: unknown = Settings.get("dohcTestRoute");
     if (route === "checks") router.push("/checks");
     if (route === "chat") router.push({ pathname: "/chat/[id]", params: { id: "g-planning", name: "planning" } });
@@ -34,6 +36,7 @@ export default function RootLayout() {
     if (page) router.push({ pathname: "/page", params: { path: page, t0: String(Date.now()) } });
   }, [router]);
 
+  if (!sampleBuild) return <NotConnected />;
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider value={navigationTheme}>

@@ -103,6 +103,12 @@ export default function Page() {
   const keyboardHeight = useKeyboardState(state => (state.isVisible ? state.height : 0));
   useEffect(() => { web.current?.injectJavaScript(`window.__dohcKeyboard?.(${keyboardHeight}); true;`); }, [keyboardHeight]);
   const endEditing = () => web.current?.injectJavaScript("window.__dohcEndEditing?.(); true;");
+  // A large file has no editor, and a page that didn't load has no web view: both copy the text as it was read.
+  const copyMarkdown = () => {
+    if (!page) return;
+    if (page.large || !web.current) { copyText(page.markdown); return; }
+    web.current.injectJavaScript(`(window.__dohcCopyMarkdown ?? (() => window.ReactNativeWebView?.postMessage('{"kind":"markdownUnavailable"}')))(); true;`);
+  };
   // A page whose view couldn't load shows nothing to read, so it takes the page-level failure, as Couldn't read does.
   // A path with no page stays missing whatever Try again does; Try again clears only a demo's failure.
   const failure: Failure | null = lostPage ? "couldntOpen" : page === undefined ? "noLongerAvailable" : retried ? null : demo.failure;
@@ -130,13 +136,16 @@ export default function Page() {
     return () => clearTimeout(timer);
   }, []);
 
-  // Time from the tap to the first text on screen, kept for the design lead's numbers.
+  // Time from the tap to the first text on screen, kept for launch measurements.
   const handleMessage = (raw: string) => {
     let data: unknown;
     try { data = JSON.parse(raw); } catch { return; }
     if (typeof data !== "object" || data === null || !("kind" in data)) return;
     // The typing report has no time stamp of its own, so it's handled before the timed messages.
     if (data.kind === "typing") { void new File(Paths.document, "page-typing.json").write(JSON.stringify({ path, ...data })); return; }
+    // The editor's answer to Copy as Markdown: the page with the person's edits.
+    if (data.kind === "markdown" && "markdown" in data && typeof data.markdown === "string") { copyText(data.markdown); return; }
+    if (data.kind === "markdownUnavailable") { if (page) copyText(page.markdown); return; }
     if (!("at" in data) || typeof data.at !== "number") return;
     if (data.kind === "fonts") { fontsAt.current = data.at; return; }
     // The page's fonts didn't load, so it didn't draw: the could-not-open strip, and Try again mounts a fresh page.
@@ -180,7 +189,7 @@ export default function Page() {
         {typing ? <Stack.Toolbar.Button variant="done" onPress={endEditing}>Done</Stack.Toolbar.Button> : null}
         <Stack.Toolbar.Button hidden={typing} icon="bubble.left" accessibilityLabel={documentWords.openChat(name)} onPress={() => router.back()} />
         <Stack.Toolbar.Menu hidden={typing} icon="ellipsis" accessibilityLabel={documentWords.documentActions}>
-          <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={() => page && copyText(page.markdown)}>{documentWords.copyAsMarkdown}</Stack.Toolbar.MenuAction>
+          <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={copyMarkdown}>{documentWords.copyAsMarkdown}</Stack.Toolbar.MenuAction>
         </Stack.Toolbar.Menu>
       </Stack.Toolbar>
       {demo.offline ? <SyncBand problem="serverUnreachable" /> : null}

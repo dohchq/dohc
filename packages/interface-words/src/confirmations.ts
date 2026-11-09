@@ -1,5 +1,5 @@
 // Words for confirmation sheets and their notices. The desktop's where it has them (file named beside each);
-// phone-only words are the design lead's.
+// the rest are phone-only. Change them here, never in a copy.
 
 const one = (count: number, single: string, several: string): string => (count === 1 ? single : several);
 

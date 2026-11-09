@@ -534,7 +534,7 @@ The phone app (`apps/mobile`) uses this skill's words and behavior. Shared words
 4. **Done** ends editing, and shows only while the keyboard is up.
 5. **Properties** are read-only for now, with nothing that looks editable: no field outlines, and a chevron only on a value that opens something.
 6. **The state mark** opens its explanation on tap. VoiceOver hears the mark's label with the explanation as its value.
-7. **Lossy and large files** have no Open externally. The large-file strip says to open it on a computer.
+7. **Lossy and large files** have no Open externally. The large-file strip says to open it on a computer. A large file's state mark reads Read-only, as every read-only page's does, and its explanation says the file is too large to edit.
 8. **No device-file states.** The phone saves to the server, so it has no Saved to host, Saved locally · Pending share, File in use, Changed outside dohc, Reloaded, or Replaced. Deleted keeps the last text, read-only, with phone words that name no trash.
 9. **Page and chat buttons.** A page's header has "Chat about <file>", and a file chat's header has "Open <file>".
 10. **Computer-only**, with no disabled entry on the phone: Collection delete, Versions, and in Sharing the conflicts banner, skipped changes, Copy code, and the waiting-changes review.

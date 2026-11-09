@@ -1,4 +1,4 @@
-// Words both apps show for Sharing, from the desktop's SharingView and #3227. The design lead owns them.
+// Words both apps show for Sharing, from the desktop's SharingView. Change them here, never in a copy.
 // Strings with names or counts are functions, so no app builds a sentence from pieces.
 
 export type ShareLevel = "view" | "comment" | "edit";
@@ -93,6 +93,6 @@ export const sharingWords = {
   restored: (subject: string) => `Restored ${subject}.`,
   alreadyEnded: (subject: string) => `${subject[0]?.toUpperCase() ?? ""}${subject.slice(1)} has already ended.`,
   endFailed: (subject: string) => `dohc could not end ${subject}.`,
-  /** The Share hint: shares end from Sharing (#3227). */
+  /** The Share hint: shares end from Sharing. */
   endAnytime: "You can end this share anytime from Sharing.",
 } as const;

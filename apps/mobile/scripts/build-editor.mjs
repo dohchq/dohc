@@ -23,7 +23,7 @@ const script = result.outputFiles[0].text;
 
 // The page body's typeface: Inter, from the same package and variable wght files the desktop ships
 // (@fontsource-variable/inter), with its faces and unicode ranges as written there. Only the Latin-script subsets ship;
-// other scripts fall back to the system font (the DL, Nov 7). The files sit beside page.js.
+// other scripts fall back to the system font. The files sit beside page.js.
 const require = createRequire(import.meta.url);
 const interCss = await readFile(require.resolve("@fontsource-variable/inter/index.css"), "utf8");
 const fonts = [];

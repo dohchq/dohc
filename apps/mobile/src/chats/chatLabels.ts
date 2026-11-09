@@ -1,8 +1,8 @@
 import { agentCardWords } from "./agentCard";
 import type { ChatKind, ChatRowData } from "./sample";
 
-// The DL's words for a chat's header (Nov 7, from desktop #3408 at dbd07864a). The header shows no reported text: the
-// claim is on the agent's card, with its "(as reported)".
+// The words for a chat's header, from the desktop's AgentBadge.tsx and reportedAgent.ts. The header shows no reported
+// text: the claim is on the agent's card, with its "(as reported)".
 export const chatWords = { connectedAgent: agentCardWords.connected, unnamedAgent: agentCardWords.unnamed } as const;
 
 /** A chat's shown name: "#" marks a group only, as on the desktop; a file's chat, a person or an agent goes by its name,

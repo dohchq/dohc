@@ -29,7 +29,7 @@ export interface GrantedShare {
 export interface ReceivedShare {
   readonly shareId: string;
   readonly kind: "file" | "folder" | "chat";
-  /** What it shares, never its share ID (#3227). */
+  /** What it shares, never its share ID. */
   readonly name: string;
   /** The sharer, named once, by name where the server knows one. */
   readonly sender: string;

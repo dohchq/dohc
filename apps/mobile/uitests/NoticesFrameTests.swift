@@ -29,12 +29,12 @@ final class NoticesFrameTests: XCTestCase {
   func testDragFramesOnTheHead() { measureDrags("app.dohc.mobile") }
 
   // The same drags with the sync band showing, through the title's fold: the band rides on the list each frame, and
-  // the round compares this test's dropped frames with the one above.
+  // a script compares this test's dropped frames with the one above.
   @MainActor
   func testDragFramesOnTheHeadWithTheBand() { measureDrags("app.dohc.mobile", demo: "band") }
 
-  // The RO's memory check: a minute of drags through the fold, with the band and without it. The round reads the
-  // app's memory footprint at each mark; it runs only when the round asks, so the suite stays short.
+  // A memory check: a minute of drags through the fold, with the band and without it. A script reads the
+  // app's memory footprint at each mark; it runs only when the script asks, so the suite stays short.
   @MainActor
   private func scrollForAMinute(demo: String) throws {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["DOHC_LONG_SCROLL"] == "1", "Runs when the round script reads memory")
@@ -44,7 +44,7 @@ final class NoticesFrameTests: XCTestCase {
     XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Maya Chen mentioned you in #planning"))
       .firstMatch.waitForExistence(timeout: 20), "Notices should list its rows")
     if !demo.isEmpty { XCTAssertTrue(app.descendants(matching: .any)["sync-band-area"].waitForExistence(timeout: 10), "The band should show") }
-    // Measurement protocol, not a pass condition: the round reads the footprint at each mark, then the drags go on.
+    // Measurement protocol, not a pass condition: a script reads the footprint at each mark, then the drags go on.
     print("NOTICES LONG SCROLL BEFORE \(demo)")
     Thread.sleep(forTimeInterval: 3)
     let end = Date().addingTimeInterval(60)

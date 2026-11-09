@@ -3,7 +3,7 @@ import XCTest
 // Notices with its native large title. Scrolling folds the title into the bar, following the finger; scrolling back
 // expands it; the last row ends at the tab bar with the same gap as
 // between rows; Mark all read stays put. The bar's own frame doesn't follow a collapse on iOS 27, so these read the
-// title's frame instead. Frames are kept for the design lead.
+// title's frame instead. Frames are kept for review.
 final class NoticesScrollTests: XCTestCase {
   private func keep(_ app: XCUIApplication, _ name: String) {
     let theme = XCUIDevice.shared.appearance == .dark ? "dark" : "light"

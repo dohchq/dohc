@@ -1,5 +1,5 @@
 // Words both apps show for a document (page). From the desktop's FileInspector, MarkdownView, fileInspectorUi
-// and StateMark; phone-only sentences are marked. The design lead owns them.
+// and StateMark; phone-only sentences are marked. Change them here, never in a copy.
 
 export const documentWords = {
   loading: "Loading…",
@@ -41,6 +41,6 @@ export const documentWords = {
   setAsideReadOnly: "This document became read-only before your edit saved. Copy your text to keep it.",
   /** Phone: a file chat's header button and its way back. */
   openPage: (name: string) => `Open ${name}`,
-  /** Phone, for the DL: the page header's button back to the file's chat. */
+  /** Phone only: the page header's button back to the file's chat. */
   openChat: (name: string) => `Chat about ${name}`,
 } as const;

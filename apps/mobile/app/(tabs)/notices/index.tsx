@@ -71,7 +71,7 @@ export default function Notices() {
     if (!away.current) return;
     away.current = false;
     if (demoMode === "band-return-scroll" || demoMode === "band-cycle-scroll") {
-      // To the top with the title open, so the title unfolds and iOS corrects the inset after the jump (round 55). iOS
+      // To the top with the title open, so the title unfolds and iOS corrects the inset after the jump. iOS
       // adds the inset the title gains to the offset, so the list comes to rest past its top by the title's unfolding.
       const target = -openBar.current - restingCover.current;
       list.current?.getNativeScrollRef().scrollTo({ y: target, animated: false });
@@ -184,7 +184,7 @@ function markSpace(height: number) {
   void new File(Paths.document, "band-space.json").write(JSON.stringify(spaces));
 }
 
-/** Design review only: what the band did, in the demos whose records the round reads. */
+/** Design review only: what the band did, in the demos whose records a script reads. */
 const noticesRecord: BandRecord = {
   space: demoMode === "band" ? height => markSpace(height) : undefined,
   hold: demoMode === "band-toggle" ? step => markHold(step) : undefined,

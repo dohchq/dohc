@@ -6,7 +6,8 @@ import { sampleAgent } from "../src/conversation/sample";
 import { useTheme } from "../src/theme";
 
 // An agent's card, as the desktop shows it from the agent's badge: a small sheet that closes by swiping down or tapping
-// outside it. It paints no background of its own, so the sheet's surface fills it to the bottom edge. The DL's lines: the name; the agent's kind, or its owner; what its client reported, marked as reported.
+// outside it. It paints no background of its own, so the sheet's surface fills it to the bottom edge.
+// It shows the name; the agent's kind, or its owner; what its client reported, marked as reported.
 export default function AgentCardSheet() {
   const theme = useTheme();
   const { id } = useLocalSearchParams<{ id: string }>();

@@ -53,7 +53,7 @@ export default function Conversation() {
         headerStyle: { backgroundColor: theme.bg },
         headerShadowVisible: true,
         headerTintColor: theme.ink,
-        // A file's chat opens its page from the header. The DL removed "Members and details" (Nov 8): it did nothing.
+        // A file's chat opens its page from the header. It has no "Members and details", which did nothing.
         headerRight: pagePath ? () => (
           <Pressable accessibilityRole="button" accessibilityLabel={documentWords.openPage(title)} hitSlop={8}
             onPress={() => router.push({ pathname: "/page", params: { path: pagePath, t0: String(Date.now()) } })}>

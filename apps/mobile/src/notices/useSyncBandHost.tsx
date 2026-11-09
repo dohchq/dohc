@@ -6,7 +6,7 @@ import { nativeBarBand } from "../../modules/bar-band";
 import { useSyncProblem } from "../demo";
 import { SyncBand, type BandLinesLayout, type SyncProblem } from "./SyncBand";
 
-/** Design review only: where a screen records what its band did, for the round to read. */
+/** Design review only: where a screen records what its band did, for a script to read. */
 export interface BandRecord {
   space?(height: number): void;
   hold?(step: "released" | "applied"): void;
@@ -56,7 +56,7 @@ export function useSyncBandHost({ ready, opened, record }: { ready: boolean; ope
   // Recorded after commit, so a render React abandons can't change them.
   useLayoutEffect(() => { showing.current = shownProblem !== null; lastGeometry.current = geometry; });
   // On iOS the band is at most half the space between the bar's resting edge and the tab bar, which the host reports.
-  // A taller band's words scroll in a region of whole lines (the DL's a2), so the band is its fixed parts plus as many
+  // A taller band's words scroll in a region of whole lines, so the band is its fixed parts plus as many
   // whole lines as fit under the cap, and a row still shows at the largest text sizes.
   const half = nativeBarBand && space !== null ? space / 2 : undefined;
   const lines = geometry?.lines;

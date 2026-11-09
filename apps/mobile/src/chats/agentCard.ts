@@ -1,4 +1,4 @@
-// An agent's card, in the words the DL ruled on Nov 7 from desktop #3408 at dbd07864a (AgentBadge.tsx, reportedAgent.ts).
+// An agent's card, in the words from the desktop's AgentBadge.tsx and reportedAgent.ts.
 // What a client reports about its agent, dohc can't check and never fills in, so it always carries "(as reported)".
 export const AS_REPORTED = "(as reported)";
 

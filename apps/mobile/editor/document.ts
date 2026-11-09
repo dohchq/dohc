@@ -1,6 +1,6 @@
 // A page in the app's web view: icon, title, properties and body in one scroll, so the caret stays above the
 // keyboard without the app coordinating two scroll views. The app passes the page in `window.__dohcPage`.
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import { post } from "./bridge";
@@ -58,8 +58,11 @@ export function mountDocument(page: PageConfig) {
     const samples: number[] = [];
     let pending: number | null = null;
     body.addEventListener("beforeinput", () => { pending ??= performance.now(); }, { capture: true });
+    const doc = markdownToYDoc(page.markdown);
+    // Copy as Markdown copies the page as it is now, with the person's edits.
+    (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () => post("markdown", { markdown: yDocToMarkdown(doc) });
     const editor = mountLiveBodyEditor(body, {
-      body: getDohcYDocBodyFragment(markdownToYDoc(page.markdown)),
+      body: getDohcYDocBodyFragment(doc),
       label: page.title,
       canEdit: () => editable,
       edit(change) {

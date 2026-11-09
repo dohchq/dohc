@@ -1,4 +1,4 @@
-// Words both apps show for Notices, toasts and sync status. The design lead owns them; change them here, never in a copy.
+// Words both apps show for Notices, toasts and sync status. Change them here, never in a copy.
 // Strings with names or counts are functions, so no app builds a sentence from pieces.
 
 export const noticesWords = {

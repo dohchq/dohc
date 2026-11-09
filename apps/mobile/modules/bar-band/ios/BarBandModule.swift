@@ -90,7 +90,7 @@ final class BarBandHost: ExpoView {
     // The first time in, the list has no place to come back to, so it moves as for any change.
     setCovered(coverHeight, moving: left == nil)
     // The list comes back where it was. If the band changed while away, iOS's own correction of the inset then moves it
-    // once by the change, as the band does on screen (round 56's trace), so the host doesn't move it again.
+    // once by the change, as the band does on screen, so the host doesn't move it again.
     if let was = left, let list = firstScrollView() {
       screen?.view.layoutIfNeeded()
       scroll(list, to: was.atTop ? -list.adjustedContentInset.top : was.offset)
@@ -151,7 +151,7 @@ final class BarBandHost: ExpoView {
 
   /// Each scroll frame: place the band, and only while iOS corrects the list's inset after a return, settle the list. A
   /// move without an inset change is someone else's scroll, so settling ends and the move stays. iOS also calls back
-  /// with the list where it was, between its corrections (round 54's trace); that isn't a move, so settling goes on.
+  /// with the list where it was, between its corrections; that isn't a move, so settling goes on.
   private func offsetChanged() {
     placeBand()
     guard let last = settling, !clamping, let list = watchedList else { return }
@@ -230,7 +230,7 @@ final class BarBandHost: ExpoView {
   }
 
   /// Where the bar's bottom is with the title open: its top plus the height it asks for open, at any scroll and any
-  /// Text Size (round 52b's probe). The band is placed on each scroll frame, so the height is asked for again only when
+  /// Text Size. The band is placed on each scroll frame, so the height is asked for again only when
   /// the bar's width or the Text Size changes.
   private func restingEdge(of bar: UINavigationBar) -> CGFloat {
     let width = bar.bounds.width, size = traitCollection.preferredContentSizeCategory

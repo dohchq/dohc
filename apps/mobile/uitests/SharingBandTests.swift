@@ -1,6 +1,6 @@
 import XCTest
 
-// Sharing with the sync band, drawn as on Notices (the DL's round 3 item 9): it sits directly under the bar, open or
+// Sharing with the sync band, drawn as on Notices: it sits directly under the bar, open or
 // folded, and the first lane starts below it, at any text size. When it arrives on an open screen, the lanes move down
 // once by its height. Frames are kept for review.
 final class SharingBandTests: XCTestCase {
