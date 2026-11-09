@@ -116,6 +116,8 @@ it("keeps the synced deletion refusal words across Electron for History and conf
   const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
   expect(readError(received).title).toBe("dohc can't bring back this file, because that could stop sync");
   expect(ipcErrorMessage(received, "Could not restore this file.")).toContain("Choose Keep this machine's copy, then copy its text from its History into a file with a new name.");
+  // The engine's refusal code is neither an instruction nor the Reason, so Copy details keeps it.
+  expect(readError(received).cause).toContain("synced-deletion-revival-refused");
   expect(readError(acrossIpc(new SyncedDeletionRevivalError())).words).toBe(readError(received).words);
 });
 
