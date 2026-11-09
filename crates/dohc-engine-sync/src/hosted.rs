@@ -662,7 +662,10 @@ pub(crate) fn shares_a_file(
              WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
         )
         .map_err(SyncError::corrupt)?
-        .query_row(params![workspace_id, change.version_id, change.path], |row| row.get(0))
+        .query_row(
+            params![workspace_id, change.version_id, change.path],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(SyncError::corrupt)?;
     match head {
@@ -679,30 +682,54 @@ pub(crate) fn shares_a_file(
 }
 
 /// Whether `occupant` is held at a path that `object_id` holds, or that a
-/// document it waits on in turn holds, and so on back to `object_id`.
+/// document it waits on in turn holds, and so on back to `object_id`. A wait
+/// an earlier pass stored counts only while the document it names still has
+/// a head or path alias that collides with the path it waits for.
 fn waits_on(
     conn: &Connection,
     workspace_id: &str,
     occupant: &str,
     object_id: &str,
 ) -> Result<bool, SyncError> {
+    use dohc_engine_files::path_is_held;
     let mut seen = BTreeSet::new();
     let mut waiting = occupant.to_owned();
     while seen.insert(waiting.clone()) {
-        let held_by: Option<String> = conn
+        let link: Option<(Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT held_by FROM hosted_documents WHERE workspace_id=?1 AND object_id=?2",
+                "SELECT held_by,held_path FROM hosted_documents \
+                 WHERE workspace_id=?1 AND object_id=?2",
                 params![workspace_id, waiting],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some((Some(held_by), Some(held_path))) = link else {
+            return Ok(false);
+        };
+        let mut paths = conn
+            .prepare_cached(
+                "SELECT path FROM snapshots WHERE workspace_id=?1 AND object_id=?2 \
+                 UNION ALL SELECT path FROM path_aliases WHERE workspace_id=?1 AND object_id=?2",
+            )
+            .map_err(SyncError::corrupt)?;
+        let mut stands = false;
+        for path in paths
+            .query_map(params![workspace_id, held_by], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(SyncError::corrupt)?
-            .flatten();
-        match held_by {
-            Some(held_by) if held_by == object_id => return Ok(true),
-            Some(held_by) => waiting = held_by,
-            None => return Ok(false),
+        {
+            let path = path.map_err(SyncError::corrupt)?;
+            stands |= path_is_held(&path, &held_path) || path_is_held(&held_path, &path);
         }
+        if !stands {
+            return Ok(false);
+        }
+        if held_by == object_id {
+            return Ok(true);
+        }
+        waiting = held_by;
     }
     Ok(false)
 }
