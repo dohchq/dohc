@@ -139,8 +139,8 @@ Reset a development store by deleting `<workspace>/.dohc/engine`.
 
 Understand the constraint. Choose the smallest design that makes correct behavior and performance clear.
 Question existing complexity rather than preserving it or adding machinery for appearance.
-Put shared operations behind human and agent entry points; keep permission checks in the authoritative service.
-Separate input handling from the operation so a new entry point does not need its own behavior or policy.
+Route human and agent entry points to one shared operation.
+Keep input handling at entry points and permission checks in the authoritative service.
 
 ### Effect in TypeScript
 
@@ -166,12 +166,12 @@ Before calling a feature complete, identify which paths apply and check the affe
 - **Entry points.** Follow the action through affected menus, shortcuts, direct links, and other callers.
   A working button does not prove the other ways into the same feature.
 - **Humans and agents.** Check the human action and its CLI or MCP equivalent against the same operation and permissions.
-  Record unavailable agent access as a gap. Computer use does not establish parity.
+  Record unavailable agent access as a gap in the PR evidence. Computer use does not establish parity.
 - **Local and shared work.** Check offline use, sharing, and collaborator access where the change affects them.
   A pass in the owner's workspace does not prove another person's permissions or sync.
 - **State and recovery.** Check saved state, restart, reversal, failure, and workspace switching where affected.
   A success message alone does not prove persistence or safe recovery.
-- **Platforms.** Check the Windows or macOS behavior the change depends on.
+- **Platforms.** Follow [platform verification](#verify-the-change) for affected Windows or macOS behavior.
   Record what remains unverified instead of treating another platform's pass as coverage.
 
 Finish layout, interaction, loading, failure, recovery, and transitions on those paths.
@@ -188,7 +188,7 @@ Measure affected startup and interactions alongside automated scores.
 Add a document only when a named reader needs it for work or a decision.
 Most code changes need no new internal document. Types, tests, and source already describe the implementation.
 Document decisions, cross-component constraints, and traps a maintainer would otherwise get wrong.
-If reading the relevant code answers the question, leave that account in the code.
+If reading the source answers the question, leave that explanation out of internal docs.
 Put a local reason in a short nearby comment. Link to source instead of copying its fields or control flow.
 When a decision changes, rewrite or remove its old explanation instead of appending another version.
 
@@ -234,9 +234,11 @@ Run affected-package typechecks and focused tests while editing and during revie
 Test observable behavior that can break. Mock-call assertions and callback wiring alone do not prove it.
 Leave facts already guaranteed by types to the typechecker.
 Extend an existing case or table when it covers the behavior.
-For logic, data, state, or protocol regressions, show the focused check failing before the fix and passing afterward.
+For logic, data, state, or protocol defects, record a focused check failing before the fix and passing afterward.
+Keep that result in the PR evidence.
 Use the lowest layer that exposes the defect. Add checks at other layers only for distinct risks.
-Purely visual changes need before-and-after captures. Interaction, state, permission, and persistence changes need behavior checks.
+For purely visual fixes, use before-and-after captures as proof instead of adding UI tests.
+Interaction, state, permission, and persistence changes need behavior checks.
 For desktop QA, start with `pnpm run doctor`; use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before Playwright.
 Wait for actual conditions; do not make a test pass by adding a sleep.
