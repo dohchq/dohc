@@ -379,7 +379,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         // A cell still open keeps its value and says why under its input. Its check mark tries the same change again.
         if (change.cell !== undefined && openCell.current === change.cell) { focusInvalid.current = true; setInvalid({ [change.cell]: words }); }
         else if (!refused) closeEditor();
-        onError(words, cause, refused ? null : () => { if (alive.current) void currentExecute.current(change); });
+        // Try again sends the change only while it still waits, so once it lands an old row can't close a newer edit.
+        onError(words, cause, refused ? null : () => { if (alive.current && mutation.current === change) void currentExecute.current(change); });
       }
     } finally { if (alive.current && !change.invalidated) { locked.current = false; setBusy(false); } }
   }

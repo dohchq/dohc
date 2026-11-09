@@ -478,6 +478,12 @@ describe("transactional Collection page", () => {
     expect(writes).toHaveLength(2); expect(writes[1]![0]).toEqual(writes[0]![0]);
     expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Name for record 1" })));
+    // The landed change's row in Notices sends nothing, and the next edit stays open.
+    fireEvent.click(screen.getByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    await act(async () => onError.mock.calls[0]![2]!());
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(2);
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
   });
 
   it("creates typed values with declared defaults and rejects missing required input inline", async () => {
