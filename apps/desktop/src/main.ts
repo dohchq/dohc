@@ -6823,7 +6823,7 @@ function registerIpcHandlers(): void {
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
   ownerLiveStopAgainForCli = async (operation, kept) => {
-    const result = await agentOwnerLiveDocuments.stopForAgent(
+    const result = await agentOwnerLiveDocuments.stop(
       {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
     sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;

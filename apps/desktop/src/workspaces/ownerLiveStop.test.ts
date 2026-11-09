@@ -1,6 +1,8 @@
 import {expect, it, vi} from "vitest";
 import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
+import {liveStopError} from "../ipc/liveEditingStop";
+import {pendingStopHarness} from "../testing/ownerLiveStop.test-helper";
 const withDocument = <T extends {binding: {mainVersionId: string; objectId: string; currentPath: string}}>(row:T) => ({...row,document:{mainVersionId:row.binding.mainVersionId,objectId:row.binding.objectId,currentPath:row.binding.currentPath},retirementOwed:true});
 
 it("never retries a deferred local fold on later sync passes", async () => {
@@ -112,4 +114,32 @@ it("finishes both Stops when the first release is held and only the safe peer ma
   expect(retired).toEqual(["held", "safe"]);
   expect(released).toEqual([{objectId: "held", materialized: false}, {objectId: "safe", materialized: true}]);
   expect(complete.mock.calls.map(([row]) => row.document.objectId)).toEqual(["held", "safe"]);
+});
+
+it("finishes a Stop the server answered with edits-pending on a later pass, without another Stop", async () => {
+  const h = pendingStopHarness("workspace", "live.md", "object");
+  h.relay.mockImplementation(async (_credentials, _path, init) => {
+    if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+    return {ok: true, documents: [{path: "live.md", objectId: "object", status: "ready"}]};
+  });
+  await expect(h.actions.stop({workspaceId: "workspace", path: "live.md"}, {workspace: {workspaceId: "workspace"}, assertCurrent() {}}))
+    .rejects.toMatchObject({name: "LiveStopWaitingError"});
+  let released = false;
+  const client = {ownerYDocStopList: vi.fn(async () => released || !h.recorded() ? [] : [h.recorded()!]),
+    ownerYDocStopRequest: vi.fn(async () => h.recorded()!)} as unknown as EngineClient;
+  // The server still applies the edits on the first pass and retires the activation on the next.
+  const retire = vi.fn(async (): Promise<number | null> => 17).mockRejectedValueOnce(new Error("dohc could not stop live editing. Try again."));
+  const release = vi.fn(async () => {released = true;});
+  const onError = vi.fn(), onComplete = vi.fn();
+  const options = {client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal,
+    assertCurrent() {}, retire, release, onError, onComplete};
+  await reconcileOwnerLiveStops(options);
+  expect(onError).toHaveBeenCalledOnce();
+  expect(release).not.toHaveBeenCalled();
+  await reconcileOwnerLiveStops(options);
+  await reconcileOwnerLiveStops(options);
+  expect(retire).toHaveBeenCalledTimes(2);
+  expect(release).toHaveBeenCalledExactlyOnceWith(h.recorded()!.binding, 17, options.signal);
+  expect(onComplete).toHaveBeenCalledOnce();
+  expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
 });
