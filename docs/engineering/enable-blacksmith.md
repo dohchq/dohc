@@ -104,7 +104,7 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
 The `confinement` job runs those suites on GitHub's `ubuntu-24.04` image whenever either gate runs.
 It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
-It fails if a replica test skips.
+It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
 The local gate runs no Linux JavaScript, so the replica suites run only in this job.
 

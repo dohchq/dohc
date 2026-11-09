@@ -388,7 +388,16 @@ jobs:
         run: cargo nextest run --locked --package dohc-compiler-owner
 
       - name: Desktop app compiler
-        run: pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 scripts/compiler-process.test.mjs scripts/stage-app-compiler.test.mjs
+        run: |
+          set -euo pipefail
+          report="$PWD/.agent-artifacts/confinement/compiler.tap"
+          mkdir -p "$(dirname "$report")"
+          pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
+            --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \
+            scripts/compiler-process.test.mjs scripts/stage-app-compiler.test.mjs
+          # A skipped compiler test would pass the run without testing the sandbox.
+          grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
+            { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; exit 1; }
 
       - name: Engine
         run: cargo build --locked -p dohc-workspace-engine --bin dohc-workspace-engine

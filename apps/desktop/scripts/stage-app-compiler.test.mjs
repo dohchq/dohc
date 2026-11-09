@@ -82,9 +82,9 @@ test("installed macOS and Linux Collection compiler runs electron-builder resour
 });
 
 const appTarget = PINNED_NODE[`${process.platform}-${process.arch}`];
-// PR checks run it on Linux in their confinement job; Blacksmith's kernel has no Landlock.
+// PR checks set DOHC_CONFINEMENT_SUITES where the kernel has no Landlock, and run this in their confinement job.
 // Three compiles, each allowed bounds.timeoutMs, follow staging and packaging.
-test("installed compiler runs electron-builder resources after relocation and checks packaging identities", { skip: !appTarget || process.platform === "linux" && process.env.DOHC_CONFINEMENT_SUITES === "exclude", timeout: 120000 }, async t => {
+test("installed compiler runs electron-builder resources after relocation and checks packaging identities", { skip: !appTarget || process.env.DOHC_CONFINEMENT_SUITES === "exclude", timeout: 120000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-installed-compiler-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const sourceRoot = join(root, "source");

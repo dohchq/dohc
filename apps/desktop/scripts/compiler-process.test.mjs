@@ -25,16 +25,17 @@ const compileClosedAppInProcess=(...args)=>reportCompilerFailure(compileClosedAp
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
 // dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin=process.platform==='darwin'&&process.arch==='arm64';
-// PR checks run the Linux owner in their confinement job; Blacksmith's kernel has no Landlock.
-const confined=darwin||process.platform==='linux'&&process.arch==='x64'&&process.env.DOHC_CONFINEMENT_SUITES!=='exclude';
-const owned={skip:!(process.platform==='win32'||confined),timeout:30000};
-const ownerOnly={skip:!confined,timeout:30000};
+const confined=darwin||process.platform==='linux'&&process.arch==='x64';
+// PR checks set this where the kernel has no Landlock, and run these tests in their confinement job.
+const excluded=process.env.DOHC_CONFINEMENT_SUITES==='exclude';
+const owned={skip:excluded||!(process.platform==='win32'||confined),timeout:30000};
+const ownerOnly={skip:excluded||!confined,timeout:30000};
 // macOS and Linux run the worker under the staged official Node and owner, as
 // the installed app does. Seatbelt stops any Node that loads libraries from
 // outside its own file. Windows runs this Node under the compiled job owner.
 let staged,stagedRoot;
 before(async()=>{
-  if(!confined&&process.platform!=='win32')return;
+  if(excluded||!confined&&process.platform!=='win32')return;
   stagedRoot=await mkdtemp(join(tmpdir(),'dohc-compiler-process-staged-'));
   staged=join(stagedRoot,'app-compiler');
   if(confined)await stageAppCompiler({destination:staged});
