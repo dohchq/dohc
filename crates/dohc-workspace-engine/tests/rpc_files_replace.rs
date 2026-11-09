@@ -1,8 +1,9 @@
 //! `files.replace` writes given bytes over a workspace file whole, through the
 //! materializer's temp, flush and rename. On macOS the temp of a replaced file
 //! or a secret is created without the folder's inherited ACL entries, and a
-//! replaced ordinary file's ACL is copied to it. `create_uninherited` and
-//! `copy_acl` in dohc-macos-files cover that.
+//! replaced ordinary file's ACL is copied to it. The macOS test here checks
+//! that through the RPC; `create_uninherited` and `copy_acl` in
+//! dohc-macos-files have their own tests.
 
 mod common;
 
@@ -162,6 +163,58 @@ async fn files_replace_writes_a_secret_owner_only() {
         .await;
         let file = scratch.path().join(path);
         assert_eq!(std::fs::read(&file).unwrap(), b"TOKEN=new\n", "{path}");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{path}");
+    }
+}
+
+/// A folder that lets everyone read each new file in it, given that entry
+/// after a private file was made, opens neither that file when it is
+/// replaced nor a secret written there.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_replace_gives_a_file_none_of_its_folders_inherited_acl() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Whether `ls -le` lists any ACL entry for `path`.
+    let has_entries = |path: &Path| {
+        let listing = std::process::Command::new("/bin/ls")
+            .arg("-led")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        String::from_utf8(listing.stdout).unwrap().lines().count() > 1
+    };
+    let (scratch, transport, handle) = fixture("acl").await;
+    let folder = scratch.path().join("shared");
+    write_file(scratch.path(), "shared/private.md", b"old\n");
+    std::fs::set_permissions(
+        folder.join("private.md"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let added = std::process::Command::new("/bin/chmod")
+        .args(["+a", "group:everyone allow read,file_inherit"])
+        .arg(&folder)
+        .status()
+        .unwrap();
+    assert!(added.success());
+    // A file made there the ordinary way takes the entry.
+    write_file(scratch.path(), "shared/inheriting.md", b"");
+    assert!(has_entries(&folder.join("inheriting.md")));
+    assert!(!has_entries(&folder.join("private.md")));
+    for (id, path) in ["shared/private.md", "shared/.env"].into_iter().enumerate() {
+        call(
+            &transport,
+            &handle,
+            10 + id as u64,
+            "files.replace",
+            params(path, TEMP, b"new\n"),
+        )
+        .await;
+        let file = scratch.path().join(path);
+        assert_eq!(std::fs::read(&file).unwrap(), b"new\n", "{path}");
+        assert!(!has_entries(&file), "{path}");
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{path}");
     }
