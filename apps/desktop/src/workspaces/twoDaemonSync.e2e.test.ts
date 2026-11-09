@@ -2816,7 +2816,8 @@ async function openEditor(daemon: Pick<LiveDaemonCapture, "capture">, path: stri
 }
 
 // H2b: B keeps the deletion. H2c: B keeps its copy and types again, and A takes
-// both up with no choice. H2d: A keeps B's copy while B's conflict is still open.
+// both up with no choice. H2d: B edits the file by hand, and A keeps B's copy
+// while B's conflict is still open.
 it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
   "settles a synced deletion in fresh %s and keeps notes syncing both ways",
   async scenario => {
@@ -2877,9 +2878,14 @@ it.skipIf(engine.missing).each(["H2b", "H2c", "H2d"] as const)(
       a.capture.observeFileEvents([{path, operation: "delete"}]);
       const deletionMoments = await waitForPathMoments(a.capture, path, beforeDelete + 1);
       expect(deletionMoments.some(row => row.operation === "delete")).toBe(true);
-      const editor = await openEditor(b, path);
-      try { await typeAtEnd(editor, "Tokyo\n"); }
-      finally { await editor.session.close(); }
+      if (scenario === "H2d") {
+        // A conflict opens on A only for a file change. An editor change waits there.
+        await writeAndCapture(b, rootB, path, "Paris\nTokyo\n");
+      } else {
+        const editor = await openEditor(b, path);
+        try { await typeAtEnd(editor, "Tokyo\n"); }
+        finally { await editor.session.close(); }
+      }
       expect(await readFile(join(rootB, path), "utf8")).toBe("Paris\nTokyo\n");
       await rounds();
       const reviewB = (await b.capture.listOpenConflictsPage()).conflicts.find(row => row.path === path)!;
