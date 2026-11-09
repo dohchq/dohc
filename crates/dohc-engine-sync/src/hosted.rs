@@ -642,6 +642,21 @@ fn spelling_occupants(
     Ok(colliding)
 }
 
+/// Whether another document of the scope holds `path` in `version_id` by
+/// another spelling, or as a folder above or inside it. A write there by
+/// `object_id` while it is not ready would land on that document's file on a
+/// disk that ignores case, so its pass leaves the write to the commit that
+/// makes it ready ([`head_writes`]).
+pub(crate) fn spelling_occupied(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+) -> Result<bool, SyncError> {
+    Ok(!spelling_occupants(conn, workspace_id, version_id, object_id, path)?.is_empty())
+}
+
 /// Whether `occupant` is held at a path that `object_id` holds, or that a
 /// document it waits on in turn holds, and so on back to `object_id`.
 fn waits_on(

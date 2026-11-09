@@ -8300,13 +8300,37 @@ fn accumulate_pull_outcome(
                 .ok_or(RelayError::InvalidResponse)?;
             record_facts.extend(routed.record_facts);
             keep_automation_claims(routed.automation_claims);
-            for change in routed.materialization_changes {
-                insert_changed_path(changed_paths, change);
-            }
-            for change in
-                crate::router::redelivered_materialization_changes(store, op).map_err(local)?
+            // A document that is not ready and moved onto another spelling
+            // of a path another document holds (#2421) writes nothing there
+            // yet: its write goes with the decisions its pass keeps only
+            // where they still stand.
+            let stored_decisions =
+                crate::router::redelivered_materialization_changes(store, op).map_err(local)?;
+            for change in routed
+                .materialization_changes
+                .into_iter()
+                .chain(stored_decisions)
             {
-                insert_changed_path(changed_paths, change);
+                let stored = match unready {
+                    Some(object_id)
+                        if change.operation == "write"
+                            && store
+                                .read_with(|conn| {
+                                    crate::hosted::spelling_occupied(
+                                        conn,
+                                        &op.workspace_id,
+                                        &change.version_id,
+                                        object_id,
+                                        &change.path,
+                                    )
+                                })
+                                .map_err(local)? =>
+                    {
+                        redelivered.entry(object_id.to_owned()).or_default()
+                    }
+                    _ => &mut *changed_paths,
+                };
+                insert_changed_path(stored, change);
             }
             *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
