@@ -524,18 +524,19 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         // The row with an open cell aligns its cells to the top, so an error under the input pushes only the rows below.
         const editing = cellEdit !== null && sameRecord(row, cellEdit.row);
         const rest = editing ? "px-3 pt-2.5 pb-2 align-top" : "px-3 py-2";
-        return <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
+        // Escape works from the input and from the row's Cancel and Save, which sit outside the cell's form.
+        return <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover" onKeyDown={editing ? event => {
+          if (event.defaultPrevented || isComposingKey(event)) return;
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!cellDisabled) closeEditor(); }
+          else if (event.key === "Enter" && (event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement && event.target.type !== "file")) { event.preventDefault(); event.target.form?.requestSubmit(); }
+        } : undefined}>{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const open = editing && cellEdit?.field.fieldId === field.fieldId;
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
         // An open cell's input keeps the value's text where it was.
         return <td key={field.fieldId} className={`${open && field.type !== "checkbox" && field.type !== "multi-select" ? "px-px py-[3px] align-top" : rest} text-ink`}>{attachment && !open ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} hidden={open} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation: edit, row, field });
-        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="block truncate text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}{open ? <form ref={editorForm} id={`${errorIds}-cell`} aria-label={`Edit ${field.name}`} className="flex flex-col gap-1 wrap-anywhere" onSubmit={event => { event.preventDefault(); submitEditor(); }} onKeyDown={event => {
-          if (event.defaultPrevented || isComposingKey(event)) return;
-          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!cellDisabled) closeEditor(); }
-          else if (event.key === "Enter" && (event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement && event.target.type !== "file")) { event.preventDefault(); event.currentTarget.requestSubmit(); }
-        }}>{valueInput(field)}{fieldError(field)}</form> : null}</td>;
+        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="block truncate text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}{open ? <form ref={editorForm} id={`${errorIds}-cell`} aria-label={`Edit ${field.name}`} className="flex flex-col gap-1 wrap-anywhere" onSubmit={event => { event.preventDefault(); submitEditor(); }}>{valueInput(field)}{fieldError(field)}</form> : null}</td>;
       })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className={rest}>{props.buttons!.render(field, row)}</td>)}<td className={editing ? "px-3 py-2 align-top" : "px-3 py-2"}><div className="flex justify-end gap-2">{editing ? <>
         <IconButton title="Cancel" aria-label="Cancel" disabled={cellDisabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
         <IconButton ref={cellSave} type="submit" form={`${errorIds}-cell`} title="Save" aria-label="Save" disabled={cellDisabled}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>

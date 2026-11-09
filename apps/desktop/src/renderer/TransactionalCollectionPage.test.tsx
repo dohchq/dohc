@@ -272,8 +272,11 @@ describe("transactional Collection page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByText("dohc could not confirm this change.");
     expect(screen.queryByText("Change not confirmed")).toBeNull();
-    // Closing the cell leaves the change waiting, and the page says so.
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // Escape from the focused check mark closes the cell, and the page says the change still waits.
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(document.activeElement).toBe(save);
+    fireEvent.keyDown(save, { key: "Escape" });
+    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
     await screen.findByText("Change not confirmed");
     const count = invoke.mock.calls.length;
     result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={2} />);
