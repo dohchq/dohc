@@ -4144,6 +4144,122 @@ async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
     assert_eq!(unknown_field.code, ErrorCode::InvalidParams);
 }
 
+// The test loopback mirrors each case in chatsLiveAdapter.test.ts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_you_run_pages_trimmed_accounts_and_large_requests_after_its_place() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-connected-page-bytes").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.ensureAgent",
+        json!({
+            "channelId": "terminal-chat",
+            "agentId": "terminal",
+            "name": "Terminal",
+            "nowMs": 2,
+        }),
+    )
+    .await;
+    let body = "x".repeat(64 * 1024);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "terminal-chat", "threadId": "dm", "messageId": "read",
+            "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": " ada ",
+            "body": "read", "nowMs": 10,
+        }),
+    )
+    .await;
+    for n in 1..=5 {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "dm", "messageId": format!("ask-{n}"), "authorKind": "human",
+                "authorDisplayName": "Ada", "authorUserId": "ada", "body": body,
+                "nowMs": 10 + n * 10,
+            }),
+        )
+        .await;
+    }
+    let reader = json!({
+        "kind": "connected",
+        "agentId": "terminal",
+        "handle": "terminal",
+        "requesters": ["ada"],
+        "unattributedCounts": false,
+    });
+    let ids = |page: &Value| {
+        page["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .map(|request| request["messageId"].clone())
+            .collect::<Vec<_>>()
+    };
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        ids(&first),
+        [json!("read")],
+        "a post sent with a padded account asks the agent its account names."
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({
+            "reader": reader,
+            "threadId": "dm",
+            "upTo": { "createdAtMs": 10, "messageId": "read" },
+        }),
+    )
+    .await;
+    let page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader }),
+    )
+    .await;
+    assert_eq!(
+        ids(&page),
+        [json!("ask-1"), json!("ask-2"), json!("ask-3")],
+        "a page stops at 256 KiB and skips what the reader has read."
+    );
+    assert_eq!(page["more"], json!(true));
+    let rest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({
+            "reader": reader,
+            "after": { "createdAtMs": 40, "messageId": "ask-3" },
+        }),
+    )
+    .await;
+    assert_eq!(ids(&rest), [json!("ask-4"), json!("ask-5")]);
+    assert_eq!(rest["more"], json!(false));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     let scratch = ScratchDir::new().expect("scratch");

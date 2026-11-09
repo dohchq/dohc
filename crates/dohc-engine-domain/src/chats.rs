@@ -1173,11 +1173,14 @@ fn agent_reader(
 /// workspace, the reader's place, the `after` coordinate, the limit, and the
 /// Group and thread filters as ?1 to ?8. A connected reader adds its handle,
 /// its requesters as a JSON array, and whether a post with no account counts.
+///
+/// Each candidate source skips what the reader has read and what comes before
+/// `after`, so read history never enters the union.
 fn agent_requests_sql(reader: &AgentReader, detail: bool) -> String {
     let (candidates, source, rule) = match reader {
         // The requests the run's agent was woken for.
         AgentReader::Run { .. } => (
-            "",
+            String::new(),
             "FROM chat_dispatch_ledger l \
              JOIN chat_messages m ON m.workspace_id = l.workspace_id \
                AND m.thread_id = l.thread_id AND m.message_id = l.trigger_message_id",
@@ -1186,22 +1189,30 @@ fn agent_requests_sql(reader: &AgentReader, detail: bool) -> String {
         // A plain @agent no agent was woken for, and a person's reply in a
         // thread an unnamed agent posted in. Agent chats belong to their agents.
         AgentReader::Unnamed => (
-            "WITH posted AS MATERIALIZED ( \
-               SELECT thread_id, MIN(message_order) AS first_order FROM chat_messages \
-               WHERE workspace_id = ?1 AND author_kind = 'agent' AND author_agent_id IS NULL \
-               GROUP BY thread_id \
-             ), candidates AS ( \
-               SELECT x.thread_id, x.message_id FROM chat_mentions x \
-               WHERE x.workspace_id = ?1 AND x.handle = 'agent' \
-                 AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
-                   WHERE l.workspace_id = x.workspace_id \
-                     AND l.trigger_message_id = x.message_id) \
-               UNION \
-               SELECT m.thread_id, m.message_id FROM posted p CROSS JOIN chat_messages m \
-                 ON m.workspace_id = ?1 AND m.thread_id = p.thread_id \
-                   AND m.message_order > p.first_order \
-               WHERE m.author_kind = 'human' \
-             )",
+            format!(
+                "WITH posted AS MATERIALIZED ( \
+                   SELECT thread_id, MIN(message_order) AS first_order FROM chat_messages \
+                   WHERE workspace_id = ?1 AND author_kind = 'agent' AND author_agent_id IS NULL \
+                   GROUP BY thread_id \
+                 ), candidates AS ( \
+                   SELECT x.thread_id, x.message_id FROM chat_mentions x {read_x} \
+                   WHERE x.workspace_id = ?1 AND x.handle = 'agent' AND {unread_x} \
+                     AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
+                       WHERE l.workspace_id = x.workspace_id \
+                         AND l.trigger_message_id = x.message_id) \
+                   UNION \
+                   SELECT m.thread_id, m.message_id FROM posted p {read_p} \
+                     CROSS JOIN chat_messages m \
+                     ON m.workspace_id = ?1 AND m.thread_id = p.thread_id \
+                       AND m.message_order > p.first_order AND {seek_m} \
+                   WHERE m.author_kind = 'human' AND {unread_m} \
+                 )",
+                read_x = read_place_join("x.thread_id"),
+                unread_x = unread_after("x"),
+                read_p = read_place_join("p.thread_id"),
+                seek_m = seek_after("m"),
+                unread_m = unread_after("m"),
+            ),
             "FROM candidates candidate CROSS JOIN chat_messages m \
                ON m.workspace_id = ?1 AND m.message_id = candidate.message_id \
                  AND m.thread_id = candidate.thread_id",
@@ -1211,26 +1222,39 @@ fn agent_requests_sql(reader: &AgentReader, detail: bool) -> String {
         // Its chat, a mention of its handle, and a reply in a thread it
         // posted in, each by its person and not from the CLI.
         AgentReader::Connected { .. } => (
-            "WITH posted AS MATERIALIZED ( \
-               SELECT thread_id, MIN(message_order) AS first_order FROM chat_messages \
-               WHERE workspace_id = ?1 AND author_agent_id = ?2 \
-               GROUP BY thread_id \
-             ), candidates AS ( \
-               SELECT m.thread_id, m.message_id FROM chat_channels agent_chat \
-                 JOIN chat_threads chat_thread \
-                   ON chat_thread.workspace_id = agent_chat.workspace_id \
-                   AND chat_thread.channel_id = agent_chat.channel_id \
-                 CROSS JOIN chat_messages m ON m.workspace_id = chat_thread.workspace_id \
-                   AND m.thread_id = chat_thread.thread_id \
-               WHERE agent_chat.workspace_id = ?1 AND agent_chat.agent_id = ?2 \
-               UNION \
-               SELECT x.thread_id, x.message_id FROM chat_mentions x \
-               WHERE x.workspace_id = ?1 AND x.handle = ?9 \
-               UNION \
-               SELECT m.thread_id, m.message_id FROM posted p CROSS JOIN chat_messages m \
-                 ON m.workspace_id = ?1 AND m.thread_id = p.thread_id \
-                   AND m.message_order > p.first_order \
-             )",
+            format!(
+                "WITH posted AS MATERIALIZED ( \
+                   SELECT thread_id, MIN(message_order) AS first_order FROM chat_messages \
+                   WHERE workspace_id = ?1 AND author_agent_id = ?2 \
+                   GROUP BY thread_id \
+                 ), candidates AS ( \
+                   SELECT m.thread_id, m.message_id FROM chat_channels agent_chat \
+                     JOIN chat_threads chat_thread \
+                       ON chat_thread.workspace_id = agent_chat.workspace_id \
+                       AND chat_thread.channel_id = agent_chat.channel_id \
+                     {read_dm} \
+                     CROSS JOIN chat_messages m ON m.workspace_id = chat_thread.workspace_id \
+                       AND m.thread_id = chat_thread.thread_id AND {seek_m} \
+                   WHERE agent_chat.workspace_id = ?1 AND agent_chat.agent_id = ?2 \
+                     AND m.author_kind = 'human' AND {unread_m} \
+                   UNION \
+                   SELECT x.thread_id, x.message_id FROM chat_mentions x {read_x} \
+                   WHERE x.workspace_id = ?1 AND x.handle = ?9 AND x.author_kind = 'human' \
+                     AND {unread_x} \
+                   UNION \
+                   SELECT m.thread_id, m.message_id FROM posted p {read_p} \
+                     CROSS JOIN chat_messages m \
+                     ON m.workspace_id = ?1 AND m.thread_id = p.thread_id \
+                       AND m.message_order > p.first_order AND {seek_m} \
+                   WHERE m.author_kind = 'human' AND {unread_m} \
+                 )",
+                read_dm = read_place_join("chat_thread.thread_id"),
+                read_x = read_place_join("x.thread_id"),
+                read_p = read_place_join("p.thread_id"),
+                seek_m = seek_after("m"),
+                unread_m = unread_after("m"),
+                unread_x = unread_after("x"),
+            ),
             "FROM candidates candidate CROSS JOIN chat_messages m \
                ON m.workspace_id = ?1 AND m.message_id = candidate.message_id \
                  AND m.thread_id = candidate.thread_id",
@@ -1261,6 +1285,35 @@ fn agent_requests_sql(reader: &AgentReader, detail: bool) -> String {
            AND (?7 IS NULL OR t.channel_id = ?7) \
            AND (?8 IS NULL OR m.thread_id = ?8) \
          ORDER BY m.created_at_ms, m.message_id LIMIT ?6"
+    )
+}
+
+/// Joins the reader's read place for the thread in `thread` as `r`.
+fn read_place_join(thread: &str) -> String {
+    format!(
+        "LEFT JOIN chat_agent_read_state r ON r.workspace_id = ?1 \
+           AND r.agent_id = ?2 AND r.thread_id = {thread}"
+    )
+}
+
+/// A lower bound on `alias.created_at_ms` from the read place `r` and the
+/// `after` coordinate, so the thread's time index can skip read history.
+fn seek_after(alias: &str) -> String {
+    format!(
+        "{alias}.created_at_ms >= MAX(COALESCE(r.last_read_created_at_ms, {min}), \
+           CASE WHEN ?3 = 0 THEN {min} ELSE ?4 END)",
+        min = i64::MIN
+    )
+}
+
+/// The row in `alias` comes after the read place `r` and after `after`.
+fn unread_after(alias: &str) -> String {
+    format!(
+        "(r.thread_id IS NULL OR {alias}.created_at_ms > r.last_read_created_at_ms \
+           OR ({alias}.created_at_ms = r.last_read_created_at_ms \
+             AND {alias}.message_id > r.last_read_message_id)) \
+         AND (?3 = 0 OR {alias}.created_at_ms > ?4 \
+           OR ({alias}.created_at_ms = ?4 AND {alias}.message_id > ?5))"
     )
 }
 

@@ -206,12 +206,18 @@ function agentReaderParam(params: ChatsJsonObject): { reader: AgentReader; bindi
   if (!AGENT_ID_PATTERN.test(agentId) || requesters.length > MAX_AGENT_REQUESTERS) throw new Error("invalid-input");
   const accounts: string[] = [];
   for (const requester of requesters) {
-    const account = requester.trim();
-    if (account === "" || account.length > MAX_AUTHOR_USER_ID_CHARS) throw new Error("invalid-sender");
+    const account = normalizeAuthorUserId(requester);
     if (!accounts.includes(account)) accounts.push(account);
   }
   const normalized = { agentId, handle: mentionHandle(handle), requesters: accounts, unattributedCounts };
   return { reader: { kind: "connected", ...normalized }, binding };
+}
+
+// The engine stores an account id trimmed, and refuses an empty or long one.
+function normalizeAuthorUserId(value: string): string {
+  const account = value.trim();
+  if (account === "" || account.length > MAX_AUTHOR_USER_ID_CHARS) throw new Error("invalid-sender");
+  return account;
 }
 
 function readCoordinate(value: JsonValue): { createdAtMs: number; messageId: string } {
@@ -783,6 +789,24 @@ function compareDispatches(left: ChatDispatch, right: ChatDispatch): number {
   return left.createdAtMs - right.createdAtMs ||
     compareText(left.triggerMessageId, right.triggerMessageId) ||
     compareText(left.agentId, right.agentId);
+}
+
+// The engine's chat page cut: rows fit 256 KiB serialized, and the first row
+// always ships unless it alone exceeds the 700 KiB frame cap.
+const CHAT_PAGE_BYTE_BUDGET = 256 * 1024;
+const SINGLE_ROW_HARD_CAP_BYTES = 700 * 1024;
+
+function byteBudgetPage<T>(rows: readonly T[]): T[] {
+  let remaining = CHAT_PAGE_BYTE_BUDGET;
+  let included = 0;
+  for (const row of rows) {
+    const size = Buffer.byteLength(JSON.stringify(row), "utf8");
+    if (included === 0 && size > SINGLE_ROW_HARD_CAP_BYTES) throw new Error("row-exceeds-wire-limit");
+    remaining -= size;
+    if (included > 0 && remaining < 0) break;
+    included += 1;
+  }
+  return rows.slice(0, included);
 }
 
 function page<T>(
@@ -1875,7 +1899,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (authorActorKey !== undefined) message.authorActorKey = authorActorKey;
     const authorUserId = optionalString(params, "authorUserId");
     const parentMessageId = optionalString(params, "parentMessageId");
-    if (authorUserId !== undefined) message.authorUserId = authorUserId;
+    if (authorUserId !== undefined) message.authorUserId = normalizeAuthorUserId(authorUserId);
     if (
       parentMessageId !== undefined &&
       state.messages.get(parentMessageId)?.threadId !== threadId
@@ -2436,7 +2460,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         (message.createdAtMs === after.createdAtMs && compareText(message.id, after.messageId) > 0)) &&
       (channelId === undefined || state.threads.get(message.threadId)?.channelId === channelId) &&
       (threadId === undefined || message.threadId === threadId));
-    const requests = rows.slice(0, limit).map((message) => {
+    const values = rows.slice(0, limit).map((message) => {
       const chatId = state.threads.get(message.threadId)?.channelId;
       const channel = chatId === undefined ? undefined : state.channels.get(chatId);
       return {
@@ -2456,7 +2480,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         createdAtMs: message.createdAtMs,
       };
     });
-    return jsonResult({ requests, more: rows.length > limit });
+    const requests = byteBudgetPage(values);
+    return jsonResult({ requests, more: rows.length > requests.length });
   }
 
   private agentUnreadThreads(

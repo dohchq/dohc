@@ -651,6 +651,41 @@ describe("ChatsLiveAdapter", () => {
     });
   });
 
+  it("matches a post's account after trimming it, as the engine stores it", async () => {
+    const { adapter, post } = readerFixture();
+    const { terminal: chat } = await agentChats(adapter);
+    await post(chat, "dm", "spaced", { userId: " ada " });
+    expect(await requestIds(adapter, terminal(["ada"], false))).toEqual(["spaced"]);
+  });
+
+  it("cuts a requests page at the engine's 256 KiB and continues after it", async () => {
+    const { adapter } = readerFixture();
+    const { terminal: chat } = await agentChats(adapter);
+    const body = "x".repeat(64 * 1024);
+    const author = { kind: "human" as const, displayName: "Ada" };
+    const started = await adapter.startChannelThread({
+      workspaceId: "workspace", channelId: chat, threadId: "dm", messageId: "ask-1",
+      authorActorKey: null, authorUserId: "ada", author, body,
+    });
+    for (const messageId of ["ask-2", "ask-3", "ask-4", "ask-5"]) {
+      await adapter.sendMessage({
+        workspaceId: "workspace", threadId: started.thread.id, messageId,
+        authorActorKey: null, authorUserId: "ada", author, body,
+      });
+    }
+    const reader = terminal(["ada"], false);
+    const first = await adapter.listAgentRequestsPage({ workspaceId: "workspace", reader });
+    expect(first.requests.map(row => row.messageId)).toEqual(["ask-1", "ask-2", "ask-3"]);
+    expect(first.more).toBe(true);
+    const last = first.requests[2];
+    if (last === undefined) throw new Error("expected three requests");
+    const rest = await adapter.listAgentRequestsPage({
+      workspaceId: "workspace", reader, after: { createdAtMs: last.createdAtMs, messageId: last.messageId },
+    });
+    expect(rest.requests.map(row => row.messageId)).toEqual(["ask-4", "ask-5"]);
+    expect(rest.more).toBe(false);
+  });
+
   it("encodes every chats request case with the workspace handle and exact params", async () => {
     expect(CHAT_REQUEST_CASES).toHaveLength(64);
     const requests: Request[] = [];
