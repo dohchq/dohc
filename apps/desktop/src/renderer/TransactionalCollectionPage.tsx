@@ -76,7 +76,8 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
 }
 type Query = { after: TransactionalCursor | null; search: string; filters?: CollectionTableView["filters"]; sort?: { fieldId: string; direction: "asc" | "desc" } };
 type Editor = { kind: "create"; operation: DatasetOperation } | { kind: "edit"; operation: DatasetOperation; row: TransactionalRow; field: TransactionalField };
-type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean; request?: TransactionalInvoke; invalidated?: boolean };
+/** `cell` is the field a cell edit saves, so a failure shows under its input while the cell stays open. */
+type Mutation = { operation: DatasetOperation; input: AppBackendJson; key: string; label: string; undo?: boolean; request?: TransactionalInvoke; invalidated?: boolean; cell?: string };
 type Undo = { operation: DatasetOperation; input: AppBackendJson };
 
 function undoFromReceipt(change: Mutation, raw: AppBackendJson): Undo | null {
@@ -192,7 +193,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const currentQuery = useRef(query); currentQuery.current = query;
   const loadedVersion = useRef(props.recordsVersion), changedVersion = useRef(props.recordsChanged);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
-  useLayoutEffect(() => { if (editor) (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
+  useLayoutEffect(() => {
+    const first = editor ? (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button") : null;
+    first?.focus();
+    // The caret goes after the value, so typing adds to it.
+    if (first instanceof HTMLInputElement && (first.type === "text" || first.type === "url")) first.setSelectionRange(first.value.length, first.value.length);
+  }, [editor]);
+  // The field of the cell open for editing, read when a save answers after this render.
+  const openCell = useRef<string | null>(null), cellSave = useRef<HTMLButtonElement>(null);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
     return { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId: operation.operationId, input, idempotencyKey: key };
@@ -366,14 +374,19 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     } catch (cause) {
       if (alive.current && !abort.signal.aborted) {
         const refused = cause !== null && typeof cause === "object" && "code" in cause && cause.code === "operation_refused";
+        const words = refused ? "The collection refused this change." : "dohc could not confirm this change.";
         if (refused) { mutation.current = null; setPending(null); }
-        else closeEditor();
-        onError(refused ? "The collection refused this change." : "dohc could not confirm this change.", cause, refused ? null : () => { if (alive.current) void currentExecute.current(change); });
+        // A cell still open keeps its value and says why under its input. Its check mark tries the same change again.
+        if (change.cell !== undefined && openCell.current === change.cell) { focusInvalid.current = true; setInvalid({ [change.cell]: words }); return; }
+        if (!refused) closeEditor();
+        onError(words, cause, refused ? null : () => { if (alive.current) void currentExecute.current(change); });
       }
     } finally { if (alive.current && !change.invalidated) { locked.current = false; setBusy(false); } }
   }
   function submitEditor(): void {
-    if (!editor || locked.current || resourceLock.current || mutation.current) return;
+    if (!editor || locked.current || resourceLock.current) return;
+    // The cell's own change that could not be confirmed goes again, with its key, before any other.
+    if (mutation.current) { if (mutation.current.cell !== undefined && mutation.current.cell === openCell.current) void execute(mutation.current); return; }
     // The row has no form to stop a value the browser rejects, such as a half-typed number.
     if (createRow.current && !Array.from(createRow.current.querySelectorAll("input")).every(input => input.reportValidity())) return;
     const editable = editor.kind === "edit" ? [editor.field] : createFields;
@@ -381,7 +394,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (problems.length > 0) { focusInvalid.current = true; setInvalid(Object.fromEntries(problems)); return; }
     const values = Object.fromEntries(editable.map(field => [field.fieldId, draft[field.fieldId] ?? null]));
     const input: AppBackendJson = editor.kind === "edit" ? { id: editor.row.id, expectedVersion: editor.row.version, values } : { values };
-    void execute({ operation: editor.operation, input, key: crypto.randomUUID(), label: editor.kind === "edit" ? "Saved the edit" : "Created a record" });
+    void execute({ operation: editor.operation, input, key: crypto.randomUUID(), label: editor.kind === "edit" ? "Saved the edit" : "Created a record", ...(editor.kind === "edit" && editor.field.fieldId === openCell.current ? { cell: editor.field.fieldId } : {}) });
   }
   async function deleteRecord(row: TransactionalRow): Promise<void> {
     if (!remove || !confirmDelete || locked.current || mutation.current) return;
@@ -394,7 +407,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     } catch (cause) { if (alive.current) onError("dohc could not confirm deletion.", cause, null); }
     finally { if (alive.current) { locked.current = false; setBusy(false); } }
   }
+  // An edit of a field this page of the table shows opens in its cell.
+  const cellEdit = editor?.kind === "edit" && !visual && page !== null && fields.some(field => field.fieldId === editor.field.fieldId) && page.rows.some(row => sameRecord(row, editor.row)) ? editor : null;
+  openCell.current = cellEdit?.field.fieldId ?? null;
+  // The open cell's own change that could not be confirmed: the cell says so, and its check mark and × stay usable.
+  const cellPending = pending?.cell !== undefined && pending.cell === cellEdit?.field.fieldId;
   const disabled = busy || visualBusy || pending !== null || resourceBusy;
+  const cellDisabled = busy || visualBusy || resourceBusy || (pending !== null && !cellPending);
   const readDisabled = busy || visualBusy || resourceBusy;
   // Records that could not load take no changes until a read shows them; Search and Refresh still read again.
   const writeDisabled = disabled || failure !== null;
@@ -413,7 +432,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   useLayoutEffect(() => {
     if (!focusInvalid.current) return;
     focusInvalid.current = false;
-    (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    const target = (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>('[aria-invalid="true"]');
+    // A cell's input stays disabled while its change waits to be confirmed, so its check mark takes focus to try again.
+    (target?.matches(":disabled") && cellSave.current ? cellSave.current : target)?.focus();
   }, [invalid]);
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
@@ -480,7 +501,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </div>
     {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
       : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
-    {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
+    {pending && !busy && !cellPending ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
@@ -499,13 +520,27 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         <span className="flex items-center gap-1.5">{supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex min-w-0 items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} /><span className="min-w-0 truncate">{field.name}</span>{query.sort?.fieldId === field.fieldId ? <span className="shrink-0">{query.sort.direction === "asc" ? " ↑" : " ↓"}</span> : null}</button> : <><FieldTypeIcon type={field.type} /><span className="min-w-0 truncate">{field.name}</span></>}
         {props.fieldMarks?.has(field.name) ? <AutomationFieldMark automations={props.fieldMarks.get(field.name)!} /> : null}</span>
       </th>)}{props.buttons?.fields.map(field => <th key={`button:${field}`} scope="col" className="border-b border-line px-3 py-2 text-left font-medium text-muted"><span className="block truncate">{field}</span></th>)}<th scope="col" className="border-b border-line"><span className="sr-only">Actions</span></th></tr></thead>
-      <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
+      <tbody>{page.rows.map(row => {
+        // The row with an open cell aligns its cells to the top, so an error under the input pushes only the rows below.
+        const editing = cellEdit !== null && sameRecord(row, cellEdit.row);
+        const rest = editing ? "px-3 pt-2.5 pb-2 align-top" : "px-3 py-2";
+        return <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
+        const open = editing && cellEdit?.field.fieldId === field.fieldId;
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
-        return <td key={field.fieldId} className="px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
+        // An open cell's input keeps the value's text where it was.
+        return <td key={field.fieldId} className={`${open && field.type !== "checkbox" && field.type !== "multi-select" ? "px-px py-[3px] align-top" : rest} text-ink`}>{attachment && !open ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} hidden={open} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation: edit, row, field });
-        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="block truncate text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
-      })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className="px-3 py-2">{props.buttons!.render(field, row)}</td>)}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}
+        }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="block truncate text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}{open ? <form ref={editorForm} id={`${errorIds}-cell`} aria-label={`Edit ${field.name}`} className="flex flex-col gap-1 wrap-anywhere" onSubmit={event => { event.preventDefault(); submitEditor(); }} onKeyDown={event => {
+          if (event.defaultPrevented || isComposingKey(event)) return;
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!cellDisabled) closeEditor(); }
+          else if (event.key === "Enter" && (event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement && event.target.type !== "file")) { event.preventDefault(); event.currentTarget.requestSubmit(); }
+        }}>{valueInput(field)}{fieldError(field)}</form> : null}</td>;
+      })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className={rest}>{props.buttons!.render(field, row)}</td>)}<td className={editing ? "px-3 py-2 align-top" : "px-3 py-2"}><div className="flex justify-end gap-2">{editing ? <>
+        <IconButton title="Cancel" aria-label="Cancel" disabled={cellDisabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
+        <IconButton ref={cellSave} type="submit" form={`${errorIds}-cell`} title="Save" aria-label="Save" disabled={cellDisabled}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
+      </> : null}{/* The record actions stay while hidden, so focus can return to the one that opened details. */}<IconButton hidden={editing} title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton hidden={editing} title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>;
+      })}
       {page.rows.length === 0 && (query.search || !canCreate) ? <tr><td colSpan={columns} className="px-3 py-2 text-muted">{query.search ? "No records match. Try a shorter search." : "No records yet. Refresh to check for new submissions."}</td></tr> : null}
       {createInRow ? <tr ref={createRow} aria-label="New record" className="border-b border-line" onKeyDown={event => {
         if (event.defaultPrevented || isComposingKey(event)) return;
@@ -523,7 +558,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       onClose={() => setDetails(null)}
       onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation, row: details, field }); }}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}
-    {editor && !createInRow ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
+    {editor && !createInRow && !cellEdit ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
       <div className="flex flex-wrap gap-3">{editorFields.map(field => <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{valueInput(field)}{fieldError(field)}</div>)}</div>
       <div className="mt-3 flex justify-end gap-2"><SecondaryButton disabled={disabled} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={disabled}>{editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
     </form> : null}
