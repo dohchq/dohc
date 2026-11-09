@@ -212,6 +212,9 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await page.getByTestId("chats-share-submit").click();
     // The grant lands (a member row appears in the panel).
     await expect(page.getByTestId("chats-share-member")).toContainText(RECIPIENT_EMAIL);
+    // Members is a dialog; close it before working in the channel again.
+    await page.getByTestId("chats-share-close").click();
+    await expect(page.getByTestId("chats-share-panel")).toHaveCount(0);
 
     const { shareId, channelWireId } = await grantedShare(page, workspaceId);
     expect(channelWireId.length).toBeGreaterThan(0);

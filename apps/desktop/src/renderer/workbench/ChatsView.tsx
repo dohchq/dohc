@@ -20,6 +20,7 @@ import { neutralPresentation } from "./actorPresentation";
 import { ThreadedChat } from "./ThreadedChat";
 import { showChat } from "./chatsOnScreen";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
+import { ChatMembersDialog } from "./ChatMembersDialog";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
@@ -744,9 +745,6 @@ export function ChatsView(props: {
   // publish under the previous workspace's scope. Reset on every switch.
   const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
-  const [shareEmail, setShareEmail] = useState("");
-  const [shareReadOnly, setShareReadOnly] = useState(false);
-  const [shareBusy, setShareBusy] = useState(false);
   const [joiningShareId, setJoiningShareId] = useState<string | null>(null);
   // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
   // and stay false until the next render, so a double-send (two Enters in one
@@ -1457,8 +1455,6 @@ export function ChatsView(props: {
       relayReach: 0,
     };
     setSharePanelOpen(false);
-    setShareEmail("");
-    setShareReadOnly(false);
     setJoiningShareId(null);
     setDms([]);
     setDmAvailable(false);
@@ -3322,44 +3318,32 @@ export function ChatsView(props: {
     });
   }, [refreshDms, refreshShares]);
 
-  const submitShare = useCallback(async () => {
+  const submitShare = useCallback(async (input: { email: string; viewOnly: boolean }): Promise<boolean> => {
     // The disabled control is honesty; this is the gate. A submit that slips
     // past it (a stale enter key, a re-render race) would still grow the lane
     // dohc already cannot list. Only the granted lane, though — an outgoing
     // share never touches the received one.
-    if (grantedLaneIsOverLimit(shareReadFailure)) return;
-    if (nav.level !== "channel" || shareBusy) return;
-    const recipientEmail = shareEmail.trim();
-    if (recipientEmail.length === 0) return;
+    if (grantedLaneIsOverLimit(shareReadFailure)) return false;
+    if (nav.level !== "channel") return false;
+    const recipientEmail = input.email.trim();
+    if (recipientEmail.length === 0) return false;
     const token = liveToken.current;
-    setShareBusy(true);
     try {
       await bridge().shareChatChannel({
         workspaceId,
         channelId: nav.channel.id,
         recipientEmail,
-        ...(shareReadOnly ? { access: "read-only" as const } : {}),
+        ...(input.viewOnly ? { access: "read-only" as const } : {}),
       });
-      if (token !== liveToken.current) return;
-      setShareEmail("");
-      setShareReadOnly(false);
+      if (token !== liveToken.current) return false;
       await refreshShares();
+      return true;
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (token !== liveToken.current) return false;
       props.onError(ipcErrorMessage(error, "Could not share that group."), error);
-    } finally {
-      setShareBusy(false);
+      return false;
     }
-  }, [
-    nav,
-    props.onError,
-    refreshShares,
-    shareBusy,
-    shareEmail,
-    shareReadFailure,
-    shareReadOnly,
-    workspaceId,
-  ]);
+  }, [nav, props.onError, refreshShares, shareReadFailure, workspaceId]);
 
   const revokeShare = useCallback(
     async (shareId: string, member: string, group: string) => {
@@ -4737,8 +4721,9 @@ export function ChatsView(props: {
                   type="button"
                   data-testid="chats-share-channel"
                   title={channelGrants.length > 0 ? "Members" : "Add members"}
+                  aria-haspopup="dialog"
                   aria-expanded={sharePanelOpen}
-                  onClick={() => setSharePanelOpen((open) => !open)}
+                  onClick={() => setSharePanelOpen(true)}
                   className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
                 >
                   {channelGrants.length > 0 ? (
@@ -4783,96 +4768,18 @@ export function ChatsView(props: {
           </div>
         ) : null}
         {canShare && sharePanelOpen ? (
-          <div
-            data-testid="chats-share-panel"
-            className="shrink-0 border-b border-line bg-panel-2/40 px-3 py-2"
-          >
-            {/* Same honesty on the owner side: an unreadable listing left this
-                panel showing no members, which reads as "nobody has this
-                channel". */}
-            {shareReadFailure ? (
-              <ShareReadFailureNotice
-                testId="chats-share-members-unreadable"
-                failure={shareReadFailure}
-                stale={channelGrants.length > 0}
-                onRetry={() => void refreshShares()}
-              />
-            ) : null}
-            {channelGrants.length > 0 ? (
-              <ul className="m-0 mb-2 list-none p-0">
-                {channelGrants.map((grant) => (
-                  <li
-                    key={grant.shareId}
-                    data-testid="chats-share-member"
-                    className="flex h-7 items-center gap-2"
-                  >
-                    <ChatAvatar presentation={neutralPresentation} name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
-                    <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-                      {grant.recipientEmail ?? "Invited"}
-                    </span>
-                    {grant.access === "read-only" ? (
-                      <span className="shrink-0 text-[10px] text-muted">read-only</span>
-                    ) : null}
-                    <button
-                      type="button"
-                      data-testid="chats-share-revoke"
-                      onClick={() =>
-                        void revokeShare(
-                          grant.shareId,
-                          grant.recipientEmail ?? "the invited person",
-                          nav.channel.name,
-                        )
-                      }
-                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
-                    >
-                      Remove
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            <form
-              className="flex items-center gap-1.5"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitShare();
-              }}
-            >
-              <label className="sr-only" htmlFor="chats-share-email">
-                Add a member by email
-              </label>
-              <input
-                id="chats-share-email"
-                data-testid="chats-share-email"
-                type="email"
-                value={shareEmail}
-                disabled={shareGrantsBlocked}
-                maxLength={320}
-                placeholder="Add by email"
-                onChange={(event) => setShareEmail(event.target.value)}
-                className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle dohc-focus-input"
-              />
-              <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted">
-                <input
-                  data-testid="chats-share-readonly"
-                  type="checkbox"
-                  checked={shareReadOnly}
-                  onChange={(event) => setShareReadOnly(event.target.checked)}
-                />
-                View only
-              </label>
-              <button
-                type="submit"
-                data-testid="chats-share-submit"
-                disabled={
-                  shareBusy || shareGrantsBlocked || shareEmail.trim().length === 0
-                }
-                className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
-              >
-                Add
-              </button>
-            </form>
-          </div>
+          <ChatMembersDialog
+            groupName={nav.channel.name}
+            members={channelGrants}
+            readFailure={shareReadFailure}
+            blocked={shareGrantsBlocked}
+            onAdd={submitShare}
+            onRemove={(grant) =>
+              void revokeShare(grant.shareId, grant.recipientEmail ?? "the invited person", nav.channel.name)
+            }
+            onRetryRead={() => void refreshShares()}
+            onClose={() => setSharePanelOpen(false)}
+          />
         ) : null}
       </>
     );
