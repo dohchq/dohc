@@ -241,6 +241,23 @@ describe("transactional Collection page", () => {
     await screen.findByRole("button", { name: "Undo last edit" });
     expect(result.onNotice).not.toHaveBeenCalled();
   });
+  it.each([
+    [new Error("Lost reply"), "dohc could not confirm the change to People. Open it to check its records."],
+    [Object.assign(new Error("This record changed. Refresh the table."), { code: "operation_refused" }), "People refused the change. Open it to check its records."],
+  ])("reports a change that fails after its page closed, naming the Collection (%s)", async (failure, words) => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
+    result.unmount();
+    await act(async () => answer.reject(failure));
+    expect(result.onError).toHaveBeenCalledOnce();
+    expect(result.onError).toHaveBeenCalledWith(words, failure, null);
+    expect(result.onNotice).not.toHaveBeenCalled();
+  });
   it("tells the person which Collection a change saved in after its page closed", async () => {
     const answer = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
