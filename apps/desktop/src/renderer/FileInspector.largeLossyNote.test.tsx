@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -8,7 +8,7 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES, WYSIWYG_MARKDOWN_THRESHOLD_BYTES, utf8ByteLength } from "../workspaces/workspaceTextLimits";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 
@@ -116,10 +116,39 @@ describe("a note past read mode's size", () => {
 
     await answerChecks();
     await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
-    expect(await screen.findByTestId("lossy-note-notice")).toBeTruthy();
+    const notice = await screen.findByTestId("lossy-note-notice");
+    expect(notice.textContent).toContain("This note has parts dohc can't show.");
+    expect(within(notice).getByTestId("lossy-note-edit-anyway")).toBeTruthy();
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
+
+  it("whose text is past the live limit, though its file is not, says it is too large, with no Edit anyway", async () => {
+    // Each invalid byte in the file reads as U+FFFD, three bytes in the text.
+    const invalid = "�".repeat(760);
+    const text = `# Notes
+
+${Array.from({ length: 1000 }, (_, index) => `Paragraph ${index + 1} ${invalid}`).join("
+
+")}
+`;
+    expect(text.length).toBeLessThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
+    expect(utf8ByteLength(text)).toBeGreaterThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
+    const bridge = bridgeFor(text, "record");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    await expectWaiting();
+    await answerChecks();
+    await waitFor(() => expect(bridge.closeEngineYDocSession).toHaveBeenCalled());
+    const notice = await screen.findByTestId("lossy-note-notice");
+    expect(notice.textContent).toContain("This file is too large to edit in dohc.");
+    expect(notice.textContent).not.toContain("This note has parts dohc can't show.");
+    expect(within(notice).getByTestId("lossy-note-open-externally")).toBeTruthy();
+    expect(within(notice).queryByTestId("lossy-note-edit-anyway")).toBeNull();
+    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("title")).toBe("This file is too large to edit in dohc.");
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  }, 30_000);
 
   it("with an engine record turns editable once a clear check answers", async () => {
     const clear = `# Notes\n\n${FILLER}\n`;

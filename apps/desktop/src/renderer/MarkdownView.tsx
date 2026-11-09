@@ -89,7 +89,7 @@ import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
 import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
 import { dirnameOf } from "./path";
-import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES, WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
@@ -1036,11 +1036,15 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
+  // Invalid bytes read as U+FFFD can take a note's text past the live limit
+  // while its file stays under it, and the check counts that text as lossy.
+  const lossy = props.lossyNote === "lossy";
+  const tooLarge = useMemo(() => lossy && exceedsUtf8Bytes(props.body, WORKSPACE_TEXT_EDITOR_MAX_BYTES), [lossy, props.body]);
   // A disabled Edit says why: the chip's words, or else the restriction its
   // notice states. Never the chip's save state: a set-aside edit doesn't stop
   // editing.
-  const editReason = readOnlyWords || (props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
-    : props.truncated ? SAVE_STATE["too-large"].title
+  const editReason = readOnlyWords || (lossy && !tooLarge ? LOSSY_NOTE_TITLE
+    : props.truncated || tooLarge ? SAVE_STATE["too-large"].title
     : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
@@ -2435,7 +2439,7 @@ export function MarkdownView(props: {
           <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
         </EngineMayHoldDocumentNotice>
       ) : props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} tooLarge={tooLarge} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
