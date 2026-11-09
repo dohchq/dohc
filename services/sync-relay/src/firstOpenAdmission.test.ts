@@ -27,7 +27,7 @@ function fixture() {
   return {open, prepare, blob, advance(ms: number) {now += ms;}};
 }
 
-it("prunes expired admission entries at capacity without dropping a remaining quiet entry", async () => {
+it("prunes an expired admission entry at capacity before any quiet entry still within its window", async () => {
   const f = fixture();
   await f.open("expired");
   f.advance(1);
