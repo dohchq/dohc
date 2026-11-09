@@ -68,10 +68,9 @@ Copy that line into the pull request.
 
 ## Where the gate runs
 
-With Blacksmith disabled, run the gate locally. Run it on native Windows x64,
-then again from WSL for Linux x64 (a WSL-native clone gives realistic
-filesystem semantics; `/mnt/c` works). Run `pnpm typecheck` and `pnpm test`
-on both as well. macOS has no routine gate run; produce one before any Mac
+PR checks run the gate on Linux x64. When a change depends on Windows
+behavior, also run it on native Windows x64, with `pnpm typecheck` and
+`pnpm test`. macOS has no routine gate run; produce one before any Mac
 distribution.
 
 ## Native target

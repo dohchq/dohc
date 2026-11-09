@@ -1,5 +1,6 @@
-# Blacksmith is off unless the repository variable BLACKSMITH_ENABLED is true.
-# While off, only manual runs allocate runners, using GitHub's ubuntu-24.04 image.
+# Ready same-repository PRs and manual runs use GitHub's ubuntu-24.04 runners.
+# Setting the repository variable BLACKSMITH_ENABLED to true moves every job except
+# confinement to Blacksmith.
 # The local verifier reads the path filters and tool pins below.
 # Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
@@ -15,7 +16,7 @@ on:
         options: [all, js, rust]
         default: all
       runner_size:
-        description: Blacksmith vCPUs, ignored while Blacksmith is off
+        description: Blacksmith vCPUs, ignored on GitHub's runners
         type: choice
         options: ["4", "8"]
         default: "4"
@@ -33,13 +34,12 @@ env:
   CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
-  # Evaluate this condition before allocating any runner. Forks start no automatic checks.
+  # Evaluate this condition before allocating any runner. Drafts and forks start no automatic checks.
   changes:
     name: what changed
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (vars.BLACKSMITH_ENABLED == 'true' && !github.event.pull_request.draft &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+      (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
     outputs:

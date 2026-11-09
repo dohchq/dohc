@@ -101,9 +101,9 @@ The person deletes the delivery folder when they finish. That removes only its c
 ## Verify a pull request
 
 One verification owner records passing evidence for every selected gate in the PR.
-While Blacksmith is off, run the gates locally.
-When enabled, reuse passing CI evidence that covers the change instead of repeating full gates locally.
-Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change activation.
+PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
+When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
+Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change the optional Blacksmith runners.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
 Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).
 For platform-specific changes, add focused checks on that platform.
