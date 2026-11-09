@@ -25,7 +25,8 @@ const compileClosedAppInProcess=(...args)=>reportCompilerFailure(compileClosedAp
 const bounds={timeoutMs:20000,maxMemoryBytes:256*1024*1024,maxProcesses:8,maxInputBytes:4096,maxOutputBytes:4096,maxErrorBytes:8192};
 // dohc stages the compiler owner for Apple silicon Macs and Linux x64.
 const darwin=process.platform==='darwin'&&process.arch==='arm64';
-const confined=darwin||process.platform==='linux'&&process.arch==='x64';
+// PR checks run the Linux owner in their confinement job; Blacksmith's kernel has no Landlock.
+const confined=darwin||process.platform==='linux'&&process.arch==='x64'&&process.env.DOHC_CONFINEMENT_SUITES!=='exclude';
 const owned={skip:!(process.platform==='win32'||confined),timeout:30000};
 const ownerOnly={skip:!confined,timeout:30000};
 // macOS and Linux run the worker under the staged official Node and owner, as

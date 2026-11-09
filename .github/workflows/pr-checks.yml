@@ -211,6 +211,9 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 60
+    env:
+      # The confinement job runs these suites.
+      DOHC_CONFINEMENT_SUITES: exclude
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -272,6 +275,9 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 60
+    env:
+      # The confinement job runs the app compiler owner's tests.
+      NEXTEST_PROFILE: without-confinement
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -286,6 +292,15 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+
+      # The Markdown reader refuses a Node in a folder other users can write,
+      # and the runner's tool cache is one. Its tests run a private copy.
+      - name: Reader test Node
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          install -m 0500 "$(command -v node)" "$dir/node"
+          echo "DOHC_READER_TEST_NODE=$dir/node" >> "$GITHUB_ENV"
 
       - name: Rust toolchain
         run: |
@@ -330,9 +345,77 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The suites that apply Landlock, which Blacksmith's kernel leaves out, and the relay's
+  # replicas, which also need the outer seccomp filter that Docker's default profile gives
+  # production. The other jobs leave them out by DOHC_CONFINEMENT_SUITES and NEXTEST_PROFILE.
+  confinement:
+    name: confinement
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: confinement
+
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: App compiler owner
+        run: cargo nextest run --locked --package dohc-compiler-owner
+
+      - name: Desktop app compiler
+        run: pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 scripts/compiler-process.test.mjs scripts/stage-app-compiler.test.mjs
+
+      - name: Engine
+        run: cargo build --locked -p dohc-workspace-engine --bin dohc-workspace-engine
+
+      # The compose service's security options, with Docker's default seccomp profile.
+      # Ubuntu 24.04 matches the runner, so the runner's Node and engine run unchanged.
+      - name: Relay replicas
+        run: |
+          set -euo pipefail
+          node_root="$(dirname "$(dirname "$(command -v node)")")"
+          report="$PWD/.agent-artifacts/confinement/relay.json"
+          docker run --rm --init --security-opt no-new-privileges:true --cap-drop ALL \
+            --user "$(id -u):$(id -g)" --env HOME=/tmp --env CI --env PATH="$node_root/bin:/usr/bin:/bin" \
+            --env DOHC_CONFINEMENT_SUITES=only --env DOHC_REQUIRE_ENGINE_E2E=1 \
+            --volume "$node_root:$node_root:ro" --volume "$PWD:$PWD" --workdir "$PWD/services/sync-relay" \
+            ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
+            sh -c 'grep -x "Seccomp:[[:space:]]*2" /proc/self/status &&
+              exec node node_modules/vitest/vitest.mjs run --reporter=default --reporter=json --outputFile="$0"' "$report"
+          # A skipped replica test would pass the run without testing the sandbox.
+          node -e '
+            const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error(`${r.numPendingTests + r.numTodoTests} of ${r.numTotalTests} replica tests did not run.`);
+            console.log(`${r.numPassedTests} replica tests passed under the default seccomp profile.`);' "$report"
+
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust]
+    needs: [changes, javascript, rust, confinement]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
@@ -360,4 +443,6 @@ jobs:
               : jobs.changes.outputs[gate] === 'true';
             assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
           }
+          const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
+          assert.equal(jobs.confinement.result, confined ? 'success' : 'skipped', 'confinement job did not complete as selected');
           NODE
