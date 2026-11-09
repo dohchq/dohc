@@ -83,6 +83,8 @@ it("resets on moment or digest changes, isolates workspaces, and discards cancel
   await f.retry.attempt(edited, async () => deadline(edited));
   expect(f.retry.state(edited)?.deadlineAnswers).toBe(1);
   expect(f.retry.state(other)?.deadlineAnswers).toBe(1);
+  // Try again waits out the relay's wait after that deadline, 1 ms here.
+  f.advance(1);
   f.retry.retry(edited);
   await expect(f.retry.attempt(edited, async () => deadline(other))).rejects.toThrow();
   expect(f.retry.state(edited)?.deadlineAnswers).toBe(0);
