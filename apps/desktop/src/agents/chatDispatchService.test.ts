@@ -3213,6 +3213,7 @@ describe("chatDispatchService", () => {
       "posts the failure notice when its next-step %s read fails",
       async (read) => {
         const fixture = await createFixture();
+        await stubRunnerPath(fixture, { node: true });
         const trigger = await createAgentThread(fixture, { body: "Finish the request.", authorUserId: "user_local" });
         await activate(fixture);
         const run = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!.run;
