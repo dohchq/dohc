@@ -278,6 +278,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
       cause: failure,
       retry: () => copyAgain(note),
       identity: copyNoticeIdentity(note),
+      target: { to: "file", path: note.path },
       ...(notOpen && note.open ? { action: { label: "Open note", run: note.open, reads: true } } : {}),
     });
   }

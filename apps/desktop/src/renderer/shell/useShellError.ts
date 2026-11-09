@@ -144,6 +144,7 @@ export type ReportShellFailure = (failure: {
   cause?: unknown;
   retry?: (() => void) | null;
   action?: ShellError["action"];
+  target?: NoticeTarget;
   identity?: string;
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);

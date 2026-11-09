@@ -243,6 +243,8 @@ describe("DocumentMenu", () => {
         cause: failure,
         retry: expect.any(Function),
         identity: expect.stringMatching(/^copy-markdown:/),
+        // A press on its Notices row opens the note it names.
+        target: { to: "file", path: "Plan.md" },
       });
     });
   });
@@ -869,6 +871,7 @@ describe("DocumentMenu", () => {
       expect(notOpen).toEqual(expect.objectContaining({
         message: "dohc could not copy Plan as Markdown, because Plan is not open.",
         identity: first.identity,
+        target: { to: "file", path: "a/Plan.md" },
         action: expect.objectContaining({ label: "Open note" }),
       }));
       notOpen.action?.run();
