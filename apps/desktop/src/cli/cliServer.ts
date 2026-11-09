@@ -3746,9 +3746,11 @@ async function dispatchWorkspace(
         if (context.readOnly) {
           throw new CliCommandError("show requires --peek in a read-only workspace");
         }
+        // A read from the run dohc started is its agent's, whatever actor it
+        // names, so it never moves your read place.
         await markShownThreadRead(
           context,
-          request.args.actor,
+          context.run ? "agent" : request.args.actor,
           chatAgentReader(context, context.run?.runId ?? null),
           target.thread.thread.id,
           messages,
