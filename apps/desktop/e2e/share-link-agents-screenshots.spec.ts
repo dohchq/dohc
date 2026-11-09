@@ -74,6 +74,7 @@ async function shoot(page: Page, dialog: Locator, name: string): Promise<void> {
 async function openLinkPane(page: Page): Promise<Locator> {
   await revealExplorerPath(page, PATH);
   await explorerRow(page, PATH).click({ button: "right" });
+  await page.getByTestId("explorer-menu-item-share").click();
   const dialog = page.getByTestId("share-dialog");
   await expect(dialog).toBeVisible();
   await dialog.getByRole("radio", { name: "Anyone with the link" }).click();
@@ -103,7 +104,7 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     shared = await startSharedDatasetBrowser({ relayUrl: relay.baseUrl, exchangeKey: relayExchangeKey });
     desktop = await launchDesktopApp({
       workspace: temp,
-      env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250", DOHC_TEST_EXPLORER_MENU_CHOICE: "share" },
+      env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" },
     });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, temp);

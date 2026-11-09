@@ -1047,6 +1047,8 @@ describe("registered relay share handlers", () => {
       relayShareOperations.retuneRelayShareLink.channel,
       relayShareOperations.rotateRelayShareLink.channel,
       relayShareOperations.revokeRelayShareLink.channel,
+      relayShareOperations.listRelayShareLinkAgents.channel,
+      relayShareOperations.disconnectRelayShareLinkAgent.channel,
       relayShareOperations.listRelayShareDiscussion.channel,
       relayShareOperations.pollRelayShareDiscussionActivity.channel,
       relayShareOperations.cancelRelayShareDiscussionActivity.channel,
@@ -1059,7 +1061,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.promoteRelayShareGrant.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(30);
+    expect(h.handlers.size).toBe(32);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
