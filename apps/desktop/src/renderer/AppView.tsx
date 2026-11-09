@@ -1,5 +1,5 @@
 import { AppWindow } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
@@ -7,11 +7,11 @@ import { openLinkExternally } from "./linkActivation";
 import { hasBlockingModal } from "./modalFocus";
 import { localLaunchUrl, openLocalApp } from "./OwnerAppPublication";
 import { PrimaryButton, RetryRow } from "./ui/controls";
+import { readColorScheme, useColorScheme } from "./useColorScheme";
 
 type Api = ReturnType<typeof bridge>;
 type AppViewEvent = Parameters<Parameters<Api["onAppViewEvent"]>[0]>[0];
 type Shortcut = Extract<AppViewEvent, { kind: "shortcut" }>;
-type ColorScheme = "light" | "dark";
 type ReportError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
 
 /** The shell's Notices, by identity: a report replaces the row of the same identity, and clear takes it back. */
@@ -35,16 +35,6 @@ export const APP_DOWNLOAD_BLOCKED = "Apps in dohc can't save files. Download it 
 const BROWSER_OPEN_FAILED = "dohc could not open this app in your browser.";
 // A load the app replaced before it finished, such as a second click.
 const LOAD_ABORTED = -3;
-
-function readTheme(): ColorScheme {
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-}
-
-function subscribeTheme(onChange: () => void): () => void {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, { attributeFilter: ["data-theme"] });
-  return () => observer.disconnect();
-}
 
 // Focus is on the page, or on the focused editor group's own area.
 function focusWentNowhere(): boolean {
@@ -90,7 +80,7 @@ export function useAppView(options: {
   // The first load finished, so the app has painted. Until then the webview shows dohc's paper.
   const [painted, setPainted] = useState(false);
   const [publicationId, setPublicationId] = useState<string | null>(null);
-  const theme = useSyncExternalStore(subscribeTheme, readTheme);
+  const theme = useColorScheme();
   const webview = useRef<Electron.WebviewTag | null>(null);
   const toolbarStart = useRef<HTMLButtonElement | null>(null);
   const latest = useRef(options);
@@ -131,7 +121,7 @@ export function useAppView(options: {
     setLoading(false);
     setPainted(false);
     try {
-      const result = await bridge().appView({ action: "open", workspaceId, appRoot, viewId, colorScheme: readTheme() });
+      const result = await bridge().appView({ action: "open", workspaceId, appRoot, viewId, colorScheme: readColorScheme() });
       if (!current()) return;
       if (result.kind === "unapproved" && result.viewId === viewId) {
         notices?.clear(failureId);
