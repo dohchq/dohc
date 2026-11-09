@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
-import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
 import type { NoticeTarget } from "./noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
@@ -360,7 +360,9 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       // Changes the row of its identity where it stands, with no new toast.
       quiet = false,
     ) => {
-      if (reportSharedViewRefusal(error)) return;
+      // The window's stop message already says why. Main marks the failed
+      // read before the window learns of the stop.
+      if (isStoppedWorkspaceRead(error) || reportSharedViewRefusal(error)) return;
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const sharedFileRefusal = refusalCode(error) === "share-collision-record";
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
@@ -379,7 +381,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           ? `record:${partial.retry.recordId}`
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
-        retry: canRetry === false ? null : retry,
+        retry: canRetry === false || isStoppedWorkspaceCall(error) ? null : retry,
         ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
           : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
@@ -425,6 +427,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
+      if (isStoppedWorkspaceRead(failure.cause) || isStoppedWorkspaceRead(failure.message)) return;
       if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message)) return;
       const refusal = [failure.cause, failure.message].find(error => refusalCode(error) === "share-collision-record");
       const shown = readError(refusal ?? failure.message);
@@ -440,7 +443,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         ...(title ? { title } : {}),
         ...(failure.tone ? { tone: failure.tone } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
-        retry: failure.retry ?? null,
+        retry: isStoppedWorkspaceCall(failure.cause) || isStoppedWorkspaceCall(failure.message) ? null : failure.retry ?? null,
         ...(failure.command ? { command: failure.command } : {}),
         ...(failure.paths?.length ? { paths: failure.paths } : {}),
         ...(details.length ? { details } : {}),
@@ -730,8 +733,9 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // stale until unrelated workspace activity happened to refresh it.
   const reportLaneFailure = useCallback(
     (lane: string, error: unknown, retry: () => void) => {
+      if (isStoppedWorkspaceRead(error)) return;
       const { cause } = readError(error);
-      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry });
+      push({ message: withErrorWords(lane, error), ...(cause ? { details: [["Cause", cause]] } : {}), retry: isStoppedWorkspaceCall(error) ? null : retry });
     },
     [push],
   );

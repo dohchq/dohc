@@ -15,7 +15,8 @@ import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
-import { appViewOperations, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
+import { appViewOperations, engineStoreRefusalRecovery, liveDraftRecoveryOperations, workLinkOperations, type WorkspaceActivatedMessage } from "./ipc/bridgeContract";
+import { stoppedWorkspaceCall } from "./ipc/stoppedWorkspaceCalls";
 import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLinks";
 import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
@@ -6286,9 +6287,19 @@ function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[
       if (counted) telemetry.track(counted);
       return result;
     } catch (error) {
-      throw ipcWireError(withPrivacyDenial(error));
+      throw ipcWireError(withPrivacyDenial(error), stoppedWorkspaceCall(channel, args[0], () => workspaceStoppedIn(event.sender)));
     }
   });
+}
+
+// The workspace a window shows its stop for in place of its workbench:
+// Forget left the window showing it, or its store needs a newer dohc.
+function workspaceStoppedIn(sender: WebContents): string | null {
+  const old = oldWindows.read(sender);
+  if (old) return old.workspaceId;
+  const session = rendererWorkspaceSessions.current(sender);
+  const refusal = session && activity.getStatus(session.workspaceId).engineStoreRefused;
+  return session && refusal != null && engineStoreRefusalRecovery(refusal) === "update" ? session.workspaceId : null;
 }
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
