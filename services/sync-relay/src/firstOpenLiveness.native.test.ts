@@ -150,7 +150,7 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
     authorize: input => authorizeServiceHostReplication(storage, {key, namespace: history.namespace, ...input})});
   const relayApp = createSyncRelayHandler({storage, shareWebOrigin: "https://share.example.test", relayExchangeKey: "first-open-liveness-exchange-".repeat(2),
     resolveActor: (request, workspaceId) => {
-      if (request.headers.get("authorization") !== "Bearer owner") throw new Error("Only the owner's device calls this relay.");
+      if (request.headers.get("authorization") !== "Bearer owner") throw new Error("Only the writing device calls this relay.");
       return {userId: OWNER, workspaceId};
     }});
   const relayHttp = serveFetchHandler({handler: request => request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.") ? serviceReplication(request) : relayApp(request),
@@ -159,7 +159,7 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
   cleanup.push(() => new Promise<void>(done => {relayHttp.closeAllConnections(); relayHttp.close(() => done());}));
   harness.relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`;
 
-  // The owner's device, where an agent writes ordinary files.
+  // The workspace's own device, where an agent writes ordinary files.
   const owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30_000,
     onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value), privateLiveApplication: profile.nativeClient,
     env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
@@ -175,7 +175,7 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
       expect(result).toMatchObject({status: "complete", refusals: [], sharingDeclined: [], ownerAdmissionPending: []});
       if (!result.hasMore) return;
     }
-    throw new Error("The owner's push exceeded its eight-page bound.");
+    throw new Error("The device's push exceeded its eight-page bound.");
   };
   await rpc("sync.claim", {workspaceId: WS});
   const mainVersionId = (await rpc("versions.ensureMain", {})).id as string;
@@ -221,7 +221,7 @@ it.skipIf(engine.missing)("activates a never-opened note through its first open 
   const activations = storage.createServiceActivationStore(history);
   const bases = () => relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND origin_id LIKE 'service-host:first-open:%'")
     .all(WS).map(row => JSON.parse(String(row.payload_json)) as {objectId: string; lineageClaimId: string});
-  // Progress, for the record: each change in what the relay holds for the note.
+  // Progress: each change in what the relay holds for the note.
   const progress: {atS: number; realS: number; step: string}[] = [];
   const step = (name: string) => {if (progress.at(-1)?.step !== name) progress.push({atS: virtualSeconds(), realS: Number(((performance.now() - hostStarted) / 1_000).toFixed(1)), step: name});};
   await vi.waitFor(() => {
