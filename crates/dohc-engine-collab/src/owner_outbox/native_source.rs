@@ -83,6 +83,10 @@ pub enum OwnerOutboxNativeOrigin {
         on_behalf_of: Option<String>,
         chain_depth: Option<i64>,
         recorded_at_ms: i64,
+        /// Absent when the row names no agent run, so a source retained
+        /// before agent runs were recorded keeps its append key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_run_id: Option<String>,
     },
     AdoptionSeed,
 }
@@ -105,6 +109,7 @@ impl OwnerOutboxNativeSource {
             actor_kind,
             on_behalf_of,
             chain_depth,
+            agent_run_id,
             ..
         } = &self.origin
         else {
@@ -117,6 +122,7 @@ impl OwnerOutboxNativeSource {
                 on_behalf_of: on_behalf_of.clone(),
                 depth: u32::try_from(*depth).map_err(|_| OwnerOutboxError::Corrupt)?,
                 run: None,
+                agent_run_id: agent_run_id.clone(),
             }),
             _ => None,
         };
@@ -172,6 +178,7 @@ impl OwnerOutboxNativeSource {
                 on_behalf_of,
                 chain_depth,
                 recorded_at_ms,
+                agent_run_id,
             } => {
                 if self.native_sequence == 0
                     || !(0..=9_007_199_254_740_991).contains(recorded_at_ms)
@@ -190,12 +197,13 @@ impl OwnerOutboxNativeSource {
                             on_behalf_of: on_behalf_of.clone(),
                             depth: u32::try_from(*depth).map_err(|_| OwnerOutboxError::Corrupt)?,
                             run: None,
+                            agent_run_id: agent_run_id.clone(),
                         };
                         attribution
                             .validate()
                             .map_err(|_| OwnerOutboxError::Corrupt)?;
                     }
-                    (None, None) if on_behalf_of.is_none() => {}
+                    (None, None) if on_behalf_of.is_none() && agent_run_id.is_none() => {}
                     _ => return Err(OwnerOutboxError::Corrupt),
                 }
                 format!(
@@ -213,13 +221,14 @@ impl OwnerOutboxNativeSource {
             on_behalf_of,
             chain_depth,
             recorded_at_ms,
+            agent_run_id,
         } = &self.origin
         else {
             return Ok(());
         };
         let matches: Option<bool> = conn.query_row(
-            "SELECT update_blob_sha256=?5 AND actor_origin_id IS ?6 AND actor_kind IS ?7 AND on_behalf_of IS ?8 AND chain_depth IS ?9 AND recorded_at_ms=?10 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",
-            params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.native_sequence,self.update_digest,actor_origin_id,actor_kind,on_behalf_of,chain_depth,recorded_at_ms],|row|row.get(0),
+            "SELECT update_blob_sha256=?5 AND actor_origin_id IS ?6 AND actor_kind IS ?7 AND on_behalf_of IS ?8 AND chain_depth IS ?9 AND recorded_at_ms=?10 AND agent_run_id IS ?11 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",
+            params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.native_sequence,self.update_digest,actor_origin_id,actor_kind,on_behalf_of,chain_depth,recorded_at_ms,agent_run_id],|row|row.get(0),
         ).optional().map_err(read_sql)?;
         match matches {
             Some(true) => {}
@@ -241,8 +250,8 @@ pub(super) fn read_native_update_source(
     adoption_id: &str,
     native_sequence: i64,
 ) -> Result<OwnerOutboxNativeSource, OwnerOutboxError> {
-    conn.query_row("SELECT update_blob_sha256,actor_origin_id,actor_kind,on_behalf_of,chain_depth,recorded_at_ms FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,native_sequence],|row|Ok(OwnerOutboxNativeSource {
-        binding:binding.clone(),adoption_id:adoption_id.into(),native_sequence,update_digest:row.get(0)?,origin:OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:row.get(1)?,actor_kind:row.get(2)?,on_behalf_of:row.get(3)?,chain_depth:row.get(4)?,recorded_at_ms:row.get(5)?},
+    conn.query_row("SELECT update_blob_sha256,actor_origin_id,actor_kind,on_behalf_of,chain_depth,recorded_at_ms,agent_run_id FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,native_sequence],|row|Ok(OwnerOutboxNativeSource {
+        binding:binding.clone(),adoption_id:adoption_id.into(),native_sequence,update_digest:row.get(0)?,origin:OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:row.get(1)?,actor_kind:row.get(2)?,on_behalf_of:row.get(3)?,chain_depth:row.get(4)?,recorded_at_ms:row.get(5)?,agent_run_id:row.get(6)?},
     })).map_err(read_sql)
 }
 

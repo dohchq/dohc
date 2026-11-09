@@ -7025,6 +7025,7 @@ fn local_unpublished_authors_survive_compaction_base_replacement_and_local_choic
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             };
             dohc_engine_collab::record_local_update(
                 &mut engine,
@@ -7165,6 +7166,7 @@ fn incomplete_local_side_credits_preservation_before_later_recovery() {
             on_behalf_of: None,
             depth: 0,
             run: None,
+            agent_run_id: None,
         };
         dohc_engine_collab::record_local_update(
             &mut engine,
@@ -7313,6 +7315,7 @@ fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_complet
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             };
             dohc_engine_collab::record_local_update(
                 &mut engine,

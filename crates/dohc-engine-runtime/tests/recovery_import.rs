@@ -64,6 +64,7 @@ async fn append(actor: &ActorHandle, key: &DocKey, bytes: Vec<u8>) {
                 on_behalf_of: Some("owner".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,
@@ -106,6 +107,7 @@ fn checkpoint(state: &YdocOpenState, doc: &Ydoc, bytes: Vec<u8>) -> RecoveryImpo
                 on_behalf_of: Some("owner".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: Some("outage-run".into()),
             }),
         }],
     }
@@ -232,6 +234,8 @@ async fn unchanged_lineage_replays_once_and_preserves_original_author_and_reques
                     .unwrap()
                     .json();
                 assert!(authors.contains("writer"));
+                // The outage typing's agent run survives the restart.
+                assert!(authors.contains(r#""agentRunId":"outage-run""#));
                 Ok::<_, StorageError>(())
             })
             .unwrap()
@@ -425,7 +429,10 @@ async fn racing_capture_and_import_leave_outside_head_and_one_recovery() {
 async fn a_remote_human_is_a_typed_refusal_without_writing() {
     let (scratch, db, supervisor, actor, state, doc, bytes) = setup().await;
     let mut input = checkpoint(&state, &doc, bytes);
-    input.updates[0].attribution.as_mut().unwrap().actor_kind = ChangeActorKind::Human;
+    // Only an agent names a run, so the human here names none.
+    let attribution = input.updates[0].attribution.as_mut().unwrap();
+    attribution.actor_kind = ChangeActorKind::Human;
+    attribution.agent_run_id = None;
     let error = import(&actor, scratch.path(), input).await.unwrap_err();
     assert!(matches!(
         error,
@@ -823,6 +830,7 @@ fn agent() -> Option<ChangeAttribution> {
         on_behalf_of: Some("owner".into()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     })
 }
 fn typed(request_id: &str, update: Vec<u8>) -> RecoveryUpdate {

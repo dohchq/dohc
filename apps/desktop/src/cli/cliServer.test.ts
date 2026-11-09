@@ -262,6 +262,8 @@ describe("CLI socket server", () => {
   let dispatchedRun: string | null;
   // The engine's id for that run, when a test claimed one.
   let dispatchedRunId: string | null;
+  // The run the fixture workspace's agent writes name, when a test set one.
+  let agentWriteRunId: string | null;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -480,6 +482,7 @@ describe("CLI socket server", () => {
     agentRunDepth = 0;
     dispatchedRun = null;
     dispatchedRunId = null;
+    agentWriteRunId = null;
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -520,6 +523,7 @@ describe("CLI socket server", () => {
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       dispatchedAgent: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRun : null),
       dispatchedRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRunId : null),
+      agentWriteRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? agentWriteRunId : null),
       agentRunWorkspace: () => undefined,
       async onWrite() {
         calls.writes += 1;
@@ -2995,6 +2999,68 @@ describe("CLI socket server", () => {
       woken,
       { actorOriginId: "codex", attribution },
       { actorOriginId: "codex", attribution },
+    ]);
+  });
+
+  it("names the run an agent's collection and document changes were made in", async () => {
+    const authors: unknown[] = [];
+    context.collections = {
+      async query() {
+        throw new Error("reads are not under test");
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+      writes: {
+        async setFields(input) {
+          authors.push(input.author);
+          return { path: input.recordPath };
+        },
+        async createRecord(input) {
+          authors.push(input.author);
+          return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+        },
+      },
+    };
+    context.documents = {
+      async read() {
+        throw new Error("reads are not under test");
+      },
+      async edit(input) {
+        authors.push(input.origin);
+        return { path: input.path, changed: true };
+      },
+      async create(input) {
+        authors.push(input.origin);
+        return { path: input.path };
+      },
+    };
+    dispatchedRun = "codex";
+    agentWriteRunId = "run-1";
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
+    await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path: "notes/plan.md", replacement: "Done." });
+    // A second run by the same agent names its own run.
+    agentWriteRunId = "run-2";
+    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
+    await invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", path: "notes/new.md", markdown: "# New" });
+    // Outside a run, a write names none.
+    dispatchedRun = null;
+    agentWriteRunId = null;
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", agent: "Claude", recordPath: "tasks/a.md", fields: { status: "parked" } });
+    await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", agent: "Claude", path: "notes/plan.md", replacement: "Parked." });
+
+    const author = (agentRunId: string) => ({ kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 0, agentRunId });
+    const origin = (agentRunId: string) => ({
+      actorOriginId: "codex",
+      attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0, agentRunId },
+    });
+    expect(authors).toEqual([
+      author("run-1"),
+      origin("run-1"),
+      author("run-2"),
+      origin("run-2"),
+      { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 },
+      { actorOriginId: "Claude", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
     ]);
   });
 

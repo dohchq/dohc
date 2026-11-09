@@ -1427,6 +1427,7 @@ fn owner_draft(
             update: update.clone(),
             now_ms: 20,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         },
         &NoFaults,
@@ -1637,7 +1638,7 @@ fn unadopted_source(f: &mut Fixture, seed: bool) {
     let origin = if seed {
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     } else {
-        owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate { actor_origin_id, actor_kind, on_behalf_of, chain_depth, recorded_at_ms }
+        owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate { actor_origin_id, actor_kind, on_behalf_of, chain_depth, recorded_at_ms, agent_run_id: None }
     };
     let source = owner_outbox::OwnerOutboxNativeSource {
         binding: f.binding.clone(),

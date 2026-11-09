@@ -249,6 +249,7 @@ impl EngineService {
                     update: bytes,
                     now_ms: now_ms()?,
                     agent_declaration: None,
+                    agent_run_id: None,
                     automation_declaration: None,
                 },
                 cancellation.token(),

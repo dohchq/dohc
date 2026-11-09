@@ -50,6 +50,7 @@ describe("released-lineage binding contract", () => {
       [{...carried, authors: [{...agent, agentId: "other-agent"}]}, outbox],
       [{...carried, authors: [{...agent, onBehalfOf: "someone"}]}, outbox],
       [{...carried, authors: [{...agent, depth: 2}]}, outbox],
+      [{...carried, authors: [{...agent, agentRunId: "run-1"}]}, outbox],
       [{...carried, authors: [{kind: "unattributed"}]}, outbox],
       [carried, {...outbox, authors: [{kind: "human", humanId: "local-person"}]}],
     ];
@@ -79,11 +80,15 @@ describe("released-lineage binding contract", () => {
       ["an author with a control character", {...carried, authors: [{kind: "agent", agentId: "a\u0001"}]}, "author agentId"],
       ["an author past the identifier bound", {...carried, authors: [{kind: "agent", agentId: "a".repeat(513)}]}, "author agentId"],
       ["an empty principal", {...carried, authors: [{kind: "agent", agentId: "a", onBehalfOf: ""}]}, "author onBehalfOf"],
+      ["an empty agent run", {...carried, authors: [{kind: "agent", agentId: "a", agentRunId: ""}]}, "author agentRunId"],
+      ["a person in an agent run", {...carried, authors: [{kind: "human", humanId: "p", agentRunId: "run-1"}]}, "author"],
     ];
     for (const [name, contribution, field] of refused) {
       expect(() => decodeRetainedContribution(contribution), name).toThrow(field);
     }
     expect(decodeRetainedContribution({...carried, authors: [{kind: "agent", agentId: "a".repeat(512)}]}).authors).toHaveLength(1);
+    expect(decodeRetainedContribution({...carried, authors: [{kind: "agent", agentId: "a", agentRunId: "run-1"}]}).authors)
+      .toEqual([{kind: "agent", agentId: "a", agentRunId: "run-1"}]);
   });
 
   it.each(vectors.valid)("encodes and digests $name as the engine does", vector => {

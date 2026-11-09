@@ -1046,6 +1046,7 @@ async fn markdown_hold_author_capacity_keeps_coverage_and_retries_only_after_con
                 on_behalf_of: None,
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             };
             dohc_engine_collab::record_local_update(
                 store,

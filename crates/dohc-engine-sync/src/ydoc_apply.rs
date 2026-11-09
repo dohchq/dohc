@@ -8733,13 +8733,22 @@ mod tests {
             on_behalf_of: Some("forged-person".into()),
             depth: 0,
             run: None,
+            agent_run_id: None,
         };
         assert!(valid_attribution(Some(&human)));
         let agent = dohc_engine_domain::ChangeAttribution {
             actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
-            ..human
+            agent_run_id: Some("run-1".into()),
+            ..human.clone()
         };
         assert!(valid_attribution(Some(&agent)));
+        // A replicated update cannot name an agent run for a person.
+        assert!(!valid_attribution(Some(
+            &dohc_engine_domain::ChangeAttribution {
+                agent_run_id: Some("run-1".into()),
+                ..human
+            }
+        )));
         assert!(valid_attribution(None));
     }
 

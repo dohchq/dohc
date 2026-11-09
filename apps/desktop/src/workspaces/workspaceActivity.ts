@@ -980,6 +980,14 @@ export function createWorkspaceActivity(
     return run?.dispatch === "run" ? run.agentRunId : null;
   }
 
+  // The run an agent's writes name while a run holds the slot, whichever
+  // agent writes, as with its depth: a run dohc dispatched or one started
+  // from Settings, or null. A self-test is not agent work and names none.
+  function agentWriteRunId(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run !== undefined && run.dispatch !== "self-test" ? run.agentRunId : null;
+  }
+
   // The agent run holding the slot, as a local app's invocation is
   // attributed to it, or null with no run.
   function agentRun(state: WorkspaceActivityState): ActiveAgentRun | null {
@@ -1067,6 +1075,7 @@ export function createWorkspaceActivity(
     agentRunDepth,
     dispatchedAgent,
     dispatchedRunId,
+    agentWriteRunId,
     agentRun,
     agentRunState,
     engineCaptureFor,

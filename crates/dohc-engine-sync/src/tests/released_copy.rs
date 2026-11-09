@@ -20,6 +20,7 @@ fn agent(id: &str) -> RetainedAuthors {
             on_behalf_of: Some("owner".into()),
             depth: 1,
             run: None,
+            agent_run_id: None,
         }),
     )
     .unwrap()

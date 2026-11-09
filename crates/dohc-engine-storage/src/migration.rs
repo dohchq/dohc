@@ -3632,6 +3632,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_agent_connection_author.sql"),
         sets_user_version: None,
     },
+    // A live edit an agent made in a run names that run.
+    Migration {
+        ordinal: 88,
+        id: "v2-ydoc-update-agent-run",
+        sql: include_str!("ydoc_update_agent_run.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5635,6 +5642,10 @@ mod tests {
             (
                 "v2-chat-agent-connection-author",
                 "1566c6535a6a8ce8ef35f5c690e6ce2441c4cf95a6ae2dcf9e2642844b40b28d",
+            ),
+            (
+                "v2-ydoc-update-agent-run",
+                "7847cf674a01b4a938882ffa6a50d79f2542f8dd1e7f37af8dcb6c09a7f7f26d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -9411,6 +9422,45 @@ mod tests {
             conn.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=0", [])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn owner_draft_run_migration_keeps_queued_entries_and_needs_a_declaration() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-ydoc-update-agent-run");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let digest = crate::blob::put_binary_blob(&conn, b"x").unwrap();
+        conn.execute("INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) VALUES('outbox','ws','main','object','lineage','owner.md','[]',0,?1,?1,1,'active',2,1,3,1)",[&digest]).unwrap();
+        let declared = r#"{"agentId":"trip-agent","onBehalfOf":null,"depth":0}"#;
+        for sequence in 1..=2 {
+            conn.execute("INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,agent_declaration_json) VALUES('outbox',?1,?2,?2,?3,?3,1,1,1,2,1,'active',?4)",rusqlite::params![sequence,format!("key-{sequence}"),digest,(sequence==2).then_some(declared)]).unwrap();
+        }
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let kept: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT delivery_id,agent_run_id FROM owner_ydoc_outbox_entries ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            kept,
+            [("key-1".to_owned(), None), ("key-2".to_owned(), None)]
+        );
+        // A run sits only beside a declared agent, and names one.
+        let set = |a: &str, sequence: i64| {
+            let sql = format!("UPDATE owner_ydoc_outbox_entries SET {a} WHERE sequence=?1");
+            conn.execute(&sql, [sequence])
+        };
+        assert!(set("agent_run_id='run-a'", 1).is_err());
+        assert!(set("agent_run_id=''", 2).is_err());
+        set("agent_run_id='run-a'", 2).unwrap();
+        assert!(set("agent_declaration_json=NULL", 2).is_err());
     }
 
     #[test]

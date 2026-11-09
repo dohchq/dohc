@@ -57,6 +57,8 @@ export interface OwnerYDocOutboxEntry {
   readonly personEdit?: true;
   /** The agent the queued edit declared; absent when it declared none. Never authority. */
   readonly agentDeclaration?: AgentDeclaration;
+  /** The run the declared agent made the queued edit in; absent outside a run. Owner only, never authority. */
+  readonly agentRunId?: string;
   readonly automationDeclaration?: AutomationDeclaration;
   /** The local journal update this entry queued, with the author this engine recorded on it. Never authority. */
   readonly nativeSource?: OwnerYDocNativeSource;
@@ -75,6 +77,8 @@ interface OwnerYDocNativeSource {
         readonly onBehalfOf: string | null;
         readonly chainDepth: number | null;
         readonly recordedAtMs: number;
+        /** The run an agent made the update in; absent outside a run. Owner only, never authority. */
+        readonly agentRunId?: string;
       }
     | { readonly kind: "adoptionSeed" };
 }
@@ -164,6 +168,16 @@ const nullableField = <T>(value: Record<string, unknown>, name: string, check: (
 };
 const isText = (field: unknown): field is string => typeof field === "string" && field.length > 0;
 const isWireInteger = (field: unknown): field is number => Number.isSafeInteger(field) && (field as number) >= 0;
+/**
+ * The agent run a member names, or undefined when it is absent. A run is an
+ * engine identifier: at most 512 UTF-8 bytes, with no control character.
+ */
+function runField(value: Record<string, unknown>, what: string): string | undefined {
+  if (!Object.hasOwn(value, "agentRunId")) return undefined;
+  const run = value.agentRunId;
+  if (!isText(run) || new TextEncoder().encode(run).byteLength > 512 || /\p{Cc}/u.test(run)) throw new TypeError(`Invalid ${what}.`);
+  return run;
+}
 
 function nativeSource(value: unknown, updateDigest: string): OwnerYDocNativeSource {
   const raw = record(value, "native source");
@@ -173,12 +187,18 @@ function nativeSource(value: unknown, updateDigest: string): OwnerYDocNativeSour
   const source = {binding: parseLiveObjectBinding(raw.binding), adoptionId: stringField(raw, "adoptionId"),
     nativeSequence: wireInteger(raw, "nativeSequence"), updateDigest};
   if (origin.kind === "adoptionSeed" && Object.keys(origin).length === 1) return {...source, origin: {kind: "adoptionSeed"}};
-  if (origin.kind !== "nativeUpdate" || Object.keys(origin).sort().join() !== "actorKind,actorOriginId,chainDepth,kind,onBehalfOf,recordedAtMs") {
+  if (origin.kind !== "nativeUpdate" || Object.keys(origin).filter(key => key !== "agentRunId").sort().join()
+    !== "actorKind,actorOriginId,chainDepth,kind,onBehalfOf,recordedAtMs") {
     throw new TypeError("Invalid native source origin.");
   }
+  const actorKind = nullableField(origin, "actorKind", isText);
+  // Only an agent's update names the run it was made in.
+  const agentRunId = runField(origin, "native source origin");
+  if (agentRunId !== undefined && actorKind !== "agent") throw new TypeError("Invalid native source origin.");
   return {...source, origin: {kind: "nativeUpdate", actorOriginId: nullableField(origin, "actorOriginId", isText),
-    actorKind: nullableField(origin, "actorKind", isText), onBehalfOf: nullableField(origin, "onBehalfOf", isText),
-    chainDepth: nullableField(origin, "chainDepth", isWireInteger), recordedAtMs: wireInteger(origin, "recordedAtMs")}};
+    actorKind, onBehalfOf: nullableField(origin, "onBehalfOf", isText),
+    chainDepth: nullableField(origin, "chainDepth", isWireInteger), recordedAtMs: wireInteger(origin, "recordedAtMs"),
+    ...(agentRunId !== undefined ? {agentRunId} : {})}};
 }
 
 function headerRecord(bytes: Uint8Array): Record<string, unknown> {
@@ -491,6 +511,9 @@ export class OwnerYDocOutbox {
       const update = await readPart("update", sequence, byteLength, updateDigest);
       if (Object.hasOwn(entry, "agentDeclaration") && Object.hasOwn(entry, "automationDeclaration")) throw new TypeError("Owner draft declares two author kinds.");
       if (Object.hasOwn(entry, "personEdit") && entry.personEdit !== true) throw new TypeError("Invalid owner person marker.");
+      // Only a declared agent's edit names the run it was made in.
+      const agentRunId = runField(entry, "owner draft run");
+      if (agentRunId !== undefined && !Object.hasOwn(entry, "agentDeclaration")) throw new TypeError("Invalid owner draft run.");
       entries.push({
         sequence,
         appendKey: stringField(entry, "appendKey"),
@@ -502,6 +525,7 @@ export class OwnerYDocOutbox {
         ...(Object.hasOwn(entry, "agentDeclaration")
           ? { agentDeclaration: parseAgentDeclaration(entry.agentDeclaration) }
           : {}),
+        ...(agentRunId !== undefined ? {agentRunId} : {}),
         ...(Object.hasOwn(entry, "nativeSource") ? {nativeSource: nativeSource(entry.nativeSource, updateDigest)} : {}),
       });
       remaining -= byteLength;

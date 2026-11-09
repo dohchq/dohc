@@ -1711,6 +1711,15 @@ impl EngineService {
                     "owner-draft-requires-idempotency-key",
                 )
             })?;
+            let agent_declaration = dohc_engine_domain::AgentDeclaration::from_change(
+                params.actor_origin_id.as_deref(),
+                params.attribution.as_ref(),
+            );
+            // The run stays beside the declaration, never in it.
+            let agent_run_id = agent_declaration
+                .as_ref()
+                .and(params.attribution.as_ref())
+                .and_then(|a| a.agent_run_id.clone());
             let input = dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                 person_edit: params
                     .attribution
@@ -1721,10 +1730,8 @@ impl EngineService {
                 append_key,
                 update,
                 now_ms: now_ms()?,
-                agent_declaration: dohc_engine_domain::AgentDeclaration::from_change(
-                    params.actor_origin_id.as_deref(),
-                    params.attribution.as_ref(),
-                ),
+                agent_declaration,
+                agent_run_id,
                 automation_declaration: params.automation_declaration(),
             };
             let actor = open.actor.clone();

@@ -815,6 +815,17 @@ it("derives an adopted native update's declaration from its retained attribution
     expect(nativeSourceAgentDeclaration(parse(seed, `owner-adoption:${jsonHash(["adoption", 0, updateDigest])}`))).toBeUndefined();
     // The source names its agent only through the native origin; any other member is refused.
     expect(() => parse({...agent, agentDeclaration: {agentId: "trip-agent-hosted", onBehalfOf: "owner", depth: 2}})).toThrow();
+    // An agent's update made in a run keeps the run in its exact source and key; its declaration names no run.
+    const inRun = source({agentRunId: "run-1"}), parsedRun = parse(inRun);
+    expect(JSON.stringify(parsedRun.source)).toBe(JSON.stringify(inRun));
+    expect(parsedRun.appendKey).toBe(`adopted-local:${jsonHash(inRun)}`);
+    expect(nativeSourceAgentDeclaration(parsedRun)).toEqual({agentId: "trip-agent-hosted", onBehalfOf: "owner", depth: 2});
+    // Only an agent names a run, and only as a bounded identifier.
+    for (const patch of [{agentRunId: ""}, {agentRunId: null}, {agentRunId: "run\u0001"}, {agentRunId: "a".repeat(513)},
+      {agentRunId: "run-1", actorKind: "human", chainDepth: 0, onBehalfOf: null},
+      {agentRunId: "run-1", actorOriginId: null, actorKind: null, chainDepth: null, onBehalfOf: null}]) {
+      expect(() => parse(source(patch))).toThrow();
+    }
   } finally {f.close();}
 });
 

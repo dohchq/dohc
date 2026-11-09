@@ -237,6 +237,7 @@ fn native_tail_record_at_depth(
         on_behalf_of: local_person.map(str::to_owned),
         depth,
         run: None,
+        agent_run_id: None,
     };
     crate::record_local_update(
         &mut f.store,
@@ -1251,6 +1252,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
             on_behalf_of: Some("owner".into()),
             depth: 0,
             run: None,
+            agent_run_id: None,
         };
         crate::record_local_update(
             &mut f.store,

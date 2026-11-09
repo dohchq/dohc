@@ -143,6 +143,7 @@ fn native_agent() -> RetainedAuthors {
             on_behalf_of: Some("owner".into()),
             depth: 1,
             run: None,
+            agent_run_id: None,
         }),
     )
     .unwrap()
@@ -345,7 +346,7 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
         (locator, delivery_id)
     };
     let automation = r#"{"automationId":"sort","attribution":{"actorKind":"automation","depth":1}}"#;
-    let damages: [(&str, PreservationReason, bool, String); 7] = [
+    let damages: [(&str, PreservationReason, bool, String); 8] = [
         ("a journal row naming another author", ContradictoryEvidence, false,
             "UPDATE ydoc_updates SET actor_origin_id='impostor' WHERE seq IN
                (SELECT json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries
@@ -354,6 +355,8 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
             format!("UPDATE owner_ydoc_outbox_entries SET automation_declaration_json='{automation}' WHERE delivery_id=?1")),
         ("a native entry claiming a person's edit", MalformedAuthorship, false,
             "UPDATE owner_ydoc_outbox_entries SET person_edit=1 WHERE delivery_id=?1".into()),
+        ("a native entry naming a run beside its source", MalformedAuthorship, false,
+            "UPDATE owner_ydoc_outbox_entries SET agent_run_id='run-a' WHERE delivery_id=?1".into()),
         ("a draft declaring an agent and an automation", MalformedAuthorship, false,
             format!("UPDATE owner_ydoc_outbox_entries SET native_source_json=NULL,
                agent_declaration_json='{{\"agentId\":\"a\",\"onBehalfOf\":null,\"depth\":0}}',
@@ -398,6 +401,28 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
         WHERE delivery_id='{delivery_id}'"));
     let [kept]: [RetainedContribution; 1] = only_unproven(&f).try_into().unwrap();
     assert_eq!((kept.locator(), kept.authors()), (locator, &native_agent()), "pending is no proof, and its acceptance no contradiction");
+
+    // A retained draft keeps the run its declared agent named beside the
+    // declaration.
+    let mut f = unapplied();
+    let (locator, delivery_id) = native_entry(&f);
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        UPDATE owner_ydoc_outbox_entries SET native_source_json=NULL,
+          agent_declaration_json='{{\"agentId\":\"draft-agent\",\"onBehalfOf\":\"owner\",\"depth\":1}}',
+          agent_run_id='run-a' WHERE delivery_id='{delivery_id}'"));
+    let in_run_a = RetainedAuthors::credited(
+        Some("draft-agent"),
+        Some(&dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+            on_behalf_of: Some("owner".into()),
+            depth: 1,
+            run: None,
+            agent_run_id: Some("run-a".into()),
+        }),
+    )
+    .unwrap();
+    let [kept]: [RetainedContribution; 1] = only_unproven(&f).try_into().unwrap();
+    assert_eq!((kept.locator(), kept.authors()), (locator, &in_run_a), "the draft's run");
 
     // One Carried delivery's journal row contradicts it; the other still
     // reads, and the tail commits to neither.

@@ -2836,6 +2836,10 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedRunId(lease.state.activity),
     ),
+  agentWriteRunId: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.agentWriteRunId(lease.state.activity),
+    ),
   // A run dohc started keeps its workspace after it ends; any other run only
   // while it holds a slot.
   agentRunWorkspace: (runId: string) => chatDispatchService.runWorkspace(runId) ??

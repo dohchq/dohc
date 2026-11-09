@@ -46,14 +46,17 @@ function bytes(value: Uint8Array) {
 }
 
 function author(entry: OwnerYDocOutboxEntry) {
-  if (entry.agentDeclaration) return {kind: "agent", declaration: entry.agentDeclaration};
+  if (entry.agentDeclaration) {
+    return {kind: "agent", declaration: entry.agentDeclaration, ...(entry.agentRunId !== undefined ? {agentRunId: entry.agentRunId} : {})};
+  }
   if (entry.automationDeclaration) return {kind: "automation", declaration: entry.automationDeclaration};
   if (entry.personEdit) return {kind: "person"};
   // A native update names the author this computer's journal recorded for it.
   const origin = entry.nativeSource?.origin;
   if (origin?.kind !== "nativeUpdate" || origin.actorKind === null) return null;
   return {kind: origin.actorKind === "human" ? "person" : origin.actorKind, actorOriginId: origin.actorOriginId,
-    onBehalfOf: origin.onBehalfOf, chainDepth: origin.chainDepth};
+    onBehalfOf: origin.onBehalfOf, chainDepth: origin.chainDepth,
+    ...(origin.agentRunId !== undefined ? {agentRunId: origin.agentRunId} : {})};
 }
 
 /** Packages a refused queue read with its checkpoint. Refuses bytes that do not match their digests. */

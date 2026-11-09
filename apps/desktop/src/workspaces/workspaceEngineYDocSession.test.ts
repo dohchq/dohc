@@ -2147,7 +2147,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
 
   // The agent edits that paragraph and adds a section, computed against the
   // provider's state, which does not have the typing yet.
-  const origin = { actorOriginId: "claude-code", attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0 } };
+  const origin = { actorOriginId: "claude-code", attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0, agentRunId: "run-1" } };
   await expect(ipc.editDocument({
     workspaceId: WORKSPACE_ID,
     path: PATH,
@@ -2174,10 +2174,12 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
   }).toBe(expected);
   await ipc.close(sender, { sessionId: "editor" });
   expect(await readFile(join(root, PATH), "utf8")).toContain("Start over here. PERSON");
-  // The engine journaled the agent's update under the agent's name.
-  expect(requests.some((request) =>
-    request.method === YDOC_METHOD.recordUpdate &&
-    (request.params as { actorOriginId?: string }).actorOriginId === "claude-code")).toBe(true);
+  // The engine journaled the agent's update under the agent's name and run.
+  expect(requests.some((request) => {
+    const params = request.params as { actorOriginId?: string; attribution?: { agentRunId?: string } };
+    return request.method === YDOC_METHOD.recordUpdate && params.actorOriginId === "claude-code" &&
+      params.attribution?.agentRunId === "run-1";
+  })).toBe(true);
 });
 
 function keyedWrite(

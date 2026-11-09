@@ -54,6 +54,7 @@ async fn append(actor: &ActorHandle, key: &DocKey, bytes: Vec<u8>, id: &str) {
                 on_behalf_of: Some("person".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,
@@ -704,6 +705,7 @@ async fn file_rewrite_discards_pending_authors_of_replaced_content() {
                         on_behalf_of: Some("person".into()),
                         depth: 0,
                         run: None,
+                        agent_run_id: None,
                     }),
                     6,
                 )

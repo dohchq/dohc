@@ -427,6 +427,10 @@ export interface CliServerOptions {
   // agent's place, whatever the command line says. Without a run, reads are
   // those of agents outside a run.
   dispatchedRunId(workspaceId: string): string | null;
+  // The run an agent's writes name while a run dohc dispatched, or one
+  // started from Settings, holds the workspace's run slot, or null. It is
+  // read with the depth, so a write names the run it was made in.
+  agentWriteRunId(workspaceId: string): string | null;
   agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
@@ -785,8 +789,8 @@ function cliChatWriter(
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
 // traffic carries its claimed name, or `dohc-mcp` when unnamed,
 // acting on behalf of the local owner, at the depth of the
-// agent run in progress; a human write is attributed as this device's local
-// author under the workspace display name.
+// agent run in progress and naming that run; a human write is attributed as
+// this device's local author under the workspace display name.
 function collectionWriteAuthor(
   actor: CliActor,
   context: CliWorkspaceContext,
@@ -794,11 +798,13 @@ function collectionWriteAuthor(
   agent: string | undefined,
 ): ChangeAuthor {
   if (writeActor(actor, context, options) === "agent") {
+    const agentRunId = options.agentWriteRunId(context.workspaceId);
     return {
       kind: "agent",
       agentId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
+      ...(agentRunId !== null ? { agentRunId } : {}),
     };
   }
   return createLocalChangeAuthor(options.localUserDisplayName());
@@ -824,19 +830,21 @@ const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is re
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
 // local owner, recorded under its claimed name or the unnamed agent label,
-// at the depth of the agent run in progress. Any process holding the socket
-// token could otherwise claim the person's typing.
+// at the depth of the agent run in progress and naming that run. Any process
+// holding the socket token could otherwise claim the person's typing.
 function documentEditOrigin(
   agent: string | undefined,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
+  const agentRunId = options.agentWriteRunId(context.workspaceId);
   return {
     actorOriginId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
     attribution: {
       actorKind: "agent",
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
+      ...(agentRunId !== null ? { agentRunId } : {}),
     },
   };
 }

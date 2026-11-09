@@ -511,6 +511,7 @@ fn first_enrollment_accept_echo_preserves_later_draft_fields_until_refusal() {
             on_behalf_of: Some("person".into()),
             depth: 1,
         }),
+        agent_run_id: None,
         automation_declaration: None,
     };
     let entry = append_draft_cached(
@@ -2486,6 +2487,7 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         on_behalf_of: Some("person".into()),
         depth: 2,
         run: None,
+        agent_run_id: None,
     };
     store
         .write_with(&NoFaults, |tx| {

@@ -60,6 +60,15 @@ it("keeps memory available when the checkpoint write fails and retries the actua
  const flush = vi.fn(() => writeTypingCheckpoint(blocked, checkpoint)); const unregister = registerTypingCheckpoint("workspace", flush);
  try {await expect(flushTypingCheckpoints("workspace")).rejects.toThrow(); await rm(blocked); await mkdir(blocked); await flushTypingCheckpoints("workspace"); expect(await readTypingCheckpoints(blocked, "workspace")).toHaveLength(1);} finally {unregister();}
 });
+it("keeps the run an agent typed in through the checkpoint and its import", async () => {
+ const directory = await createTestScratch("typing-agent-run-");
+ const updates = [{requestId: "agent", updateBase64: "AAA=", actorOriginId: "codex", attribution: {actorKind: "agent" as const, onBehalfOf: "person", agentRunId: "run-1"}}];
+ await writeTypingCheckpoint(directory, {...checkpoint, updates});
+ expect((await readTypingCheckpoints(directory, "workspace"))[0]!.checkpoint.updates).toEqual(updates);
+ const importer = vi.fn(async (input: {updates: unknown}) => {expect(input.updates).toEqual(updates); return {committed: true as const, outcome: "replayed" as const, momentId: null};});
+ await importTypingCheckpoints(directory, "workspace", importer, vi.fn(), vi.fn());
+ expect(importer).toHaveBeenCalledOnce();
+});
 it("rejects tampered authors and does not send a malformed record to the engine", async () => {
  const directory = await createTestScratch("typing-invalid-"); await writeTypingCheckpoint(directory, checkpoint);
  const row = (await readTypingCheckpoints(directory, "workspace"))[0]!; const raw = JSON.parse(await readFile(row.file, "utf8")); raw.updates[0].attribution.actorKind = "remote-person"; await writeFile(row.file, JSON.stringify(raw));

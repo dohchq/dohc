@@ -19,6 +19,7 @@ function options(serverAccount?: CliServerOptions["serverAccount"]) {
     localUserDisplayName: () => "Ice", localPersonId: () => "person", agentRunDepth: () => 0,
     dispatchedAgent: () => null,
     dispatchedRunId: () => null,
+    agentWriteRunId: () => null,
     agentRunWorkspace: () => undefined,
     ...(serverAccount ? { serverAccount } : {}),
   };

@@ -4268,6 +4268,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         on_behalf_of: Some("automation:triage".to_owned()),
         depth: 2,
         run: None,
+        agent_run_id: Some("run-triage".to_owned()),
     };
     let expected_row = (
         Some("agent".to_owned()),
@@ -4306,20 +4307,33 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         history_attribution(&a.store, &key),
         vec![expected_row.clone()]
     );
-    let update_row: (Option<String>, Option<String>, Option<i64>) = a
-        .store
-        .read_with(|conn| -> Result<_, CollabError> {
-            conn.query_row(
-                "SELECT actor_kind,on_behalf_of,chain_depth FROM ydoc_updates                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3                  ORDER BY seq DESC LIMIT 1",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|error| CollabError::Corrupt {
-                reason: error.to_string(),
+    type UpdateRow = (
+        (Option<String>, Option<String>, Option<i64>),
+        Option<String>,
+    );
+    let update_row = |store: &dohc_engine_storage::EngineStore| -> UpdateRow {
+        store
+            .read_with(|conn| -> Result<_, CollabError> {
+                conn.query_row(
+                    "SELECT actor_kind,on_behalf_of,chain_depth,agent_run_id FROM ydoc_updates                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3                  ORDER BY seq DESC LIMIT 1",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| {
+                        Ok((
+                            (row.get(0)?, row.get(1)?, row.get(2)?),
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })
             })
-        })
-        .expect("update row attribution");
-    assert_eq!(update_row, expected_row);
+            .expect("update row attribution")
+    };
+    assert_eq!(
+        update_row(&a.store),
+        (expected_row.clone(), Some("run-triage".to_owned()))
+    );
 
     // Remote apply of the same bytes on the other device: the payload's
     // attribution persists and returns identically, and the facts carry the
@@ -4344,6 +4358,11 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         .expect("a remote apply derives facts on the receiving device");
     assert_eq!(facts.attribution.as_ref(), Some(&attribution));
     assert_eq!(facts.source, Some(("origin-a".to_owned(), 7)));
+    // The owner's other device keeps the agent run its replicated update named.
+    assert_eq!(
+        update_row(&b.store),
+        (expected_row.clone(), Some("run-triage".to_owned()))
+    );
     assert_eq!(history_attribution(&b.store, &key), vec![expected_row]);
 
     // An unattributed write stays NULL on every column: absent means absent.
@@ -4377,6 +4396,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         on_behalf_of: Some(String::new()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     };
     record_local_update(
         &mut a.store,
@@ -4413,6 +4433,7 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
             claim_id: "run-a".into(),
             automation_name: "Original name".into(),
         }),
+        agent_run_id: None,
     };
     let marker = Some(MarkerCreation {
         path: Some("notes/original.txt"),
@@ -4461,6 +4482,7 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
         on_behalf_of: Some("bob".into()),
         depth: 1,
         run: None,
+        agent_run_id: None,
     };
     let delete_append = LocalAppend {
         marker,

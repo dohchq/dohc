@@ -143,7 +143,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), agentWriteRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -898,6 +898,10 @@ describe("desktop CLI workspace context", () => {
       expect(write.mock.calls[2]![2]).toEqual({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 });
       await context.documents!.create({ path: "woken-named.md", markdown: "Hi.", origin: { ...woken, actorOriginId: "Codex" } });
       expect(write.mock.calls[3]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "person-local", depth: 3 });
+      // A file written in a run names that run, so two runs stay two authors.
+      const inRun = { actorOriginId: "Codex", attribution: { ...woken.attribution, agentRunId: "run-1" } };
+      await context.documents!.create({ path: "in-run.md", markdown: "Hi.", origin: inRun });
+      expect(write.mock.calls[4]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "person-local", depth: 3, agentRunId: "run-1" });
 
       await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))
         .rejects.toThrow("taken.md already exists. Edit it instead.");
@@ -909,7 +913,8 @@ describe("desktop CLI workspace context", () => {
       await expect(context.documents!.create({ path: "later.md", markdown: "Text", origin }))
         .rejects.toThrow("dohc created later.md, but could not write its text (engine busy). Edit the document to add it.");
       expect(await readFile(join(root, "later.md"), "utf8")).toBe("");
-      expect(edit).toHaveBeenCalledTimes(5);
+      // Five creates wrote their text, and later.md tried once.
+      expect(edit).toHaveBeenCalledTimes(6);
 
       // Two creates of one path: one creates it, the other is told it exists.
       const race = await Promise.allSettled([
@@ -1075,6 +1080,19 @@ describe("raw fileWrite socket requests", () => {
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     expect(await f.invoke([{ path: "plain.txt", contentBase64: "bmV3" }], "agent", agent)).toEqual({ ok: true, written: ["plain.txt"] });
     expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 });
+  });
+  it("names the run a file was written in, and none outside a run", async () => {
+    const f = await setup();
+    vi.mocked(f.dependencies.activity.agentWriteRunId).mockReturnValueOnce("run-1").mockReturnValueOnce("run-2");
+    for (const path of ["first.txt", "second.txt", "outside.txt"]) {
+      expect(await f.invoke([{ path, contentBase64: "bmV3" }], "agent", "Codex")).toEqual({ ok: true, written: [path] });
+    }
+    expect(vi.mocked(f.dependencies.activity.agentWriteRunId)).toHaveBeenCalledWith("workspace");
+    expect(f.capture.writeAuthoredFile.mock.calls.map(call => call[2])).toEqual([
+      { kind: "agent", agentId: "Codex", onBehalfOf: "person-local", agentRunId: "run-1" },
+      { kind: "agent", agentId: "Codex", onBehalfOf: "person-local", agentRunId: "run-2" },
+      { kind: "agent", agentId: "Codex", onBehalfOf: "person-local" },
+    ]);
   });
   it("enforces byte limits and base64 validation without MCP", async () => {
     const f = await setup();

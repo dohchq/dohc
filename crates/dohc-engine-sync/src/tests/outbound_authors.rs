@@ -20,6 +20,7 @@ fn solo_typing_credits_deltas_but_not_full_state_bases() {
                 on_behalf_of: Some("owner-account".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             is_base,
         );
@@ -83,11 +84,13 @@ fn ordinary_update_context_does_not_infer_a_person_for_declared_work() {
         (Some("agent"), ChangeActorKind::Agent),
         (Some("automation"), ChangeActorKind::Automation),
     ] {
+        // The replicated update carries an agent's run to the owner's devices.
         let attribution = ChangeAttribution {
             actor_kind: kind,
             on_behalf_of: Some("owner-account".into()),
             depth: 0,
             run: None,
+            agent_run_id: (kind == ChangeActorKind::Agent).then(|| "run-1".to_owned()),
         };
         let payload = crate::ydoc_update_payload(
             &key,

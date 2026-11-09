@@ -1066,6 +1066,7 @@ fn a_seed_missing_any_condition_is_not_abandoned() {
                         on_behalf_of: None,
                         chain_depth: None,
                         recorded_at_ms: 1,
+                        agent_run_id: None,
                     };
                     format!("adopted-local:{}", hex_sha256(&serde_json::to_vec(&source).unwrap()))
                 } else {
@@ -2557,6 +2558,7 @@ fn prepared_append(
         on_behalf_of: Some("owner".into()),
         depth: 1,
         run: None,
+        agent_run_id: None,
     };
     crate::record_local_update(
         &mut f.store,
