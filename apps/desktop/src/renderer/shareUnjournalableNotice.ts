@@ -32,7 +32,7 @@ export function shareUnjournalableNotice(paths: readonly UnjournalableSharePath[
 }
 
 // A Notices row's text, as many whole reasons as `budget` holds, then a
-// count of the rest. Details holds every reason when some are left out.
+// count of the rest, which Details holds.
 export function shareUnjournalableRow(
   paths: readonly UnjournalableSharePath[],
   budget: number,
@@ -49,7 +49,7 @@ export function shareUnjournalableRow(
   }
   return {
     message: text(shown),
-    details: shown.length < lines.length ? lines.map(line => ["Reason", line] as const) : [],
+    details: lines.slice(shown.length).map(line => ["Reason", line] as const),
   };
 }
 

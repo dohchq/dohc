@@ -365,6 +365,8 @@ describe("refreshing shares added to this workspace", () => {
       expect(body).not.toContain("…");
       fireEvent.click(within(row).getByRole("button", { name: "Details" }));
       expect(await within(row).findByText(unreadable, { exact: false })).toBeTruthy();
+      const details = row.querySelector("pre")?.textContent ?? "";
+      expect(details.split("\n").filter(line => line.startsWith("Reason: "))).toEqual([`Reason: ${inTheWay}`, `Reason: ${unreadable}`]);
     });
   });
 
