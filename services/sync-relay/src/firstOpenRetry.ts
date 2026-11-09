@@ -94,7 +94,8 @@ export class FirstOpenRetry {
             current.retryAtMs = this.#now() + Math.max(this.#delay(60_000 * 2 ** (current.deadlineAnswers - 1)), outcome.retryAfterMs);
           }
         } else current.retryAtMs = this.#now() + this.#failureDelay(current);
-      } else current.retryAtMs = Infinity;
+        // A stale source holds nothing: should the relay's history come back to this source, asking about it again may start it.
+      } else current.retryAtMs = outcome.recovery === "pull-current-source" ? this.#now() : Infinity;
       return outcome;
     } catch (error) {
       if (!isCurrent()) return undefined;

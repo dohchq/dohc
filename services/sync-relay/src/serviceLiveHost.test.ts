@@ -5319,6 +5319,57 @@ it("builds nothing for a first-open request with another credential, and asks ag
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
+// Review round 2 of 3b, finding 1: detach ended first-open work only after the
+// engine answered, and not at all when the detach failed. A publication whose
+// check had answered could pass the writer's guard meanwhile.
+// Proves: a detach aborts the workspace's first-open request and ends the
+// checks the engine answered before it, while the engine has not answered the
+// detach, and those checks stay ended when the detach fails.
+it.each(["answers", "fails"] as const)("ends a workspace's first-open work before its detach, which then %s", async outcome => {
+  // The retry clock stands still, so the aborted request is never asked again here.
+  const o = await neverOpenedHost({nowMs: () => 0, answer: request => new Promise((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), {once: true});
+  })});
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  Object.assign(o.client(), {checkFirstOpenCandidate: vi.fn(async () => ({status: "refused", cause: "settlement-mismatch"}))});
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const source = new TextEncoder().encode("# Plan\n"), candidate = Uint8Array.of(0, 0);
+  const input = {objectId: neverOpened.objectId, path: neverOpened.path, sourceMomentId: "plain-moment", replicationEpoch: "epoch", streamIdentity: "stream",
+    source, sourceSha256: digest(source), candidate, candidateSha256: digest(candidate), maxFullStateBytes: 4096};
+  const answered = await o.host.checkFirstOpenCandidate("workspace", input, new AbortController().signal);
+  expect(answered.kind === "answered" && answered.current()).toBe(true);
+  if (outcome === "fails") o.failDetach(new EngineRequestError(1, {code: "INTERNAL", message: "detach refused", retry: "no"} as never));
+  const parked = o.park("liveApplication.detachWorkspace"), detaching = o.host.deleteWorkspaces(["workspace"]);
+  await parked.entered.promise;
+  expect(o.requests[0]!.signal.aborted).toBe(true);
+  expect(answered.kind === "answered" && answered.current()).toBe(false);
+  expect(await o.host.checkFirstOpenCandidate("workspace", input, new AbortController().signal)).toEqual({kind: "unavailable", reason: "host-absent"});
+  parked.release.resolve();
+  if (outcome === "fails") await expect(detaching).rejects.toThrow();
+  else await detaching;
+  expect(answered.kind === "answered" && answered.current()).toBe(false);
+  expect(o.requests).toHaveLength(1);
+  expect(o.bases()).toHaveLength(0);
+});
+
+// Review round 2 of 3b, finding 2: a stale-source answer left its source never
+// asked about again, so a source the relay's history came back to stayed
+// without a first open.
+// Proves: after a stale answer, the next pass that finds the same source asks
+// again, and the relay publishes its base.
+it("asks again about a source whose first-open answer said it was stale", async () => {
+  let answered = 0;
+  const o = await neverOpenedHost({answer: async (request, relay) => {
+    if (answered++ > 0) return relay(request);
+    const body = await request.clone().json() as {objectId: string; path: string; sourceMomentId: string; sourceDigest: string};
+    return Response.json({ok: true, outcome: firstOpenOutcome({workspaceId: "workspace", objectId: body.objectId, path: body.path,
+      sourceMomentId: body.sourceMomentId, sourceDigest: body.sourceDigest}, {kind: "refused", reason: "stale-source"})});
+  }});
+  await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+  expect(o.statuses).toEqual([200, 200]);
+  expect(o.builds).toHaveBeenCalledOnce();
+});
+
 // Proves: a diverged replica stops and detaches, its documents stay retained,
 // and no later update attaches its store again on this daemon. A new
 // identity's store is another store, so it attaches.

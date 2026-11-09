@@ -255,7 +255,8 @@ export async function startServiceLiveHost(options: {
   };
   const ledgers = new Map<string, LiveClaimLedger>();
   // Attached workspaces and hosted documents, as `update` last left them.
-  const members = new Map<string, {handle: string; workspace: ServiceWorkspace}>();
+  // `detaching` and `detaches` end first-open checks once a detach begins, before the engine answers it.
+  const members = new Map<string, {handle: string; workspace: ServiceWorkspace; detaching: boolean; detaches: number}>();
   const hosted = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
   // Hosted documents that left the hosted set. Passes settle, publish and unload them.
   const leaving = new Set<string>();
@@ -438,7 +439,7 @@ export async function startServiceLiveHost(options: {
       if (row.workspaceId !== workspace.workspaceId || typeof handle !== "string" || !handle || [...members.values()].some(member => member.handle === handle)) {
         throw new Error("Configured workspace identity mismatch.");
       }
-      members.set(workspace.workspaceId, {handle, workspace});
+      members.set(workspace.workspaceId, {handle, workspace, detaching: false, detaches: 0});
       consumers.set(workspace.workspaceId, new LiveCommittedDelivery(storage, history, { client, workspace: handle,
         host: coordinate, deadlineMs: config.client.requestDeadlineMs, nextRequestId, restore }));
       const attachment = workspace.hostedReplication;
@@ -539,11 +540,16 @@ export async function startServiceLiveHost(options: {
     };
     // Detach does not wait for unsettled work. The workspace store keeps it until the workspace attaches again.
     const detach = async (workspaceId: string, joined: AbortSignal) => {
-      try {await membershipRequest("liveApplication.detachWorkspace", members.get(workspaceId)!.handle, {}, joined);}
+      // First-open work ends before the engine answers, so nothing checked earlier can publish while the
+      // detach is pending, or after it fails. Checks while it is pending are refused; later ones may stand.
+      const member = members.get(workspaceId)!;
+      member.detaching = true; member.detaches++;
+      for (const document of hosted.values()) if (document.target.workspaceId === workspaceId) activation?.cancelFirstOpen(document.target);
+      try {await membershipRequest("liveApplication.detachWorkspace", member.handle, {}, joined);}
       catch (error) {
         // The workspace is already closed, as after a detach whose reply was lost.
         if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;
-      }
+      } finally {member.detaching = false;}
       members.delete(workspaceId); consumers.delete(workspaceId);
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) if (document.target.workspaceId === workspaceId) forget(key);
@@ -1775,10 +1781,10 @@ export async function startServiceLiveHost(options: {
        * or running, so checks never crowd out live writes.
        */
       async checkFirstOpenCandidate(workspaceId: string, input: FirstOpenCandidateInput, callerSignal: AbortSignal): Promise<FirstOpenNativeCheck> {
-        const handle = members.get(workspaceId)?.handle;
+        const member = members.get(workspaceId), detaches = member?.detaches;
         const current = () => {
           try {checkPreparing();} catch {return false;}
-          return handle !== undefined && members.get(workspaceId)?.handle === handle;
+          return member !== undefined && members.get(workspaceId) === member && !member.detaching && member.detaches === detaches;
         };
         const failed = (reason: Extract<FirstOpenNativeCheck, {kind: "unavailable"}>["reason"], error?: unknown): FirstOpenNativeCheck => {
           if (error !== undefined) console.error("[service-live-host] first-open check gave no verdict", error);
@@ -1792,7 +1798,7 @@ export async function startServiceLiveHost(options: {
         firstOpenChecking = true;
         try {
           const check = await withLiveHostSignal(signal, callerSignal, joined => client.checkFirstOpenCandidate(
-            {id: nextRequestId(), workspace: handle!, deadlineMs: config.client.requestDeadlineMs}, input, joined));
+            {id: nextRequestId(), workspace: member!.handle, deadlineMs: config.client.requestDeadlineMs}, input, joined));
           return current() ? {kind: "answered", check, current} : failed("host-absent");
         } catch (error) {
           callerSignal.throwIfAborted();

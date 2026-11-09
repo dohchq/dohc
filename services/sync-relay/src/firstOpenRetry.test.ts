@@ -162,6 +162,17 @@ it("starts a retry after the relay's own deadline wait, so no answer from inside
   expect(f.retry.state(source)?.deadlineAnswers).toBe(1);
 });
 
+// Review round 2 of 3b, finding 2: a stale-source answer left its source
+// waiting forever. Proves: a stale answer holds nothing, so the same source
+// asks again at once, while an answer that holds still waits.
+it("asks again at once for a source its stale answer named", async () => {
+  const f = fixture();
+  await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "refused", reason: "stale-source"}));
+  expect(f.retry.state(source)).toMatchObject({retryAtMs: 0, stop: undefined});
+  await f.retry.attempt(source, async () => firstOpenOutcome(source, {kind: "refused", reason: "deletion"}));
+  expect(f.retry.state(source)?.retryAtMs).toBe(Infinity);
+});
+
 it("resets transient backoff on another answer, a new source, and explicit retry, honoring retry-after", async () => {
   const f = fixture(0);
   const busy = (s = source) => firstOpenOutcome(s, {kind: "unavailable", reason: "busy"});
