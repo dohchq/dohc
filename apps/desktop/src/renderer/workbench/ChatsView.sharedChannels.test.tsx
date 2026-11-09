@@ -664,7 +664,13 @@ describe("ChatsView shared channels (MU-C4)", () => {
       restoredMessage: "Restored ana@example.com to team.",
     });
 
-    // Sharing to a new address, read-only via the checkbox.
+    // Adding someone as View only. The dialog stays open with the field
+    // cleared and Can post chosen again, ready for the next person, even
+    // while the member list is still reloading.
+    let finishListing = () => {};
+    bridgeMock.listChatChannelShares.mockImplementation(
+      () => new Promise((resolve) => { finishListing = () => resolve(shareListing()); }),
+    );
     await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
     await userEvent.click(screen.getByTestId("chats-share-readonly"));
     await userEvent.click(screen.getByTestId("chats-share-submit"));
@@ -676,6 +682,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
         access: "read-only",
       }),
     );
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe(""),
+    );
+    expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
+    await userEvent.type(screen.getByTestId("chats-share-email"), "cy@example.com");
+    await act(async () => finishListing());
+    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("cy@example.com");
+
+    // Close leaves the members button where it was.
+    await userEvent.click(screen.getByTestId("chats-share-close"));
+    expect(screen.queryByTestId("chats-share-panel")).toBeNull();
+    expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
   });
 
   // A revocation that landed is a local fact. When the confirming refresh

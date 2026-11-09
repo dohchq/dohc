@@ -115,6 +115,8 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-share-email").fill(MEMBER_EMAIL);
     await owner.page.getByTestId("chats-share-submit").click();
     await expect(owner.page.getByTestId("chats-share-member")).toContainText(MEMBER_EMAIL);
+    await owner.page.getByTestId("chats-share-close").click();
+    await expect(owner.page.getByTestId("chats-share-panel")).toHaveCount(0);
 
     // The relay holds one grant, a group naming the channel and its folder.
     const listing = await fetch(`${relay.baseUrl}/sync/shares`, {

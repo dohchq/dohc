@@ -103,13 +103,15 @@ export function ShareReadFailureNotice(props: {
   // they are just older than this failure.
   stale: boolean;
   onRetry: () => void;
+  // The frame, for a notice that is not a band across a panel.
+  className?: string;
 }) {
   const staleLine = props.stale ? " This list may be out of date." : "";
   return (
     <div
       data-testid={props.testId}
       data-failure={props.failure.kind}
-      className="flex items-start gap-1.5 border-b border-line px-3 py-2"
+      className={`flex items-start gap-1.5 ${props.className ?? "border-b border-line px-3 py-2"}`}
     >
       <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
         {props.failure.kind === "unreachable"
