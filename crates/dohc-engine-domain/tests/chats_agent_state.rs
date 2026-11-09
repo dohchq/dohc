@@ -304,6 +304,27 @@ fn ask_by(
     );
 }
 
+/// A person's post that starts its own thread in an agent's chat. Without
+/// it, a post there joins the chat's one conversation.
+fn ask_in_own_thread(
+    chats: &mut LinkedChatStore<'_>,
+    user: Option<&str>,
+    channel: &str,
+    thread: &str,
+    message: &str,
+    at: i64,
+) {
+    let input = StartChannelThread {
+        channel_id: channel.to_owned(),
+        author_user_id: user.map(str::to_owned),
+        own_thread: true,
+        ..start_input(thread, message, ChatActorKind::Human, at)
+    };
+    chats
+        .start_channel_thread(&input, &NO_FAULTS)
+        .expect("own thread");
+}
+
 fn ask(chats: &mut LinkedChatStore<'_>, channel: &str, thread: &str, message: &str, at: i64) {
     ask_by(chats, Some("ada"), channel, thread, message, at);
 }
@@ -509,7 +530,7 @@ fn a_request_from_before_signing_out_stays_until_its_thread_is_read() {
     agent_chats(&mut chats);
     let reader = terminal(&["me"], true);
     ask_by(&mut chats, Some("me"), "t", "t1", "signed-in", 10);
-    ask_by(&mut chats, None, "t", "t2", "signed-out", 20);
+    ask_in_own_thread(&mut chats, None, "t", "t2", "signed-out", 20);
     assert_eq!(requests_for(&chats, &reader), ["signed-in", "signed-out"]);
     answer(&mut chats, "t", "t2", "answer", 25);
     chats
@@ -525,7 +546,7 @@ fn a_request_from_before_signing_out_stays_until_its_thread_is_read() {
         .expect("acknowledged");
     assert!(requests_for(&chats, &reader).is_empty());
 
-    ask_by(&mut chats, Some("me"), "t", "t3", "first", 40);
+    ask_in_own_thread(&mut chats, Some("me"), "t", "t3", "first", 40);
     ask_by(&mut chats, None, "t", "t3", "second", 50);
     let page = chats
         .list_agent_unread_requests(WS, &reader, None, 1)
