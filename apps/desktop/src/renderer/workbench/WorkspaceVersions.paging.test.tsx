@@ -213,7 +213,9 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
       const notice = readError(report.mock.calls[0]![1]);
       expect(notice.words).toBe("Move your newer lines into the new file, and leave c-1.md and its copies alone. Your other files keep syncing.");
       expect(notice.canRetry).toBe(false);
-      expect(notice.cause).toContain("changed on this machine after the conflict appeared");
+      // The Reason says why once. The error's own message repeats it, so it adds no Cause.
+      expect(notice.details).toBe("c-1.md changed on this machine after the conflict appeared, so either choice would overwrite the newer lines.");
+      expect(notice.cause).toBeNull();
     }
   });
 });

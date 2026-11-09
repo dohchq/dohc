@@ -500,11 +500,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
     return result;
   }
-  serviceHostEnrollmentHasEditGrant(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">) {
-    return serviceHostEnrollmentStorage.serviceHostEnrollmentHasEditGrant(this, enrollment);
+  serviceHostEnrollmentCovered(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">) {
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
   }
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}) {
-    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document, owner, restoring);
   }
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
@@ -520,6 +520,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   retirementJournalEvidence(retirement: ServiceActivationRetirement, deliveryIds: readonly string[]) {
     return serviceActivationRetirementStorage.retirementJournalEvidence(this, retirement, deliveryIds);
+  }
+  endLapsedServiceHostRun(enrollment: serviceHostEnrollmentStorage.ServiceHostEnrollment, nowMs: number) {
+    return serviceHostEnrollmentStorage.endLapsedServiceHostRun(this, enrollment, nowMs);
   }
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
     const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);

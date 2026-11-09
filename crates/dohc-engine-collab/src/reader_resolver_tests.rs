@@ -249,7 +249,7 @@ fn construction_as_proof_cannot_change_content_or_unknown_metadata() {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn real_reader_proves_frontmatter_source_without_rewriting_live_state() {
     let config =
         serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
@@ -891,7 +891,7 @@ pub(crate) fn run(future: impl std::future::Future<Output = ()>) {
 }
 
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn real_reader_checks_the_current_witness_and_holds_without_a_runtime() {
     let config =
         serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();

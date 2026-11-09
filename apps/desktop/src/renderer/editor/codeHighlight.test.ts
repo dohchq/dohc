@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Node as PMNode } from '@tiptap/pm/model'
 import { EditorState } from '@tiptap/pm/state'
-import type { DecorationSet } from '@tiptap/pm/view'
+import { Decoration, type DecorationSet } from '@tiptap/pm/view'
 import { getDohcProseMirrorSchema } from '@dohc/ydoc-projection'
-import { codeBlock, doc, paragraph } from './testDocs'
+import { codeBlock, doc, paragraph, randomEdit, seededRandom } from './testDocs'
 import {
   codeHighlightKey,
   computeCodeHighlightRanges,
@@ -181,5 +181,49 @@ describe('makeCodeHighlightPlugin', () => {
     const hugeText = `const x = 1; ${'a'.repeat(20_000)}`
     const state = stateWithCodeBlock('typescript', hugeText)
     expect(decorationCount(state)).toBe(0)
+  })
+})
+
+describe('makeCodeHighlightPlugin — edits', () => {
+  const byPosition = (a: { from: number; to: number }, b: { from: number; to: number }) => a.from - b.from || a.to - b.to
+
+  it('matches a full highlight after every edit', () => {
+    const random = seededRandom(2260)
+    let state = EditorState.create({
+      doc: doc(
+        codeBlock('const x = "a";', 'typescript'),
+        paragraph('plain text'),
+        codeBlock('def f(): return 1', 'python'),
+        codeBlock('no language'),
+        paragraph('const not code'),
+      ),
+      plugins: [makeCodeHighlightPlugin()],
+    })
+    for (let step = 0; step < 400; step += 1) {
+      state = state.apply(randomEdit(state, random, ['const ', '"', '1', ' ', '# c', 'return ', '\n']))
+      const shown = (codeHighlightKey.getState(state) as DecorationSet)
+        .find()
+        .map(({ from, to }) => ({ from, to }))
+        .sort(byPosition)
+      expect(shown, `step ${step}`).toEqual(
+        computeCodeHighlightRanges(state.doc, new WeakMap()).map(({ from, to }) => ({ from, to })).sort(byPosition),
+      )
+    }
+  })
+
+  it('highlights only the edited block when typing in a note with 2,000 code blocks', () => {
+    const blocks = Array.from({ length: 2000 }, (_, i) => codeBlock(`const value${i} = "${i}";`, 'typescript'))
+    let state = EditorState.create({ doc: doc(...blocks), plugins: [makeCodeHighlightPlugin()] })
+    const middle = blocks.slice(0, 1000).reduce((pos, block) => pos + block.nodeSize, 0)
+    const inline = vi.spyOn(Decoration, 'inline')
+    try {
+      state = state.apply(state.tr.insertText('x', middle + 1))
+      // One block holds a few spans. Before this bound, each key built the
+      // spans of all 2,000 blocks again.
+      expect(inline.mock.calls.length).toBeLessThan(20)
+    } finally {
+      inline.mockRestore()
+    }
+    expect(decorationCount(state)).toBe(computeCodeHighlightRanges(state.doc, new WeakMap()).length)
   })
 })

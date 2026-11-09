@@ -206,14 +206,22 @@ jobs:
               - 'apps/desktop/e2e/helpers/systemClipboard.ts'
 
   javascript:
-    name: typecheck + tests
+    name: typecheck + tests (${{ matrix.shard }})
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 60
+    # On one four-CPU runner the desktop tests, the other packages and the proofs run
+    # at once and push CPU-heavy tests past their time limits, so each shard runs on
+    # its own runner. These are the shards scripts/verification/js-tests.mjs defines.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [desktop, packages, proofs]
     env:
       # The confinement job runs these suites.
       DOHC_CONFINEMENT_SUITES: exclude
+      DOHC_JS_SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -263,7 +271,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verification-js-${{ github.run_attempt }}
+          name: verification-js-${{ matrix.shard }}-${{ github.run_attempt }}
           path: |
             .agent-artifacts/verification/*/result.json
             .agent-artifacts/verification/*/*.log
@@ -279,7 +287,7 @@ jobs:
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       # The confinement job runs the app compiler owner's tests.
       NEXTEST_PROFILE: without-confinement

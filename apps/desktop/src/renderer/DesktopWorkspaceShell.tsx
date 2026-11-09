@@ -112,7 +112,7 @@ import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
-import { ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { ShellErrorReporter, ShellNoticeClear, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useDisconnectedLinkAgents, useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -233,10 +233,10 @@ import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCente
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
-import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "./shell/noticeTarget";
+import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, workLinkTarget, type NoticeTarget } from "../notices/noticeTarget";
 import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
-import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
+import { serverHoldNoticesKey } from "../notices/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
 import { useVersionRounds } from "./shell/useVersionRounds";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
@@ -6107,15 +6107,23 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [syncStatus, observationFailure, reportShellFailure, clearIdentity]);
   // Reading a refusal's row stores its read mark. Closing its toast alone
-  // doesn't, so an unread one toasts again the next time dohc starts.
+  // doesn't, so an unread one toasts again the next time dohc starts. A mark
+  // main refuses leaves the row unread, and Try again sends the same read.
   const readWorkspaceError = useCallback((id: string) => {
-    const refusal = props.sentNotices?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
-    if (!refusal) return;
+    const sent = props.sentNotices;
+    const refusal = sent?.notices.find(notice => notice.noticeId === id && isRefusalNoticeKind(notice.kind));
+    if (!sent || !refusal) return undefined;
     const askedFor = workspaceId;
-    void props.sentNotices!.read([refusal]).catch(error => {
-      if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error);
+    const identity = `notice-read:${id}`;
+    const attempt = (): Promise<boolean> => sent.read([refusal]).then(() => {
+      if (workspaceIdRef.current === askedFor) clearIdentity(identity);
+      return true;
+    }, error => {
+      if (workspaceIdRef.current === askedFor) reportShellError("dohc could not mark this Notice read.", error, () => void attempt(), undefined, identity);
+      return false;
     });
-  }, [props.sentNotices, workspaceId, reportShellError]);
+    return attempt();
+  }, [props.sentNotices, workspaceId, reportShellError, clearIdentity]);
   useEffect(() => {
     showSyncRefusals((props.sentNotices?.notices ?? []).filter(notice =>
       isRefusalNoticeKind(notice.kind) && notice.workspaceId === workspaceId), syncFailureNotice.retry, openFile, openHistoryView, readWorkspaceError);
@@ -6287,6 +6295,7 @@ export function DesktopWorkspaceShell(props: {
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
     <MessageLinks.Provider value={makeMessageLink}>
+    <ShellNoticeClear.Provider value={clearIdentity}>
     <div
       data-testid="workspace-shell"
       ref={focusRoot}
@@ -7832,6 +7841,7 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
       {retainedCopiesDialog}
     </div>
+    </ShellNoticeClear.Provider>
     </MessageLinks.Provider>
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>

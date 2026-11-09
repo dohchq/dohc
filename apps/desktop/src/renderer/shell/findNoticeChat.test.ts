@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findNoticeChat } from "./findNoticeChat";
-import { workLinkTarget } from "./noticeTarget";
+import { workLinkTarget } from "../../notices/noticeTarget";
 
 const group = { id: "group-1", name: "trip", slug: "trip", kind: "channel" as const, type: "both" as const,
   createdAtMs: 0, updatedAtMs: 0, threadCount: 2, unreadCount: 0 };

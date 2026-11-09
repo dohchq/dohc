@@ -275,6 +275,11 @@ impl Drop for EngineService {
             // the runtime that polls it. The pass keeps only a `Weak` between
             // steps, and its writes hold the gates the cleanup takes below.
             lock(&workspace.markdown_recovery).take();
+            // Awaiting undo recovery would wait for that same runtime. An aborted
+            // task never resumes, and its version fence holds those gates too.
+            if let Some(undo) = lock(&workspace.undo_recovery).take() {
+                undo.abort();
+            }
         }
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
@@ -2222,9 +2227,9 @@ mod tests {
         );
     }
 
-    /// A test blocked in its scratch cleanup cannot poll the Markdown recovery
-    /// pass. Dropping the service must still close the store, or the store's
-    /// files stay open until that runtime ends.
+    /// A test blocked in its scratch cleanup cannot poll the Markdown or undo
+    /// recovery tasks. Dropping the service right after open must still close
+    /// the store, or the store's files stay open until that runtime ends.
     #[tokio::test]
     async fn service_drop_closes_the_store_while_its_runtime_is_blocked() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -2246,16 +2251,11 @@ mod tests {
             serde_json::from_value(opened["workspace"].clone()).expect("handle");
         let retained = service.open(Some(&handle)).expect("retained access");
         assert!(lock(&retained.markdown_recovery).is_some());
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !lock(&retained.undo_recovery)
+        assert!(
+            lock(&retained.undo_recovery)
                 .as_ref()
-                .is_none_or(tokio::task::JoinHandle::is_finished)
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("undo recovery ends on its own");
+                .is_some_and(|undo| !undo.is_finished())
+        );
         drop(service);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while retained.actor.lifecycle() != LifecycleState::Closed {

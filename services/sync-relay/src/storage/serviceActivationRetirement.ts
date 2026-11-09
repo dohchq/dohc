@@ -81,6 +81,12 @@ export function readServiceActivationRetirementDecision(storage: StorageContext,
   return value ? retirement(value) : null;
 }
 
+/** The activation a restore continues: the adoption of the owner origin it saved. */
+export const restoredActivation = (basisJson: string): unknown => {
+  const origin: unknown = JSON.parse(basisJson)?.ownerOrigin;
+  return typeof origin === "string" ? JSON.parse(origin)?.adoptionId : undefined;
+};
+
 /** Whether the document's activation has an open retirement obligation. */
 export function serviceActivationRetirementOpen(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
   return storage.db.prepare(`SELECT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS}

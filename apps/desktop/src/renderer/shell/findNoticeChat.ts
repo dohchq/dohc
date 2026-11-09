@@ -2,7 +2,7 @@ import type { FileChatThreadRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { ChatsNav } from "../workbench/ChatsView";
 import type { DmChatLocator } from "./chatOpenTarget";
-import type { NoticeTarget } from "./noticeTarget";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 
 /**
  * Where a chat target opens. A Group's or an agent's conversation opens in

@@ -168,6 +168,21 @@ describe("the Sharing view's two lists", () => {
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledWith({ workspaceId: "workspace-a", reason: "sharing-open" });
   });
 
+  it("counts every share each list shows, whatever its status, and this computer's shares the server doesn't list", async () => {
+    const ended = { status: "revoked" as const, selector: null, access: null };
+    answerWith({
+      granted: answer("granted", { rows: [granted(), granted({ shareId: "share-2", grantId: "grant-2", ...ended, subjectName: "old.md" }),
+        granted({ shareId: "share-3", grantId: "grant-3", status: "damaged" })] }),
+      received: answer("received", { rows: [received(), received({ shareId: "in-2", grantId: "in-grant-2", status: "removed", subjectName: "gone.csv" }),
+        received({ shareId: "in-3", grantId: "in-grant-3", ...ended, subjectName: "ended.csv" })] }),
+    });
+    render(<View mounts={[{ shareId: "here-1", label: "notes", granterEmail: "sam@example.com", access: "view" }]} />);
+    await waitFor(() => expect(screen.getAllByTestId("sharing-received-row")).toHaveLength(4));
+    expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(3);
+    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("3");
+    expect(screen.getByTestId("sharing-received-count").textContent).toBe("4");
+  });
+
   it("says one level per person, widest first, and a link for everyone who has it", async () => {
     answerWith({ granted: answer("granted", { rows: [
       granted({ grantId: "sam", access: "edit" }),
@@ -389,7 +404,10 @@ describe("the Sharing view's two lists", () => {
       : cursor === "page-2" ? answer("granted", { rows: [granted({ shareId: "share-2", grantId: "grant-2" })] })
         : answer("granted", { rows: [granted()], nextCursor: "page-2" }));
     render(<View />);
-    expect((await screen.findByTestId("sharing-granted-count")).textContent).toBe("1+");
+    const count = await screen.findByTestId("sharing-granted-count");
+    // "1+" on screen, read as "1 or more shares".
+    expect(within(count).getByText("1+").getAttribute("aria-hidden")).toBe("true");
+    expect(within(count).getByText("1 or more shares").className).toContain("sr-only");
     await userEvent.click(screen.getByTestId("sharing-granted-more"));
     await waitFor(() => expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(2));
     expect(bridgeMock.listSharingAccess).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", lane: "granted", cursor: "page-2" });
@@ -584,7 +602,8 @@ describe("the actions Settings offers on a share", () => {
     expect(row.textContent).toContain("plan.md");
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Ended");
     expect(within(row).queryByRole("button", { name: "Share actions" })).toBeNull();
-    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("0");
+    // The list still shows it, so the count does.
+    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("1");
   });
 
   it("offers no End share for a link or a chat: those end where they were made", async () => {

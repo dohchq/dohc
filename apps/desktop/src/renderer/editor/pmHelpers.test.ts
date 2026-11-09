@@ -1,5 +1,6 @@
+import { Fragment } from "@tiptap/pm/model";
 import { EditorState } from "@tiptap/pm/state";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { documentChange } from "./pmHelpers";
 import { doc, paragraph, schema } from "./testDocs";
 
@@ -18,6 +19,17 @@ function positionOfChild(state: EditorState, index: number): number {
 }
 
 describe("documentChange", () => {
+  it("reads no block of a document that did not change", () => {
+    const state = longState();
+    const child = vi.spyOn(Fragment.prototype, "child");
+    try {
+      expect(documentChange(state.doc, state.doc).range).toBeNull();
+      expect(child).not.toHaveBeenCalled();
+    } finally {
+      child.mockRestore();
+    }
+  });
+
   it("names only the block that typing changed", () => {
     const state = longState();
     const pos = positionOfChild(state, 500);

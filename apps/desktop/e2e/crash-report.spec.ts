@@ -84,3 +84,51 @@ test("an engine crash leaves a notice and sends its report only after the person
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+// A crash toasts once. Closing the toast is kept with the report, so the next
+// launch shows only its row in Notices, still with Dismiss, Copy and Send.
+test("a closed crash toast stays closed after a restart, and its row stays in Notices", async () => {
+  test.setTimeout(150_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page, app } = desktop;
+    const appPid = app.process().pid;
+    if (appPid === undefined) throw new Error("Electron app has no pid.");
+    await openWorkspaceFromFirstRun(page, temp);
+
+    const victims = await engineDaemonPids(appPid);
+    expect(victims.length).toBeGreaterThan(0);
+    for (const pid of victims) await hardKillPid(pid);
+    await waitForFreshEngineDaemon(appPid, victims);
+
+    const toast = page.getByTestId("crash-report-toast");
+    await expect(toast).toContainText("The workspace engine failed");
+    await page.getByRole("button", { name: "Close crash report notice" }).click();
+    await expect(toast).toHaveCount(0);
+    await expect.poll(async () =>
+      await page.evaluate(async () => (await window.dohcDesktop!.readCrashReport({})).report?.read)).toBe(true);
+
+    await desktop.close();
+    desktop = null;
+    desktop = await launchDesktopApp({ workspace: temp });
+    const next = desktop.page;
+    await openWorkspaceFromFirstRun(next, temp);
+
+    // Once the row shows, this window has the report. Opening Notices focuses
+    // the panel, not the row, so an unread report would still show its mark
+    // here and its toast after Notices closes.
+    await next.getByTestId("notice-center-toggle").click();
+    const row = next.getByTestId("notice-crash-report");
+    await expect(row).toContainText("The workspace engine failed");
+    await expect(next.getByTestId("notice-crash-report-unread")).toHaveCount(0);
+    await expect(next.getByTestId("notice-crash-report-dismiss")).toBeVisible();
+    await next.getByTestId("notice-center-toggle").click();
+    await expect(next.getByTestId("notice-center")).toHaveCount(0);
+    await expect(next.getByTestId("crash-report-toast")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

@@ -6216,6 +6216,219 @@ fn imported_agent_message_keeps_its_owner_display_name() {
     assert_eq!(stored, "Ada");
 }
 
+/// A name from another device reaches chat without characters that hide or
+/// reorder text, for a person, an agent and the person it acts for, a
+/// reaction, and a post that waited for its thread. Joining characters and
+/// variation selectors stay.
+#[test]
+fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let posts = [
+        (
+            3,
+            "person",
+            "human",
+            "Ana\u{202E}lisa",
+            None,
+            "thread-imported",
+        ),
+        (
+            4,
+            "agent",
+            "agent",
+            "No\u{200B}va\u{2066}",
+            Some("Sam\u{0007}"),
+            "thread-imported",
+        ),
+        (
+            5,
+            "joined",
+            "human",
+            "Ali\u{200C}reza 👩\u{200D}💻 ❤\u{FE0F}",
+            None,
+            "thread-imported",
+        ),
+        (
+            6,
+            "parked",
+            "agent",
+            "\u{3164}Sc\u{2028}out",
+            Some("A\u{2069}da"),
+            "late-thread",
+        ),
+    ];
+    for (seq, id, author_kind, name, owner, thread_id) in posts {
+        let mut payload = json!({
+            "messageId": id, "threadId": thread_id, "authorKind": author_kind,
+            "authorDisplayName": name, "body": "Hi", "createdAtMs": 30
+        });
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        apply_chat_envelope(
+            &mut engine,
+            &envelope("peer", seq, "chat.message.append", payload),
+            &NoFaults,
+        )
+        .expect("a post with such a name applies");
+    }
+    let reaction = envelope(
+        "peer",
+        7,
+        "chat.reaction.set",
+        json!({
+            "reactionId": "reaction-hidden", "messageId": "person", "threadId": "thread-imported",
+            "emoji": "👍", "authorId": "ana", "authorKind": "human",
+            "authorDisplayName": "Ana\u{2067}lisa", "atMs": 40, "state": "added"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &reaction, &NoFaults).expect("reaction");
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({ "threadId": "late-thread", "title": "Late thread", "createdAtMs": 20, "channelSlug": "imported" }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let name = |id: &str| -> (String, Option<String>) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_display_name, author_owner_display_name FROM chat_messages WHERE message_id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("stored post")
+    };
+    assert_eq!(name("person"), ("Analisa".to_owned(), None));
+    assert_eq!(name("agent"), ("Nova".to_owned(), Some("Sam".to_owned())));
+    assert_eq!(
+        name("joined"),
+        ("Ali\u{200C}reza 👩\u{200D}💻 ❤\u{FE0F}".to_owned(), None)
+    );
+    assert_eq!(name("parked"), ("Scout".to_owned(), Some("Ada".to_owned())));
+    let reacted: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_display_name FROM chat_reactions WHERE reaction_id = 'reaction-hidden'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("stored reaction");
+    assert_eq!(reacted, "Analisa");
+
+    // A name with nothing visible left is no name, for a post and for the
+    // person an agent posts for.
+    for (seq, name, owner) in [
+        (8, "\u{200B}\u{3164}", None),
+        (9, "\u{200C}", None),
+        (10, "\u{200D}\u{FE0F}", None),
+        (11, " \u{E0100} ", None),
+        (12, "Nova", Some("\u{200D}")),
+    ] {
+        let author_kind = if owner.is_some() { "agent" } else { "human" };
+        let mut payload = json!({
+            "messageId": format!("blank-{seq}"), "threadId": "thread-imported",
+            "authorKind": author_kind, "authorDisplayName": name, "body": "Hi", "createdAtMs": 31
+        });
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        let blank = envelope("peer", seq, "chat.message.append", payload);
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &blank, &NoFaults));
+    }
+}
+
+/// An older build parked posts whose names this build refuses. When their
+/// thread arrives, the thread applies and each such post is refused.
+#[test]
+fn a_parked_post_whose_name_is_now_refused_lets_its_thread_arrive() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let parked = [
+        ("human", "\u{200B}", None),
+        ("human", "\u{3164}", None),
+        ("agent", "Nova", Some("\u{200D}")),
+    ];
+    for (seq, (author_kind, name, owner)) in parked.into_iter().enumerate() {
+        let seq = seq as i64;
+        let mut payload = json!({
+            "messageId": format!("parked-{seq}"), "threadId": "late-thread",
+            "authorKind": author_kind, "authorDisplayName": "Ana", "body": "Hi",
+            "createdAtMs": 30
+        });
+        if owner.is_some() {
+            payload["authorOwnerDisplayName"] = json!("Ana");
+        }
+        let op = envelope("old-peer", seq, "chat.message.append", payload.clone());
+        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("parked post");
+        // The payload as the older build recorded it.
+        payload["authorDisplayName"] = json!(name);
+        if let Some(owner) = owner {
+            payload["authorOwnerDisplayName"] = json!(owner);
+        }
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log SET payload_json = ?2 \
+                     WHERE workspace_id = 'ws' AND origin_id = 'old-peer' AND origin_seq = ?1",
+                    params![seq, payload.to_string()],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("record the older payload");
+    }
+    assert_eq!(pending_chat_coordinate_count(&engine), 3);
+
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({ "threadId": "late-thread", "title": "Late thread", "createdAtMs": 20, "channelSlug": "imported" }),
+    );
+    let outcome = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("the thread applies");
+    assert!(
+        matches!(outcome.primary, ApplyDisposition::Applied(_)),
+        "the thread arrives"
+    );
+    let mut refused: Vec<(String, i64)> = outcome
+        .refusals
+        .iter()
+        .map(|refusal| (refusal.origin_id.clone(), refusal.origin_seq))
+        .collect();
+    refused.sort();
+    assert_eq!(
+        refused,
+        [0, 1, 2].map(|seq| ("old-peer".to_owned(), seq)).to_vec()
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let (threads, posts): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, dohc_engine_storage::StorageError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_threads WHERE thread_id = 'late-thread'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id LIKE 'parked-%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+            ))
+        })
+        .expect("counts");
+    assert_eq!((threads, posts), (1, 0));
+}
+
 #[test]
 fn received_and_parked_messages_wake_no_agent_here() {
     let (_scratch, _path, mut engine) = open_store();

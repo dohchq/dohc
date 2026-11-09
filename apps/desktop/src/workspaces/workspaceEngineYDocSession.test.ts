@@ -2479,6 +2479,35 @@ it("keeps typing records pending through a busy store without reopening or relab
   scratch.destroy();
 });
 
+it("retires a busy refusal's typing checkpoint once the engine records the resent typing", async () => {
+  await capture.stop();
+  const written: string[] = [];
+  const retire = vi.fn(async (_checkpoint: { text: string }) => undefined);
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    openRustYDocProviderSession: async options =>
+      ({ ...await openEngineYdocProviderSession(options), objectId: "checkpoint-object", versionId: "main" }),
+    writeTypingCheckpoint: async checkpoint => { written.push(checkpoint.text); },
+    retireTypingCheckpoint: retire,
+    onError: context => captureErrors.push(context),
+  });
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+  const editor = mirrorEditor(session);
+  busyRecordAttempts = 2;
+  try {
+    typeIntoBody(editor, "Busy typing kept on disk.");
+    await vi.waitFor(() => expect(written.at(-1)).toContain("Busy typing kept on disk."));
+    await session.settleNow();
+    expect(busyRecordAttempts).toBe(0);
+    await vi.waitFor(() => expect(retire).toHaveBeenCalledOnce());
+    expect(retire.mock.calls[0]![0].text).toBe(written.at(-1));
+    expect(captureErrors).toEqual([]);
+  } finally {
+    await session.close({ settle: false });
+    editor.destroy();
+  }
+});
+
 it("does not replay acknowledged agent originals when a later original loses its answer", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const scratch = new Y.Doc();

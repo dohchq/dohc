@@ -14,6 +14,7 @@ import { guardRelayResponses } from "./relayResponseStanding";
 import { createDeviceHostCredential } from "./deviceHostCredential";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./storage/context";
+import { attachedLiveJournalHistoryNamespace } from "./storage/liveJournalHistory";
 import { acquireSupervisorOwnership } from "../../../packages/app-backend-runtime/src/worker-ownership";
 
 const cleanups: (() => void)[] = [];
@@ -82,6 +83,21 @@ describe("relay deployment continuity", () => {
       expect(second.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 })).toBe("owned");
     } finally { second.storage.close(); }
   }, 2 * TSX_CHILD_TIMEOUT_MS + 10_000);
+
+  // Proves: the relay's history is attached under the configured namespace
+  // before its storage is returned, so the first read of a note's restores,
+  // on opening and after a restart, sees the history they were written under.
+  it("attaches its history before it returns the storage, on opening and after a restart", () => {
+    const f = fixture(), {namespace} = JSON.parse(readFileSync(f.configPath, "utf8")) as {namespace: string};
+    for (const open of ["first", "reopened"]) {
+      const {storage, history} = openRelayDeployment(f.configPath);
+      try {
+        expect(attachedLiveJournalHistoryNamespace(storage as StorageContext), open).toBe(namespace);
+        expect(history.namespace).toBe(namespace);
+      } finally { storage.close(); }
+    }
+    expect(read(f.relayPath, "sync_relay_continuity")).toMatchObject({namespace});
+  });
 
   it("refuses a database restored to exactly one permission write ago with no new journal event", async () => {
     const f = fixture(), current = openRelayDeployment(f.configPath);

@@ -203,6 +203,29 @@ it("reports a synced deletion refusal in Undo and retains only the refused recei
   expect(f.shell().receipts.get(WORKSPACE, ANA.target).map(file => file.restoredMomentId)).toEqual(["trip"]);
 });
 
+it.each([
+  ["a person", ANA, "Put back 1 file as ana@example.com left them. Their access stays stopped."],
+  ["a link", LINK, "Put back 1 file as Edit link to trip left them. The link stays ended."],
+])("counts only the files an Undo put back, for %s", async (_, first, partly) => {
+  const refused = (momentId: string) => ({kind: "refused" as const, momentId, detail: "Changed on this device since the last saved version."});
+  const f = fixture([{status: "restored", restored: [{path: "trip/a.md", restoredMomentId: "a"}, {path: "trip/b.md", restoredMomentId: "b"}],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null}], first);
+  f.undoStopAndRestore.mockResolvedValueOnce({errorMessage: null, files: [refused("a"), refused("b")]});
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-undo"));
+  const outcome = await screen.findByTestId("stop-and-restore-outcome");
+  await within(outcome).findByText("trip/a.md");
+  expect(within(outcome).getByText("trip/b.md")).toBeTruthy();
+  expect(outcome.textContent).not.toMatch(/Put back/);
+
+  f.undoStopAndRestore.mockResolvedValueOnce({errorMessage: null, files: [refused("a"),
+    {kind: "restored", momentId: "b", receipt: {path: "trip/b.md", restoredMomentId: "undo-b"}}]});
+  fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText(partly)).toBeTruthy();
+  expect(within(screen.getByTestId("stop-and-restore-outcome")).getByText("trip/a.md")).toBeTruthy();
+});
+
 it("recovers unfinished runs after relaunch and opens Try again from the Notice", async () => {
   const result: StopAndRestoreResult = {status: "restored", restored: [], review: [], runsUndone: 1, runsLeft: 0,
     keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false,

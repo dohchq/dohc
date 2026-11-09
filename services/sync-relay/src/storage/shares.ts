@@ -34,7 +34,7 @@ import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
 import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
-import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare } from "./serviceHostEnrollment";
+import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare, type KeptServiceActivation } from "./serviceHostEnrollment";
 import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
 function dependentGrantIdsMatch(
@@ -362,7 +362,8 @@ export function revokeShareGrant(storage: StorageContext, input: RevokeShareGran
   }
 
 // The caller owns the synchronous relay transaction.
-export function revokeShareGrantInTransaction(storage: StorageContext, input: RevokeShareGrantInput): LinkGrantTransitionResult {
+/** `keep` is only for the owner's restore that revokes the grant; see `retireUncoveredServiceActivations`. */
+export function revokeShareGrantInTransaction(storage: StorageContext, input: RevokeShareGrantInput, keep?: KeptServiceActivation): LinkGrantTransitionResult {
       input.guard?.();
       const grant = storage.getShareGrant(input.grantId);
       if (
@@ -409,7 +410,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
         .run(grant.shareId, grant.shareId);
-      retireUncoveredServiceActivations(storage, covered, revokedAtMs);
+      retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
       forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }

@@ -55,6 +55,7 @@ const bridge = {
   readCrashReport: vi.fn(async (): Promise<ReadCrashReportResult> => ({ report: null, sendTo: null })),
   sendCrashReport: vi.fn(async () => ({ sent: true })),
   dismissCrashReport: vi.fn(async () => undefined),
+  markCrashReportRead: vi.fn(async () => undefined),
   onCrashReportChanged: vi.fn(() => () => undefined),
   windowRole: "workspace",
   platform: "linux" as NodeJS.Platform,
@@ -736,7 +737,7 @@ describe("workspace manager", () => {
     const user = userEvent.setup();
     const text = "dohc crash report\n\nProcess: window";
     bridge.readCrashReport.mockResolvedValueOnce({
-      report: { revision: 1, through: 1, source: "window", problems: 1, atMs: 1_000, text },
+      report: { revision: 1, through: 1, read: false, source: "window", problems: 1, atMs: 1_000, text },
       sendTo: "reports.example.test",
     });
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);

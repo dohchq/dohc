@@ -5,7 +5,7 @@ import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation"
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
-import type { NoticeTarget } from "./noticeTarget";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -143,9 +143,13 @@ export type ReportShellFailure = (failure: {
   message: string;
   cause?: unknown;
   retry?: (() => void) | null;
+  action?: ShellError["action"];
+  target?: NoticeTarget;
   identity?: string;
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
+// Takes back the row of one identity, once what it named has worked.
+export const ShellNoticeClear = createContext<((identity: string) => void) | null>(null);
 
 export function useShellError(workspaceId: string, retrySharedView?: () => void) {
   const currentWorkspace = useRef(workspaceId);
@@ -546,7 +550,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           // The whole path: a title names only the file, and two folders can hold one name.
           details: [...(path ? [["File", path, path.length] as const] : []), ["Detail", notice.detail ?? notice.body]] as const,
           atMs: notice.createdAtMs, seen: prior?.seen === true || notice.readAtMs !== null,
-          read: prior?.read === true || notice.readAtMs !== null,
+          // The list holds a read until main answers and lets go of one main refused.
+          read: notice.readAtMs !== null,
           retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
           // A hold is on purpose: nothing failed.
           ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),

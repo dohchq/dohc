@@ -246,9 +246,75 @@ fn refuse_choice_before_preflight(resolution: ResolveConflictKind) {
 }
 
 #[test]
-fn synced_deletion_incoming_choice_is_refused_before_preflight() {
-    refuse_choice_before_preflight(ResolveConflictKind::ApplyIncoming);
+fn synced_deletion_incoming_choice_brings_the_note_back_as_the_same_object() {
+    let dir = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
+    let conflict = setup(&mut store, true);
+    let mut preflight = false;
+    VersionedTextStore::new(&mut store)
+        .resolve_text_conflict_with(
+            &choice(ResolveConflictKind::ApplyIncoming),
+            &NoFaults,
+            |_, _, _| {
+                preflight = true;
+                Ok(())
+            },
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+    assert!(preflight);
+    let head = VersionedTextStore::new(&mut store)
+        .read_text("ws", "main", "trip.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.text, "Tokyo");
+    assert_eq!(
+        head.object_id,
+        conflict.incoming.snapshot.unwrap().object_id,
+        "the other machine's copy must come back as the same object"
+    );
 }
+fn point_incoming_at(store: &mut EngineStore, object_id: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws', ?1, 2)",
+                [object_id],
+            )
+            .unwrap();
+            tx.execute("UPDATE conflicts SET incoming_object_id=?1", [object_id])
+                .unwrap();
+            Ok::<_, DomainError>(())
+        })
+        .unwrap();
+}
+
+/// Keeping the other copy needs the note stored here as a file. An object
+/// row alone, which a parked editor change leaves, is refused.
+#[test]
+fn synced_deletion_incoming_choice_needs_a_stored_file() {
+    let dir = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
+    setup(&mut store, true);
+    point_incoming_at(&mut store, "unstored");
+    let before = counts(&mut store);
+    assert_eq!(
+        resolve(&mut store, ResolveConflictKind::ApplyIncoming)
+            .unwrap_err()
+            .code(),
+        "synced-deletion-revival-refused"
+    );
+    assert_eq!(counts(&mut store), before);
+    point_incoming_at(&mut store, "note");
+    resolve(&mut store, ResolveConflictKind::ApplyIncoming).unwrap();
+    let head = VersionedTextStore::new(&mut store)
+        .read_text("ws", "main", "trip.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.object_id, "note");
+}
+
 #[test]
 fn synced_deletion_combined_choice_is_refused_before_preflight() {
     refuse_choice_before_preflight(ResolveConflictKind::ApplyMerged {

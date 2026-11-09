@@ -32,6 +32,31 @@ export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, 
   return activationId;
 }
 /**
+ * Stored records of the owner's restore of `binding` that ended its last Edit
+ * grant at 30 and kept the owner's live session, after
+ * `retainServiceActivation` and the owner's enrollment. The restore fenced
+ * generation 8 and resumed; the activation it kept stays unretired. Its native
+ * evidence is covered by the restore suites. Returns the restore's row, for a
+ * test to change.
+ */
+export function keptByOwnerRestore(raw: InstanceType<typeof DatabaseSync>, namespace: string) {
+  const activationId = `ordinary-activation-${"a".repeat(64)}`;
+  raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',generation=generation+1,revoked_at_ms=30 WHERE grant_id=? AND status='active'").run(scope.grantId);
+  const run = raw.prepare("SELECT created_at_ms FROM sync_relay_service_host_enrollments WHERE workspace_id=? AND object_id=?").get(binding.workspaceId, binding.objectId);
+  if (!run) throw new Error("Missing enrollment.");
+  const document = {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
+  const intent = {deliveryKind: "owner", operationId: "restore", ownerUserId: "owner-1", document, shareId: scope.shareId, grantId: scope.grantId,
+    expectedGrantGeneration: 4, expectedDependentGrantIds: [], expectedFence: 7, restorePointCursor: 0, restorePointReceiptDigest: binding.lineageClaimId,
+    keptRun: {runToken: Number(run.created_at_ms), ownerUserId: "owner-1", shareId: scope.shareId, activationId}};
+  const basis = {binding, ownerBinding: binding, baselineSequence: 1, namespace, ownerOrigin: JSON.stringify({adoptionId: activationId})};
+  raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,
+      lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,
+      invalidated_at_ms,fenced_at_ms,accounted_bytes) VALUES ('restore',?,NULL,?,'main',?,?,?,?,'{}','{}','{}','resumed',7,8,0,5,30,30,1)`)
+    .run(namespace, binding.workspaceId, binding.objectId, binding.lineageClaimId, JSON.stringify(intent), JSON.stringify(basis));
+  raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=8 WHERE workspace_id=? AND object_id=?").run(binding.workspaceId, binding.objectId);
+  return {activationId, update: (sql: string) => raw.prepare(`UPDATE sync_relay_live_restore_operations SET ${sql} WHERE operation_id='restore'`).run()};
+}
+/**
  * The owner's Stop as a running service host fences it once its engine
  * prepared the document's activation, for tests of what follows Stop. The
  * host's own preparation is tested in `serviceLiveHost.test.ts`.

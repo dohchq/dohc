@@ -7,7 +7,7 @@ import { deferred, type Deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
-import type { NoticeTarget } from "./shell/noticeTarget";
+import type { NoticeTarget } from "../notices/noticeTarget";
 import { openWorkLinkInDohc } from "./workLinkOpener";
 
 const LINK = `https://dohc.example/l/${"a".repeat(43)}`;

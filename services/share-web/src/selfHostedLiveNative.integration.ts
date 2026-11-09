@@ -1186,7 +1186,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   const predecessor = proof.activation()!, P = predecessor.activationId, journal = proof.journal(), secondJournal = proof.journal(second.objectId);
   const enrollment = (hostDrainedAtMs: unknown) => ({workspaceId: "workspace", objectId: proof.objectId, path: "docs/a.md", ownerUserId: proof.ownerUserId,
     shareId: "share", replicationEpoch: predecessor.source.replicationEpoch, streamIdentity: predecessor.source.streamIdentity, ownerStop: "retire",
-    enabled: false, retired: true, createdAtMs: expect.any(Number), updatedAtMs: expect.any(Number), hostDrainedAtMs});
+    enabled: false, retired: true, runToken: expect.any(Number), updatedAtMs: expect.any(Number), hostDrainedAtMs});
   const parking = {status: "pending", reason: "parking"}, onlyParking = () => expect(harness.releases).toEqual(harness.releases.map(() => parking));
   const sibling = () => ({tip: proof.ownerTips(second.objectId).current, ...proof.settlement(second.objectId)});
   expect(proof.activations()).toEqual([{activation_id: P, predecessor_activation_id: null, state_digest: predecessor.source.fullStateDigest, completed: 1,

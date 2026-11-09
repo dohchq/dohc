@@ -1,7 +1,7 @@
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
-import type { HistoryCursor } from "@dohc/workspace-engine-client";
+import type { HistoryCursor, WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
 import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
@@ -95,8 +95,9 @@ import {
   mediaTypeForPath,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { createReadStream, existsSync, type Stats } from "node:fs";
+import { lstat, mkdir, open, readFile, realpath, rm, type FileHandle } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -1024,6 +1025,16 @@ function isCaptureBusy(error: unknown): boolean {
   return isWorkspaceUpdatingRefusal(error) || error instanceof EngineCaptureNotSettledError;
 }
 
+// Capture works unless it stopped. A deliberate rescan, such as a due
+// refresh, `capture.reconcile` or a tracking-rule edit, replaces the watching
+// layer: for a moment it reads not running while ready and neither degraded
+// nor terminal (capture_driver.rs `PolicyChanged`). A failure reads degraded,
+// and a stopped task degraded and terminal.
+function captureWorks(status: WatcherStatusResult | undefined): boolean {
+  return status === undefined
+    || ((status.running || status.phase === "ready") && !status.degraded && !status.terminal);
+}
+
 function isUpdateBackoffCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, candidate => {
     if (candidate instanceof EngineRequestDeadlineError) return true;
@@ -1771,10 +1782,17 @@ function assertEngineWritablePath(
   }
 }
 
+// The engine's write of a file whole: the resolved workspace path, the
+// temp's name, and the bytes.
+type EngineReplaceFile = (path: string, temporary: string, data: string | Uint8Array) => Promise<void>;
+
 // Exported for direct regression tests of the containment invariants below;
 // production code always goes through WorkspaceEngineCaptureOptions.diskWriter
 // defaulting.
-export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
+// With `replaceFile`, the engine writes the temp after the checks here. On
+// macOS a temp Node creates takes the folder's inherited ACL entries; the
+// engine creates it without them and gives it the replaced file's ACL.
+export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineReplaceFile): EngineDiskWriter {
   // Symlink containment (the same defense versionedFileWorkspace applies to
   // its write path):
   //   1. Before mkdir, the nearest existing ancestor must resolve inside the
@@ -1782,9 +1800,8 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      a symlinked ancestor outside the workspace;
   //   2. after mkdir, the real parent directory must still resolve inside
   //      the root;
-  //   3. the leaf itself must not be a symlink — writeFile follows symlinks,
-  //      so an unchecked leaf would redirect engine content outside the
-  //      workspace (or clobber an arbitrary user file).
+  //   3. the leaf itself must not be a symlink. The write replaces the leaf,
+  //      so a link there would silently become a plain file.
   async function assertContainedDir(absoluteDir: string): Promise<void> {
     const [realRoot, realDir] = await Promise.all([
       realpath(resolve(rootPath)),
@@ -1814,15 +1831,16 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       candidate = parent;
     }
   }
-  async function assertLeafNotSymlink(absolutePath: string): Promise<void> {
+  async function assertLeafNotSymlink(absolutePath: string): Promise<Stats | undefined> {
     try {
       const info = await lstat(absolutePath);
       if (info.isSymbolicLink()) {
         throw new Error(`Engine refused to write through a symlink: ${absolutePath}`);
       }
+      return info;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") return;
+      if (code === "ENOENT" || code === "ENOTDIR") return undefined;
       throw error;
     }
   }
@@ -1849,10 +1867,21 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       access: "entry",
     });
   }
+  // Each target has one temp name, and the chain writes one file at a time.
+  // A temp left by a stopped write can hold a secret's plaintext, so the next
+  // write or delete of that target removes it. The name is lowercased, so a
+  // case-variant spelling on a case-insensitive disk finds the same temp.
+  function temporaryFor(target: string): string {
+    const name = createHash("sha256").update(basename(target).toLowerCase()).digest("hex").slice(0, 16);
+    return join(dirname(target), `.dohc-write-${name}.tmp`);
+  }
   // Text and bytes take the same four checks in the same order, so they take
-  // one path through them. writeFile defaults a string to UTF-8 and ignores
-  // the encoding for a Uint8Array, so one call serves both. Two copies of a
-  // security sequence can drift; one cannot.
+  // one path through them. FileHandle.writeFile defaults a string to UTF-8
+  // and ignores the encoding for a Uint8Array, so one call serves both. Two
+  // copies of a security sequence can drift; one cannot.
+  // The bytes go to a flushed `.dohc-write-` sibling, which capture ignores,
+  // and a rename puts them in place. The target holds its old bytes or the
+  // new ones, never a cut-off file, even if the app stops mid-write.
   async function writeEngineFile(
     absolutePath: string,
     data: string | Uint8Array,
@@ -1860,12 +1889,33 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
-    const { resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
+    const { relative: workspacePath, resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
-    await assertLeafNotSymlink(target);
-    await writeFile(target, data);
+    const replaced = await assertLeafNotSymlink(target);
+    if (replaceFile) {
+      await replaceFile(workspacePath, basename(temporaryFor(target)), data);
+      return;
+    }
+    await atomicReplaceFile(target, async (temporary) => {
+      const mode = replaced?.isFile() ? 0o600 : 0o666;
+      const handle = await open(temporary, "wx", mode).catch(async (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+        // A stopped write left it. Remove it rather than write through it.
+        await rm(temporary, { force: true });
+        return open(temporary, "wx", mode);
+      });
+      try {
+        if (replaced?.isFile()) await keepPermissions(handle, replaced);
+        await handle.writeFile(data);
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+      await handle.close();
+    }, { temporary: temporaryFor(target), syncDirectory: true });
   }
   return {
     writeTextFile: writeEngineFile,
@@ -1880,8 +1930,25 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(target, { force: true });
+      await rm(temporaryFor(target), { force: true });
     },
   };
+}
+
+// The temp takes only the owner's bits of the file it replaces. Node can't
+// read a file's ACL, and a Linux ACL's mask shows as the group bits, so
+// copying the group or other bits could let someone read what the ACL denied.
+// The engine's materializer keeps only the owner's bits on a Unix where it
+// can't check for an ACL (`temp_mode` in materialize.rs). The temp starts
+// owner-only, so a failed copy leaves it so and never fails the write.
+async function keepPermissions(handle: FileHandle, replaced: Stats): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    const temp = await handle.stat();
+    await handle.chmod((replaced.mode & 0o700) | (temp.uid === replaced.uid ? 0 : 0o600));
+  } catch {
+    // The new bytes matter more than the copied mode.
+  }
 }
 
 // A person's own file change reads as a local file edit in History, as their
@@ -1919,7 +1986,16 @@ export function createWorkspaceEngineCapture(
       // There is nothing left to report the reporting failure to.
     }
   };
-  const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
+  const diskWriter = options.diskWriter ?? createDefaultDiskWriter(
+    rootPath,
+    process.platform === "darwin"
+      ? async (path, temporary, data) => {
+          const { replaceFile } = await engineStore();
+          if (!replaceFile) throw new Error("This engine can't write a file whole on macOS.");
+          await replaceFile({ path, temporary, data });
+        }
+      : undefined,
+  );
   const outsideCopies = outsideWriteCopies({ workspaceId, rootPath, attachmentId });
   let lastOutsideCopies: [string, string, string][] | null = null;
   let reportedOutsideCopies: string | null = null;
@@ -3577,7 +3653,14 @@ export function createWorkspaceEngineCapture(
           // does need a new generation — a dropped transport, a quarantined
           // session, a session the daemon no longer knows — so this stays
           // narrow and everything else still rebinds.
+          //
+          // Until the resend is recorded, the typing lives only in memory, so
+          // it goes to the typing checkpoint, as in an outage. The engine's
+          // acknowledgement retires it. Once the checkpoint has started,
+          // later typing reaches it on its timer. A drawing has no
+          // checkpoint, and a moment's wait does not warrant its outage notice.
           if (isTransientEngineCause(error)) {
+            if (checkpointContentKind !== "scene" && !checkpointBase) checkpointUnresolved();
             armed();
             return true;
           }
@@ -4533,8 +4616,7 @@ export function createWorkspaceEngineCapture(
           options.onHeldFiles?.(status.heldFiles);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
-        const healthy =
-          status === undefined || (status.running && !status.degraded && !status.terminal);
+        const healthy = captureWorks(status);
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine).catch((error: unknown) => {
             // Busy leaves a healthy outcome standing; it cannot hide a degraded one.
@@ -6301,8 +6383,7 @@ export function createWorkspaceEngineCapture(
       await enqueueResult("history capture retry", async () => {
         let healthy = false;
         await reportCaptureOutcome(async () => {
-          const status = await engine.watcherStatus?.();
-          healthy = status === undefined || (status.running && !status.degraded && !status.terminal);
+          healthy = captureWorks(await engine.watcherStatus?.());
           return healthy;
         });
         if (!healthy) throw new HistoryStillPausedError([]);

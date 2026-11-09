@@ -146,11 +146,17 @@ async function changeState(api: Api, input: {
  * can't change what Apply does. Records can come and go since then, which
  * changes only the counts, but it applies nothing that now deletes more than
  * shown. It returns the change it applied, counted as it applied it.
+ *
+ * A change can land without its confirmation arriving. Try again then finds
+ * it already applied and returns it, since preparing it a second time can fail.
  */
 export async function applyCollectionChange(api: Pick<Api, "dataset">, workspaceId: string,
   shown: { proposal: CollectionChangeProposal; rows: readonly CollectionChangeRow[] }): Promise<{ kind: "applied"; proposal: CollectionChangeProposal } | { kind: "edited" } | { kind: "deletes-more"; was: Deletes; now: Deletes }> {
   const { proposal } = shown;
-  const prepared = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "prepareMigration", migrationPath: proposal.migrationPath });
+  const selection = { workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId };
+  const described = await api.dataset({ ...selection, action: "describe" });
+  if (described.kind === "description" && described.dataset.revisionSha256 === proposal.revisionSha256) return { kind: "applied", proposal };
+  const prepared = await api.dataset({ ...selection, action: "prepareMigration", migrationPath: proposal.migrationPath });
   if (prepared.kind !== "migration-prepared") throw new Error("dohc could not prepare this change.");
   let approving = false;
   try {

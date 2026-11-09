@@ -89,6 +89,8 @@ type Section = {
   label: string;
   count?: number;
   countLabel?: (count: number) => string;
+  // More can load, so the count shows how many have loaded so far, with a "+".
+  countMore?: boolean;
   rows: HomeRowModel[];
   // A last row that is not a file, such as Show all in Files.
   more?: { key: string; label: string; testId: string; onActivate: () => void };
@@ -232,14 +234,15 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     });
   }
   if (showCollections) {
+    const more = refusal ? undefined : explorer.onMoreDataCollections;
     sections.push({
       id: "collections",
       label: "Collections",
       count: refusal ? undefined : collections.length,
-      countLabel: (count) => plural(count, "Collection", "Collections"),
+      countLabel: (count) => more ? `${count} or more Collections` : plural(count, "Collection", "Collections"),
       rows: refusal ? [] : collections,
-      ...(explorer.onMoreDataCollections && !refusal
-        ? { more: { key: "collections:more", label: "Show more collections", testId: "collections-more", onActivate: explorer.onMoreDataCollections } }
+      ...(more
+        ? { countMore: true, more: { key: "collections:more", label: "Show more Collections", testId: "collections-more", onActivate: more } }
         : {}),
       ...(explorer.shareView ? {} : { add: { label: "New Collection", onClick: () => explorer.onNewCollection("") } }),
       ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
@@ -692,7 +695,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                     aria-label={section.countLabel?.(section.count)}
                     className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-subtle"
                   >
-                    {section.count}
+                    {section.count}{section.countMore ? "+" : null}
                   </span>
                 ) : null}
                 <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />

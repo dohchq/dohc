@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+    #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
     fn reader_bootstrap_accepts_file_first_and_update_first_after_proof() {
         for update_first in [false, true] {
             let vector = reader_vector();
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+    #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
     fn reader_bootstrap_has_its_own_authority_matrix() {
         for case in [
             "valid",

@@ -151,12 +151,13 @@ describe("transactional Collection page", () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
       if (++writes === 1) throw Error("Lost reply");
-      return { result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } };
+      return { result: { id: 2, version: 1 } };
     });
     const result = setup({ invoke });
-    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Alice");
+    fireEvent.click(within(screen.getByRole("table")).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     await screen.findByText("Change not confirmed");
     const retry = result.onError.mock.calls[0]![2];
     result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: true, savedAtMs: 1 }} />);
@@ -166,10 +167,9 @@ describe("transactional Collection page", () => {
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={current} copy={{ offline: false, savedAtMs: 2 }} />);
     await screen.findByRole("button", { name: "Try again" });
     await act(async () => retry());
-    await screen.findByRole("button", { name: "Undo last edit" });
-    const changes = invoke.mock.calls.filter(([input]) => input.operationId === edit);
+    await waitFor(() => expect(screen.queryByText("Change not confirmed")).toBeNull());
+    const changes = invoke.mock.calls.filter(([input]) => input.operationId === create);
     expect(changes).toHaveLength(2); expect(changes[1]![0]).toEqual(changes[0]![0]);
-    expect(screen.queryByText("Change not confirmed")).toBeNull();
     expect(result.onNotice).not.toHaveBeenCalled();
   });
   it.each([false, true])("invalidates an old revision's pending edit and stale retry after rule changes (in flight: %s)", async inFlight => {
@@ -180,7 +180,7 @@ describe("transactional Collection page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    if (!inFlight) await screen.findByText("Change not confirmed");
+    if (!inFlight) await screen.findByText("dohc could not confirm this change.");
     const retry = result.onError.mock.calls[0]?.[2];
     const revision = { ...dataset(), revision: 2, revisionSha256: "b".repeat(64) };
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision} />);
@@ -241,6 +241,23 @@ describe("transactional Collection page", () => {
     await screen.findByRole("button", { name: "Undo last edit" });
     expect(result.onNotice).not.toHaveBeenCalled();
   });
+  it.each([
+    [new Error("Lost reply"), "dohc could not confirm the change to People. Open it to check its records."],
+    [Object.assign(new Error("This record changed. Refresh the table."), { code: "operation_refused" }), "People refused the change. Open it to check its records."],
+  ])("reports a change that fails after its page closed, naming the Collection (%s)", async (failure, words) => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
+    result.unmount();
+    await act(async () => answer.reject(failure));
+    expect(result.onError).toHaveBeenCalledOnce();
+    expect(result.onError).toHaveBeenCalledWith(words, failure, null);
+    expect(result.onNotice).not.toHaveBeenCalled();
+  });
   it("tells the person which Collection a change saved in after its page closed", async () => {
     const answer = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
@@ -270,6 +287,13 @@ describe("transactional Collection page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("dohc could not confirm this change.");
+    expect(screen.queryByText("Change not confirmed")).toBeNull();
+    // Escape from the focused check mark closes the cell, and the page says the change still waits.
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(document.activeElement).toBe(save);
+    fireEvent.keyDown(save, { key: "Escape" });
+    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
     await screen.findByText("Change not confirmed");
     const count = invoke.mock.calls.length;
     result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={2} />);
@@ -313,12 +337,74 @@ describe("transactional Collection page", () => {
     expect(details.getByText("Alice")).toBeTruthy();
     expect(details.queryByText("Private note")).toBeNull();
     fireEvent.click(details.getByRole("button", { name: "Edit Name" }));
-    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-    expect(document.activeElement).toBe(screen.getByLabelText("Name"));
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(document.activeElement).toBe(details.getByLabelText("Name"));
+    fireEvent.change(details.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(details.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(result.invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
     expect(result.invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } });
+  });
+
+  it("edits a field in place in record details: Escape closes only the field, Enter saves, and focus returns to its pencil", async () => {
+    const { invoke } = setup(); await screen.findByText("Alice");
+    const open = screen.getByRole("button", { name: "Open record 1" });
+    open.focus(); fireEvent.click(open);
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    const pencil = within(dialog).getByRole("button", { name: "Edit Name" });
+    fireEvent.click(pencil);
+    // The input opens where the value was, with the caret after it, and Cancel and Save take the pencil's place.
+    const input = within(within(dialog).getByRole("form", { name: "Edit Name" })).getByLabelText<HTMLInputElement>("Name");
+    expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 5]);
+    expect(within(input.closest("dd")!).getAllByRole("button").map(button => button.getAttribute("aria-label"))).toEqual(["Cancel", "Save"]);
+    expect(input.closest("td")).toBeNull();
+    fireEvent.change(input, { target: { value: "Alicia" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(within(dialog).queryByRole("form", { name: "Edit Name" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    expect(within(dialog).getByText("Alice")).toBeTruthy();
+    expect(document.activeElement).toBe(pencil);
+
+    fireEvent.click(pencil);
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.keyDown(within(dialog).getByLabelText("Name"), { key: "Enter" });
+    await waitFor(() => expect(invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
+    await waitFor(() => expect(document.activeElement).toBe(pencil));
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    // The next Escape closes details, and focus returns to the row.
+    fireEvent.keyDown(pencil, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(open));
+  });
+
+  it("cancels a field open in details on Escape from Done, and the next Escape closes details", async () => {
+    setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Name" }));
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Alicia" } });
+    const done = within(dialog).getByRole("button", { name: "Done" });
+    done.focus();
+    fireEvent.keyDown(done, { key: "Escape" });
+    expect(within(dialog).queryByRole("form", { name: "Edit Name" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    expect(document.activeElement).toBe(done);
+    fireEvent.keyDown(done, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+  });
+
+  it("unlocks the page when details closes during an attachment upload", async () => {
+    const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
+    const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
+    const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
+    setup({ dataset: description, uploadFile }); await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open record 1" }));
+    const dialog = screen.getByRole("dialog", { name: "Record details" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Amount" }));
+    fireEvent.change(within(dialog).getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt")] } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(uploadFile.mock.calls[0]![1].aborted).toBe(true);
+    await act(async () => pendingUpload.reject(new DOMException("The upload was cancelled.", "AbortError")));
+    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("closes details on Escape and returns keyboard focus to the row", async () => {
@@ -392,6 +478,34 @@ describe("transactional Collection page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Previous" })); await screen.findByText("Alice");
   });
 
+  it("edits a value in its cell: Enter saves, Escape cancels, and focus returns to the cell", async () => {
+    const { invoke } = setup();
+    const cell = await screen.findByRole("button", { name: "Edit Name for record 1" });
+    const row = cell.closest("tr")!;
+    fireEvent.click(cell);
+    const form = screen.getByRole("form", { name: "Edit Name" }), input = within(form).getByLabelText<HTMLInputElement>("Name");
+    // The input opens in the value's cell with the caret after the value, and Cancel and Save take the record actions' places.
+    expect(cell.closest("td")!.contains(form)).toBe(true);
+    expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 5]);
+    expect(within(row).getAllByRole("button").map(button => button.getAttribute("aria-label"))).toEqual(["Edit Amount for record 1", "Cancel", "Save"]);
+    // Focus leaving the cell keeps it open.
+    act(() => input.blur());
+    expect(screen.getByRole("form", { name: "Edit Name" })).toBeTruthy();
+    fireEvent.change(input, { target: { value: "Alicia" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
+    expect(document.activeElement).toBe(cell);
+    expect(cell.textContent).toBe("Alice");
+
+    fireEvent.click(cell);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    await waitFor(() => expect(invoke.mock.calls.find(([request]) => request.operationId === edit)?.[0].input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
+    await waitFor(() => expect(document.activeElement).toBe(cell));
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(1);
+  });
+
   it("edits through the approved operation and reverses server-reported prior values", async () => {
     const { invoke } = setup();
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
@@ -405,7 +519,7 @@ describe("transactional Collection page", () => {
     expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)[1]![0].input).toEqual({ id: 1, expectedVersion: 3, values: { [name]: "Alice" } });
   });
 
-  it("retains the exact mutation and retry key after a lost response", async () => {
+  it("keeps an edit that could not be confirmed in its cell, and its check mark sends the exact request again", async () => {
     let failed = false;
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
@@ -415,15 +529,28 @@ describe("transactional Collection page", () => {
     const { onError } = setup({ invoke });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } }); fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await screen.findByRole("button", { name: "Try again" });
-    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
+    const error = await screen.findByRole("alert");
+    expect(error.textContent).toBe("dohc could not confirm this change.");
+    const input = screen.getByLabelText<HTMLInputElement>("Name"), save = screen.getByRole<HTMLButtonElement>("button", { name: "Save" });
+    expect(input.closest("td")!.contains(error)).toBe(true);
+    expect([input.value, input.disabled, input.getAttribute("aria-describedby")]).toEqual(["Alicia", true, error.id]);
+    expect(save.disabled).toBe(false); expect(document.activeElement).toBe(save);
+    // The failure also takes a toast and a row in Notices, whose Try again sends the same change.
+    expect(onError).toHaveBeenCalledWith("dohc could not confirm this change.", expect.objectContaining({ message: "Connection ended after commit" }), expect.any(Function));
+    expect(screen.queryByText("Change not confirmed")).toBeNull();
     expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(onError).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    fireEvent.click(save);
     await screen.findByRole("button", { name: "Undo last edit" });
     const writes = invoke.mock.calls.filter(([request]) => request.operationId === edit);
-    expect(writes[1]![0]).toEqual(writes[0]![0]);
+    expect(writes).toHaveLength(2); expect(writes[1]![0]).toEqual(writes[0]![0]);
+    expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Name for record 1" })));
+    // The landed change's row in Notices sends nothing, and the next edit stays open.
+    fireEvent.click(screen.getByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    await act(async () => onError.mock.calls[0]![2]!());
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(2);
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
   });
 
   it("creates typed values with declared defaults and rejects missing required input inline", async () => {
@@ -544,9 +671,12 @@ describe("transactional Collection page", () => {
     const { onError } = setup({ invoke });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } }); fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
-    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Alicia");
-    expect((screen.getByLabelText("Name") as HTMLInputElement).disabled).toBe(false);
+    const error = await screen.findByRole("alert");
+    expect(error.textContent).toBe("The collection refused this change.");
+    const input = screen.getByLabelText<HTMLInputElement>("Name");
+    expect([input.value, input.disabled, input.getAttribute("aria-invalid")]).toEqual(["Alicia", false, "true"]);
+    expect(document.activeElement).toBe(input);
+    expect(onError).toHaveBeenCalledWith("The collection refused this change.", expect.objectContaining({ code: "operation_refused" }), null);
     expect(screen.queryByText("Change not confirmed")).toBeNull();
   });
 

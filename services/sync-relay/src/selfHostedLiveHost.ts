@@ -67,7 +67,8 @@ export async function startSelfHostedLiveHost(options: {
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined;
   let initialReconciliationComplete = false, selectedDocuments = false;
-  let signature = "", lastError: unknown;
+  // `startFailed` holds only while the last daemon start failed; `lastError` holds any failed reconciliation.
+  let signature = "", lastError: unknown, startFailed = false;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
   const lifetime = new AbortController();
@@ -76,11 +77,11 @@ export async function startSelfHostedLiveHost(options: {
   const changes = Effect.runSync(Queue.sliding<void>(1));
   // Whether the enrollment names its workspace's current owner and identity.
   const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or no Edit grant covers it.
+  // A release applies to the document: it was stopped, paused, or neither an Edit grant nor its owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
     storage.serviceActivationRetirement(row) !== null;
-  const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentHasEditGrant(row);
+  const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
   const atPath = (row: ServiceHostEnrollment) => storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
   const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
@@ -96,7 +97,11 @@ export async function startSelfHostedLiveHost(options: {
     const page = storage.listUndrainedServiceHostEnrollments(retiredCursor);
     const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
     for (const row of page.documents) {
-      if (departs(row, covered(row))) (matching(row) ? departing : obsolete).push(row);
+      const holds = covered(row);
+      // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
+      // opens here, before any update lets the document go, so the host retires its activation.
+      if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
+      if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
       else if (matching(row)) (atPath(row) ? targets : away).push(row);
     }
     // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
@@ -124,7 +129,8 @@ export async function startSelfHostedLiveHost(options: {
       if (!covered(row)) return {code: "host-no-edit-grant", sessionHost: "running without this document (no Edit grant)"};
       if (!atPath(row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
     }
-    if (!current) return lastError !== undefined
+    // Another failure, such as in discovery, leaves the daemon waiting for the next pass to start it.
+    if (!current) return startFailed
       ? {code: "host-start-failed", sessionHost: "couldn't start"}
       : {code: "host-not-loaded", sessionHost: "starting"};
     return {code: "host-not-loaded", sessionHost: current.invalidated.aborted ? "restarting" : "running, document not loaded yet"};
@@ -232,7 +238,10 @@ export async function startSelfHostedLiveHost(options: {
         const desired = await hostedSet(selected);
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
-        if (!current && (targets.length || departing.length)) current = await start();
+        if (!current && (targets.length || departing.length)) {
+          try {current = await start();} catch (error) {startFailed = !signal.aborted; throw error;}
+          startFailed = false;
+        }
         // A failed update may already have changed membership, so the next reconciliation updates again.
         signature = "";
         await current?.update(desired);
@@ -261,7 +270,7 @@ export async function startSelfHostedLiveHost(options: {
         signature = "";
         for (const row of departing) if (row.workspaceId === workspaceId) leave(row);
       }
-      lastError = undefined; initialReconciliationComplete = true;
+      lastError = undefined; startFailed = false; initialReconciliationComplete = true;
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
     } finally {
@@ -372,7 +381,7 @@ export async function startSelfHostedLiveHost(options: {
       // runs beside it, and the next reconciliation keeps it.
       async page(kept: ServiceKeptEdits, cursor: JsonValue | undefined, callerSignal?: AbortSignal) {
         let host = current;
-        if (!host) await exclusive(async () => {signal.throwIfAborted(); host = current ??= await start();});
+        if (!host) await exclusive(async () => {signal.throwIfAborted(); host = current ??= await start(); startFailed = false;});
         if (!host) throw new Error("This server does not hold the workspace's live documents now.");
         return host.readKeptEditsPage(kept, cursor, join(root, storeName({workspaceId: kept.workspaceId, ...kept.identity})), callerSignal);
       },

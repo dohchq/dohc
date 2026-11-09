@@ -1,6 +1,11 @@
-import { forwardRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useState, type ReactNode } from "react";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import {
+  currentCollaborationExtensionsLoad,
+  loadCollaborationExtensions,
+  preloadCollaborationExtensions,
+} from "./collaborationExtensions";
 import type {
   MarkdownEditor,
   MarkdownEditorHandle,
@@ -23,7 +28,11 @@ let markdownEditorPromise: Promise<MarkdownEditorComponent> | null = null;
 let markdownEditorLoad: MarkdownEditorLoad = { status: "loading" };
 
 function loadMarkdownEditor(): Promise<MarkdownEditorComponent> {
-  markdownEditorPromise ??= import("./MarkdownEditor").then(
+  if (markdownEditorPromise) return markdownEditorPromise;
+  // A live note's editor also needs the collaboration code. Loading both
+  // together keeps a note's text on screen through its first open.
+  preloadCollaborationExtensions();
+  markdownEditorPromise = import("./MarkdownEditor").then(
     (mod) => {
       markdownEditorLoad = { status: "ready", Editor: mod.MarkdownEditor };
       return mod.MarkdownEditor;
@@ -37,7 +46,37 @@ function loadMarkdownEditor(): Promise<MarkdownEditorComponent> {
 }
 
 export function preloadMarkdownEditor(): void {
-  void loadMarkdownEditor();
+  // A failure stays in `markdownEditorLoad`, and the editor shows it.
+  loadMarkdownEditor().catch(() => undefined);
+}
+
+function liveEditorSettled(): boolean {
+  return (
+    markdownEditorLoad.status === "failed" ||
+    (markdownEditorLoad.status === "ready" &&
+      currentCollaborationExtensionsLoad().status !== "loading")
+  );
+}
+
+/** Whether a live note's editor can mount without loading rows: its code and
+ *  the collaboration code have loaded, or one of them failed and the editor
+ *  shows that failure. A failed editor shows it without waiting for the
+ *  collaboration code. */
+export function useLiveEditorSettled(wanted: boolean): boolean {
+  const [settled, setSettled] = useState(liveEditorSettled);
+  useEffect(() => {
+    if (!wanted || settled) return;
+    let current = true;
+    const settle = () => {
+      if (current && liveEditorSettled()) setSettled(true);
+    };
+    loadMarkdownEditor().then(settle, settle);
+    loadCollaborationExtensions().then(settle, settle);
+    return () => {
+      current = false;
+    };
+  }, [settled, wanted]);
+  return settled || liveEditorSettled();
 }
 
 // Children commit with the editor, never with the loading state.

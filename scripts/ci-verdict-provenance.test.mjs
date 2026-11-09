@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
+import { jsShards } from "./verification/js-tests.mjs";
 import {
   HEAD_REFLOG_RECOVERY,
   classifyTreeProvenance,
@@ -453,7 +454,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     const context = workflowContext({enabled: "true", event: "workflow_dispatch", size});
     for (const name of ["javascript", "rust"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [`blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`]);
-      assert.equal(jobs[name]["timeout-minutes"], 60);
+      assert.equal(jobs[name]["timeout-minutes"], name === "rust" ? 90 : 60);
     }
     for (const name of ["changes", "verification"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
@@ -475,6 +476,17 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
     assert.equal(workflowExpression(jobs.confinement.if, context), true);
   }
+});
+
+test("the JavaScript job runs every shard the verifier defines, each on its own runner", () => {
+  const {javascript} = load(workflow).jobs;
+  // The final check reads the matrix's combined result, so a dropped shard would pass unseen.
+  assert.deepEqual(javascript.strategy.matrix, {shard: jsShards});
+  assert.equal(javascript.strategy["fail-fast"], false, "one failed shard must not cancel the others' evidence");
+  assert.equal(javascript.env.DOHC_JS_SHARD, "${{ matrix.shard }}");
+  assert.match(javascript.name, /\$\{\{ matrix\.shard \}\}/);
+  const upload = javascript.steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
+  assert.match(upload.with.name, /\$\{\{ matrix\.shard \}\}/, "shards must not overwrite each other's evidence");
 });
 
 test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {

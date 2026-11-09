@@ -40,6 +40,10 @@ pub enum SyncError {
     MarkdownReaderPending(std::sync::Arc<dohc_engine_collab::reader_resolver::PendingProof>),
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
+    /// This machine cannot take up the editor history of a note it deleted
+    /// and the other machine kept. Trying again does not change that.
+    #[error("synced deletion revival refused")]
+    SyncedDeletionRevivalRefused,
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("invalid replication input: {reason}")]
@@ -200,6 +204,7 @@ impl SyncError {
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. }
             | SyncError::FaultCrash
+            | SyncError::SyncedDeletionRevivalRefused
             | SyncError::Cancelled => ShareDisposition::Abort,
         }
     }
@@ -211,6 +216,7 @@ impl SyncError {
             SyncError::MarkdownWriteHeld { .. } => "markdown-write-held",
             SyncError::MarkdownWitnessCheckPending { .. } => "markdown-witness-check-pending",
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
+            SyncError::SyncedDeletionRevivalRefused => "synced-deletion-revival-refused",
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::InputTooLarge { .. } => "invalid-input",
@@ -389,7 +395,8 @@ impl RelayError {
             | RelayError::HostedRefusal(_)
             | RelayError::ValidationPending(_)
             | RelayError::Local(_)
-            | RelayError::RepairPending => None,
+            | RelayError::RepairPending
+            | RelayError::PathOccupied { .. } => None,
         }
     }
 }
@@ -585,4 +592,10 @@ pub enum RelayError {
     Local(String),
     #[error("pull repairs need another fetch")]
     RepairPending,
+    /// A pull stopped because this replica holds another object's file at
+    /// the path a pulled Y.Doc update names. `detail` is what `Local` would
+    /// carry. The path stays out of the message, so the engine's log names
+    /// no file.
+    #[error("local sync state failed: {detail}")]
+    PathOccupied { path: String, detail: String },
 }

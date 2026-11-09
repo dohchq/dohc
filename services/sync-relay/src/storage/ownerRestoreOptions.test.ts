@@ -264,6 +264,22 @@ describe("owner restore options", () => {
     expect(() => f.read()).toThrow("not found");
   });
 
+  // Proves: while the session host is still starting or stopping the file's
+  // live editing, Restore's options give the same answer as a restore request,
+  // not the session-host switch explanation.
+  it.each([
+    ["starting", "NULL,NULL,NULL", "Live editing is still starting. Try again in a moment."],
+    ["stopping", "20,7,0", "Live editing is still stopping. Try again in a moment."],
+  ])("answers that live editing is still %s", async (_state, retirement, message) => {
+    const f = await fixture();
+    f.raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,
+      lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,accounted_bytes,
+      retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor) VALUES (?,'activation',?,'main',?,?,'{}',?,?,x'0000',?,?,1,${retirement})`)
+      .run(namespace, scope.workspaceId, binding.objectId, binding.lineageClaimId, JSON.stringify(binding), "a".repeat(64), ownerUserId, scope.shareId);
+    expect(() => f.read()).toThrowError(expect.objectContaining({code: "conflict", message}));
+    expect(() => f.begin()).toThrowError(expect.objectContaining({code: "conflict", message}));
+  });
+
   it("recovers the pending operation even after its grant is revoked", async () => {
     const f = await fixture(); f.begin();
     expect(f.read().pendingOperation).toEqual({operationId: "restore", phase: "authority-invalidated", proposalDigest: null});

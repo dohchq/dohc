@@ -397,6 +397,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
+import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
@@ -5052,6 +5053,7 @@ const agentWaits = createAgentWaits((agentIds) => {
 });
 
 const { startDesktopCliServer } = createDesktopCliServer({
+  notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,
   beforeMove: moveAcceptedEdits.beforeMove,
@@ -6830,7 +6832,7 @@ function registerIpcHandlers(): void {
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
   ownerLiveStopAgainForCli = async (operation, kept) => {
-    const result = await agentOwnerLiveDocuments.stopForAgent(
+    const result = await agentOwnerLiveDocuments.stop(
       {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
     sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: kept.objectId});
     return result;
@@ -7676,6 +7678,7 @@ function registerIpcHandlers(): void {
       crashReports.dismiss(through);
       await crashReportPreview.remove();
     },
+    markCrashReportRead: ({ through }) => { crashReports.markRead(through); },
     // The renderer only opens the dialog. The answer comes from the person.
     sendCrashReport: async (_input, { event }) => ({
       sent: await crashReports.send(async (request) => {

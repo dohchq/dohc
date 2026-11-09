@@ -1,4 +1,4 @@
-import { liveStopError } from "../ipc/liveEditingStop";
+import { LIVE_STOP_WAITING, liveStopError } from "../ipc/liveEditingStop";
 import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
@@ -136,6 +136,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
   });
   const dependencies: Dependencies = {
     chatFileMentions: vi.fn(async () => null),
+    notices: vi.fn(async () => []),
     chatLinks: vi.fn(async () => null),
     links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
@@ -1835,20 +1836,24 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
 }
 
 describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
-  it("returns the edits-pending Stop's server answer with nothing left to release", async () => {
+  it.each(["no readable list", "kept edits"] as const)("keeps an edits-pending Stop with %s and says dohc keeps trying", async setup => {
     const f = await keptEditsFixture();
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
-    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", setup === "kept edits" ? {
+      ownerLiveQuarantines: () => [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "paused")]} : {});
+    if (setup === "kept edits") h.relay.mockImplementation(async (_credentials, _path, init) => {
+      if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+      return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: "unavailable", reason: "workspace-changed"}]};
+    });
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
-      reason: door === "cli" ? "dohc: Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.\n"
-        : "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."});
-    expect(h.recorded()).toBeUndefined();
-    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+      reason: door === "cli" ? `dohc: ${LIVE_STOP_WAITING}\n` : LIVE_STOP_WAITING});
+    expect(h.recorded()?.state).toBe("requested");
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request"]);
   });
   it.each(["paused", "session-host-refused"])("returns the Resume instruction for an edits-pending %s Stop", async state => {
     const f = await keptEditsFixture();
@@ -1860,7 +1865,7 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
         ...(state === "paused" ? {} : {reason: state})}]};
     });
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });
@@ -1868,42 +1873,39 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false, reason: door === "cli" ? `dohc: ${words}\n` : words});
     expect(h.recorded()).toBeUndefined();
   });
-  it.each(["conflict-parent-withheld", "quarantine"] as const)("returns the %s pending Stop answer", async reason => {
+  it("returns the conflict-parent-withheld pending Stop answer", async () => {
     const f = await keptEditsFixture();
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
-    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", reason === "quarantine" ? {
-      ownerLiveQuarantines: () => [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "paused")]} : {});
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
     h.relay.mockImplementation(async (_credentials, _path, init) => {
       if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
-      return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: "unavailable",
-        reason: reason === "quarantine" ? "workspace-changed" : reason}]};
+      return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: "unavailable", reason: "conflict-parent-withheld"}]};
     });
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });
-    const words = reason === "quarantine"
-      ? "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."
-      : "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+    const words = "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
       reason: door === "cli" ? `dohc: ${words}\n` : words});
     expect(h.recorded()).toBeUndefined();
   });
-  it.each(HOST_STOP_CASES)("returns the %s Stop answer and %s detail with no Stop request left", async (code, sessionHost, words) => {
+  it.each(HOST_STOP_CASES)("returns the %s Stop answer and %s detail, keeping only a Stop the server can finish later", async (code, sessionHost, words) => {
     const f = await keptEditsFixture();
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
     const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
-    const answer = `${words}\nServer: ${sessionHost}`;
+    const waits = code === "host-not-loaded";
+    const answer = waits ? LIVE_STOP_WAITING : `${words}\nServer: ${sessionHost}`;
     h.relay.mockRejectedValueOnce(hostStopWireError(code, sessionHost, "untrusted relay text"));
     f.stopAgain.mockImplementation(async (operation, again) => {
-      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+      await h.actions.stop({workspaceId: operation.workspace.workspaceId, path: again.path, again},
         {workspace: operation.workspace, assertCurrent() {}});
       return {keptEdits: "kept"};
     });
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false, reason: door === "cli" ? `dohc: ${answer}\n` : answer});
-    expect(h.recorded()).toBeUndefined();
-    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+    expect(h.recorded()?.state).toBe(waits ? "requested" : undefined);
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(waits ? ["request"] : ["request", "clear"]);
   });
   it("lists each restore queue as save-only and saves the exact incident", async () => {
     const f = await keptEditsFixture();

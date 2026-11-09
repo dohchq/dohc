@@ -8,7 +8,8 @@ use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_author_fields, hash_fields,
     hash_optional_text_fields, lookup_request, moment_exists, next_moment_order, record_request,
     validate_delete_input, validate_identifier, validate_moment_id, validate_moment_metadata,
-    validate_path, validate_write_input, version_is_active, write_text_in_tx,
+    validate_path, validate_write_input, version_is_active, write_revived_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
@@ -885,10 +886,19 @@ impl VersionedTextStore<'_> {
             if !live_state_matches_conflict_current(&live, &conflict.current) {
                 return Err(DomainError::ConflictStaleTarget);
             }
+            if matches!(input.resolution, ResolveConflictKind::ApplyIncoming)
+                && let Some(object_id) = revived_incoming_object_id(&conflict)
+                && !object_stored_as_text_file_in_tx(
+                    tx,
+                    &conflict.workspace_id,
+                    &conflict.target_version_id,
+                    object_id,
+                )?
+            {
+                return Err(DomainError::SyncedDeletionRevivalRefused);
+            }
             if !conflict.current.is_present()
-                && (matches!(input.resolution, ResolveConflictKind::ApplyMerged { .. })
-                    || matches!(input.resolution, ResolveConflictKind::ApplyIncoming)
-                        && conflict.incoming.snapshot.is_some())
+                && matches!(input.resolution, ResolveConflictKind::ApplyMerged { .. })
                 && let Some(text) = conflict
                     .incoming
                     .snapshot
@@ -994,15 +1004,23 @@ impl VersionedTextStore<'_> {
                                 moment_id: input.write_moment_id.clone(),
                             });
                         } else if let Some(incoming) = &conflict.incoming.snapshot {
-                            let write_input = write_input(
+                            let mut write_input = write_input(
                                 input,
                                 &conflict.target_version_id,
                                 &destination,
                                 &incoming.text,
                                 &input.write_moment_id,
                             );
+                            let revived = revived_incoming_object_id(&conflict);
+                            if let Some(object_id) = revived {
+                                object_id.clone_into(&mut write_input.object_id);
+                            }
                             validate_write_input(&write_input)?;
-                            let result = write_text_in_tx(tx, &write_input)?;
+                            let result = if revived.is_some() {
+                                write_revived_text_in_tx(tx, &write_input)?
+                            } else {
+                                write_text_in_tx(tx, &write_input)?
+                            };
                             let preimage = if destination == conflict.path {
                                 conflict_state_preimage(&conflict.current)
                             } else {
@@ -1083,6 +1101,39 @@ impl VersionedTextStore<'_> {
         })?;
         committed(outcome)
     }
+}
+
+/// The object "apply incoming" writes under when this machine deleted its
+/// side of a sync conflict: the other machine's own object, so both machines
+/// close the conflict on one object. `None` means the request's new object.
+#[doc(hidden)]
+pub fn revived_incoming_object_id(conflict: &TextConflict) -> Option<&str> {
+    if conflict.metadata.origin != "sync" || conflict.current.is_present() {
+        return None;
+    }
+    conflict
+        .incoming
+        .snapshot
+        .as_ref()
+        .map(|incoming| incoming.object_id.as_str())
+}
+
+/// Whether this machine ever stored `object_id` as a text file in the version.
+/// A parked editor change leaves only an object row.
+fn object_stored_as_text_file_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<bool, DomainError> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2
+           AND object_id=?3 AND after_content_kind='text' AND after_blob_sha256 IS NOT NULL
+           AND COALESCE(sync_record_only,0)=0)",
+        params![workspace_id, version_id, object_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
 }
 
 /// A kept text resolution needs a durable head that every peer can adopt.

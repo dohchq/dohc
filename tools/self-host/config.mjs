@@ -64,6 +64,20 @@ export function validateSettings(settings) {
   if (settings.DOHC_BEHIND_CLOUDFLARE === '1' && settings.DOHC_SERVER_NETWORK_ACCESS !== 'public') {
     errors.push('Cloudflare requires public mode. Set DOHC_SERVER_NETWORK_ACCESS to public or DOHC_BEHIND_CLOUDFLARE to 0.');
   }
+  const appCertificate = ['DOHC_APP_TLS_CERT_FILE', 'DOHC_APP_TLS_KEY_FILE'];
+  if (cloudflareApps(settings)) {
+    // Caddy substitutes the domain into its configuration, so it must be a plain host name.
+    const domain = settings.DOHC_SHARE_WEB_APP_DOMAIN, host = settings.DOHC_PUBLIC_HOST ?? '';
+    if (!/^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
+      errors.push('Set DOHC_SHARE_WEB_APP_DOMAIN to a lowercase domain name without a scheme, port, or wildcard.');
+    } else if (host === domain || host.endsWith(`.${domain}`)) errors.push('Keep DOHC_PUBLIC_HOST outside DOHC_SHARE_WEB_APP_DOMAIN.');
+    for (const name of appCertificate) {
+      if (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings[name] ?? '')) errors.push(`Set ${name} to the absolute path of the app domain's origin certificate file.`);
+    }
+  } else if (appCertificate.some(name => settings[name])) {
+    errors.push('The app certificate is used only behind Cloudflare with an app domain. Set DOHC_BEHIND_CLOUDFLARE=1 and DOHC_SHARE_WEB_APP_DOMAIN, ' +
+      'or leave DOHC_APP_TLS_CERT_FILE and DOHC_APP_TLS_KEY_FILE empty.');
+  }
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'public' && /:\d+$/.test(settings.DOHC_PUBLIC_HOST ?? '')) errors.push('Public mode uses HTTPS port 443. Remove the custom port from the origin.');
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'private' && !/^https:\/\/[^/]+\.ts\.net(?::[0-9]+)?$/.test(settings.DOHC_PUBLIC_ORIGIN ?? '')) {
     errors.push('Private mode requires your Tailscale HTTPS hostname ending in .ts.net.');
@@ -94,12 +108,16 @@ export function readValidSettings(path) {
   return settings;
 }
 
+/** Behind Cloudflare, an app domain adds the gateway's app route. Without Cloudflare, the operator supplies that route. */
+export const cloudflareApps = settings => settings.DOHC_BEHIND_CLOUDFLARE === '1' && Boolean(settings.DOHC_SHARE_WEB_APP_DOMAIN);
+
 export function composeArgs(envFile, settings, ...args) {
   return ['compose', '--env-file', resolve(envFile), '-f', 'docker-compose.self-host.yml',
     ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []),
     ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []),
     ...(settings.DOHC_POSTGRES_HOST ? ['-f', 'tools/self-host/compose.external-postgres.yml'] : []),
     ...(settings.DOHC_BEHIND_CLOUDFLARE === '1' ? ['-f', 'tools/self-host/compose.cloudflare.yml'] : []),
+    ...(cloudflareApps(settings) ? ['-f', 'tools/self-host/compose.cloudflare-apps.yml'] : []),
     // Hourly snapshots run only when off-site storage is configured.
     ...(settings.DOHC_SNAPSHOT_S3_BUCKET ? ['--profile', 'snapshots'] : []), ...args];
 }

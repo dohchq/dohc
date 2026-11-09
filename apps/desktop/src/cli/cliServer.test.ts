@@ -1448,6 +1448,45 @@ describe("CLI socket server", () => {
     expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
   });
 
+  it("lists the caller's workspace's Notices with the ids show takes, and nothing outside a workspace", async () => {
+    const notices = vi.fn(async () => [
+      { id: "reply", kind: "agent-run", title: "Nova replied", body: "Done", sender: { kind: "agent" as const, label: "Nova" },
+        createdAtMs: 2, read: false, opens: { to: "chat" as const, thread: "thread-1", message: "message-2" } },
+      { id: "run", kind: "agent-run", title: "Nova stopped", body: "", sender: null,
+        createdAtMs: 1, read: true, opens: { to: "chat" as const, thread: "thread-1", run: "run-1" } },
+      { id: "file", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
+        createdAtMs: 0, read: false, opens: { to: "file" as const, path: "plans/day-1.md" } },
+    ]);
+    serverOptions.notices = notices;
+    const listed = await invokeAny("notices", { cwd: workspaceRoot, actor: "agent" });
+    expect(notices).toHaveBeenCalledExactlyOnceWith(WORKSPACE_ID);
+    expect(listed.notices.map(({ opens }) => opens)).toEqual([
+      { to: "chat", thread: "th_1", message: "msg_2" },
+      { to: "chat", thread: "th_1", run: "run-1" },
+      { to: "file", path: "plans/day-1.md" },
+    ]);
+    // From a subfolder, a path names the same file the way `document read` takes it there.
+    notices.mockResolvedValueOnce([
+      { id: "file", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
+        createdAtMs: 1, read: false, opens: { to: "file" as const, path: "plans/day-1.md" } },
+      { id: "done", kind: "mention", title: "Bea mentioned you in done", body: "When done, close the window.", sender: null,
+        createdAtMs: 1, read: false, opens: { to: "file" as const, path: "done" } },
+      { id: "switch", kind: "automation-switched-off", title: "Reminders stopped", body: "", sender: null,
+        createdAtMs: 0, read: false, opens: { to: "automation-controls" as const, automation: "reminders", sharedFile: "trip/automations.yaml" } },
+    ] as never);
+    await mkdir(join(workspaceRoot, "plans"), { recursive: true });
+    const nested = await invokeAny("notices", { cwd: join(workspaceRoot, "plans"), actor: "agent" });
+    expect(nested.notices.map(({ opens }) => opens)).toEqual([
+      { to: "file", path: "day-1.md" },
+      { to: "file", path: "../done" },
+      { to: "automation-controls", automation: "reminders", sharedFile: "../trip/automations.yaml" },
+    ]);
+    expect(nested.notices[1]?.body).toBe("When done, close the window.");
+    const outside = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "notices", args: { cwd: tempRoot, actor: "agent" } });
+    expect(outside).toMatchObject({ ok: false, error: expect.stringContaining("not inside a dohc workspace") });
+    expect(notices).toHaveBeenCalledTimes(2);
+  });
+
   it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
     const recordSuccess = vi.fn();
     serverOptions.recordSuccess = recordSuccess;
@@ -6463,6 +6502,49 @@ describe("CLI socket server", () => {
     expect(await asks()).toEqual([cliMessageId(asked.message.id)]);
     await invoke("show", { cwd: workspaceRoot, actor: "agent", target, peek: false });
     expect(await asks()).toEqual([]);
+  });
+
+  it("marks a chat read only for the run's agent when its run reads it, whatever actor the run names", async () => {
+    if (!store) throw new Error("Store is not available");
+    await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const asked = await store.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      wakeAgentIds: ["codex"],
+      body: "@Codex can you check the plan?",
+    });
+    await store.sendMessage({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId: asked.thread.id,
+      author: { kind: "agent", displayName: "Nova" },
+      body: "A note you haven't read",
+    });
+    const target = cliThreadId(asked.thread.id);
+    const yourUnread = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "human" })).threads.map((thread) => thread.id);
+    const runAsks = async () =>
+      (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map((mention) => mention.messageId);
+    expect(await yourUnread()).toContain(target);
+
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "codex" });
+    if (claim?.run.agentId !== "codex") throw new Error("Expected Codex's run");
+    dispatchedRun = "codex";
+    dispatchedRunId = claim.run.runId;
+    expect(await runAsks()).toEqual([cliMessageId(asked.message.id)]);
+
+    // The run names a person, as a terminal without DOHC_CHAT_ACTOR does.
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target, peek: false });
+    expect(await yourUnread()).toContain(target);
+    expect(await runAsks()).toEqual([]);
+
+    // Your own terminal holds no run secret, so your read is still yours.
+    callerRunSecret = undefined;
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target, peek: false });
+    expect(await yourUnread()).not.toContain(target);
   });
 
   it("toggles reactions with main-derived actor identity", async () => {

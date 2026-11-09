@@ -1220,6 +1220,21 @@ pub(crate) fn self_bound_log(
     Ok(())
 }
 
+/// Fold the log once a committed append brings it to the default threshold.
+/// The fold runs in its own transaction, so a failure leaves the committed
+/// append and its result intact. The engine logs the failure, and the next
+/// append that reaches the threshold tries again.
+pub fn compact_after_commit(
+    store: &mut EngineStore,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) {
+    if let Err(error) = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms) {
+        eprintln!("engine: Y.Doc update committed; compaction will retry: {error}");
+    }
+}
+
 // Below `threshold` (or nothing pending) means compaction cannot fire.
 // Shared by `maybe_compact`'s cheap pre-check and its authoritative check so
 // the two can never drift apart.
@@ -2465,6 +2480,104 @@ pub(crate) fn record_credited_updates_in_tx(
         });
     }
     Ok(facts)
+}
+
+/// One received update a lineage replays: its author credit and bytes.
+pub type LoggedUpdate = (Option<String>, Option<ChangeAttribution>, Vec<u8>);
+
+/// Where a reinstalled lineage's base came from.
+pub enum LoggedBaseOrigin {
+    /// A base update this machine logged.
+    Update { origin_id: String, origin_seq: i64 },
+    /// The successor a logged resolution installed over `parent_claim_id`.
+    Successor { parent_claim_id: String },
+}
+
+/// Install a lineage this machine retired again, from its base and the
+/// updates it received for it. The caller has replayed `updates` over `base`
+/// and found every dependency met. Fails unless the base claims an absent
+/// marker.
+pub fn reinstall_lineage_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base: &[u8],
+    base_origin: &LoggedBaseOrigin,
+    updates: &[LoggedUpdate],
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    let doc = Ydoc::wire();
+    doc.apply(base)?;
+    let state_vector = doc.encode_state_vector();
+    let claim = claim_base_in_tx(tx, key, content_kind, base, &state_vector, now_ms)?;
+    let ClaimOutcome::Claimed { base_snapshot_sha } = claim else {
+        return Err(CollabError::Corrupt {
+            reason: "a retired Y.Doc lineage is already active".into(),
+        });
+    };
+    match base_origin {
+        LoggedBaseOrigin::Update {
+            origin_id,
+            origin_seq,
+        } => record_base_coordinate_in_tx(
+            tx,
+            BaseCoordinateRecord {
+                key,
+                lineage_claim_id: &base_snapshot_sha,
+                origin_id,
+                origin_seq: *origin_seq,
+                relay_seq: None,
+                now_ms,
+            },
+        )?,
+        LoggedBaseOrigin::Successor { parent_claim_id } => {
+            tx.execute(
+                "UPDATE ydoc_docs SET lineage_parent_claim_id=?4, lineage_epoch_tag=?5 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    parent_claim_id,
+                    doc.lineage_epoch_tag(),
+                ],
+            )
+            .map_err(map_sql)?;
+        }
+    }
+    append_logged_updates_in_tx(tx, key, updates, now_ms)
+}
+
+/// Append updates received for `key`'s active lineage, skipping any it has
+/// already logged. The caller has replayed them over that lineage.
+fn append_logged_updates_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    updates: &[LoggedUpdate],
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    for (actor, attribution, update) in updates {
+        validate_update_bytes(update)?;
+        if let Some(actor) = actor {
+            crate::validate_actor_origin_id(actor)?;
+        }
+        validate_attribution(attribution.as_ref())?;
+        let sha = crate::hex_sha256(update);
+        if blob_seq_in_log(tx, key, &sha, update)?.is_some() {
+            continue;
+        }
+        put_binary_blob_with_sha(tx, update, &sha)?;
+        append_row(
+            tx,
+            key,
+            &sha,
+            actor.as_deref(),
+            attribution.as_ref(),
+            false,
+            now_ms,
+        )?;
+    }
+    Ok(())
 }
 
 /// The receipt application owner has checked its full binding in this transaction.

@@ -33,7 +33,9 @@ export const ice = { name: "Ice", agent: false }, claude = { name: "Claude Code"
  * A workspace and its Collection as the bridge answers for them. Preparing
  * reads the files as they are now, and approving spends the preparation
  * first, as main does. `refuse` makes the next approval throw that error
- * instead. `recount` changes the records the next preparation counts.
+ * instead. `unconfirmed` makes the next approval apply the change and then
+ * throw, as when its confirmation is lost. `recount` changes the records the
+ * next preparation counts.
  */
 export function world() {
   const files: Record<string, string> = { "volunteers/dataset.json": JSON.stringify(asked, null, 2), [volunteers.schemaPath]: schemaSql,
@@ -51,7 +53,7 @@ export function world() {
   const saved = new Map([[base.revisionSha256, base]]);
   const calls: DatasetRequest[] = [];
   const reads: string[] = [];
-  const control = { refuse: null as unknown };
+  const control = { refuse: null as unknown, unconfirmed: false };
   let preparations = 0, records = counts;
   const prepare = () => {
     const revision = describeDatasetRevision({ definition: JSON.parse(files["volunteers/dataset.json"]!), revision: head.revision + 1, schemaSql: files[volunteers.schemaPath]!, operationSource: files[volunteers.operationsPath]! });
@@ -96,6 +98,7 @@ export function world() {
         if (!spent) throw new Error("This Collection review expired. Prepare the change again.");
         if (request.changeSha256 !== spent.candidate.changeSha256) throw new Error("This change differs from the one you were asked to apply.");
         head = spent.revision; saved.set(head.revisionSha256, head);
+        if (control.unconfirmed) { control.unconfirmed = false; throw new Error("The server did not confirm this Collection change. Refresh the Collection before reviewing it again."); }
         return { kind: "migrated" };
       }
       throw new Error(`Unexpected ${request.action}`);

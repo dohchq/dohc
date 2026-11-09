@@ -443,6 +443,17 @@ describe("Explorer Home", () => {
     expect(screen.getByTestId("sites-row").getAttribute("aria-current")).toBe("page");
   });
 
+  it("counts the Collections loaded so far with a + while more can load", () => {
+    const loaded = Array.from({ length: 24 }, (_, index) => ({ datasetId: `d${index}`, datasetPath: `c${index}/dataset.json`, tableId: TABLE, name: `Collection ${index}` }));
+    const view = render(<Explorer {...explorerProps({ dataCollections: loaded, collectionFolders: new Set(), onMoreDataCollections: vi.fn() })} />);
+    expect(screen.getByLabelText("24 or more Collections").textContent).toBe("24+");
+    expect(screen.getByTestId("collections-more").textContent).toBe("Show more Collections");
+    // Once every Collection has loaded, the count is a total.
+    view.rerender(<Explorer {...explorerProps({ dataCollections: loaded, collectionFolders: new Set() })} />);
+    expect(screen.getByLabelText("24 Collections").textContent).toBe("24");
+    expect(screen.queryByTestId("collections-more")).toBeNull();
+  });
+
   it("lists other files by name with their folder, and sends the rest to Files", async () => {
     const onModeChange = vi.fn();
     const user = userEvent.setup();
@@ -454,7 +465,8 @@ describe("Explorer Home", () => {
     const many = Array.from({ length: OTHER_FILES_SHOWN + 3 }, (_, index) => file(`data/${String(index).padStart(2, "0")}.json`));
     view.rerender(<Explorer {...explorerProps({ onModeChange, files: many, folders: ["data"] })} />);
     expect(rowLabels("Other files")).toHaveLength(OTHER_FILES_SHOWN);
-    expect(screen.getByTestId("explorer-other-files-header").textContent).toContain(String(OTHER_FILES_SHOWN + 3));
+    // Other files counts every file, so its count is a total, with no "+".
+    expect(screen.getByLabelText(`${OTHER_FILES_SHOWN + 3} files`).textContent).toBe(String(OTHER_FILES_SHOWN + 3));
     await user.click(screen.getByTestId("other-files-show-all"));
     expect(onModeChange).toHaveBeenCalledWith("files");
   });

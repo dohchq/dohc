@@ -10,8 +10,8 @@ import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, type PathLike } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -3255,6 +3255,60 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
+  // A deliberate rescan, such as capture.reconcile or a tracking-rule edit,
+  // drops the watching layer for a moment: not running, but ready and
+  // neither degraded nor terminal. A failed tick reads degraded, and a
+  // stopped task degraded and terminal (capture_driver.rs DriverStatus).
+  it("reads a deliberate rescan as working, and still reports a failed tick or a stopped task", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores({
+      workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID,
+    }, sessions).store;
+    const working = { running: true, degraded: false, terminal: false, phase: "ready", deferredWrites: [] as string[] };
+    let watcher = working;
+    const daemonStore = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return async () => watcher;
+        if (property === "listPendingCollectionAdoptions") return async () => ({ adoptions: [], nextCursor: null });
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcomes: WorkspaceEngineCaptureFailure[] = [];
+    const engine = capture(root, {
+      store: daemonStore, rustEngineSessions: sessions,
+      onError: () => {}, onCaptureOutcome: (outcome) => outcomes.push(outcome),
+    });
+    const settled = () => engine.flush().catch(() => undefined);
+    // Each health poll publishes an outcome; the last one is what Notices shows.
+    const pollWith = async (status: typeof watcher) => {
+      const before = outcomes.length;
+      watcher = status;
+      await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+      await settled();
+      expect(outcomes.length).toBeGreaterThan(before);
+      return outcomes.at(-1);
+    };
+    try {
+      engine.start();
+      await settled();
+      expect(outcomes).toEqual([null]);
+
+      expect(await pollWith({ ...working, running: false })).toBeNull();
+      expect(await pollWith({ ...working, running: false, degraded: true })).toBe("other");
+      expect(await pollWith(working)).toBeNull();
+      expect(await pollWith({ ...working, running: false, degraded: true, terminal: true, phase: "degraded" })).toBe("other");
+    } finally {
+      watcher = working;
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a drive without atomic no-replace renames from the engine's status", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -4553,6 +4607,7 @@ describe("createDefaultDiskWriter symlink containment", () => {
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "a", "b", "c.md"), "nested\n");
     expect(await readFile(join(root, "a", "b", "c.md"), "utf8")).toBe("nested\n");
+    expect(await readdir(join(root, "a", "b"))).toEqual(["c.md"]);
   });
 
   it("writes into a directory whose NAME starts with '..'", async () => {
@@ -4657,6 +4712,173 @@ describe("createDefaultDiskWriter symlink containment", () => {
       createDefaultDiskWriter(root).deletePath(join(root, "notes", "page.md")),
     ).rejects.toThrow(/could not read the workspace folder/);
     expect(existsSync(root)).toBe(false);
+  });
+});
+
+describe("createDefaultDiskWriter replaces a file whole", () => {
+  const actualFs = () => vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  const restoreFs = () => {
+    for (const mocked of [open, rename, rm, writeFile]) vi.mocked(mocked).mockRestore();
+  };
+
+  it("keeps the old bytes and leaves no temp file when a write fails partway", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes.md", "old");
+    const fs = await actualFs();
+    const diskFull = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    // Every write stops after two bytes, as a full disk leaves it.
+    vi.mocked(writeFile).mockImplementation(async (file, data) => {
+      await fs.writeFile(file, String(data).slice(0, 2));
+      throw diskFull;
+    });
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const handle = await fs.open(...args);
+      handle.writeFile = async (data) => {
+        await handle.write(String(data).slice(0, 2));
+        throw diskFull;
+      };
+      return handle;
+    });
+    try {
+      await expect(
+        createDefaultDiskWriter(root).writeTextFile(join(root, "notes.md"), "new contents\n"),
+      ).rejects.toBe(diskFull);
+    } finally {
+      restoreFs();
+    }
+    expect(await readFile(join(root, "notes.md"), "utf8")).toBe("old");
+    expect(await readdir(root)).toEqual(["notes.md"]);
+  });
+
+  it("flushes a .dohc-write- sibling before it renames the sibling over the file", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes.md", "old");
+    const fs = await actualFs();
+    const events: string[] = [];
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const handle = await fs.open(...args);
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        events.push(`sync ${basename(String(args[0]))}`);
+        await sync();
+      };
+      return handle;
+    });
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      events.push(`rename ${basename(String(from))} to ${basename(String(to))}`);
+      await fs.rename(from, to);
+    });
+    try {
+      await createDefaultDiskWriter(root).writeTextFile(join(root, "notes.md"), "new\n");
+    } finally {
+      restoreFs();
+    }
+    const temporary = events[0]?.slice("sync ".length);
+    expect(temporary).toMatch(/^\.dohc-write-.+\.tmp$/);
+    expect(events).toEqual([
+      `sync ${temporary}`,
+      `rename ${temporary} to notes.md`,
+      ...(process.platform === "win32" ? [] : [`sync ${basename(root)}`]),
+    ]);
+    expect(await readFile(join(root, "notes.md"), "utf8")).toBe("new\n");
+    expect(await readdir(root)).toEqual(["notes.md"]);
+  });
+
+  // A Linux ACL's mask shows as the group bits, and Node can't read the ACL,
+  // so copying the group or other bits could let someone read what it denied.
+  it.skipIf(process.platform === "win32")("keeps only the owner's bits of a replaced file", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "run.sh", "old");
+    await chmod(join(root, "run.sh"), 0o754);
+    await write(root, "shared.md", "old");
+    await chmod(join(root, "shared.md"), 0o640);
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeBinaryFile(join(root, "run.sh"), new Uint8Array([1, 2]));
+    await writer.writeTextFile(join(root, "shared.md"), "new\n");
+    expect((await stat(join(root, "run.sh"))).mode & 0o777, "run.sh").toBe(0o700);
+    expect((await stat(join(root, "shared.md"))).mode & 0o777, "shared.md").toBe(0o600);
+    expect(await readFile(join(root, "run.sh"))).toEqual(Buffer.from([1, 2]));
+    expect(await readFile(join(root, "shared.md"), "utf8")).toBe("new\n");
+  });
+
+  it.skipIf(process.platform === "win32")("leaves a replaced file owner-only when its mode can't be copied", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "secret.md", "old");
+    await chmod(join(root, "secret.md"), 0o600);
+    const fs = await actualFs();
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const handle = await fs.open(...args);
+      handle.chmod = async () => { throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" }); };
+      return handle;
+    });
+    try {
+      await createDefaultDiskWriter(root).writeTextFile(join(root, "secret.md"), "new\n");
+    } finally {
+      restoreFs();
+    }
+    expect((await stat(join(root, "secret.md"))).mode & 0o777).toBe(0o600);
+    expect(await readFile(join(root, "secret.md"), "utf8")).toBe("new\n");
+  });
+
+  it.each([
+    ["deleted", (writer: EngineDiskWriter, path: string) => writer.deletePath(path), [] as string[]],
+    ["written again", (writer: EngineDiskWriter, path: string) => writer.writeTextFile(path, "TOKEN=rotated\n"), [".env"]],
+  ])("leaves no copy of a secret a crashed write left behind once the path is %s", async (_, next, left) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, ".env", "TOKEN=old\n");
+    const writer = createDefaultDiskWriter(root);
+    // The app stops after the temp is flushed and before the rename, so
+    // nothing renames or removes the temp. The mocked `rm` is the cleanup in
+    // atomicReplaceFile's catch; an earlier `rm` in the write would use it up.
+    vi.mocked(rename).mockRejectedValueOnce(new Error("the app stopped"));
+    vi.mocked(rm).mockResolvedValueOnce(undefined);
+    try {
+      await expect(writer.writeTextFile(join(root, ".env"), "TOKEN=secret\n")).rejects.toThrow("the app stopped");
+    } finally {
+      restoreFs();
+    }
+    const crashed = (await readdir(root)).filter((name) => name.startsWith(".dohc-write-"));
+    expect(crashed).toHaveLength(1);
+    expect(await readFile(join(root, crashed[0]!), "utf8")).toBe("TOKEN=secret\n");
+
+    await next(writer, join(root, ".env"));
+    expect(await readdir(root)).toEqual(left);
+  });
+
+  // On macOS a temp Node creates takes the folder's inherited ACL entries, so
+  // the engine writes it there. The checks before the write stay here.
+  it("hands a checked write and its temp name to the engine's writer", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes/a.md", "old");
+    const calls: [string, string, string | Uint8Array][] = [];
+    const writer = createDefaultDiskWriter(root, async (path, temporary, data) => {
+      calls.push([path, temporary, data]);
+    });
+    await writer.writeTextFile(join(root, "notes", "a.md"), "new\n");
+    await writer.writeBinaryFile(join(root, "b", "c.bin"), new Uint8Array([1, 2]));
+    const temporary = (name: string) =>
+      `.dohc-write-${createHash("sha256").update(name).digest("hex").slice(0, 16)}.tmp`;
+    expect(calls).toEqual([
+      ["notes/a.md", temporary("a.md"), "new\n"],
+      ["b/c.bin", temporary("c.bin"), new Uint8Array([1, 2])],
+    ]);
+    expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("old");
+    expect(await readdir(join(root, "notes"))).toEqual(["a.md"]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a link before the engine's writer sees the write", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    await symlink(join(outside, "keep.md"), join(root, "link.md"));
+    await write(root, ".dohc/settings.json", "{}\n");
+    await symlink(join(root, ".dohc"), join(root, "meta"), "dir");
+    const writer = createDefaultDiskWriter(root, async () => {
+      throw new Error("the engine's writer was called");
+    });
+    await expect(writer.writeTextFile(join(root, "link.md"), "x")).rejects.toThrow(/through a symlink/);
+    await expect(writer.writeTextFile(join(root, "meta", "x.md"), "x")).rejects.toThrow(/Engine write path leads to a reserved area/);
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
   });
 });
 

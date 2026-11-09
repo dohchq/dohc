@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { Plug, Sparkles, TriangleAlert } from "lucide-react";
 import { isConnectedAgentId, shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
+import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
@@ -71,6 +72,8 @@ export function CloudSyncSettings(props: {
   workspaceId: string;
   sharedView?: boolean;
   cloud: CloudSettings;
+  // Settings › Agents, which names the agent that paused sync.
+  agents?: DesktopUserSettings["agents"];
 }) {
   const { status } = props.cloud;
   // A successful enable or stop shows at once, until the shell's next read
@@ -317,7 +320,7 @@ export function CloudSyncSettings(props: {
                 </span>
               ) : syncPause || needsServer ? (
                 <>
-                  {syncPause ? <SyncPausedLine pause={syncPause} /> : null}
+                  {syncPause ? <SyncPausedLine pause={syncPause} agents={props.agents} /> : null}
                   {needsServer ? (
                     <span data-testid="cloud-sync-needs-server" className="block">
                       {SYNC_ON_NEEDS_SERVER}
@@ -412,18 +415,22 @@ export function CloudSyncSettings(props: {
 }
 
 // Who paused this workspace's sync, and when. An agent carries the agent mark.
-function SyncPausedLine(props: { pause: SyncPause }) {
+function SyncPausedLine(props: { pause: SyncPause; agents: DesktopUserSettings["agents"] | undefined }) {
   const { author } = props.pause;
   const time = formatChatTime(props.pause.atMs);
   // A person pause from another installation id (a copied or reset registry)
   // names nobody. A connected agent takes the plug beside the name it gave, or "Agent".
+  // Your agent goes by its name in Settings › Agents, or its id once Settings no longer lists it.
   const connected = author.kind === "agent" && isConnectedAgentId(author.agentId);
+  const settingsName = author.kind === "agent" && !connected && props.agents
+    ? listAgents({ agents: props.agents }).find(({ id }) => id === author.agentId)?.name
+    : undefined;
   const Mark = connected ? Plug : Sparkles;
   const by = author.kind === "agent" ? (
     <span className="text-agent">
       <Mark size={12} strokeWidth={1.9} aria-hidden data-agent-mark={connected ? "connected" : "agent"} className="mr-0.5 inline align-[-2px]" />
       <span className="sr-only">{connected ? "connected agent " : "agent "}</span>
-      {shownAgentName(author.agentName) ?? (connected ? "Agent" : author.agentId)}
+      {shownAgentName(author.agentName) ?? (connected ? "Agent" : settingsName ?? author.agentId)}
     </span>
   ) : author.self ? "you" : null;
   return (

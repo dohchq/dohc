@@ -2,8 +2,8 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {finishedRestoreBinding,requireFinishedRestoreBinding} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {hasServiceActivation,readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
-import {moveServiceActivationRetirement} from "./serviceActivationRetirement";
-import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
+import {moveServiceActivationRetirement, openServiceActivationRetirement, restoredActivation} from "./serviceActivationRetirement";
+import {endServiceHostRun, KEPT_RUN, SERVICE_HOST_ENROLLMENTS, type KeptServiceRun} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -127,10 +127,14 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
 // retires before a restore begins; one that starts retiring during a restore
 // is carried by its fence.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
+  const state = requireActivationAtRest(storage, document);
+  if (state !== "absent" && state !== "completed") refuse();
+}
+function requireActivationAtRest(storage: StorageContext, document: LiveDocumentKey) {
   const state = serviceActivationState(readServiceActivation(storage, document));
   if (state === "pending") throw relayError("conflict", "Live editing is still starting. Try again in a moment.");
   if (state === "retiring") throw relayError("conflict", "Live editing is still stopping. Try again in a moment.");
-  if (state !== "absent" && state !== "completed") refuse();
+  return state;
 }
 // The operation row records the revocation it made. Account deletion may purge
 // that grant; its absence ends the same authority for good.
@@ -150,6 +154,7 @@ function requireBootstrapRestorable(storage: StorageContext, document: LiveDocum
 }
 /** Refuses a document whose Stop restore needs a bootstrap that the configured session host can't deliver. */
 export function requireStopRestorable(storage: StorageContext, document: LiveDocumentKey): void {
+  requireActivationAtRest(storage, document);
   const control = storage.getLiveHostControl();
   if (!control || ownerOrigin(storage, liveJournalHistoryNamespace(storage), document, control.configuredHostId) === undefined) {
     requireBootstrapRestorable(storage, document);
@@ -408,19 +413,29 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     if (intent.deliveryKind === "bootstrap" && initialBasis.ownerOrigin !== null) refuse();
     if (intent.deliveryKind === "bootstrap") requireBootstrapRestorable(storage, intent.document);
     if (intent.deliveryKind === "owner") requireStopRestoreOwnerOrigin(storage,initialBasis);
-    // Fund the final cutoff metadata and a Decline's evidence before invalidation so neither can run out of quota.
+    // The owner's restore keeps the live session it continues instead of retiring it, so the restored note stays live for the owner.
+    // The stored intent records that run. `snapshot()` drops it, so a request never carries it.
+    const activationId = intent.deliveryKind === "owner" ? restoredActivation(basisJson) : undefined;
+    const enrollment = typeof activationId === "string" ? storage.db.prepare(`SELECT share_id,owner_user_id,created_at_ms FROM ${SERVICE_HOST_ENROLLMENTS}
+      WHERE workspace_id=? AND object_id=? AND retired=0`).get(intent.document.workspaceId, intent.document.objectId) : undefined;
+    const keptRun: KeptServiceRun | null = enrollment && typeof activationId === "string" ? {runToken: Number(enrollment.created_at_ms),
+      ownerUserId: String(enrollment.owner_user_id), shareId: String(enrollment.share_id), activationId} : null;
+    const marker = {kept: false};
+    const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,
+      revokedAtMs: at, expectedDependentGrantIds: intent.expectedDependentGrantIds },
+      keptRun ? {...intent.document, activationId: keptRun.activationId, kept: () => { marker.kept = true; }} : undefined);
+    if (!revoked.ok) refuse();
+    const storedIntentJson = keptRun && marker.kept ? JSON.stringify({...intent, [KEPT_RUN]: keptRun}) : intentJson;
+    // Fund the final cutoff metadata and a Decline's evidence in the same transaction as the invalidation, so neither can run out of quota.
     const maximum = maximumFenceEvidence(intent, initialBasis);
-    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximum.receipt),JSON.stringify(maximum.applied),JSON.stringify(maximum.nativeReceipt), "authority-invalidated",
+    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), storedIntentJson, basisJson, JSON.stringify(maximum.receipt),JSON.stringify(maximum.applied),JSON.stringify(maximum.nativeReceipt), "authority-invalidated",
       intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER])) +
       cancellationReservation(intent, initialBasis);
     assertWorkspaceQuota(storage, intent.document.workspaceId, charge);
-    const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,
-      revokedAtMs: at, expectedDependentGrantIds: intent.expectedDependentGrantIds });
-    if (!revoked.ok) refuse();
     storage.db.prepare(`INSERT INTO ${table}(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,intent_json,basis_json,phase,
       old_fence,new_fence,cutover_cursor,revoked_generation,invalidated_at_ms,fenced_at_ms,accounted_bytes)
       VALUES (?,?,?,?,?,?,?,?,?,'authority-invalidated',?,NULL,NULL,?,?,NULL,?)`)
-      .run(intent.operationId, namespace,previousOperationId,...key(intent.document), intentJson, basisJson, intent.expectedFence, revoked.grant.generation, at, charge);
+      .run(intent.operationId, namespace,previousOperationId,...key(intent.document), storedIntentJson, basisJson, intent.expectedFence, revoked.grant.generation, at, charge);
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, intent.document.workspaceId);
     return read(storage, intent.operationId, intent.document.workspaceId)!;
   });
@@ -500,7 +515,20 @@ function declineBeforeFence(storage: StorageContext, operation: StopRestoreOpera
   const declined = storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=? WHERE relay_database_namespace=? AND operation_id=? AND phase='authority-invalidated'`)
     .run(at, operation.basis.namespace, operation.intent.operationId);
   if (Number(declined.changes) !== 1) refuse();
+  endKeptRun(storage, operation, at);
   return read(storage, operation.intent.operationId, operation.intent.document.workspaceId)!;
+}
+/**
+ * A restore that ends without resuming no longer keeps the owner's live
+ * session: it ends the run and opens the retirement its revocation skipped,
+ * at the fence the document is left at.
+ */
+function endKeptRun(storage: StorageContext, operation: StopRestoreOperation, at: number): void {
+  const row = storage.db.prepare(`SELECT json_extract(intent_json,'$.${KEPT_RUN}') IS NOT NULL AS kept FROM ${table} WHERE relay_database_namespace=? AND operation_id=?`)
+    .get(operation.basis.namespace, operation.intent.operationId);
+  if (row?.kept !== 1) return;
+  endServiceHostRun(storage, operation.intent.document, at);
+  openServiceActivationRetirement(storage, operation.intent.document, at);
 }
 /**
  * Whether the workspace keeps the identity the restore began under. A rotation
@@ -531,6 +559,15 @@ function objectHoldsFrozenPath(storage: StorageContext, operation: StopRestoreOp
 export function stopRestoreFinishedAtMovedPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
   if (operation.phase !== "resumed") refuse();
   return !objectHoldsFrozenPath(storage, operation);
+}
+/**
+ * Inside the transaction that resumes the restore. A restore that kept the
+ * owner's live session but finishes after its file left the frozen path can't
+ * keep it: the note is away from where live editing began. It ends the run and
+ * opens the retirement, which settles the frozen path.
+ */
+export function endKeptRunAwayFromFrozenPath(storage: StorageContext, operation: StopRestoreOperation, at: number): void {
+  if (!objectHoldsFrozenPath(storage, operation)) endKeptRun(storage, operation, at);
 }
 /** Whether the restore's object still holds its frozen path. Admission refuses otherwise. */
 export function stopRestoreHoldsFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
@@ -667,6 +704,7 @@ export function acknowledgeStopRestoreCancellation(storage: StorageContext, inpu
     if (Number(storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=?,native_receipt_json=? WHERE ${where}`)
       .run(at, JSON.stringify(receipt.fence), ...params).changes) !== 1) refuse();
   }
+  endKeptRun(storage, saved, at);
   const outcome = answer.status === "cancelled" ? "cancelled" : "fence-cancelled", acknowledgmentJson = JSON.stringify(answer);
   const bytes = cancellationBytes(saved, requested.requestedAtMs, outcome, acknowledgmentJson, journalCursor);
   chargeCancellation(storage, saved, bytes, requested.accountedBytes);

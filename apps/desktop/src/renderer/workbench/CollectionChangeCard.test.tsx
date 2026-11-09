@@ -140,6 +140,18 @@ it("offers Try again for an Applied reply that didn't post, which posts it", asy
   expect(onNotice).not.toHaveBeenCalled();
 });
 
+it("shows a change Applied when Try again finds it landed without its confirmation", async () => {
+  const proposal = ask(place); card();
+  place.control.unconfirmed = true;
+  fireEvent.click(await screen.findByTestId("lane-change-apply"));
+  await waitFor(() => expect(screen.getByTestId("lane-change-apply").textContent).toBe("Try again"));
+  expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
+  fireEvent.click(screen.getByTestId("lane-change-apply"));
+  await waitFor(() => expect(screen.getByTestId("lane-change-card").dataset.state).toBe("applied"));
+  expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
+  expect(place.actions().filter(action => action === "prepareMigration")).toHaveLength(1);
+});
+
 it("offers Try again for an Apply that fails after the chat closed, which prepares the change from the Collection as it is now", async () => {
   const proposal = ask(place); const view = card();
   const apply = await screen.findByTestId("lane-change-apply");

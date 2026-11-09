@@ -1,5 +1,5 @@
 import { isAutomationControlsTarget, SERVER_HOLD_NOTICE_PREFIX, SERVER_RUN_FAILED_NOTICE_PREFIX } from "@dohc/workspace-contracts/relay";
-import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { NoticeRow, WorkspaceSummary } from "../ipc/bridgeContract";
 
 // Where Open takes a notice sent to you, on this computer.
 export type SentNoticePlace =

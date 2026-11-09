@@ -5,6 +5,7 @@ import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace
 import { AlertTriangle, CheckCircle2, Diff, Folder, Globe2, Merge, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
+import type { DesktopUserSettings } from "../../settings/userSettings";
 import type {
   ActorPresentation,
   ChannelThreadRecord,
@@ -299,6 +300,11 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
   );
 }
 
+function SplitGroupsSpecimen(props: Omit<ComponentProps<typeof EditorGroupLayout>, "onFocusGroup">) {
+  const [activeGroupId, setActiveGroupId] = useState(props.activeGroupId);
+  return <EditorGroupLayout {...props} activeGroupId={activeGroupId} onFocusGroup={setActiveGroupId} />;
+}
+
 // Two groups side by side, each with one file open and that file's actions
 // in its own tab row.
 function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode }; right: { path: string; actions: ReactNode } }) {
@@ -333,10 +339,9 @@ function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode
   });
   return (
     <div className="flex w-full overflow-hidden rounded-lg border border-line">
-      <EditorGroupLayout
+      <SplitGroupsSpecimen
         groups={[group("left", 1, props.left), group("right", 2, props.right)]}
         activeGroupId="left"
-        onFocusGroup={noop}
         onResizeGroups={noop}
       />
     </div>
@@ -352,13 +357,12 @@ function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
   const [first, second] = props.activeHasTabs ? [tabbed, empty] : [empty, tabbed];
   return (
     <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
-      <EditorGroupLayout
+      <SplitGroupsSpecimen
         groups={[
           { id: "first", size: 1, content: <EditorGroupSpecimen groupId="first" groupNumber={1} {...first} /> },
           { id: "second", size: 1, content: <EditorGroupSpecimen groupId="second" groupNumber={2} {...second} /> },
         ]}
         activeGroupId="first"
-        onFocusGroup={noop}
         onResizeGroups={noop}
       />
     </div>
@@ -2112,7 +2116,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           data-force-state="focus focus-visible"
           data-force-target="[role=menuitem]:nth-child(1)"
         >
-          <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
+          <DocumentMenu workspaceId="states" path="states.md" suggestedName="states" getMarkdown={() => null} />
         </div>
       </Section>
 
@@ -2550,7 +2554,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => null }}
                 />
               }
             />
@@ -2564,7 +2568,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2578,7 +2582,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2592,7 +2596,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2606,7 +2610,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2625,7 +2629,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true, title: "dohc could not open this file." }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
                 />
               }
             />
@@ -2641,7 +2645,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -3643,7 +3647,12 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="sync off: paused by an agent">
           <div className="w-[640px]">
-            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
+            <CloudSyncSettings workspaceId="ws-trip" agents={SYNC_PAUSING_AGENTS} cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
+          </div>
+        </Specimen>
+        <Specimen label="sync off: paused by an agent Settings no longer lists">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" agents={{}} cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
           </div>
         </Specimen>
         <Specimen label="sync off: paused under this computer's earlier id">
@@ -3818,13 +3827,12 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
         <Specimen label="split: the active group's line over its fades, then the other group">
           <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
-            <EditorGroupLayout
+            <SplitGroupsSpecimen
               groups={[
                 { id: "first", size: 1, content: <OverflowStripSpecimen groupId="first" groupNumber={1} active="packing-list.md" /> },
                 { id: "second", size: 1, content: <OverflowStripSpecimen groupId="second" groupNumber={2} active="flights.md" /> },
               ]}
               activeGroupId="first"
-              onFocusGroup={noop}
               onResizeGroups={noop}
             />
           </div>
@@ -3845,13 +3853,12 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="split: the active group, then one whose active tab recedes" className="w-full">
           <div className="flex w-full overflow-hidden rounded-lg border border-line">
-            <EditorGroupLayout
+            <SplitGroupsSpecimen
               groups={[
                 { id: "first", size: 1, content: <GlyphStrip groupId="first" groupNumber={1} tabs={["trip/plan.md", "ledger.db"]} active="trip/plan.md" /> },
                 { id: "second", size: 1, content: <GlyphStrip groupId="second" groupNumber={2} tabs={[STRIP_GROUP, siteTabPath("trip-planner")]} active={STRIP_GROUP} /> },
               ]}
               activeGroupId="first"
-              onFocusGroup={noop}
               onResizeGroups={noop}
             />
           </div>
@@ -4127,6 +4134,9 @@ const SYNC_PAUSED_BY_ANOTHER: CloudStatusResult["syncPause"] = {
 const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
   author: { kind: "agent", agentId: "codex", onBehalfOf: "human-sam", depth: 1 },
+};
+const SYNC_PAUSING_AGENTS: DesktopUserSettings["agents"] = {
+  codex: { name: "Nova", hue: "olive", launch: { command: "node agent.mjs" }, changesFiles: true, enabled: true, timeoutMinutes: 30 },
 };
 const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
   status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop, onDeleteAccount: noop,

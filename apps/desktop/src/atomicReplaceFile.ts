@@ -3,18 +3,20 @@ import { renameSync, unlinkSync } from "node:fs";
 import { link, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
-const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const WINDOWS_BUSY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+/** Windows refused a file, as it does for a moment while another program, such as a virus scanner, holds it. */
+export function isWindowsBusy(error: unknown, platform: NodeJS.Platform = process.platform): boolean {
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+  return platform === "win32" && typeof code === "string" && WINDOWS_BUSY_CODES.has(code);
+}
 
 // Six attempts, with 8 + 16 + 32 + 64 + 128 = 248 ms of requested waits.
 // The success path never waits or allocates a wait buffer.
 function retryDelay(error: unknown, attempt: number, platform: NodeJS.Platform): number | undefined {
-  const code = typeof error === "object" && error !== null && "code" in error
-    ? error.code
-    : undefined;
-  if (platform !== "win32" || attempt >= 5 || typeof code !== "string" || !WINDOWS_RENAME_RETRY_CODES.has(code)) {
-    return undefined;
-  }
-  return 8 * 2 ** attempt;
+  return attempt < 5 && isWindowsBusy(error, platform) ? 8 * 2 ** attempt : undefined;
 }
 
 function waitSync(milliseconds: number): void {
@@ -108,20 +110,18 @@ function waitAsync(milliseconds: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export async function renameWithRetry(
-  source: string,
-  destination: string,
+/** Runs `operation` again while Windows says its file is busy, then gives up with the last error. */
+export async function retryWhileWindowsBusy<T>(
+  operation: () => Promise<T>,
   {
-    rename: replace = rename,
     wait = waitAsync,
     platform = process.platform,
-  }: AsyncReplaceDependencies = {},
+  }: Pick<AsyncReplaceDependencies, "wait" | "platform"> = {},
   beforeRetry?: () => Promise<void>,
-): Promise<void> {
+): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await replace(source, destination);
-      return;
+      return await operation();
     } catch (error) {
       const delay = retryDelay(error, attempt, platform);
       if (delay === undefined) throw error;
@@ -131,16 +131,31 @@ export async function renameWithRetry(
   }
 }
 
+export function renameWithRetry(
+  source: string,
+  destination: string,
+  { rename: replace = rename, ...retry }: AsyncReplaceDependencies = {},
+  beforeRetry?: () => Promise<void>,
+): Promise<void> {
+  return retryWhileWindowsBusy(() => replace(source, destination), retry, beforeRetry);
+}
+
 export async function atomicReplaceFile(
   destination: string,
   writeTemporary: (temporary: string) => Promise<void>,
   dependencies: AsyncReplaceDependencies & {
     syncDirectory?: boolean;
     open?: (path: string, flags: string) => Promise<SyncHandle>;
+    /** A sibling of `destination` that nothing else uses. */
+    temporary?: string;
   } = {},
 ): Promise<void> {
-  const { syncDirectory = false, open: openDirectory = open, platform = process.platform } = dependencies;
-  const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
+  const {
+    syncDirectory = false,
+    open: openDirectory = open,
+    platform = process.platform,
+    temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`,
+  } = dependencies;
   try {
     await writeTemporary(temporary);
     await renameWithRetry(temporary, destination, dependencies);
