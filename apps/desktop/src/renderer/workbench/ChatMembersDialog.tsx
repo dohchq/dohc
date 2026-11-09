@@ -387,7 +387,7 @@ function AddPeople(props: {
 
   function onPaste(event: ClipboardEvent<HTMLInputElement>) {
     const pasted = event.clipboardData.getData("text");
-    if (!/[\s,;<]/.test(pasted.trim())) return;
+    if (busy || !/[\s,;<]/.test(pasted.trim())) return;
     event.preventDefault();
     const { emails, rest } = splitAddresses(`${text} ${pasted}`);
     pick(emails, rest);

@@ -142,6 +142,19 @@ describe("ChatMembersDialog", () => {
     ]);
   });
 
+  it("picks no one from a paste while Add runs", async () => {
+    let finish = (_added: boolean) => {};
+    dialog({ onAdd: () => new Promise<boolean>((resolve) => { finish = resolve; }) });
+    await userEvent.type(field(), "ana{Enter}");
+    await userEvent.click(screen.getByTestId("chats-share-submit"));
+    expect(screen.getByTestId("chats-share-submit").textContent).toBe("Adding…");
+    fireEvent.paste(field(), { clipboardData: { getData: () => "ben@example.com cy@example.org" } });
+    expect(chips()).toEqual(["Aana@example.com"]);
+    finish(false);
+    await waitFor(() => expect(screen.getByTestId("chats-share-submit").textContent).toBe("Add"));
+    expect(chips()).toEqual(["Aana@example.com"]);
+  });
+
   it("puts focus back in the field when Add fails", async () => {
     dialog({ onAdd: async () => false });
     await userEvent.type(field(), "new@example.net");
