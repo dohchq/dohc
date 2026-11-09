@@ -4789,6 +4789,42 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
     await next(writer, join(root, ".env"));
     expect(await readdir(root)).toEqual(left);
   });
+
+  // On macOS a temp Node creates takes the folder's inherited ACL entries, so
+  // the engine writes it there. The checks before the write stay here.
+  it("hands a checked write and its temp name to the engine's writer", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, "notes/a.md", "old");
+    const calls: [string, string, string | Uint8Array][] = [];
+    const writer = createDefaultDiskWriter(root, async (path, temporary, data) => {
+      calls.push([path, temporary, data]);
+    });
+    await writer.writeTextFile(join(root, "notes", "a.md"), "new\n");
+    await writer.writeBinaryFile(join(root, "b", "c.bin"), new Uint8Array([1, 2]));
+    const temporary = (name: string) =>
+      `.dohc-write-${createHash("sha256").update(name).digest("hex").slice(0, 16)}.tmp`;
+    expect(calls).toEqual([
+      ["notes/a.md", temporary("a.md"), "new\n"],
+      ["b/c.bin", temporary("c.bin"), new Uint8Array([1, 2])],
+    ]);
+    expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("old");
+    expect(await readdir(join(root, "notes"))).toEqual(["a.md"]);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a link before the engine's writer sees the write", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    await symlink(join(outside, "keep.md"), join(root, "link.md"));
+    await write(root, ".dohc/settings.json", "{}\n");
+    await symlink(join(root, ".dohc"), join(root, "meta"), "dir");
+    const writer = createDefaultDiskWriter(root, async () => {
+      throw new Error("the engine's writer was called");
+    });
+    await expect(writer.writeTextFile(join(root, "link.md"), "x")).rejects.toThrow(/through a symlink/);
+    await expect(writer.writeTextFile(join(root, "meta", "x.md"), "x")).rejects.toThrow(/Engine write path leads to a reserved area/);
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
 });
 
 // Agent-attributed capture: while a dohc-tracked agent run is active the
