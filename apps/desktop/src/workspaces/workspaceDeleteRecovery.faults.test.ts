@@ -246,14 +246,14 @@ describe("delete recovery failures", () => {
     try {
       const result = await f.remove();
       expect(result).toMatchObject({ ok: true, trashed: true, undo: { available: false,
-        reason: `Cannot undo the delete. folder is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.` } });
+        reason: `Cannot undo the delete. folder is in the system trash. Restore it there.` } });
       expect(faults.failRecord).toBe(false);
       const record = await readDeleteRecovery(f.root, result.operationId!);
       expect(record?.staged).toBeDefined();
       expect(existsSync(join(f.root, ".dohc/local/trash", record!.staged!))).toBe(false);
       expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
       expect(await f.undo(result.operationId!)).toEqual({ ok: false,
-        reason: `Cannot undo the delete. folder is no longer in .dohc/local/trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`,
+        reason: `Cannot undo the delete. folder is no longer in .dohc/local/trash, and History has no copy of it. Check the system trash.`,
         refusal: { code: "unexplained" } });
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally { faults.failRecord = false; }
@@ -261,7 +261,7 @@ describe("delete recovery failures", () => {
   it("a healthy OS trash does not require healthy workspace trash", async () => {
     const f = await fixture(true);
     await writeFile(join(f.root, ".dohc/local/trash"), "unavailable");
-    expect(await f.remove(true)).toMatchObject({ trashed: true, undo: { available: false, reason: expect.stringMatching(/in the (Recycle Bin|Trash)\. Restore it there\.$/) } });
+    expect(await f.remove(true)).toMatchObject({ trashed: true, undo: { available: false, reason: expect.stringMatching(/in the system trash\. Restore it there\.$/) } });
     expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
     expect(existsSync(join(f.root, "folder"))).toBe(false);
   });
@@ -619,7 +619,7 @@ describe("delete recovery placement and receipts", () => {
     const f = await fixture(true);
     await f.write("folder/another.txt", "rowless");
     const result = await f.remove(true);
-    expect(result.undo).toMatchObject({ available: false, reason: expect.stringMatching(/another\.txt, folder\/rowless\.txt are in the (Recycle Bin|Trash)\. Restore them there\.$/) });
+    expect(result.undo).toMatchObject({ available: false, reason: expect.stringMatching(/another\.txt, folder\/rowless\.txt are in the system trash\. Restore them there\.$/) });
   });
   it("replays the saved result when the engine cannot refresh it", async () => {
     const f = await fixture();
@@ -655,7 +655,7 @@ describe("delete recovery placement and receipts", () => {
     const trash = join(f.root, ".dohc/local/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in .dohc/local/trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in .dohc/local/trash, and History has no copy of it. Check the system trash.`) });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("expires metadata without deleting fallback bytes", async () => {
