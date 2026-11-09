@@ -2183,11 +2183,12 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
-  // Proves: each file whose first open the server refused reaches the
-  // workspace's status with its typed refusal, without making the workspace's
-  // delivery retry, and leaves once the server no longer reports it. A row for
-  // another workspace never reaches this one.
-  it("reports each refused first open on its own, without making delivery retry", async () => {
+  // Proves: each file whose first open the server refused, or stopped trying
+  // after repeated build deadlines, reaches the workspace's status with its
+  // typed refusal or stop, without making the workspace's delivery retry, and
+  // leaves once the server no longer reports it. A row for another workspace
+  // never reaches this one.
+  it("reports each refused or stopped first open on its own, without making delivery retry", async () => {
     const f = fixture(), credentials = new AbortController(), changed = vi.fn();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
     const rootPath = await createTestScratch("dohc-server-owner-first-open-");
@@ -2196,7 +2197,10 @@ describe("server owner peer lifecycle", () => {
     const firstOpen = (workspaceId: string) => ({reason: "unsupported-source", code: "settlement-mismatch", recovery: "none",
       source: {workspaceId, objectId: "object", path: "notes.md", sourceMomentId: "moment", sourceDigest: "a".repeat(64)}});
     const refused = (workspaceId = "owner") => ({path: "notes.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: firstOpen(workspaceId)});
-    let rows: unknown[] = [refused()];
+    const stop = {reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, recovery: "retry-later",
+      source: {workspaceId: "owner", objectId: "object-slow", path: "slow.md", sourceMomentId: "moment", sourceDigest: "b".repeat(64)}};
+    const stopped = {path: "slow.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen: stop};
+    let rows: unknown[] = [refused(), stopped];
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
@@ -2207,15 +2211,15 @@ describe("server owner peer lifecycle", () => {
         keptEditsPage: async () => {throw new Error("Unexpected kept edits read");}, documents: async () => ({ok: true, documents: rows})})};
     try {
       expect(await f.engine.start()).toBe(true);
-      await vi.waitFor(() => expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toEqual([firstOpen("owner")]));
+      await vi.waitFor(() => expect(f.engine.ownerLiveFirstOpen("owner")).toEqual([firstOpen("owner"), stop]));
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
       expect(changed).toHaveBeenCalledWith("owner");
       rows = [refused(), {path: "changed.md", status: "unavailable", reason: "workspace-changed"}]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"));
-      expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toEqual([firstOpen("owner")]);
+      expect(f.engine.ownerLiveFirstOpen("owner")).toEqual([firstOpen("owner")]);
       rows = [refused("elsewhere")]; f.engine.retryOwnerDelivery("owner");
-      await vi.waitFor(() => expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toBeUndefined());
+      await vi.waitFor(() => expect(f.engine.ownerLiveFirstOpen("owner")).toBeUndefined());
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
     } finally {credentials.abort(); await f.close();}
   });
@@ -2233,7 +2237,12 @@ describe("server owner peer lifecycle", () => {
     const firstOpen = (path: string, code: string) => ({reason: "ordinary-activation-refused", code, recovery: "report",
       source: {workspaceId: "owner", objectId: `object-${path}`, path, sourceMomentId: "moment", sourceDigest: "a".repeat(64)}});
     const refused = (path: string, code: string) => ({path, status: "unavailable", reason: "live-first-open-refused", firstOpen: firstOpen(path, code)});
-    const rows = [{path: "a.md", status: "ready", document}, refused("bad.md", "Native_Disagreement"), refused("good.md", "native-disagreement")];
+    // A stop that names the wrong reason, or one under a refusal's reason, is as unreadable.
+    const stop = {reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, recovery: "retry-later",
+      source: {workspaceId: "owner", objectId: "object-slow.md", path: "slow.md", sourceMomentId: "moment", sourceDigest: "a".repeat(64)}};
+    const rows = [{path: "a.md", status: "ready", document}, refused("bad.md", "Native_Disagreement"), refused("good.md", "native-disagreement"),
+      {path: "slow.md", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen: {...stop, deadlineAnswers: 2}},
+      {path: "slow.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: stop}];
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
@@ -2248,8 +2257,9 @@ describe("server owner peer lifecycle", () => {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledWith(expect.objectContaining({document})));
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
-      expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toEqual([firstOpen("good.md", "native-disagreement")]);
-      expect(log).toHaveBeenCalledWith("[desktop] owner live first-open refusal is invalid:", expect.anything());
+      expect(f.engine.ownerLiveFirstOpen("owner")).toEqual([firstOpen("good.md", "native-disagreement")]);
+      expect(log).toHaveBeenCalledWith("[desktop] owner live first-open status is invalid:", expect.anything());
+      expect(log).toHaveBeenCalledWith("[desktop] owner live first-open status does not match its reason:", "live-first-open-refused");
       expect(log).not.toHaveBeenCalledWith("[desktop] server owner delivery failed:", expect.anything());
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); log.mockRestore();}
   });

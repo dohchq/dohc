@@ -476,6 +476,9 @@ const OwnerLiveFirstOpenStop = OwnerLiveFirstOpenBase.extend({reason: z.literal(
   deadlineAnswers: z.literal(3), recovery: z.literal("retry-later")}).strict();
 const ownerLiveFirstOpenStopMatchesContract: SameType<z.infer<typeof OwnerLiveFirstOpenStop>, FirstOpenTemporaryStop> = true;
 void ownerLiveFirstOpenStopMatchesContract;
+// What Live documents and Notices show of a first open that has not started live editing: a refusal or a stop.
+export const OwnerLiveFirstOpenStatus = z.union([OwnerLiveFirstOpen, OwnerLiveFirstOpenStop]);
+export type OwnerLiveFirstOpenStatus = z.infer<typeof OwnerLiveFirstOpenStatus>;
 // One document whose owner edits the server refused for good. The edits wait
 // in a queue on this computer, or on the server when the server hosts the
 // document, until the owner tries again or stops live editing. `incident`
@@ -529,7 +532,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-first-open-refused", "live-first-open-retry-stopped", "conflict-parent-withheld"]).optional(),
   // Present exactly when `reason` is `live-first-open-refused`, as a refusal, or `live-first-open-retry-stopped`, as a stop.
-  firstOpen: z.union([OwnerLiveFirstOpen, OwnerLiveFirstOpenStop]).optional(),
+  firstOpen: OwnerLiveFirstOpenStatus.optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
@@ -1523,8 +1526,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256 + RESTORE_FENCED_RECOVERY_LIMIT).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
-  // Files the server refused to start live, one per document, as owner status reported them.
-  ownerLiveFirstOpen: z.array(OwnerLiveFirstOpen).max(64).optional(),
+  // Files the server refused to start live, or stopped trying to start after repeated deadlines, one per document,
+  // as Live documents status reported them.
+  ownerLiveFirstOpen: z.array(OwnerLiveFirstOpenStatus).max(64).optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.

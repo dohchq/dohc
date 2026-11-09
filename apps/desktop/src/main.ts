@@ -2713,7 +2713,7 @@ const activity = {
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
-      ownerLiveFirstOpen: desktopEngine.ownerLiveFirstOpenRefusals(workspaceId),
+      ownerLiveFirstOpen: desktopEngine.ownerLiveFirstOpen(workspaceId),
     })),
   recordShareViewStoreRefusal: (
     workspaceId: string,

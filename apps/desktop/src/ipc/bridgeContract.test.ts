@@ -3435,6 +3435,12 @@ describe("sync status IPC contract", () => {
       expect(OwnerLiveFirstOpen.safeParse(invalid).success).toBe(false);
     }
     expect(OwnerLiveFirstOpen.safeParse({ reason: "ordinary-activation-refused", code: "a".repeat(128), source, recovery: "report" }).success).toBe(true);
+    // An engine's own code reaches IPC in its stable form, and a stop reaches the status beside refusals.
+    const normalized = firstOpenRefusal(firstOpenOutcome(source, { kind: "refused", reason: "ordinary-activation-refused", code: "LIMIT_EXCEEDED" }));
+    expect(OwnerLiveFirstOpen.parse(normalized)).toStrictEqual({ reason: "ordinary-activation-refused", code: "limit-exceeded", source, recovery: "report" });
+    const stop = { reason: "retry-stopped", code: "build-deadline", deadlineAnswers: 3, source, recovery: "retry-later" };
+    expect(SyncStatusResult.parse({ ...status, ownerLiveFirstOpen: [normalized, stop] }).ownerLiveFirstOpen).toStrictEqual([normalized, stop]);
+    expect(SyncStatusResult.safeParse({ ...status, ownerLiveFirstOpen: [{ ...stop, deadlineAnswers: 2 }] }).success).toBe(false);
   });
   it("refuses a status that cannot say why history is off", () => {
     const status = {
