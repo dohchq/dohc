@@ -2349,15 +2349,15 @@ export async function createRecord(
   });
 }
 
-// Files dohc moved aside while it saved, because another program changed them
-// meanwhile. The desktop shows each as a Notices row; an agent reads the same
-// list and takes the same step.
 // The person's Notices rows that open in this workspace, through the
 // resolver the desktop's Open uses. Listing marks nothing read.
 export async function listNotices(ctx: ToolContext) {
   return requestCli(ctx, "notices", {});
 }
 
+// Files dohc moved aside while it saved, because another program changed them
+// meanwhile. The desktop shows each as a Notices row; an agent reads the same
+// list and takes the same step.
 export async function listKeptCopies(ctx: ToolContext) {
   return requestCli(ctx, "keptCopies", {});
 }
