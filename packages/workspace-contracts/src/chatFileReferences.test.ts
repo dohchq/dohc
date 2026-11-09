@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { codeRanges } from "@dohc/workspace-contracts/chat-mentions";
 import {
+  chatMentionTokens,
+  codeRanges,
   extractChatFileReferences,
   extractChatFileReferenceTokens,
   formatChatFileReferenceToken,
-} from "./chatFileMentions";
+} from "./chatMentions";
 
 describe("chat file reference tokens", () => {
   it("round-trips whole-file and heading references", () => {
@@ -155,5 +156,15 @@ describe("the linear reference scanner", () => {
       extractChatFileReferenceTokens(body);
       expect(performance.now() - started).toBeLessThan(100);
     }
+  });
+
+  it("reads no name inside a file link", () => {
+    const handles = (body: string) => chatMentionTokens(body).map((token) => token.handle);
+    expect(handles("@Nova, see @[trip @Nova notes.md]")).toEqual(["Nova"]);
+    expect(handles("@[notes @agent draft.md#plan @agent]")).toEqual([]);
+    // A name that ends where a link starts still counts.
+    expect(handles("@Nova@[trip.md]")).toEqual(["Nova"]);
+    // Inside code, the link is text and code hides its name.
+    expect(handles("`@[trip @Nova notes.md]` and @Nova")).toEqual(["Nova"]);
   });
 });

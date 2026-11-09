@@ -6,10 +6,9 @@ import {
   hasPreferredNameControlCharacters,
 } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
-import { chatMentionTokens } from "../renderer/workbench/chatFileMentions";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
-import { handleForName, normalizeHandle, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentionTokens, handleForName, normalizeHandle, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()

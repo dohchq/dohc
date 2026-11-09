@@ -4,11 +4,9 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
-import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import {
-  chatMentions,
-  extractChatFileReferenceTokens,
   fileReferenceKey,
   resolveFileMentionNavigationTargets,
   type FileMentionNavigationTarget,

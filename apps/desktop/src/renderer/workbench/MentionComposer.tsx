@@ -3,12 +3,12 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, 
 import {
   activeMentionQuery,
   applyMentionCompletion,
+  formatChatFileReferenceToken,
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentAddressedOffer, type AgentRosterPick } from "../offers/agentAddressed";
 import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
-import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";

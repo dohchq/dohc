@@ -14,7 +14,7 @@ import {
   chatAuthorLabel,
   pinnedChatDay,
 } from "./chatMessages";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { extractChatFileReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
 
@@ -22,7 +22,7 @@ import { setChosenColors } from "./chosenColors";
 
 // Real implementations, spied: every message-body render runs the file-token
 // scan, so its call count shows whether a message actually re-rendered.
-vi.mock("./chatFileMentions", { spy: true });
+vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
 // Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
 // view send through this composer, so its Enter semantics are load-bearing

@@ -1,4 +1,4 @@
-import { handleForName, normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentionTokens, handleForName, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { authorizeShareAction } from "./shareAuthorization";
 import { linkChatOrigin } from "./relayLogInputs";
 import { filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
@@ -97,7 +97,7 @@ export function chatMessageInterest(storage: StorageContext, message: PushMessag
   const access = pushMessageAccess(storage, message, recipient.userId);
   if (!access) return null;
   const handle = normalizeHandle(handleForName(recipient.accountName));
-  if (handle && scanMentionTokens(message.body, {ignoreCode: true}).some(token => normalizeHandle(token.handle) === handle)) return "mention";
+  if (handle && chatMentionTokens(message.body).some(token => normalizeHandle(token.handle) === handle)) return "mention";
   if (access.dm) return "dm";
   const prior = storage.db.prepare(`SELECT 1 FROM sync_relay_log WHERE workspace_id = ?
     AND op_kind = 'chat.message.append' AND json_valid(payload_json)

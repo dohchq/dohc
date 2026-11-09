@@ -33,13 +33,8 @@ import type {
   ChatMessageRecord,
   ChatReactionRecord,
 } from "../../ipc/bridgeContract";
-import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import {
-  chatMentions,
-  extractChatFileReferenceTokens,
-  fileReferenceKey,
-  resolveFileMentionNavigationTargets,
-} from "./chatFileMentions";
+import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these same

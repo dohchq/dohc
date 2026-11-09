@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { extractChatFileReferences } from "../renderer/workbench/chatFileMentions";
+import { extractChatFileReferences } from "@dohc/workspace-contracts/chat-mentions";
 import {
   resolveChatFileMentionPath,
   resolveTrackedChatFilePath,
