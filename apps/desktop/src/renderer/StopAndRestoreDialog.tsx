@@ -523,7 +523,10 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
   const other = otherKept(result);
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
-      <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
+      {/* An Undo that put nothing back leads with the files it could not. */}
+      {undone && result.restored.length === 0 ? null : (
+        <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
+      )}
       {!undone && result.restored.some(file => file.removed) ? <p className="m-0 text-[13px] text-muted">
         Removed {plural(result.restored.filter(file => file.removed).length, "created file", "created files")}.
       </p> : null}
