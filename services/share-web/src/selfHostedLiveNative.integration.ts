@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, resolve, toNamespacedPath } from "node:path";
+import { basename, dirname, join, resolve, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { getCookies, parseSetCookieHeader } from "better-auth/cookies";
@@ -21,7 +21,15 @@ import { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import {startSelfHostedLiveHost} from "../../sync-relay/src/selfHostedLiveHost.js";
 import {authorizeServiceHostReplication} from "../../sync-relay/src/serviceHostCredential.js";
 import {createServiceHostReplication} from "../../sync-relay/src/serviceHostReplication.js";
-import {createFirstOpenPublisher} from "../../sync-relay/src/firstOpenPublication.js";
+import {createFirstOpenPublisher, type FirstOpenCheckHost} from "../../sync-relay/src/firstOpenPublication.js";
+import {isLinkLivePath} from "../../sync-relay/src/linkEndpointPath.js";
+import {createLinkLiveResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
+import {Client as McpClient, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
+import {FIRST_OPEN_ACTIVATION_CODE} from "@dohc/workspace-contracts/first-open";
+import {FirstOpenOwnerStatus} from "@dohc/workspace-contracts/first-open-wire";
+import {LIVE_MARKDOWN_MAX_BYTES} from "@dohc/live-session-contract/limits";
+import {signInAgent} from "./mcpSignIn.test-helper.js";
+import {replaceLiveText} from "./liveTextEdit.js";
 import {createServiceHostEnrollmentRoutes} from "../../sync-relay/src/serviceHostEnrollmentRoutes.js";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
@@ -45,10 +53,18 @@ import { createNamedLiveBrowserTransport, type NamedLiveBrowserState } from "@do
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // The service host's first-open requests, sent to the loopback relay the supervisor's public origin stands for.
-const firstOpenFetch: typeof fetch = (url, init) => fetch(String(url).replace("https://service-activation-relay.example.test", harness.relayUrl), init);
+const firstOpenFetch: typeof fetch = async (url, init) => {
+  const response = await fetch(String(url).replace("https://service-activation-relay.example.test", harness.relayUrl), init);
+  const objectId = typeof init?.body === "string" ? String((JSON.parse(init.body) as {objectId?: unknown}).objectId) : "";
+  const answer = await response.clone().json().catch(() => undefined) as {outcome?: {kind?: string; reason?: string}} | undefined;
+  harness.firstOpens.push({objectId, status: response.status, kind: answer?.outcome?.kind, reason: answer?.outcome?.reason});
+  return response;
+};
 const profile = selfHostLiveProfile();
 const frames = profile.frames, browserLimits = profile.requests, routeLimits = profile.namedLive.transport;
 const audience = "https://share.example.test", exchangeKey = "native-network-exchange-".repeat(2), ticketKey = "native-network-tickets-".repeat(2);
+const linkKey = "native-network-links-".repeat(2);
+type ServiceHost = NonNullable<ReturnType<Awaited<ReturnType<typeof startSelfHostedLiveHost>>["current"]>>;
 type Manager = ReturnType<typeof createNamedLiveBrowserTransport>;
 type Provider = ReturnType<Manager["select"]>;
 type BrowserSocket = ReturnType<NonNullable<Parameters<typeof createNamedLiveBrowserTransport>[0]["openSocket"]>>;
@@ -87,6 +103,29 @@ async function browserRequest(port: number, path: string, init: RequestInit = {}
   });
 }
 
+// An agent's requests to share-web's public origin, sent to its loopback listener as the deployed proxy does.
+const publicFetch = (port: number): typeof fetch => async (input, init) => {
+  const request = new Request(input, init), url = new URL(request.url);
+  request.headers.set("host", new URL(audience).host);
+  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(`http://127.0.0.1:${port}${url.pathname}${url.search}`, {method: request.method,
+      headers: Object.fromEntries(request.headers), signal: request.signal}, response => {
+      const chunks: Buffer[] = [];
+      response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+      response.once("error", reject);
+      response.once("end", () => {
+        const headers = new Headers();
+        for (let index = 0; index < response.rawHeaders.length; index += 2) headers.append(response.rawHeaders[index]!, response.rawHeaders[index + 1]!);
+        resolve(new Response([204, 205, 304].includes(response.statusCode!) ? null : Buffer.concat(chunks), {status: response.statusCode, headers}));
+      });
+    });
+    outgoing.once("error", reject); outgoing.end(body);
+  });
+};
+// A row of the Live documents list.
+type LiveDocumentRow = {path: string; objectId?: string; status: string; reason?: string; firstOpen?: unknown};
+
 const harness = vi.hoisted(() => ({
   relayUrl: "", holdAdoption: true, committed: undefined as undefined | (() => void),
   failed: undefined as undefined | ((error: Error) => void),
@@ -105,7 +144,16 @@ const harness = vi.hoisted(() => ({
   releases: [] as Record<string, any>[],
   transforms: [] as {from: string; to: string; insecureLoopbackForTests: true}[],
   captures: [] as {activationId: string; requestedActivationId?: string; source: unknown}[],
-  tracePath: "", calls: [] as {method: string; status: "started" | "complete" | "failed"; message?: string; code?: string}[],
+  // Each capture the service host asked the engine for, in order: its path, whether `captureBudget` limited it, and the engine's refusal.
+  captureAttempts: [] as {path: string; limited: boolean; code?: string; detail?: string}[],
+  // While `when()` holds, captures of `path` ask the engine with this byte budget, as a host whose capture budget shrank would.
+  captureBudget: undefined as undefined | {path: string; maxBytes: number; when(): boolean},
+  // Each first-open request the service host sent, with the relay's answer.
+  firstOpens: [] as {objectId: string; status: number; kind?: string; reason?: string}[],
+  // The next first-open request to reach `at` stops there until its caller gives up, as when the relay stops at that point:
+  // `build` before the base is built, `check` after the engine checked it and before the writer, `reply` after the base is published.
+  holdFirstOpen: undefined as undefined | {at: "build" | "check" | "reply"; reached(): void},
+  tracePath: "", calls: [] as {method: string; status: "started" | "complete" | "failed"; message?: string; code?: string; detail?: string}[],
 }));
 vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../../../packages/workspace-engine-client/src/daemon/index.js")>();
@@ -131,8 +179,9 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
     const capture = client.captureOwnerActivation.bind(client), adopt = client.sendLiveOwnerAdoption.bind(client), apply = client.sendLiveApplication.bind(client);
     async function trace<T>(method: string, operation: () => Promise<T>): Promise<T> {
       const record = (status: "started" | "complete" | "failed", error?: unknown) => {
-        const wire = error as {wireError?: {code?: string}; code?: string} | undefined;
-        harness.calls.push({method, status, ...(error instanceof Error ? {message: error.message, code: wire?.wireError?.code ?? wire?.code ?? ""} : {})});
+        const wire = error as {wireError?: {code?: string; message?: string}; code?: string} | undefined;
+        harness.calls.push({method, status, ...(error instanceof Error ? {message: error.message, code: wire?.wireError?.code ?? wire?.code ?? "",
+          detail: wire?.wireError?.message ?? ""} : {})});
         writeFileSync(harness.tracePath, JSON.stringify({calls: harness.calls, transforms: harness.transforms, captures: harness.captures}, null, 2));
       };
       record("started");
@@ -166,7 +215,14 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/index.js", async i
         return response;
       };
       if (property === "captureOwnerActivation") return async (...args: Parameters<typeof capture>) => {
-        const result = await trace("captureOwnerActivation", () => capture(...args));
+        const budget = harness.captureBudget, limited = budget?.path === args[1] && budget.when();
+        if (limited) args[2] = budget!.maxBytes;
+        const result = await trace("captureOwnerActivation", () => capture(...args)).catch((error: unknown) => {
+          const wire = (error as {wireError?: {code?: string; message?: string}}).wireError;
+          harness.captureAttempts.push({path: args[1], limited, code: wire?.code ?? "", detail: wire?.message ?? String(error)});
+          throw error;
+        });
+        harness.captureAttempts.push({path: args[1], limited});
         harness.captures.push({activationId: result.activationId, requestedActivationId: args[4], source: result.source});
         return result;
       };
@@ -685,7 +741,8 @@ async function openSelfHostProof(name: string) {
   const root = mkdtempSync(join(resolve(output), `${name}-`)), hostRoot = join(root, "service"), ownerRoot = join(root, "owner");
   mkdirSync(hostRoot); mkdirSync(join(ownerRoot, "docs"), {recursive: true});
   Object.assign(harness, {holdAdoption: false, committed: undefined, failed: undefined, withhold: undefined, holdApplication: undefined, unreachable: new Set(),
-    unpublished: false, pulls: [], releases: [], transforms: [], captures: [], calls: [], tracePath: join(root, "service-rpc-trace.json")});
+    unpublished: false, pulls: [], releases: [], transforms: [], captures: [], captureAttempts: [], captureBudget: undefined, firstOpens: [], holdFirstOpen: undefined,
+    calls: [], tracePath: join(root, "service-rpc-trace.json")});
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
   const admin = new Client({connectionString, connectionTimeoutMillis: 30_000});
   const pool = new Pool({connectionString, options: `-c search_path=${schema}`, connectionTimeoutMillis: 30_000});
@@ -718,6 +775,15 @@ async function openSelfHostProof(name: string) {
     let storage!: ReturnType<typeof openRelayDeployment>["storage"], history!: ReturnType<typeof openRelayDeployment>["history"];
     let frameChanges!: ReturnType<typeof createNamedFrameChanges>, serviceReplication!: ReturnType<typeof createServiceHostReplication>;
     let relayApp!: ReturnType<typeof createSyncRelayHandler>, activations!: ReturnType<typeof storage.createServiceActivationStore>;
+    // A first-open request `harness.holdFirstOpen` stops at `at` waits there until its caller gives up, as when the relay stops at that point.
+    const firstOpenStop = async (at: "build" | "check" | "reply", signal: AbortSignal) => {
+      const hold = harness.holdFirstOpen;
+      if (hold?.at !== at) return;
+      harness.holdFirstOpen = undefined; hold.reached();
+      await new Promise<never>((_resolve, reject) => {
+        if (signal.aborted) reject(signal.reason); else signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+      });
+    };
     const openRelay = () => {
       deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now},
         firstOpenHistory: (read, signal) => validation.readFirstOpenHistory(read, signal)});
@@ -725,10 +791,18 @@ async function openSelfHostProof(name: string) {
       frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners);
       // As main.ts wires it: one publisher, checking with the daemon running when each request arrives.
       const firstOpen = createFirstOpenPublisher({storage, namespace: history.namespace, activation: () => supervisor?.current()?.activationConfig(),
-        host: () => supervisor?.current(), build: (policy, input, signal) => validation.buildFirstOpenBase(policy, input, signal)});
+        host: (): FirstOpenCheckHost | undefined => {
+          const current = supervisor?.current();
+          return current && {async checkFirstOpenCandidate(workspaceId, input, signal) {
+            const answer = await current.checkFirstOpenCandidate(workspaceId, input, signal);
+            await firstOpenStop("check", signal);
+            return answer;
+          }};
+        },
+        build: async (policy, input, signal) => {await firstOpenStop("build", signal); return validation.buildFirstOpenBase(policy, input, signal);}});
       serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, firstOpen,
         authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
-      relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor,
+      relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor, publicEditRelease: {version: 1}, linkKey,
         namedBrowserSessionLimits: profile.browserSessions, ownerRestoreHost: () => supervisor?.current()});
       activations = storage.createServiceActivationStore(history);
     };
@@ -736,13 +810,58 @@ async function openSelfHostProof(name: string) {
     const relayRead = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
     closes.push(async () => relayRead.close());
     let enrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
-    const relayHttp = serveFetchHandler({handler: request => request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.") ? serviceReplication(request)
-      : new URL(request.url).pathname.endsWith("/live-host") ? enrollment!(request) : relayApp(request),
-      maxBodyBytes: () => 8_000_000, oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
+    // The relay's named and link live routes, as main.ts opens them for a self-hosted relay. Each relay process opens its own.
+    let liveRoutes: undefined | {named: ReturnType<typeof createNamedLiveRoutes>; link: ReturnType<typeof createNamedLiveRoutes>; linkHttp: ReturnType<typeof createLinkLiveHttp>};
+    const closeLiveRoutes = async () => {const routes = liveRoutes; liveRoutes = undefined; await routes?.named.close(); await routes?.link.close();};
+    const openLiveRoutes = (hosts: Set<string>) => {
+      const captureNative = (...args: Parameters<ServiceHost["captureNative"]>) => {
+        const host = supervisor?.current();
+        if (!host) throw new Error("No service daemon is running.");
+        return host.captureNative(...args);
+      };
+      const tickets = createLiveTickets({storage, audience, key: ticketKey, hostReports: createLiveHostReports({storage, captureNative})});
+      const sessionHostBlocked = (document: {workspaceId: string; objectId: string}) =>
+        storage.getLiveHostControl()?.configuredMode === "service" && !!supervisor?.stopped(document);
+      const shared = {storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits, bounds: profile.namedLive.host, validate, tickets, captureNative, sessionHostBlocked};
+      liveRoutes = {
+        named: createNamedLiveRoutes({kind: "named", ...shared, sessions: {resolve: relayApp.resolveNamedBrowserSession}}),
+        link: createNamedLiveRoutes({kind: "link", ...shared,
+          sessions: createLinkLiveResolver({publicEditRelease: {version: 1}, storage, linkKey, linkAuthority: relayApp.linkAuthority})}),
+        linkHttp: createLinkLiveHttp({publicEditRelease: {version: 1}, storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits,
+          linkAuthority: relayApp.linkAuthority, sessionHostBlocked}),
+      };
+    };
+    // The service host's requests. A first-open reply that published a base waits while `harness.holdFirstOpen` holds it.
+    const serviceReply = async (request: Request) => {
+      const response = await serviceReplication(request);
+      if (harness.holdFirstOpen?.at === "reply" && new URL(request.url).pathname.endsWith("/hosted/first-open") &&
+        (await response.clone().json().catch(() => undefined) as {outcome?: {kind?: string}} | undefined)?.outcome?.kind === "published") {
+        await firstOpenStop("reply", request.signal);
+      }
+      return response;
+    };
+    const upgrades: Promise<void>[] = [];
+    const relayHttp = serveFetchHandler({handler: request => {
+      const path = new URL(request.url).pathname;
+      return request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.") ? serviceReply(request)
+        : path.endsWith("/live-host") ? enrollment!(request)
+        : path === "/sync/live/named-tickets" ? liveRoutes!.named.handle(request)
+        : isLinkLivePath(path) ? (path === "/sync/live/link-tickets" ? liveRoutes!.link.handle(request) : liveRoutes!.linkHttp(request))
+        : relayApp(request);
+    }, maxBodyBytes: () => 8_000_000, oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
+    relayHttp.on("upgrade", (request, socket, head) => {
+      const url = request.url ?? "", routes = liveRoutes;
+      const upgrade = url.startsWith("/sync/live/named?") ? routes?.named : url.startsWith("/sync/live/link?") ? routes?.link : undefined;
+      if (!upgrade) {socket.destroy(); return;}
+      upgrades.push(upgrade.handleUpgrade(request, socket, head).catch(() => {socket.destroy();}));
+    });
     relayHttp.listen(0, "127.0.0.1"); await once(relayHttp, "listening");
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
-    const relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`;
+    closes.push(async () => {await Promise.allSettled(upgrades);});
+    closes.push(closeLiveRoutes);
+    const relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`, relayHosts = new Set([new URL(relayUrl).host]);
     harness.relayUrl = relayUrl;
+    openLiveRoutes(relayHosts);
     owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value), privateLiveApplication: profile.nativeClient,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
@@ -769,6 +888,7 @@ async function openSelfHostProof(name: string) {
     // A rich document the owner writes and edits ordinarily on their device, each change pushed to the relay.
     // Unless `seeded`, it is only written as text, as an agent writes it, until `open` opens it as the desktop does.
     const ownerDocument = async (path: string, text: string, {seeded = true} = {}) => {
+      mkdirSync(dirname(join(ownerRoot, path)), {recursive: true});
       writeFileSync(join(ownerRoot, path), text);
       const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
       // The owner's Y.Doc, as its engine holds it.
@@ -848,6 +968,64 @@ async function openSelfHostProof(name: string) {
       try {return read(engine);} finally {engine.close();}
     };
     const stopSupervisor = async () => {const stopping = supervisor; supervisor = undefined; await stopping?.close();};
+    // The public share-web server, its account sign-in and its live gateway, started once a test needs a browser or a link agent.
+    let publicPort: Promise<number> | undefined;
+    const openPublic = async () => {
+      const authHttp = serveFetchHandler({handler: request => auth.handler(request), maxBodyBytes: () => 8192, oversized: () => new Response(null, {status: 404}), failure: () => new Response(null, {status: 500})});
+      authHttp.listen(0, "127.0.0.1"); await once(authHttp, "listening");
+      closes.push(() => new Promise<void>(done => authHttp.close(() => done())));
+      const application = createShareWebApplication({publicEditRelease: {version: 1}, relayUrl, publicRelayUrl: audience, relayExchangeKey: exchangeKey,
+        publicHosts: new Set([new URL(audience).host]), accountAuth: {publicOrigin: audience, upstreamUrl: `http://127.0.0.1:${(authHttp.address() as {port: number}).port}`},
+        namedBrowserSessionLimits: browserLimits, namedLiveTickets: true, linkLive: {publicOrigin: audience, requests: browserLimits, editor: profile.editor}});
+      const gateway = createLiveGateway({publicOrigin: audience, publicHosts: new Set([new URL(audience).host]), limits: profile.gateway,
+        resolveSession: async (request, discriminator, signal) => {
+          const authenticated = namedLiveGatewayRequest(request, audience, signal);
+          return authenticated ? application.resolveNamedBrowserSession(authenticated, discriminator) : null;
+        },
+        openHostRoute: createNamedLiveRelayRoute({relayUrl, publicOrigin: audience, exchangeKey, handshakeTimeoutMs: 30000})});
+      const publicHttp = serveFetchHandler({handler: application.handle, maxBodyBytes: () => 32768, oversized: () => new Response(null, {status: 413}), failure: () => new Response(null, {status: 500})});
+      publicHttp.on("upgrade", (request, socket, head) => {upgrades.push(gateway.handleUpgrade(request, socket, head));});
+      publicHttp.listen(0, "127.0.0.1"); await once(publicHttp, "listening");
+      closes.push(() => new Promise<void>(done => publicHttp.close(() => done()))); closes.push(async () => gateway.close());
+      return (publicHttp.address() as {port: number}).port;
+    };
+    // The named collaborator signed in to share-web in their browser.
+    const collaborator = async () => {
+      const port = await (publicPort ??= openPublic());
+      const signedIn = await browserRequest(port, "/api/account/sign-in", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({email: namedUser.email, password})});
+      const cookieName = getCookies({baseURL: audience}).sessionToken.name, cookieLine = signedIn.headers.getSetCookie().find(value => value.startsWith(`${cookieName}=`));
+      if (signedIn.status !== 200 || !cookieLine) throw new Error(`The collaborator could not sign in: ${signedIn.status}`);
+      const cookie = cookieLine.split(";", 1)[0]!, sockets: WebSocket[] = [], providers: Provider[] = [];
+      closes.push(async () => {for (const provider of providers) {provider.close(); provider.doc.destroy();} sockets.forEach(socket => socket.terminate());});
+      return {
+        /** Opens a document in a new browser tab, as the collaborator's link to it does. */
+        open(grantId: string, objectId: string) {
+          const manager = createNamedLiveBrowserTransport({publicOrigin: audience, limits: profile.editor,
+            fetch: (input, init) => {const url = new URL(input instanceof Request ? input.url : input.toString()); return browserRequest(port, url.pathname + url.search, init, cookie);},
+            openSocket: (input, protocols) => {
+              const url = new URL(input);
+              const socket = new WebSocket(`ws://127.0.0.1:${port}${url.pathname}${url.search}`, protocols, {headers: {host: new URL(audience).host, origin: audience, cookie}, perMessageDeflate: false});
+              sockets.push(socket); socket.on("error", () => undefined); socket.once("unexpected-response", (_request, response) => {response.resume(); socket.terminate();});
+              return socket as unknown as BrowserSocket;
+            }});
+          const provider = manager.select({accountId: namedUser.id, workspaceId: `named:${grantId}`, grantId, objectId}); providers.push(provider);
+          return provider;
+        },
+      };
+    };
+    // An agent given an Edit link to `path`, signed in to it over MCP as any MCP client does.
+    const linkAgent = async (path: string) => {
+      const port = await (publicPort ??= openPublic()), send = publicFetch(port);
+      const created = await fetch(`${relayUrl}/sync/workspace/shares/links`, {method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
+        body: JSON.stringify({paths: [path], access: "edit"})});
+      const link = await created.json() as {url?: string};
+      if (created.status !== 200 || !link.url) throw new Error(`The relay refused a link to ${path}: ${created.status} ${JSON.stringify(link)}`);
+      const agent = await signInAgent((target, init) => send(audience + target, init), audience, new URL(link.url).hash.slice(1), "Link agent");
+      const client = new McpClient({name: "self-host-link-agent", version: "1"});
+      closes.push(() => client.close());
+      await client.connect(new StreamableHTTPClientTransport(new URL(agent.resource), {requestInit: {headers: {authorization: `Bearer ${agent.accessToken}`}}, fetch: send}));
+      return {call: (name: string, args: Record<string, unknown> = {}) => client.callTool({name, arguments: args})};
+    };
     const proof = {root, hostRoot, store, executable, expectedHash, relayRead, reports, ownerDocument, ownerEdit: first.edit, objectId, ownerUserId: ownerUser.id,
       route, serviceRead, activation, live, startSupervisor, stopSupervisor,
       /** The relay storage the running relay opened. */
@@ -858,7 +1036,55 @@ async function openSelfHostProof(name: string) {
        * Restarts the relay process: stops the supervisor and its daemon, closes
        * relay storage, reopens it from its durable files, and starts the supervisor again.
        */
-      restartRelay: async () => {await stopSupervisor(); deployment!.storage.close(); openRelay(); await startSupervisor();},
+      restartRelay: async () => {
+        await stopSupervisor(); await closeLiveRoutes(); deployment!.storage.close();
+        openRelay(); openLiveRoutes(relayHosts); await startSupervisor();
+      },
+      namedUserId: namedUser.id, collaborator, linkAgent,
+      /** Shares `folder` with the named collaborator, with Edit. */
+      share: (folder: string, shareId: string, grantId: string) => storage.createShare({share: {shareId, workspaceId: "workspace", granterUserId: ownerUser.id,
+        selectorJson: JSON.stringify({paths: [folder], versionId: null}), createdAtMs: Date.now()}, grant: {grantId, shareId, principalKind: "user",
+        principalUserId: namedUser.id, principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}}),
+      /** How many activation passes started: each pulls its workspace once, ready or not. */
+      passes: () => harness.calls.filter(call => call.method === "sync.pullHosted" && call.status === "started").length,
+      /** The first-open bases the relay published for a document. */
+      firstOpenBases: (object: string) => relayRead.prepare(`SELECT origin_id,payload_json FROM sync_relay_log WHERE workspace_id='workspace'
+        AND origin_id LIKE 'service-host:first-open:%' AND json_extract(payload_json,'$.objectId')=? ORDER BY relay_seq`).all(object)
+        .map(row => ({originId: String(row.origin_id), ...JSON.parse(String(row.payload_json)) as {objectId: string; lineageClaimId: string}})),
+      /** A document's Y.Doc rows in the relay's log: who wrote each, and the lineage it names. */
+      yDocRows: (object: string) => relayRead.prepare(`SELECT origin_id,op_kind,json_extract(payload_json,'$.lineageClaimId') AS lineage FROM sync_relay_log
+        WHERE workspace_id='workspace' AND op_kind LIKE 'ydoc.%' AND json_extract(payload_json,'$.objectId')=? ORDER BY relay_seq`).all(object) as
+        {origin_id: string; op_kind: string; lineage: string | null}[],
+      /** Who wrote a document's first version as a file. */
+      writer: (object: string) => (relayRead.prepare(`SELECT origin_id FROM sync_relay_log WHERE workspace_id='workspace' AND op_kind='moment.append'
+        AND json_extract(payload_json,'$.objectId')=? ORDER BY relay_seq LIMIT 1`).get(object) as {origin_id: string} | undefined)?.origin_id,
+      /** The text of a document's latest file version the relay holds. */
+      latestText: (object: string) => {
+        const row = relayRead.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id='workspace' AND op_kind='moment.append'
+          AND json_extract(payload_json,'$.objectId')=? ORDER BY relay_seq DESC LIMIT 1`).get(object) as {payload_json: string} | undefined;
+        const sha256 = row && (JSON.parse(row.payload_json) as {payloadAfterBlobSha256?: string}).payloadAfterBlobSha256;
+        const blob = sha256 === undefined ? null : storage.getBlob("workspace", sha256);
+        return blob ? new TextDecoder().decode(blob) : undefined;
+      },
+      /** A document's row in Live documents, once `accept` takes it, within `timeout` milliseconds. */
+      statusWhen: (path: string, accept: (row: LiveDocumentRow | undefined) => boolean, timeout = 60_000) => vi.waitFor(async () => {
+        const row = (await route("GET")).body.documents.find((row: LiveDocumentRow) => row.path === path) as LiveDocumentRow | undefined;
+        if (!accept(row)) throw new Error(`Live documents shows ${path} as ${JSON.stringify(row)}.`);
+        return row;
+      }, {timeout, interval: 100}),
+      /** Resolves once `count` more activation passes started, within 30 seconds. */
+      passesAfter: (count: number) => {
+        const from = harness.calls.filter(call => call.method === "sync.pullHosted" && call.status === "started").length;
+        return vi.waitFor(() => {
+          if (harness.calls.filter(call => call.method === "sync.pullHosted" && call.status === "started").length < from + count) throw new Error(`Waiting for ${count} passes.`);
+        }, {timeout: 30_000, interval: 50});
+      },
+      /** The service host's activations of a document it has not released. */
+      unreleased: (object: string) => serviceRead(engine => engine.prepare(`SELECT activation_id FROM live_owner_activations
+        WHERE workspace_id='workspace' AND object_id=? AND released_at_ms IS NULL`).all(object)),
+      /** The Y.Doc lineage the service host holds for a document. */
+      hostLineage: (object: string) => serviceRead(engine => (engine.prepare("SELECT lineage_claim_id AS id FROM ydoc_docs WHERE workspace_id='workspace' AND object_id=?")
+        .get(object) as {id: string | null} | undefined)?.id),
       /** Whether browsers are told live editing of the document is unavailable, as the relay's `main.ts` decides it. */
       sessionHostBlocked: (document: {workspaceId: string; objectId: string}) =>
         storage.getLiveHostControl()?.configuredMode === "service" && supervisor!.stopped(document),
@@ -925,7 +1151,7 @@ async function openSelfHostProof(name: string) {
       }),
       /** The session host's Y.Doc: the digest of its state as a fresh document encodes it, and its Markdown. */
       hostState: () => frameHost(first.document, async (_host, doc) => ({digest: hash(Y.encodeStateAsUpdate(doc)), markdown: yDocToMarkdown(doc)})),
-      documents: async () => (await route("GET")).body.documents as {path: string; status: string; reason?: string}[],
+      documents: async () => (await route("GET")).body.documents as LiveDocumentRow[],
       hosted: (object = objectId) => serviceRead(engine => engine.prepare("SELECT state,held_reason AS reason FROM hosted_documents WHERE workspace_id='workspace' AND object_id=?")
         .get(object) as {state: string; reason: string | null} | undefined),
       /** Engine RPCs the service host started. */
@@ -1580,3 +1806,209 @@ it("detaches a store restored from an older copy before anyone edits it", () => 
   expect(relayRows()).toEqual(pushed);
   return {origin, numbered, pushed: pushed.map(row => row.origin_seq), calls};
 }), 120000);
+
+// `work`, failing once it takes `ms` milliseconds, so a step that never ends fails the test with its name instead of its timeout.
+function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_resolve, reject) => {timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms} ms.`)), ms);});
+  return Promise.race([work, bound]).finally(() => clearTimeout(timer));
+}
+// Opens a collaborator's tab until it is live, as their Try again does, and answers how many tries it took.
+async function openWhenLive(provider: Provider) {
+  let tries = 0;
+  await vi.waitFor(async () => {
+    tries++;
+    await within(provider.reconnect(), 35_000, "Opening the document");
+    await stateWhen(provider, state => state.status === "live");
+  }, {timeout: 90_000, interval: 250});
+  return tries;
+}
+// A live edit in the collaborator's tab, once the relay acknowledged it. Answers the tab's Markdown.
+async function browserEdit(provider: Provider, find: string, replacement: string) {
+  const before = provider.state().lastApplied?.journalCursor ?? 0;
+  expect(provider.edit(() => replaceLiveText(provider.body, find, replacement))).toBe(true);
+  const acknowledged = await within(stateWhen(provider, state => (state.lastApplied?.journalCursor ?? 0) > before && state.pendingUpdates === 0), 30_000, "The live edit");
+  return {ack: acknowledged.lastApplied!, markdown: yDocToMarkdown(provider.doc)};
+}
+// Resolves once the session host settled `markdown` into its file and the relay holds it as the document's latest version.
+const settledAs = (proof: SelfHostProof, path: string, objectId: string, markdown: string) => vi.waitFor(() => {
+  expect(readFileSync(join(proof.store, path), "utf8")).toBe(markdown);
+  expect(proof.latestText(objectId)).toBe(markdown);
+  expect(proof.unpushed()).toEqual([]);
+}, {timeout: 30_000, interval: 100});
+
+// #2069: an agent writes a note into a folder as an ordinary file. The
+// folder is shared with a collaborator, with Edit, and no device opens the note.
+// The collaborator opens it in their browser and edits it live. The relay and
+// its host restart, keeping the settled file and the note's history, and an
+// agent with an Edit link reads and edits it through the ordinary share routes.
+it("lets a collaborator edit live a note an agent wrote as a file and no device opened, through a relay restart, and an Edit link agent continue it", () => withSelfHostProof("self-host-journey", async proof => {
+  const started = Date.now(), path = "notes/trip.md", text = "Bring snacks for the drive.";
+  const note = await proof.ownerDocument(path, text, {seeded: false}), objectId = note.objectId, writerOrigin = proof.writer(objectId);
+  expect(writerOrigin).toBeDefined();
+  // Unshared, the note is no one's live document.
+  await proof.passesAfter(3);
+  expect((await proof.documents()).map(row => row.path)).not.toContain(path);
+  expect(harness.firstOpens.filter(open => open.objectId === objectId)).toEqual([]);
+
+  proof.share("notes", "notes-share", "notes-grant");
+  const browser = await proof.collaborator(), tab = browser.open("notes-grant", objectId);
+  const tries = await openWhenLive(tab);
+  expect(yDocToMarkdown(tab.doc)).toBe(text);
+  const opened = Date.now();
+  const byBrowser = await browserEdit(tab, "snacks", "maps");
+  expect(byBrowser.markdown).toBe("Bring maps for the drive.");
+  await settledAs(proof, path, objectId, byBrowser.markdown);
+
+  // An agent with an Edit link to the note, through share-web's MCP route.
+  const agent = await proof.linkAgent(path);
+  expect(await agent.call("dohc_read_document", {path: "trip.md"})).toMatchObject({structuredContent: {ok: true, markdown: byBrowser.markdown}});
+  expect(await agent.call("dohc_edit_document", {path: "trip.md", find: "maps", replacement: "a map"})).toMatchObject({structuredContent: {ok: true, outcome: "applied"}});
+  await vi.waitFor(() => expect(yDocToMarkdown(tab.doc)).toBe("Bring a map for the drive."), {timeout: 30_000});
+  await settledAs(proof, path, objectId, "Bring a map for the drive.");
+
+  // Only the first open and the service host wrote the note's Y.Doc; the device that wrote the file never did.
+  const bases = proof.firstOpenBases(objectId), yDoc = proof.yDocRows(objectId);
+  expect(bases).toHaveLength(1);
+  expect(yDoc.filter(row => row.origin_id === writerOrigin)).toEqual([]);
+  expect(new Set(yDoc.flatMap(row => row.lineage === null ? [] : [row.lineage]))).toEqual(new Set([bases[0]!.lineageClaimId]));
+  const before = {liveUpdates: proof.journal(objectId), activations: proof.activations(objectId).map(row => row.activation_id), bases, yDoc,
+    file: readFileSync(join(proof.store, path), "utf8"), relay: proof.latestText(objectId)};
+  const asked = harness.firstOpens.filter(open => open.objectId === objectId).length;
+
+  const restarting = Date.now();
+  await within(proof.restartRelay(), 60_000, "Restarting the relay");
+  await proof.statusWhen(path, row => row?.status === "ready");
+  const restarted = Date.now() - restarting;
+  expect(proof.journal(objectId)).toEqual(before.liveUpdates);
+  expect(proof.activations(objectId).map(row => row.activation_id).slice(0, before.activations.length)).toEqual(before.activations);
+  expect(proof.firstOpenBases(objectId)).toEqual(before.bases);
+  expect(proof.yDocRows(objectId).slice(0, before.yDoc.length)).toEqual(before.yDoc);
+  expect(readFileSync(join(proof.store, path), "utf8")).toBe(before.file);
+  expect(proof.latestText(objectId)).toBe(before.relay);
+  expect(harness.firstOpens.filter(open => open.objectId === objectId)).toHaveLength(asked);
+
+  // Both continue after the restart.
+  const reopened = browser.open("notes-grant", objectId);
+  await openWhenLive(reopened);
+  expect(yDocToMarkdown(reopened.doc)).toBe("Bring a map for the drive.");
+  const after = await browserEdit(reopened, "drive", "long drive");
+  await settledAs(proof, path, objectId, after.markdown);
+  expect(await agent.call("dohc_read_document", {path: "trip.md"})).toMatchObject({structuredContent: {ok: true, markdown: after.markdown}});
+  expect(proof.firstOpenBases(objectId)).toEqual(before.bases);
+  expect(proof.yDocRows(objectId).filter(row => row.origin_id === writerOrigin)).toEqual([]);
+  return {objectId, tries, openedMs: opened - started, restartMs: restarted, totalMs: Date.now() - started, bases, liveUpdates: proof.journal(objectId),
+    firstOpens: harness.firstOpens.filter(open => open.objectId === objectId)};
+}), 240_000);
+
+// A note first open cannot start stays an ordinary file: Live documents, and
+// the agents that read it, say why, the collaborator's tab ends unavailable,
+// and the host asks about unchanged content only once.
+it("keeps an unsupported note and a too-large note ordinary files, says why in Live documents, ends the browser unavailable, and asks once", () => withSelfHostProof("self-host-first-open-refused", async proof => {
+  const started = Date.now(), autolink = "See <https://example.com/b>.\n", large = "a".repeat(LIVE_MARKDOWN_MAX_BYTES + 1);
+  const notes = [
+    {...await proof.ownerDocument("docs/autolink.md", autolink, {seeded: false}), text: autolink, refusal: {reason: "unsupported-source", code: "settlement-mismatch", recovery: "none"}},
+    {...await proof.ownerDocument("docs/large.md", large, {seeded: false}), text: large, refusal: {reason: "too-large", code: "source-limit", recovery: "none"}},
+  ];
+  const rows: LiveDocumentRow[] = [];
+  for (const note of notes) {
+    const row = (await proof.statusWhen(note.path, row => row?.firstOpen !== undefined))!;
+    rows.push(row);
+    expect(row).toMatchObject({path: note.path, objectId: note.objectId, status: "unavailable", reason: "live-first-open-refused"});
+    // An agent in the sharing workspace reads this row as dohc_live_documents returns it.
+    expect(FirstOpenOwnerStatus.parse(row.firstOpen)).toEqual({...note.refusal,
+      source: expect.objectContaining({workspaceId: "workspace", objectId: note.objectId, path: note.path})});
+  }
+  const refusedMs = Date.now() - started;
+
+  // The collaborator's tab says it cannot open the note, and does not wait.
+  const browser = await proof.collaborator(), tab = browser.open("grant", notes[0]!.objectId);
+  await within(tab.reconnect(), 35_000, "Opening the refused note");
+  expect(tab.state()).toMatchObject({status: "disconnected", reason: "authority-unavailable"});
+
+  // An Edit link agent reads the file, and its live edit is not applied.
+  const agent = await proof.linkAgent(notes[0]!.path);
+  const read = await within(agent.call("dohc_read_document", {path: "autolink.md"}), 35_000, "The link agent's read");
+  const edit = await within(agent.call("dohc_edit_document", {path: "autolink.md", find: "See", replacement: "Read"}), 35_000, "The link agent's edit");
+  expect.soft(edit).toMatchObject({isError: true});
+
+  // Unchanged content is not asked about, or captured, again.
+  const captures = harness.captureAttempts.length;
+  await proof.passesAfter(10);
+  for (const note of notes) {
+    expect(harness.firstOpens.filter(open => open.objectId === note.objectId)).toEqual([expect.objectContaining({status: 200, kind: "refused", reason: note.refusal.reason})]);
+    expect(proof.firstOpenBases(note.objectId)).toEqual([]);
+    expect(proof.yDocRows(note.objectId)).toEqual([]);
+    expect(proof.activations(note.objectId)).toEqual([]);
+    expect(proof.unreleased(note.objectId)).toEqual([]);
+    expect(proof.latestText(note.objectId)).toBe(note.text);
+    expect((await proof.documents()).find(row => row.path === note.path)).toEqual(rows[notes.indexOf(note)]);
+  }
+  expect(readFileSync(join(proof.store, "docs/autolink.md"), "utf8")).toBe(autolink);
+  expect(harness.captureAttempts.slice(captures)).toEqual([]);
+  return {refusedMs, totalMs: Date.now() - started, rows, read, edit, firstOpens: harness.firstOpens,
+    captures: harness.captureAttempts.filter(attempt => attempt.path !== "docs/a.md")};
+}), 240_000);
+
+// Native refuses the activation after first open published the note's base.
+// The host keeps the engine's code in Live documents, stops capturing the
+// unchanged note, and releases what it held of the refused activation.
+it("reports a native refusal after first open published, with its code, captures once and holds no activation", () => withSelfHostProof("self-host-first-open-native-refused", async proof => {
+  const started = Date.now(), path = "docs/budget.md";
+  // Once a base is published, the host captures the note with a one-byte budget, which the engine refuses.
+  harness.captureBudget = {path, maxBytes: 1, when: () => harness.firstOpens.some(open => open.kind === "published")};
+  const note = await proof.ownerDocument(path, "Too much for one byte", {seeded: false});
+  const limited = () => harness.captureAttempts.filter(attempt => attempt.path === path && attempt.limited);
+  await vi.waitFor(() => expect(limited().filter(attempt => attempt.code !== undefined)).not.toEqual([]), {timeout: 60_000, interval: 100});
+  const refused = limited()[0]!, refusedMs = Date.now() - started;
+  await proof.passesAfter(10);
+  const nativeCode = [refused.detail, refused.code].find(value => value !== undefined && FIRST_OPEN_ACTIVATION_CODE.test(value));
+  const row = (await proof.documents()).find(row => row.path === path);
+  expect.soft(row).toMatchObject({status: "unavailable", reason: "live-first-open-refused",
+    firstOpen: {reason: "ordinary-activation-refused", recovery: "report", ...(nativeCode === undefined ? {} : {code: nativeCode}),
+      source: expect.objectContaining({objectId: note.objectId, path})}});
+  expect.soft(limited(), "captures of the unchanged refused note").toHaveLength(1);
+  expect.soft(proof.unreleased(note.objectId)).toEqual([]);
+  expect.soft(proof.activations(note.objectId).filter(row => !row.completed && !row.retired)).toEqual([]);
+  expect(proof.firstOpenBases(note.objectId)).toHaveLength(1);
+  expect(harness.captureAttempts.filter(attempt => attempt.path === path && attempt.code === undefined)).toEqual([]);
+  return {refused, nativeCode, row, refusedMs, totalMs: Date.now() - started, captures: harness.captureAttempts.filter(attempt => attempt.path === path),
+    firstOpens: harness.firstOpens.filter(open => open.objectId === note.objectId)};
+}), 180_000);
+
+// The relay stops while it builds a note's first-open base, after the engine
+// checked it and before it is written, or after it is published and before
+// the host hears. Once it restarts, the note becomes ready once with its
+// exact bytes, or reports why it cannot, on one history.
+it.for(["build", "check", "reply"] as const)("starts a note once on one history when the relay stops at first open's %s", at => withSelfHostProof(`self-host-first-open-stop-${at}`, async proof => {
+  const started = Date.now(), path = `docs/stopped-${at}.md`, text = `Stopped at ${at}`;
+  let reached!: () => void;
+  const stopped = new Promise<void>(resolve => {reached = resolve;});
+  harness.holdFirstOpen = {at, reached};
+  const note = await proof.ownerDocument(path, text, {seeded: false}), objectId = note.objectId;
+  await within(stopped, 60_000, `First open reaching ${at}`);
+  const basesAtStop = proof.firstOpenBases(objectId).length;
+  expect(basesAtStop).toBe(at === "reply" ? 1 : 0);
+  const restarting = Date.now();
+  await within(proof.restartRelay(), 60_000, "Restarting the relay");
+  const row = (await proof.statusWhen(path, row => row?.status === "ready" || row?.firstOpen !== undefined, 90_000))!;
+  const settledMs = Date.now() - restarting;
+  const bases = proof.firstOpenBases(objectId);
+  expect(bases.length).toBeLessThanOrEqual(1);
+  if (row.status === "ready") {
+    expect(bases).toHaveLength(1);
+    const lineage = bases[0]!.lineageClaimId;
+    expect(proof.hostLineage(objectId)).toBe(lineage);
+    expect(proof.activation(path)?.source.lineageClaimId).toBe(lineage);
+    expect(proof.activations(objectId)).toHaveLength(1);
+    expect(new Set(proof.yDocRows(objectId).flatMap(row => row.lineage === null ? [] : [row.lineage]))).toEqual(new Set([lineage]));
+    await settledAs(proof, path, objectId, text);
+  } else {
+    expect(FirstOpenOwnerStatus.safeParse(row.firstOpen).success).toBe(true);
+  }
+  // It stays as it is.
+  await proof.passesAfter(10);
+  expect((await proof.documents()).find(row => row.path === path)).toEqual(row);
+  expect(proof.firstOpenBases(objectId)).toEqual(bases);
+  return {at, basesAtStop, row, settledMs, totalMs: Date.now() - started, bases, firstOpens: harness.firstOpens.filter(open => open.objectId === objectId)};
+}), 240_000);
