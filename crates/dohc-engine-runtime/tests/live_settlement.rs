@@ -4343,7 +4343,7 @@ async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
 }
 
 #[tokio::test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 async fn reader_restore_dispatches_outside_the_actor_at_every_phase() {
     let vector: serde_json::Value = serde_json::from_str(include_str!(
         "../../dohc-engine-collab/tests/reader-restore.json"
