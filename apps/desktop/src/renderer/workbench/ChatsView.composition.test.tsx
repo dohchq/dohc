@@ -229,7 +229,7 @@ describe("ChatsView agents' chats", () => {
     // Each row says whether its own agent is off or has no runner, and its own unread count.
     expect(within(rows[0]!).queryByTestId("chats-my-agent-state")).toBeNull();
     expect(within(rows[1]!).getByTestId("chats-my-agent-state").textContent).toBe("off");
-    expect(within(rows[2]!).getByTestId("chats-my-agent-state").textContent).toBe("not set up");
+    expect(within(rows[2]!).getByTestId("chats-my-agent-state").textContent).toBe("removed");
     expect(within(rows[1]!).getByTestId("chats-my-agent-unread").textContent).toBe("3");
     expect(within(rows[2]!).getByTestId("chats-my-agent-unread").textContent).toBe("1");
     // An unread agent chat's name goes bold beside its ink count; a read one stays regular.
@@ -255,10 +255,12 @@ describe("ChatsView agents' chats", () => {
         channel({ id: "chat-default", name: "My agent", slug: "agent", kind: "agent", agentId: "default" }),
         channel({ id: "chat-codex", name: "Codex", slug: "agent-codex", kind: "agent", agentId: "codex" }),
         channel({ id: "chat-scout", name: "Scout", slug: "agent-scout", kind: "agent", agentId: "scout" }),
+        channel({ id: "chat-terminal", name: "Terminal", slug: "agent-terminal", kind: "agent", agentId: "terminal" }),
       ],
       fileThreads: [],
     });
     const settings = settingsWithAgent({ name: "Claude Code", launch: { command: "claude -p" } });
+    const { launch: _launch, ...terminal } = testAgent({ name: "Terminal", hue: "rose", enabled: false });
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
         workspaceId: "workspace-a",
@@ -275,12 +277,13 @@ describe("ChatsView agents' chats", () => {
           ...settings.agents,
           codex: testAgent({ name: "Codex", hue: "teal", launch: { command: "codex exec" } }),
           scout: testAgent({ name: "Scout", enabled: false }),
+          terminal,
         },
       },
       onSaveUserSettings: vi.fn(async () => undefined),
     });
 
-    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByTestId("chats-my-agent")).toHaveLength(4));
     await user.click(screen.getAllByTestId("chats-my-agent")[1]!);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Codex");
     expect(screen.queryByTestId("chats-agent-problem")).toBeNull();
@@ -294,6 +297,14 @@ describe("ChatsView agents' chats", () => {
     await user.click(scout);
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Scout");
     expect(screen.getByTestId("chats-agent-problem").textContent).toBe("Scout is off.");
+
+    // An agent you run has no launch, and is neither off nor missing a setup.
+    await user.click(await screen.findByTestId("chats-channel-back"));
+    const yours = (await screen.findAllByTestId("chats-my-agent"))[3]!;
+    expect(within(yours).queryByTestId("chats-my-agent-state")).toBeNull();
+    await user.click(yours);
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Terminal");
+    expect(screen.queryByTestId("chats-agent-problem")).toBeNull();
   });
 
   it("names the program a runner command starts, with the whole command on hover", () => {

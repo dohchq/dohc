@@ -85,6 +85,8 @@ test("an agent you run gets a message in its chat and replies as itself while a 
     await expect.poll(() => agentsListening(page), { timeout: 30_000 }).toEqual(["terminal"]);
 
     await openAgentChat(page, "terminal", "Terminal");
+    // Its chat has no setup to finish: it answers while it's connected.
+    await expect(page.getByTestId("chats-agent-problem")).toHaveCount(0);
     await page.getByTestId("chats-lane-composer").fill("are you there?");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
