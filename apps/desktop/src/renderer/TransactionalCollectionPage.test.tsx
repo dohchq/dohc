@@ -390,6 +390,16 @@ describe("transactional Collection page", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Edit Name" }));
   });
+  it("keeps an edit it has not opened again when its page closes before its records load", async () => {
+    const first = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    first.unmount();
+    // The Collection opens again, and another file opens before its records load.
+    render(<TransactionalCollectionPage {...first.props} invoke={() => new Promise<never>(() => undefined)} />).unmount();
+    render(<TransactionalCollectionPage {...first.props} />);
+    expect((await screen.findByLabelText<HTMLInputElement>("Name")).value).toBe("Alicia");
+  });
   it("opens no edit again that was cancelled, has no changes, or belongs to rules that changed", async () => {
     const reopen = async (props: React.ComponentProps<typeof TransactionalCollectionPage>, typed: string | null, cancel = false) => {
       const view = render(<TransactionalCollectionPage {...props} />);

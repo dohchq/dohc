@@ -296,17 +296,19 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   useEffect(() => {
     keptEdits.delete(keptKey);
     // A change still saving goes on without the page and reports how it ended, so its edit is not kept.
-    return () => { if (keeping.current && !mutation.current) keptEdits.set(keptKey, keeping.current); };
+    // An edit not opened again yet, because the page closed before its records showed, stays kept.
+    return () => { const kept = keeping.current ?? restoring.current; if (kept && !mutation.current) keptEdits.set(keptKey, kept); };
   }, [keptKey]);
   useLayoutEffect(() => {
     const kept = restoring.current;
-    if (!kept || (page === null && !visual)) return;
+    // A board or calendar opens the edit once its view has read, since the page's first load closes record details.
+    if (!kept || (visual ? visualRefresh === 0 || visualBusy : page === null)) return;
     restoring.current = null;
     // The Collection's fields or rules changed while the page was closed, so the edit may no longer apply.
     if (kept.contract !== contractKey) return;
     setDraft(kept.draft); setInvalid({}); setEditor(kept.editor);
     if (kept.inDetails && kept.editor.kind === "edit") { const row = kept.editor.row; setDetails(page?.rows.find(shown => sameRecord(shown, row)) ?? row); }
-  }, [page, visual]);
+  }, [page, visual, visualRefresh, visualBusy]);
   useEffect(() => {
     const view = selectedView;
     setPage(null);

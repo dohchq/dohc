@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { BoardViewProps, CalendarViewProps } from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
@@ -89,6 +89,25 @@ it("routes board moves through approved edits with the real version, then offers
   fireEvent.click(await screen.findByRole("button",{name:"Move 4"}));
   await screen.findByRole("button",{name:"Undo last edit"});
   expect(invoke.mock.calls.find(([request])=>request.operationId==="edit")?.[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,operationId:"edit",input:{id:4,expectedVersion:7,values:{status:"Done"}}});
+});
+it("opens a board edit with changes again in record details when its page closes and opens again",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
+  });
+  const first=setup(invoke);
+  fireEvent.click(await screen.findByRole("button",{name:"Show 4"}));
+  const before=screen.getByRole("dialog",{name:"Record details"});
+  fireEvent.click(within(before).getByRole("button",{name:"Edit Status"}));
+  fireEvent.change(within(before).getByLabelText("Status"),{target:{value:"Done"}});
+  first.unmount();
+  render(<TransactionalCollectionPage {...first.props}/>);
+  const dialog=await screen.findByRole("dialog",{name:"Record details"});
+  const input=within(within(dialog).getByRole("form",{name:"Edit Status"})).getByLabelText<HTMLSelectElement>("Status");
+  expect(input.value).toBe("Done");
+  expect(document.activeElement).toBe(input);
+  fireEvent.keyDown(input,{key:"Escape"});
+  expect(document.activeElement).toBe(within(dialog).getByRole("button",{name:"Edit Status"}));
 });
 it("does not move offline records and refuses an authored read that ignores board filtering",async()=>{
   const invoke=vi.fn(async()=>({result:{...empty,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}));
