@@ -2272,8 +2272,9 @@ fn retired_kept_predecessor(
     // Either this machine's own conflict is open, or none opened here because
     // the other machine's edit waited for the history this deletion retired.
     // A second deletion here may be one the other machine never reviewed. A
-    // rollback leaves no row for the deletion it undoes, but its write brings
-    // the note back from absent, as a creation does.
+    // rollback leaves no row for the change it undoes, so any rollback of the
+    // note here asks too. Its row's id comes from
+    // `rollback_compensating_moment_id`.
     let deletion_reviewed: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2 \
@@ -2283,8 +2284,8 @@ fn retired_kept_predecessor(
                      AND (path=?4 OR current_object_id=?3 OR incoming_object_id=?3)))) \
                AND (SELECT COUNT(*) FROM moments WHERE workspace_id=?1 AND version_id=?5 \
                    AND object_id=?3 AND operation='delete')=1 \
-               AND (SELECT COUNT(*) FROM moments WHERE workspace_id=?1 AND version_id=?5 \
-                   AND object_id=?3 AND operation='write' AND before_present IN (0,1))<=1)",
+               AND NOT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?5 \
+                   AND object_id=?3 AND substr(moment_id,1,9)='rollback-'))",
             params![
                 payload.workspace_id,
                 payload.conflict_id,
