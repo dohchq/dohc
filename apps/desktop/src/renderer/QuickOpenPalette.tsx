@@ -57,7 +57,13 @@ export function QuickOpenPalette(props: {
       ariaLabel="File"
       commands={commands}
       rank={rank}
+      emptyText={quickOpenEmptyText}
       onClose={props.onClose}
     />
   );
+}
+
+function quickOpenEmptyText(query: string): string {
+  const search = query.trim();
+  return search ? `No files match "${search}". Try a shorter search.` : "No files yet.";
 }
