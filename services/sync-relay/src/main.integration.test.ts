@@ -30,6 +30,9 @@ const loopbackListenDenied = await new Promise<boolean>((resolve) => {
   server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EPERM"));
   server.listen(0, "127.0.0.1", () => server.close(() => resolve(false)));
 });
+if (loopbackListenDenied && process.env.DOHC_REQUIRE_ENGINE_E2E === "1") {
+  throw new Error("Required relay process tests cannot listen on loopback.");
+}
 
 const WORKSPACE_ID = "workspace-live-relay";
 const USER_ID = "sync-user";

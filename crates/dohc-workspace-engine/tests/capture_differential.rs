@@ -13,7 +13,7 @@
 //! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

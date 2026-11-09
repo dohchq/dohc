@@ -1337,9 +1337,7 @@ async function runEngineDaemonSmoke(
 ): Promise<JsonValue> {
   const rootDir = await mkdtemp(join(tmpdir(), "dohc-rust-engine-smoke-"));
   try {
-    // Unique per invocation: the background startup smoke can overlap an
-    // explicit smoke (tests, restarts) in the same process, and two live
-    // opens must never share one workspaceId.
+    // Concurrent lifecycles and restarts must use separate workspace identities.
     return await smokeWorkspace(rootDir, `desktop-startup-smoke-${randomUUID()}`);
   } finally {
     try {
@@ -1350,14 +1348,6 @@ async function runEngineDaemonSmoke(
       onCleanupFailure(error);
     }
   }
-}
-
-export async function runEngineDaemonStartupSmoke(
-  lifecycle: EngineDaemonLifecycle,
-): Promise<JsonValue> {
-  return await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
-    await lifecycle.smokeWorkspace(rootDir, workspaceId),
-  );
 }
 
 export function createRustEngineDaemon(

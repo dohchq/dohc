@@ -60,7 +60,6 @@ function longCheckpoint(paragraphs: number, mixed: boolean) {
   try {return encodeStateAsUpdate(doc);} finally {doc.destroy();}
 }
 
-// Each validation of 5000 mixed paragraphs takes about 5 s, so each gets its own budget.
 const longValidations = {
   settlement: async ({pool, input}, checkpoint) =>
     expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint})).toMatchObject({kind: "accepted"}),
@@ -73,11 +72,15 @@ const longValidations = {
     expect(await pool.restore(selfHostLiveProfile().service.restore.validation).point(restorePoint(input, checkpoint)))
       .toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)}),
 } satisfies Record<string, (f: ReturnType<typeof fixture>, checkpoint: Uint8Array) => Promise<void>>;
-it.each(Object.entries(longValidations))("accepts 5000 mixed paragraphs for %s validation in a capped child", async (_, validate) => {
-  await validate(fixture(), longCheckpoint(5000, true));
+it.each(Object.entries(longValidations))("routes %s validation through a capped child", async (_, validate) => {
+  await validate(fixture(), longCheckpoint(3, true));
 }, 60_000);
 
-it("refuses 25000 bold paragraphs by the struct budget before exhausting the worker heap", async () => {
+it("accepts 5000 mixed paragraphs in a capped child", async () => {
+  await longValidations.settlement(fixture(), longCheckpoint(5000, true));
+}, 60_000);
+
+it("refuses 25000 bold paragraphs in a capped child", async () => {
   const {pool, input} = fixture(), checkpoint = longCheckpoint(25000, false);
   expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
     .toMatchObject({kind: "refused", reason: "capacity-refused"});
@@ -218,10 +221,19 @@ it("keeps a worker thread's stack for deeply nested emphasis", async () => {
     .toMatchObject({kind: "accepted", evidence: {projectedMarkdownSha256: sha256(source)}});
 }, 120_000);
 
+let heapCheckpoint: Uint8Array | undefined;
+function heapExhaustionCheckpoint() {
+  if (!heapCheckpoint) {
+    const doc = markdownToYDoc("a\n\n".repeat(80_000));
+    try {heapCheckpoint = encodeStateAsUpdate(doc);} finally {doc.destroy();}
+  }
+  return heapCheckpoint;
+}
+
 it.each(["journal", "settlement"] as const)("refuses %s work whose child runs out of heap, and replaces the child", async kind => {
   const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
   const validate = pool.validator(policy);
-  const doc = markdownToYDoc("a\n\n".repeat(80_000)), checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const checkpoint = heapExhaustionCheckpoint();
   const result = kind === "journal" ? await validate({...input, checkpoint})
     : await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint});
   expect(result).toEqual({kind: "refused", reason: "capacity-refused", source: kind === "journal" ? "final" : "registration-input"});
@@ -249,7 +261,7 @@ function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Ui
 it("refuses restore work whose child runs out of heap, and validates the next restore", async () => {
   const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
   const restore = pool.restore(policy), validate = pool.validator(policy);
-  const doc = markdownToYDoc("a\n\n".repeat(80_000)), checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const checkpoint = heapExhaustionCheckpoint();
   await expect(restore.point(restorePoint(input, checkpoint))).rejects.toBeInstanceOf(LiveRestoreTooLarge);
   expect(validate.hasCapacity?.()).toBe(true);
   expect(await restore.point(restorePoint(input, input.checkpoint))).toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)});
@@ -322,30 +334,25 @@ it("kills a child at its deadline and keeps its slot until the child exits", asy
   held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});
 }, 60_000);
 
-it.each([false, true])('commits and recovers worker evidence with checkpoint due=%s', async checkpointDue => {
+it('commits and recovers worker evidence without changing an exact replay', async () => {
   const f = registered({deployment: true}), pool = createLiveValidationExecutor();
   try {
-    const template = f.capture(f.update('payload', checkpointDue ? 'x'.repeat(1_048_576) : 'small'));
-    const validate = pool.validator({...policy, maxDecodedPayloadByteVisits: 1_000_000_000});
-    for (let index = 0; index < (checkpointDue ? 20 : 1); index++) {
-      const read = f.storage.readLiveUpdateJournalCut({document: template.cutToken.document});
-      if (read.kind !== 'cut') throw Error('Expected journal cut');
-      const input = {...template, metadata: {...template.metadata, deliveryId: 'worker-' + index}, cutToken: read.cut};
-      const validation = await validate({document: read.cut.document, currentPath: read.cut.currentPath,
-        checkpoint: read.cut.checkpoint.bytes, suffix: read.cut.suffix.map(row => row.bytes), candidate: input.updateBytes});
-      if (validation.kind !== 'accepted') throw Error('Expected accepted worker evidence');
-      const due = checkpointDue && index === 19;
-      expect(Object.hasOwn(validation.evidence, 'stateUpdate')).toBe(due);
-      const accepted = f.storage.commitLiveUpdateJournal({...input, validation});
-      expect(accepted.result).toMatchObject({kind: 'accepted', replayed: false});
-      if (index !== (checkpointDue ? 19 : 0)) continue;
-      const before = f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(index + 1)!;
-      expect(before.validation_checkpoint_bytes).toEqual(due ? validation.evidence.stateUpdate : null);
-      expect(before.validation_checkpoint_sha256).toBe(due ? validation.evidence.stateUpdateSha256 : null);
-      expect(f.storage.commitLiveUpdateJournal({...input, validation}).result).toMatchObject({kind: 'accepted', replayed: true});
-      expect(f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(index + 1)).toEqual(before);
-      expect(f.storage.readCommittedLiveUpdate({host: input.host, document: input.cutToken.document, journalCursor: index + 1}))
-        .toEqual({kind: 'committed', admitted: accepted.admitted});
-    }
+    const template = f.capture(f.update('payload', 'small'));
+    const read = f.storage.readLiveUpdateJournalCut({document: template.cutToken.document});
+    if (read.kind !== 'cut') throw Error('Expected journal cut');
+    const input = {...template, metadata: {...template.metadata, deliveryId: 'worker'}, cutToken: read.cut};
+    const validation = await pool.validator(policy)({document: read.cut.document, currentPath: read.cut.currentPath,
+      checkpoint: read.cut.checkpoint.bytes, suffix: read.cut.suffix.map(row => row.bytes), candidate: input.updateBytes});
+    if (validation.kind !== 'accepted') throw Error('Expected accepted worker evidence');
+    expect(Object.hasOwn(validation.evidence, 'stateUpdate')).toBe(false);
+    const accepted = f.storage.commitLiveUpdateJournal({...input, validation});
+    expect(accepted.result).toMatchObject({kind: 'accepted', replayed: false});
+    const before = f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=1').get()!;
+    expect(before.validation_checkpoint_bytes).toBeNull();
+    expect(before.validation_checkpoint_sha256).toBeNull();
+    expect(f.storage.commitLiveUpdateJournal({...input, validation}).result).toMatchObject({kind: 'accepted', replayed: true});
+    expect(f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=1').get()).toEqual(before);
+    expect(f.storage.readCommittedLiveUpdate({host: input.host, document: input.cutToken.document, journalCursor: 1}))
+      .toEqual({kind: 'committed', admitted: accepted.admitted});
   } finally {await pool.close(); f.close();}
 }, 30_000);

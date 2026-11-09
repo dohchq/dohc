@@ -569,7 +569,7 @@ mod tests {
         ApplicationHandle,
     ) {
         let dir = ScratchDir::new_named("live-bootstrap").unwrap();
-        let store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let store = dohc_engine_testkit::open_empty_store(&dir.join("engine.db"), 0);
         registered_fixture(vector, dir, store)
     }
     fn registered_fixture(

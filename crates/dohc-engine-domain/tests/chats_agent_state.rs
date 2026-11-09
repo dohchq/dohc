@@ -15,7 +15,7 @@ const UNNAMED: AgentReader = AgentReader::Unnamed;
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    let store = EngineStore::open(&db, 1).expect("open");
+    let store = dohc_engine_testkit::open_empty_store(&db, 1);
     (scratch, store)
 }
 

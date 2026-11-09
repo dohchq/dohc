@@ -8,6 +8,7 @@ import { artifactFingerprint, artifactSourceFingerprint } from "./build.mjs";
 
 const probe = "apps/desktop/resources/agent-probe";
 const node = "apps/desktop/resources/app-compiler/node.exe";
+const reader = "apps/desktop/resources/engine-reader";
 
 function scratch(t, prefix) {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -22,8 +23,28 @@ function artifacts(t) {
     mkdirSync(join(fixture.root, directory), { recursive: true });
   }
   fixture.write(node, "node");
+  fixture.write(`${reader}/selection.json`, "selection");
+  for (const name of ["node", "reader.cjs", "manifest.json"]) fixture.write(`${reader}/generation/${name}`, name);
   for (const name of ["agentProbeOwner.exe", "agentProbeRelay.mjs", "manifest.json"]) fixture.write(`${probe}/${name}`, name);
   return fixture;
+}
+
+for (const [platform, arch] of [["win32", "x64"], ["darwin", "arm64"], ["linux", "x64"]]) {
+  test(`a ${platform} ${arch} desktop artifact rejects reader drift and missing generations`, t => {
+    const { root, write } = artifacts(t);
+    const fingerprint = () => artifactFingerprint("desktop", root, platform, arch);
+    const prepared = fingerprint();
+    for (const path of [`${reader}/selection.json`, ...["node", "reader.cjs", "manifest.json"].map(name => `${reader}/generation/${name}`)]) {
+      write(path, "drift");
+      assert.notEqual(fingerprint(), prepared, `${path} changed`);
+      rmSync(join(root, path));
+      assert.notEqual(fingerprint(), prepared, `${path} deleted`);
+      write(path, path.endsWith("selection.json") ? "selection" : path.split("/").at(-1));
+      assert.equal(fingerprint(), prepared);
+    }
+    rmSync(join(root, reader), { recursive: true });
+    assert.throws(fingerprint, { code: "ENOENT" });
+  });
 }
 
 test("a Windows x64 desktop artifact rejects a changed, deleted or missing probe closure", t => {
@@ -59,9 +80,16 @@ test("other targets do not read the probe or compiler trees", t => {
   const { root } = artifacts(t);
   rmSync(join(root, probe), { recursive: true });
   rmSync(join(root, dirname(node)), { recursive: true });
+  rmSync(join(root, reader), { recursive: true });
   assert.doesNotThrow(() => artifactFingerprint("desktop", root, "linux", "arm"));
   assert.doesNotThrow(() => artifactFingerprint("desktop", root, "win32", "arm64"));
   assert.doesNotThrow(() => artifactFingerprint("desktop", root, "darwin", "x64"));
+});
+
+test("Linux arm64 does not require a desktop reader", t => {
+  const { root } = artifacts(t);
+  rmSync(join(root, reader), { recursive: true });
+  assert.doesNotThrow(() => artifactFingerprint("desktop", root, "linux", "arm64"));
 });
 
 test("desktop production inputs cover the probe sources and ignore staged probe output", t => {

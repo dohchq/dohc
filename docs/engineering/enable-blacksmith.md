@@ -65,7 +65,8 @@ gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runne
 The `gate` input accepts `all`, `js`, or `rust`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
-The JavaScript job has a 60-minute timeout, and the engine gate has 90 minutes.
+Complete cloud gate budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
+Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
@@ -93,7 +94,7 @@ If projected spending exceeds the budget, reduce unnecessary reruns or follow th
 PR checks continue on GitHub-hosted runners after Blacksmith is off.
 
 At $0.008 per minute, 950 PRs averaging ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
-Count both test jobs across every run on each PR, including cancelled runs.
+Count all gate jobs across every run on each PR, including cancelled runs.
 The 2-vCPU selection and verdict jobs add cost beyond those test-job minutes.
 Use ten minutes per PR as a planning target, not a measured runtime or permission to remove required tests.
 The free allowance is shared across the organization; check its remaining balance before including it in the budget.
@@ -108,7 +109,7 @@ It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
 The local gate runs no Linux JavaScript, so the replica suites run only in this job.
 
-Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript job moves that file aside, so the login shell tests read the profile in their own `HOME`.
+Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript shards move that file aside, so the login shell tests read the profile in their own `HOME`.
 
 ## Read the result
 

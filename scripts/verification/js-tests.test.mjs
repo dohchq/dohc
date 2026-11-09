@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { cancellationScope } from "./cancellation.mjs";
-import { jsShards, runBounded, shardTasks, takeJsShard, testPlan, testWorkspace } from "./js-tests.mjs";
+import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
@@ -778,87 +778,6 @@ for (const scenario of ["success", "lane-reuse", "proof-failure", "package-failu
     } finally { rmSync(root, {recursive: true, force: true}); }
   });
 }
-
-test("DOHC_JS_SHARD names one shard, leaves the environment, and defaults to one whole run", () => {
-  const env = {DOHC_JS_SHARD: "packages", OTHER: "kept"};
-  assert.equal(takeJsShard(env), "packages");
-  assert.deepEqual(env, {OTHER: "kept"}, "a verifier that a test starts must run whole");
-  assert.equal(takeJsShard({}), null);
-  assert.equal(takeJsShard({DOHC_JS_SHARD: ""}), null);
-  for (const shard of ["Desktop", "all", "desktop,packages"]) assert.throws(() => takeJsShard({DOHC_JS_SHARD: shard}), /must be one of desktop, packages, proofs/);
-});
-
-test("the shards split every package test between them exactly once", () => {
-  const tasks = ["@dohc/desktop", "@dohc/sync-relay", "@dohc/ydoc-projection", "@dohc/workspace-api"].map(name => ({name}));
-  assert.deepEqual(shardTasks(tasks, null), tasks);
-  assert.deepEqual(shardTasks(tasks, "desktop").map(task => task.name), ["@dohc/desktop"]);
-  assert.deepEqual(shardTasks(tasks, "packages").map(task => task.name), ["@dohc/sync-relay", "@dohc/ydoc-projection", "@dohc/workspace-api"]);
-  assert.deepEqual(shardTasks(tasks, "proofs"), []);
-  assert.deepEqual(jsShards.flatMap(shard => shardTasks(tasks, shard)).map(task => task.name).sort(), tasks.map(task => task.name).sort());
-});
-
-test("each shard runs its own lanes one package at a time, and together they run what one whole run does", () => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-js-shards-"));
-  const put = (path, value) => {
-    mkdirSync(dirname(join(root, path)), {recursive: true});
-    writeFileSync(join(root, path), value);
-  };
-  try {
-    put("package.json", '{"type":"module"}');
-    for (const name of ["desktop", "share-web", "relay", "tail"]) {
-      put(`packages/${name}/package.json`, JSON.stringify({name: `@dohc/${name}`, scripts: {test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {})}}));
-    }
-    copyFlakyFixture(root);
-    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
-    put("scripts/verification/process.mjs", `
-      import {resolve} from 'node:path';
-      import {setImmediate} from 'node:timers/promises';
-      export const repoRoot=resolve(import.meta.dirname,'../..');
-      export const pnpm=args=>['pnpm',args];
-      export const started=[], active=new Set();
-      export let packagePeak=0, scriptsBesideDesktop=false;
-      export async function run(_command,args){
-        if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','relay','tail'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
-        const name=args[0]==='proof'?'proofs':args[0]==='run'?'repository':args[3].startsWith('test:scripts:')?args[3]:args[1];
-        started.push(name);active.add(name);
-        if(active.has('@dohc/desktop')&&[...active].some(name=>name.startsWith('test:scripts:')))scriptsBesideDesktop=true;
-        packagePeak=Math.max(packagePeak,[...active].filter(name=>name.startsWith('@dohc/')).length);
-        for(let i=0;i<5;i++)await setImmediate();
-        active.delete(name);return {stdout:''};
-      }
-    `);
-    put("driver.mjs", `
-      import {readFileSync} from 'node:fs';
-      import {testWorkspace} from './scripts/verification/js-tests.mjs';
-      import {run,started,packagePeak,scriptsBesideDesktop} from './scripts/verification/process.mjs';
-      const shard=process.argv[2]||null;
-      await testWorkspace({prepared:true,output:'evidence',shard,runProofs:async()=>{await run('fixture',['proof']);}});
-      const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
-      console.log(JSON.stringify({started:started.filter(name=>name!=='inventory').sort(),packagePeak,scriptsBesideDesktop,concurrency:report.concurrency,shard:report.shard??null,proofs:report.proofs,verdict:report.verdict}));
-    `);
-    const drive = shard => {
-      const result = spawnSync(process.execPath, ["driver.mjs", ...(shard ? [shard] : [])], {cwd: root, encoding: "utf8", timeout: 20_000});
-      assert.equal(result.status, 0, result.stderr);
-      return JSON.parse(result.stdout.trim().split("\n").at(-1));
-    };
-    const whole = drive(null);
-    assert.deepEqual(whole.started, ["@dohc/desktop", "@dohc/relay", "@dohc/share-web", "@dohc/tail", "proofs", "repository", "test:scripts:isolated", "test:scripts:runtime"]);
-    assert.equal(whole.concurrency, 2);
-    const desktop = drive("desktop"), packages = drive("packages"), proofs = drive("proofs");
-    assert.deepEqual(desktop.started, ["@dohc/desktop", "test:scripts:isolated", "test:scripts:runtime"]);
-    assert.equal(desktop.scriptsBesideDesktop, false, "the desktop shard's isolated scripts wait for its unit tests");
-    assert.deepEqual(packages.started, ["@dohc/relay", "@dohc/share-web", "@dohc/tail"]);
-    assert.deepEqual(proofs.started, ["proofs", "repository"]);
-    assert.deepEqual([...desktop.started, ...packages.started, ...proofs.started].sort(), whole.started, "the shards together run every step once");
-    for (const [shard, run] of Object.entries({desktop, packages, proofs})) {
-      assert.equal(run.verdict, "PASS");
-      assert.equal(run.shard, shard);
-      assert.equal(run.concurrency, 1);
-      assert.ok(run.packagePeak <= 1, `${shard} ran ${run.packagePeak} packages at once`);
-      assert.equal(run.proofs, shard === "proofs");
-    }
-  } finally { rmSync(root, {recursive: true, force: true}); }
-});
 
 for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false, onlyDesktop = false} of [
   {name:"desktop preflight finishes unit tests before starting isolated scripts",onlyDesktop:true},

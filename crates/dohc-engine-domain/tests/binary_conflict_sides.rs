@@ -39,7 +39,7 @@ fn assert_combined_text_refused(err: &DomainError) {
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch dir");
     let path = engine_db_path(&scratch).expect("db path");
-    let mut store = EngineStore::open(&path, 1_000).expect("open store");
+    let mut store = dohc_engine_testkit::open_empty_store(&path, 1_000);
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1_000, &NoFaults)
         .expect("workspace");

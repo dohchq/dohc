@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
+import { HOST_STOP_UI_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
 import { deferred } from "../testing/deferred";
 import {
   LiveDocumentsDialog,
@@ -93,8 +93,7 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
-  it.each(HOST_STOP_CASES.flatMap(([code, sessionHost, words, control]) =>
-    (["ready", "paused"] as const).map(status => ({code, sessionHost, words, control, status}))))(
+  it.each(HOST_STOP_UI_CASES)(
     "keys $code on a $status row on code alone ($sessionHost)", async ({code, sessionHost, words, control, status}) => {
     const h = harness(), user = userEvent.setup();
     h.load.mockResolvedValueOnce(page([row("a.md", {status, canResume: true})])).mockResolvedValue(page([row("a.md")]));

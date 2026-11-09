@@ -3,7 +3,7 @@
 //! differential check must catch, rollback/crash semantics, compaction
 //! re-base byte-equality, eviction, and the forced-close containment pin.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;

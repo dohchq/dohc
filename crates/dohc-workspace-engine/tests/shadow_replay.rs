@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use base64::Engine as _;
 use common::call_with_busy_retry;
 use dohc_engine_collab::{ContentKind, DocKey, Ydoc, load_persisted};

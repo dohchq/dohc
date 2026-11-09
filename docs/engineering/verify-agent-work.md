@@ -103,7 +103,14 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks split the JavaScript gate into three jobs, `desktop`, `packages`, and `proofs`, and `PR verification` passes only when all three pass. A local `pnpm verify:pr` still runs the whole gate.
+PR checks distribute the selected JavaScript inventory across pure and native shards, with shared desktop preparation and separate confinement proofs.
+The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
+Each aggregate requires passing receipts for every assigned task. `PR verification` also checks the completed job times.
+A local `pnpm verify:pr` still runs the whole selected gate.
+The cloud budgets are 300 s for JavaScript and 600 s for Rust, from selection's actual start through the gate's last required job finish.
+These times include preparation, internal scheduling, transfers, confinement, and aggregate reporting. Report the initial runner queue separately.
+For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.
+Read the cache logs before describing a hit or miss. A requested cache condition alone does not establish one.
 Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change the optional Blacksmith runners.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
 Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).

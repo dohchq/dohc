@@ -58,7 +58,7 @@ test("History runner retains release results and rejects debug results or a revo
         release() { assert.equal(exited, true); released = true; } }),
       async execute(exe, args, options) {
         assert.equal(exe, spec.exe);
-        assert.deepEqual(args, ["history_page_benchmark", "--exact", "--ignored", "--nocapture"]);
+        assert.deepEqual(args, ["history_page_benchmark", "--ignored", "--nocapture"]);
         assert.equal(options.env.HISTORY_BENCH_MODE, "candidate");
         assert.equal(options.env.HISTORY_BENCH_ENTRIES, "100000");
         assert.ok(options.env.DOHC_TEST_SCRATCH_ROOT.startsWith(spec.root));

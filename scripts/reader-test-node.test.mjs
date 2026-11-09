@@ -11,7 +11,7 @@ import { testScratchParent } from "../tools/rust-engine-program/scratch-leak-rep
 const bytes = Buffer.from("a stand-in for the pinned Node");
 const hash = createHash("sha256").update(bytes).digest("hex");
 const readNode = async () => bytes;
-// Staging is macOS-only; Windows refuses to rename a folder onto another one.
+// Windows refuses to rename a folder onto another one.
 const posix = { skip: process.platform === "win32" };
 // What a starting reader compares, plus the write time.
 const identity = path => { const { ino, ctimeNs, mtimeNs } = statSync(path, { bigint: true }); return { ino, ctimeNs, mtimeNs }; };

@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use dohc_engine_collab::{ContentKind, DocKey};
 use dohc_engine_domain::{

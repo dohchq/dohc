@@ -256,11 +256,13 @@ export function directoryFingerprint(path) {
 // The Windows x64 probe owner and relay run on the compiler's pinned Node, so both trees are desktop artifacts.
 // macOS and Linux stage only the Collection compiler's esbuild binary.
 const compilerTargets = ["win32-x64", "darwin-arm64", "linux-arm64", "linux-x64"];
+const readerTargets = ["win32-x64", "darwin-arm64", "linux-x64"];
 export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
     "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist",
     ...(compilerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/app-compiler"] : []),
+    ...(readerTargets.includes(`${platform}-${arch}`) ? ["apps/desktop/resources/engine-reader"] : []),
     ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/agent-probe"] : []),
   ].map((path) => [path, directoryFingerprint(join(root, path))]))).digest("hex");
 }

@@ -1,7 +1,7 @@
 //! RPC-B acceptance: the complete R09 chat read/write surface through the
 //! in-process protocol transport, backed only by real domain writes.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_protocol::{

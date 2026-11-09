@@ -9,7 +9,7 @@
 //! diverges from yjs), nested-frontmatter key sorting (constraint 2), and
 //! compaction convergence-neutrality against the yjs state.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_collab::{
@@ -147,26 +147,70 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
 }
 
 #[test]
-fn every_fixture_converges_on_yjs_expectation() {
+fn every_fixture_converges_before_and_after_compaction() {
     let fixtures = load_all_fixtures();
     let mut plaintext = 0;
     let mut richdoc = 0;
+    let mut compacted_count = 0;
     for fx in &fixtures {
         // Probes have their own dedicated tests.
         if fx.kind.is_some() {
             continue;
         }
-        let (ts, key, _landed) = ingest(fx);
+        let (mut ts, key, _landed) = ingest(fx);
         let persisted = load_persisted(&ts.store, &key)
             .expect("load")
             .expect("marker present");
         assert_matches_expectation(fx, &persisted.doc);
+        if fx.updates.len() >= 2 {
+            let before = load_persisted(&ts.store, &key)
+                .expect("load")
+                .expect("marker")
+                .doc
+                .canonical_content_sha256();
+
+            let outcome = maybe_compact(&mut ts.store, &key, 1, &NoFaults, 5_000).expect("compact");
+            assert!(
+                matches!(outcome, TxnOutcome::Committed(_)),
+                "compact committed seed {}",
+                fx.seed
+            );
+            // The update log is now folded away; a single snapshot remains.
+            assert_eq!(
+                count(&ts.store, "ydoc_updates", &key),
+                0,
+                "log pruned seed {}",
+                fx.seed
+            );
+            assert_eq!(
+                count(&ts.store, "ydoc_snapshots", &key),
+                1,
+                "one snapshot seed {}",
+                fx.seed
+            );
+
+            let persisted = load_persisted(&ts.store, &key)
+                .expect("load")
+                .expect("marker");
+            assert_eq!(
+                persisted.doc.canonical_content_sha256(),
+                before,
+                "compaction changed converged content seed {}",
+                fx.seed
+            );
+            assert_matches_expectation(fx, &persisted.doc);
+            compacted_count += 1;
+        }
         match content_kind(fx) {
             ContentKind::Plaintext => plaintext += 1,
             ContentKind::Richdoc => richdoc += 1,
             ContentKind::Scene => panic!("the legacy cross-engine corpus has no scene fixtures"),
         }
     }
+    assert!(
+        compacted_count >= 30,
+        "compacted {compacted_count} fixtures"
+    );
     // Guard against a silently-empty corpus.
     assert!(
         plaintext >= 20,
@@ -187,11 +231,11 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
         if !kind.starts_with("richdocProjection-") {
             continue;
         }
-        let (ts, key, _) = ingest(fx);
-        let doc = load_persisted(&ts.store, &key)
-            .expect("load")
-            .expect("marker present")
-            .doc;
+        let doc = Ydoc::wire();
+        for update in &fx.updates {
+            doc.apply(&decode_b64(update))
+                .expect("apply TypeScript update");
+        }
         let expected = fx.expected["markdown"]
             .as_str()
             .expect("TypeScript markdown expectation");
@@ -208,65 +252,6 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
         cases, 30,
         "expected every live-oracle richdoc projection fixture"
     );
-}
-
-#[test]
-fn compaction_is_convergence_neutral_against_yjs() {
-    // For every fixture: reconstruct pre-compaction content, force a compaction
-    // (threshold 1 folds the whole log into one snapshot), reconstruct again,
-    // and assert the converged content is byte-identical and still equals the
-    // yjs expectation. A compacted snapshot must yield the same converged content
-    // as the un-compacted log.
-    let fixtures = load_all_fixtures();
-    let mut compacted_count = 0;
-    for fx in &fixtures {
-        if fx.kind.is_some() || fx.updates.len() < 2 {
-            continue;
-        }
-        let (mut ts, key, _) = ingest(fx);
-        let before = load_persisted(&ts.store, &key)
-            .expect("load")
-            .expect("marker")
-            .doc
-            .canonical_content_sha256();
-
-        let outcome = maybe_compact(&mut ts.store, &key, 1, &NoFaults, 5_000).expect("compact");
-        assert!(
-            matches!(outcome, TxnOutcome::Committed(_)),
-            "compact committed seed {}",
-            fx.seed
-        );
-        // The update log is now folded away; a single snapshot remains.
-        assert_eq!(
-            count(&ts.store, "ydoc_updates", &key),
-            0,
-            "log pruned seed {}",
-            fx.seed
-        );
-        assert_eq!(
-            count(&ts.store, "ydoc_snapshots", &key),
-            1,
-            "one snapshot seed {}",
-            fx.seed
-        );
-
-        let persisted = load_persisted(&ts.store, &key)
-            .expect("load")
-            .expect("marker");
-        assert_eq!(
-            persisted.doc.canonical_content_sha256(),
-            before,
-            "compaction changed converged content seed {}",
-            fx.seed
-        );
-        assert_matches_expectation(fx, &persisted.doc);
-        compacted_count += 1;
-    }
-    assert!(
-        compacted_count >= 30,
-        "compacted {compacted_count} fixtures"
-    );
-    eprintln!("compaction convergence-neutral across {compacted_count} fixtures");
 }
 
 #[test]

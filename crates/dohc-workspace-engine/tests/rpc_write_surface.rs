@@ -1,7 +1,7 @@
 //! RPC-D sequencing steps 1-3: mutation guards exercised through the real
 //! in-process transport and actor-owned store.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

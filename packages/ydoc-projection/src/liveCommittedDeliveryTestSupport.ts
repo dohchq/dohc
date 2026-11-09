@@ -13,7 +13,6 @@ import {
   createLiveMarkdownJournalValidator,
 } from "./liveDocumentValidation.js";
 import {
-  openSyncRelayStorage,
   type LiveUpdateJournalCommitInput,
   type LiveHostConnectionCoordinate,
   type LiveTicketStoragePolicy,
@@ -22,6 +21,7 @@ import { initializeRelayDeployment, openRelayDeployment } from "../../../service
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import { liveJournalCheckpointDue } from "../../../services/sync-relay/src/storage/liveJournalCheckpoint.js";
 import { liveRestoreValidator, runLiveRestoreWork } from "../../../services/sync-relay/src/liveRestoreValidation.js";
+import { openEmptyRelayTestStorage } from "../../../services/sync-relay/src/testing/emptyRelayStorage.js";
 
 export const policy = {
   maxStructVisits: 1_000_000,
@@ -101,7 +101,7 @@ function fixture(options: { workspaceQuotaBytes?: number; deployment?: boolean; 
   const path = join(root, "volume", "relay.sqlite");
   const configPath = join(root, "deployment.json");
   if (options.deployment) initializeRelayDeployment({ configPath, relayPath: path, continuityDirectory: join(root, "continuity") });
-  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openSyncRelayStorage(path, options);
+  const storage = options.deployment ? openRelayDeployment(configPath, options).storage : openEmptyRelayTestStorage(path, options);
   const raw = new DatabaseSync(path, { readOnly: options.deployment === true });
   const write = (run: (db: StorageContext["db"]) => void) => {
     const context = storage as StorageContext;

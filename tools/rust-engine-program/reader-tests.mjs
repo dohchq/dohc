@@ -13,9 +13,7 @@
 // build.
 //
 // The bundle is built into this user's private scratch parent and removed
-// afterwards. On macOS the reader runs the staged pinned Node, as the reader's
-// own tests do; Linux and Windows use DOHC_READER_TEST_NODE when it is set, and
-// otherwise the Node running this script.
+// afterwards. POSIX readers run a private pinned Node, as the reader's own tests do.
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -68,7 +66,8 @@ export function readerTestMismatches(names, list) {
 }
 
 async function readerNode() {
-  if (process.platform !== "darwin") return process.env.DOHC_READER_TEST_NODE || process.execPath;
+  if (process.env.DOHC_READER_TEST_NODE) return process.env.DOHC_READER_TEST_NODE;
+  if (process.platform === "win32") return process.execPath;
   const { stageReaderTestNode } = await import("./reader-test-node.mjs");
   return stageReaderTestNode();
 }
@@ -92,7 +91,7 @@ export async function runReaderTests() {
     const env = { ...process.env, DOHC_ENGINE_READER_CONFIG: JSON.stringify({
       node, bundle: join(bundle, "reader.cjs"), manifest: join(bundle, "manifest.json"),
     }) };
-    const run = spawnSync("cargo", [...readerTestArgs("run", names), "--no-tests=fail", "--no-fail-fast"],
+    const run = spawnSync("cargo", [...readerTestArgs("run", names), "--no-tests=fail", "--no-fail-fast", "--retries=0"],
       { cwd: repoRoot, env, stdio: "inherit" });
     if (run.status !== 0) throw new Error(`Reader regressions failed: ${run.error?.message ?? `exit ${run.status}`}.`);
   } finally {

@@ -8,7 +8,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
-import { jsShards } from "./verification/js-tests.mjs";
+import { JS_SHARDS } from "./verification/shards.mjs";
+import { RUST_SHARDS } from "./verification/cloud-rust.mjs";
 import {
   HEAD_REFLOG_RECOVERY,
   classifyTreeProvenance,
@@ -372,30 +373,32 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
 // contract. `scripts/rust-gate-artifact.test.mjs` now runs the real producer
 // and feeds its evidence line to this checker, which cannot rot.
 
-test("PR workflow uses both canonical jobs and provisions the pinned Rust tools", () => {
-  const document = load(workflow);
-  for (const [job, gate] of [
-    ["javascript", "js"],
-    ["rust", "rust"],
-  ]) {
-    const steps = document.jobs[job].steps;
-    assert.ok(steps.some(step => step.run === "pnpm install --frozen-lockfile"));
-    assert.ok(!steps.some(step => /setup:worktree|xvfb-run|playwright install-deps/u.test(step.run ?? "")), "the canonical verifier owns selected desktop setup");
-    const selected = steps.find(step => step.run?.trim() === `pnpm verify:pr --base "$PR_BASE_SHA" --job ${gate}`);
-    const full = steps.find(step => step.run?.trim() === `pnpm verify:pr --base HEAD --job ${gate} --full`);
-    assert.ok(selected, `${job} must use the PR base for gate selection`);
-    assert.equal(selected.if, "github.event_name == 'pull_request'");
-    assert.equal(selected.env.PR_BASE_SHA, "${{ github.event.pull_request.base.sha }}");
-    assert.ok(full, `${job} must support complete manual verification`);
-    assert.equal(full.if, "github.event_name == 'workflow_dispatch'");
-    const checkout = steps.find(step => step.uses?.startsWith("actions/checkout@"));
+test("distributed gate jobs retain source identity and pinned Rust tools", () => {
+  const {jobs, env} = load(workflow);
+  for (const [name, job] of Object.entries(jobs)) {
+    if (["changes", "verification", "confinement"].includes(name)) continue;
+    assert.ok([job.needs].flat().includes("changes"), name + " cannot bypass selection");
+    const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"));
     assert.equal(checkout.with.ref, "${{ github.sha }}");
-    assert.equal(checkout.with["fetch-depth"], 0, "base and merge commit must both be available");
+    assert.equal(checkout.with["fetch-depth"], 2);
     assert.equal(checkout.with["persist-credentials"], false);
   }
-  const install = document.jobs.rust.steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
-  assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
-    `cargo-${tool}@${document.env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
+  for (const name of ["rust-archive", "rust-policy"]) {
+    const install = jobs[name].steps.find(step => step.uses?.startsWith("taiki-e/install-action@"));
+    assert.deepEqual(install.with.tool.split(",").sort(), ["deny", "audit", "nextest"].map(tool =>
+      `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
+  }
+  assert.deepEqual(jobs.javascript.needs, ["changes", "javascript-prepare", "javascript-pure", "javascript-native", "confinement"]);
+  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive", "rust-tests", "rust-policy", "confinement"]);
+  for (const [name, scope] of [["javascript-native", "js"], ["rust-tests", "rust"]]) {
+    const job = jobs[name];
+    assert.deepEqual(job.needs, ["changes", scope === "js" ? "javascript-prepare" : "rust-archive"],
+      "artifact consumers must not hold runners while their build is queued");
+    const install = job.steps.findIndex(step => step.name === "Install dependencies");
+    const download = job.steps.findIndex(step => step.uses?.startsWith("actions/download-artifact@"));
+    assert.ok(install >= 0 && install < download);
+    assert.equal(job.steps[download].with.name, `${scope === "js" ? "javascript-prepared" : "rust-tests"}-\${{ github.run_attempt }}`);
+  }
 });
 
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
@@ -421,7 +424,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
   const document = load(workflow);
   assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
   assert.deepEqual(document.on.pull_request.types, ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"]);
-  for (const name of ["javascript", "rust", "confinement"]) assert.equal(document.jobs[name].needs, "changes", `${name} cannot bypass selection`);
+  for (const job of Object.values(document.jobs).filter(job => job !== document.jobs.changes)) assert.ok([job.needs].flat().includes("changes"), "every job depends on selection");
   for (const enabled of ["", "false", "0", "disabled"]) {
     for (const draft of [false, true]) for (const fork of [false, true]) {
       const context = workflowContext({enabled, draft, fork});
@@ -454,7 +457,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     const context = workflowContext({enabled: "true", event: "workflow_dispatch", size});
     for (const name of ["javascript", "rust"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), [`blacksmith-${size === "8" ? "8" : "4"}vcpu-ubuntu-2404`]);
-      assert.equal(jobs[name]["timeout-minutes"], name === "rust" ? 90 : 60);
+      assert.ok(jobs[name]["timeout-minutes"] <= 10);
     }
     for (const name of ["changes", "verification"]) {
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
@@ -462,8 +465,8 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   }
   // Blacksmith's kernel has no Landlock, so the sandbox suites always run on GitHub's image.
   assert.equal(jobs.confinement["runs-on"], "ubuntu-24.04");
-  assert.equal(jobs.javascript.env.DOHC_CONFINEMENT_SUITES, "exclude");
-  assert.equal(jobs.rust.env.NEXTEST_PROFILE, "without-confinement");
+  for (const name of ["javascript-prepare", "javascript-pure", "javascript-native"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
+  for (const name of ["rust-archive", "rust-tests", "rust-policy"]) assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const context = {...workflowContext({enabled: "true"}), needs: {changes: {outputs: {js, rust}}}};
     assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
@@ -478,15 +481,16 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   }
 });
 
-test("the JavaScript job runs every shard the verifier defines, each on its own runner", () => {
-  const {javascript} = load(workflow).jobs;
-  // The final check reads the matrix's combined result, so a dropped shard would pass unseen.
-  assert.deepEqual(javascript.strategy.matrix, {shard: jsShards});
-  assert.equal(javascript.strategy["fail-fast"], false, "one failed shard must not cancel the others' evidence");
-  assert.equal(javascript.env.DOHC_JS_SHARD, "${{ matrix.shard }}");
-  assert.match(javascript.name, /\$\{\{ matrix\.shard \}\}/);
-  const upload = javascript.steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
-  assert.match(upload.with.name, /\$\{\{ matrix\.shard \}\}/, "shards must not overwrite each other's evidence");
+test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
+  const {jobs} = load(workflow);
+  for (const [name, count] of [["javascript-pure", JS_SHARDS], ["javascript-native", JS_SHARDS], ["rust-tests", RUST_SHARDS]]) {
+    const job = jobs[name];
+    assert.deepEqual(job.strategy.matrix, {shard: Array.from({length: count}, (_, index) => index)}, name);
+    assert.equal(job.strategy["fail-fast"], false, "one failed shard must not cancel the others' evidence");
+    assert.match(job.name, /\$\{\{ matrix\.shard \}\}/);
+    const upload = job.steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
+    assert.match(upload.with.name, /\$\{\{ matrix\.shard \}\}/, "shards must not overwrite each other's evidence");
+  }
 });
 
 test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {
@@ -498,13 +502,13 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   assert.equal(filter.with.token, "", "do not truncate selection at the PR API file limit");
   assert.equal(filter.with.base, "${{ github.event.pull_request.base.sha }}");
   for (const name of ["javascript", "rust"]) {
+    const download = jobs[name].steps.find(step => step.uses?.startsWith("actions/download-artifact@"));
+    assert.equal(download.with.pattern, `verification-${name === "javascript" ? "js" : "rust"}-*-\${{ github.run_attempt }}`);
     const upload = jobs[name].steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));
     assert.equal(upload.if, "always()");
     assert.equal(upload.with["retention-days"], 7);
     assert.equal(upload.with["include-hidden-files"], true);
-    const paths = upload.with.path.trim().split("\n");
-    assert.ok(paths.every(path => /\/(?:result\.json|\*\.log|ticket-evidence\/\*\.json)$/.test(path)), "upload only receipts, logs, and ticket JSON, not workspaces or profiles");
-    assert.ok(paths.includes(".agent-artifacts/verification/*/ticket-evidence/*.json"), "retain ticket payloads and observations named by the receipt");
+    assert.equal(upload.with.path, `.agent-artifacts/verification/aggregate/${name === "javascript" ? "js" : "rust"}-result.json`);
   }
 });
 
@@ -514,13 +518,22 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
   const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
+  assert.equal(job.steps[verdictIndex].env.DOHC_WORKFLOW_HEAD_SHA, "${{ github.event.pull_request.head.sha || github.sha }}");
   const setupIndex = job.steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
   assert.ok(setupIndex >= 0 && setupIndex < verdictIndex, "verdicts need the selected Node on PATH");
   assert.equal(job.steps[setupIndex].with["node-version"], "24");
   const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
-  const run = (jobs, event = "pull_request", gate = "all") => spawnSync(process.execPath, ["--input-type=module", "-e", source], {
-    env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate}, encoding: "utf8", timeout: 10_000,
+  const started = Date.parse("2026-11-09T00:00:00Z");
+  const jobNames = ["what changed", "confinement", "typecheck + tests", "engine gate", "JS shared preparation", "Rust build once", "Rust policy checks",
+    ...["pure", "native"].flatMap(part => Array.from({length: JS_SHARDS}, (_, index) => `JS ${part} ${index}`)),
+    ...Array.from({length: RUST_SHARDS}, (_, index) => `Rust tests ${index}`)];
+  const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
+    started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));
+  const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => spawnSync(process.execPath, ["--input-type=module", "-e",
+    `globalThis.fetch = async () => Response.json({jobs: JSON.parse(process.env.TIMING_JOBS)});\n${source}`], {
+    env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate, TIMING_JOBS: JSON.stringify(rows),
+      GITHUB_API_URL: "https://api.invalid", GITHUB_REPOSITORY: "owner/repo", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", GITHUB_SHA: checkout, DOHC_WORKFLOW_HEAD_SHA: "head", GITHUB_TOKEN: "fixture"}, encoding: "utf8", timeout: 10_000,
   });
   const jobs = (js, rust, jsResult, rustResult, confinementResult = jsResult === "success" || rustResult === "success" ? "success" : "skipped") =>
     ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, confinement: {result: confinementResult}});
@@ -543,6 +556,22 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     const manual = jobs(undefined, undefined, gate === "rust" ? "skipped" : "success", gate === "js" ? "skipped" : "success", "success");
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
     assert.equal(run({...manual, confinement: {result: "skipped"}}, "workflow_dispatch", gate).status, 1);
+  }
+  for (const [gate, finalJob, budget] of [["js", "typecheck + tests", 300], ["rust", "engine gate", 600]]) {
+    const manual = jobs(undefined, undefined, gate === "js" ? "success" : "skipped", gate === "rust" ? "success" : "skipped", "success");
+    const at = seconds => completed.map(row => row.name === finalJob ? {...row, completed_at: new Date(started + seconds * 1000).toISOString()} : row);
+    assert.equal(run(manual, "workflow_dispatch", gate, at(budget)).status, 0);
+    const late = run(manual, "workflow_dispatch", gate, at(budget + 1));
+    assert.equal(late.status, 1, `${gate} must include reporting after the aggregate receipt`);
+    assert.match(late.stderr, /complete.*budget/);
+  }
+  assert.equal(run(jobs("true", "false", "success", "skipped"), "pull_request", "all", completed, "merge-head").status, 0,
+    "PR job metadata identifies the branch head while checkout and proof identify the merge commit");
+  for (const gate of ["js", "rust"]) {
+    const manual = jobs(undefined, undefined, gate === "js" ? "success" : "skipped", gate === "rust" ? "success" : "skipped", "success");
+    const rows = completed.filter(row => gate === "js" ? !row.name.startsWith("Rust ") && row.name !== "engine gate"
+      : !row.name.startsWith("JS ") && row.name !== "typecheck + tests");
+    assert.equal(run(manual, "workflow_dispatch", gate, rows).status, 0, "unselected job timestamps are unnecessary");
   }
 });
 

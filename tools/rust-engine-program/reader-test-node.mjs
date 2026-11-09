@@ -1,14 +1,13 @@
 #!/usr/bin/env node
-// Stages the Node that the Markdown reader's tests run on macOS, and prints its
+// Stages the Node that the Markdown reader's tests run on POSIX, and prints its
 // path. The reader refuses a runtime under a linked or shared-writable
-// directory, which includes Homebrew's Cellar, so the tests take the app
+// directory, including package-manager and hosted tool caches, so tests take the app
 // compiler's pinned, hash-checked Node from DOHC_READER_TEST_NODE instead:
 //
 //   DOHC_READER_TEST_NODE="$(node tools/rust-engine-program/reader-test-node.mjs)" \
 //     cargo nextest run -p dohc-engine-reader
 //
-// The Rust gate runs it before its macOS test step. Linux and Windows tests use
-// node on PATH.
+// The Rust gate stages it before its macOS and Linux test steps.
 //
 // The Node lives in this user's private scratch parent under its own hash,
 // whatever folder holds the checkout. A stager writes it into a private
@@ -26,8 +25,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 
 function pinnedHash() {
-  const pin = process.platform === "darwin" && PINNED_NODE[`darwin-${process.arch}`];
-  if (!pin) throw new Error(`No reader test Node is pinned for ${process.platform}-${process.arch}; Linux and Windows tests use node on PATH.`);
+  const pin = process.platform !== "win32" && PINNED_NODE[`${process.platform}-${process.arch}`];
+  if (!pin) throw new Error(`No reader test Node is pinned for ${process.platform}-${process.arch}.`);
   return pin.sha256;
 }
 

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

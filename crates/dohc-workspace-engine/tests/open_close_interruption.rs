@@ -10,7 +10,7 @@
 //! races the first real open. The OpenGuard and the Closing marker are what
 //! keep the registry consistent through the drop; this pins them.
 
-mod common;
+use crate::common;
 
 use common::*;
 use std::sync::Arc;

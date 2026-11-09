@@ -161,7 +161,7 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
-    let mut store = EngineStore::open(&db, 1).expect("open");
+    let mut store = dohc_engine_testkit::open_empty_store(&db, 1);
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, VERSION, 1, &NO_FAULTS)
         .expect("ensure main");

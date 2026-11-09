@@ -7,7 +7,7 @@
 //! durable yrs reconstruction → `ydoc.resync` path and compares the resulting
 //! typed-root state against the yjs oracle.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_collab::{CacheStats, Ydoc};
