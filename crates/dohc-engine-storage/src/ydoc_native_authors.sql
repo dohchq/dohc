@@ -1,6 +1,9 @@
 -- Each attributed update keeps its author until a settlement names it, or an
--- accepted delivery of the same update names the same author. A fold that
--- removes the update's journal row keeps it.
+-- accepted delivery of the same update names the same author.
+-- coverage: 'update' while its update holds the author; 'interval' once a
+-- fold removed the journal row or an accepted delivery did not name the
+-- author; 'moment' while an unresolved settlement's moment names it;
+-- 'replaced' when an accepted delivery named it after that moment.
 CREATE TABLE ydoc_native_authors (
     workspace_id     TEXT    NOT NULL,
     version_id       TEXT    NOT NULL,
@@ -14,7 +17,8 @@ CREATE TABLE ydoc_native_authors (
     chain_depth      INTEGER NOT NULL CHECK (chain_depth >= 0),
     agent_run_id     TEXT
         CHECK (agent_run_id IS NULL OR (actor_kind = 'agent' AND length(agent_run_id) > 0)),
-    folded           INTEGER NOT NULL DEFAULT 0 CHECK (folded IN (0, 1)),
+    coverage         TEXT    NOT NULL DEFAULT 'update'
+        CHECK (coverage IN ('update','interval','moment','replaced')),
     PRIMARY KEY (workspace_id, version_id, object_id, lineage_claim_id, update_digest),
     FOREIGN KEY (workspace_id, version_id, object_id)
       REFERENCES ydoc_docs(workspace_id, version_id, object_id)

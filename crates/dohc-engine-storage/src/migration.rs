@@ -5679,7 +5679,7 @@ mod tests {
             ),
             (
                 "v2-ydoc-native-authors",
-                "b7c4cf4f7d343109ab44f0492312cd39991eec69b24583faf0a4395f9182cbd4",
+                "eee4335a0aeed1de07a284e8d0164563974de9bbec7a5fc274f57d3819f87ebe",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

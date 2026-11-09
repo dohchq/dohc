@@ -546,7 +546,7 @@ fn advance_generation_in_tx(
 /// Keep the original seq-0 snapshot and its exact claimed source. The new
 /// snapshot replaces current native state, without resetting head identity.
 #[allow(clippy::too_many_arguments)]
-fn install_native_checkpoint_in_tx(
+pub(crate) fn install_native_checkpoint_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &crate::DocKey,
     marker: &crate::Marker,

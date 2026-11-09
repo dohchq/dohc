@@ -20,38 +20,98 @@ fn history_recovery_keeps_compacted_adopted_private_tail_authors() {
     assert!(recovered.json().contains("native-agent"));
 }
 
+/// Each agent `[agentId, onBehalfOf]` that coverage names.
+fn agents(authors: &crate::author_coverage::Authors) -> Vec<Value> {
+    let authors: Value = serde_json::from_str(&authors.json()).unwrap();
+    authors
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|author| author["kind"] == "agent")
+        .map(|author| serde_json::json!([author["agentId"], author["onBehalfOf"]]))
+        .collect()
+}
+
 #[test]
 fn adopted_signed_out_agent_edit_accepted_after_sign_in_is_one_history_author() {
-    // Each agent `[agentId, onBehalfOf]` that coverage names.
-    fn agents(authors: &crate::author_coverage::Authors) -> Vec<Value> {
-        let authors: Value = serde_json::from_str(&authors.json()).unwrap();
-        authors
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|author| author["kind"] == "agent")
-            .map(|author| serde_json::json!([author["agentId"], author["onBehalfOf"]]))
-            .collect()
+    for compacted in [false, true] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        // The agent edits while nobody is signed in, so its row and its
+        // delivery name this computer's person. The relay binds the agent to
+        // the server account.
+        let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+        if compacted {
+            durable::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 30).unwrap();
+            assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
+        }
+        native_tail_apply(&mut f, edit.update, edit.delivery_id, 7);
+        let account = [serde_json::json!(["native-agent", "owner"])];
+        let recovered = f
+            .store
+            .read_with(|conn| crate::author_coverage::recovery_in(conn, &f.key))
+            .unwrap();
+        assert_eq!(agents(&recovered), account, "compacted: {compacted}");
+        release(&mut f, "adoption");
+        let interval = f
+            .store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+            .unwrap();
+        assert_eq!(agents(&interval), account, "compacted: {compacted}");
     }
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    // The agent edits while nobody is signed in, so its row and its delivery
-    // name this computer's person. The relay binds the agent to the server
-    // account.
-    let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
-    native_tail_apply(&mut f, edit.update, edit.delivery_id, 7);
-    let account = [serde_json::json!(["native-agent", "owner"])];
-    let recovered = f
-        .store
-        .read_with(|conn| crate::author_coverage::recovery_in(conn, &f.key))
+}
+
+#[test]
+fn adopted_agent_edit_its_acceptance_does_not_name_is_settled_with_its_agent() {
+    let person = LiveAuthorEntry::Human {
+        human_id: "owner".into(),
+        human_name: "Owner".into(),
+    };
+    for (case, snapshot) in [("empty", vec![]), ("person only", vec![person])] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let held = f
+            .store
+            .read_with(|conn| crate::author_coverage::accepted_only_in(conn, &f.key))
+            .unwrap();
+        assert!(held, "{case}");
+        let edit = native_tail_edit_for(&mut f, "agent edit", 11, Some("installation-person"));
+        let mut event = native_tail_event(&f, edit.update, edit.delivery_id, 7);
+        event.metadata.author_snapshot = Some(snapshot);
+        let result = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
         .unwrap();
-    assert_eq!(agents(&recovered), account);
-    release(&mut f, "adoption");
-    let interval = f
-        .store
-        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
-        .unwrap();
-    assert_eq!(agents(&interval), account);
+        assert!(matches!(result, ApplicationResult::Applied(..)), "{case}");
+        // The whole interval is accepted, so the settlement names all of it.
+        let TxnOutcome::Committed(moment) = f
+            .store
+            .write_with(&NoFaults, |tx| {
+                let authors = crate::author_coverage::interval_in(tx, &f.key, i64::MAX)?;
+                crate::author_coverage::advance_in(tx, &f.key, false)?;
+                Ok::<_, crate::CollabError>(authors)
+            })
+            .unwrap()
+        else {
+            panic!("settlement interrupted")
+        };
+        assert_eq!(
+            agents(&moment),
+            [serde_json::json!(["native-agent", "installation-person"])],
+            "{case}"
+        );
+        let after = f
+            .store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+            .unwrap();
+        assert!(after.is_empty(), "{case}");
+    }
 }
 
 #[test]

@@ -209,9 +209,10 @@ pub(crate) fn record_native_in(
 }
 
 /// An accepted delivery of a native update names its authors. The update no
-/// longer owes an author the delivery names by the same kind, identity and
+/// longer owes its author when the delivery names the same kind, identity and
 /// run, so one edit is not listed again under another scope. An author the
-/// delivery does not name stays.
+/// delivery does not name stays interval-wide, as a fold keeps it, so a held
+/// lineage names it too.
 pub(crate) fn accept_native_in(
     conn: &Connection,
     key: &DocKey,
@@ -219,46 +220,82 @@ pub(crate) fn accept_native_in(
     update_digest: &str,
     authors: &[String],
 ) -> Result<(), CollabError> {
-    let mut statement = conn
+    let row: Option<(String, String, Option<String>, String)> = conn
         .prepare_cached(
-            "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
-             AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5 \
-             AND actor_kind=?6 AND actor_origin_id=?7 AND agent_run_id IS ?8",
+            "SELECT actor_kind, actor_origin_id, agent_run_id, coverage FROM ydoc_native_authors \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 \
+             AND update_digest=?5",
         )
+        .map_err(sql)?
+        .query_row(
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage_claim_id,
+                update_digest
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
         .map_err(sql)?;
+    let Some((kind, id, run, coverage)) = row else {
+        return Ok(());
+    };
+    let mut named = false;
     for json in authors {
         let entries: Vec<Value> = serde_json::from_str(json)
             .map_err(|_| corrupt("accepted coverage is not an author list"))?;
-        for author in entries {
-            let kind = author.get("kind").and_then(Value::as_str);
-            let field = match kind {
-                Some("agent") => "agentId",
-                Some("automation") => "automationId",
-                Some("human") => "humanId",
-                _ => continue,
-            };
-            let Some(id) = author.get(field).and_then(Value::as_str) else {
-                continue;
-            };
-            let run = author
-                .get("agentRunId")
-                .and_then(Value::as_str)
-                .filter(|_| kind == Some("agent"));
-            statement
-                .execute(params![
-                    key.workspace_id,
-                    key.version_id,
-                    key.object_id,
-                    lineage_claim_id,
-                    update_digest,
-                    kind,
-                    id,
-                    run
-                ])
-                .map_err(sql)?;
-        }
+        named |= entries
+            .iter()
+            .any(|author| names(author, &kind, &id, run.as_deref()));
     }
+    let statement = match (named, coverage.as_str()) {
+        (true, "update" | "interval") => {
+            "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+             AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5"
+        }
+        // The unresolved settlement's moment names it already. If that
+        // settlement is compensated, the author does not return.
+        (true, "moment") => {
+            "UPDATE ydoc_native_authors SET coverage='replaced' WHERE workspace_id=?1 \
+             AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5"
+        }
+        (false, "update") => {
+            "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
+             AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND update_digest=?5"
+        }
+        _ => return Ok(()),
+    };
+    conn.prepare_cached(statement)
+        .map_err(sql)?
+        .execute(params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            lineage_claim_id,
+            update_digest
+        ])
+        .map_err(sql)?;
     Ok(())
+}
+
+/// Whether an accepted author entry names this kind, identity and run.
+fn names(author: &Value, kind: &str, id: &str, run: Option<&str>) -> bool {
+    let entry_kind = author.get("kind").and_then(Value::as_str);
+    let field = match entry_kind {
+        Some("agent") => "agentId",
+        Some("automation") => "automationId",
+        Some("human") => "humanId",
+        _ => return false,
+    };
+    let entry_run = author
+        .get("agentRunId")
+        .and_then(Value::as_str)
+        .filter(|_| entry_kind == Some("agent"));
+    entry_kind == Some(kind)
+        && author.get(field).and_then(Value::as_str) == Some(id)
+        && entry_run == run
 }
 
 /// Read only authors above the settled boundary, including rows a fold already
@@ -283,8 +320,8 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     Ok(authors)
 }
 
-/// Adds the authors of this document's folded updates, and unless `held`, of
-/// its other updates in `(boundary, through]`.
+/// Adds the authors of this document's interval-wide rows, and unless `held`,
+/// of its updates in `(boundary, through]`.
 fn union_native_in(
     conn: &Connection,
     key: &DocKey,
@@ -295,41 +332,59 @@ fn union_native_in(
 ) -> Result<(), CollabError> {
     let mut stmt = conn
         .prepare_cached(
-            "SELECT actor_origin_id, actor_kind, on_behalf_of, chain_depth, agent_run_id \
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth), agent_run_id \
              FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-             AND (folded=1 OR (NOT ?6 AND seq>COALESCE(?4,-1) AND seq<=?5))",
+             AND (coverage='interval' \
+               OR (coverage='update' AND NOT ?6 AND seq>COALESCE(?4,-1) AND seq<=?5)) \
+             GROUP BY actor_origin_id, actor_kind, on_behalf_of, agent_run_id",
         )
         .map_err(sql)?;
     let rows = stmt
-        .query_map(
-            params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                boundary,
-                through,
-                held
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, u32>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
+        .query(params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            boundary,
+            through,
+            held
+        ])
+        .map_err(sql)?;
+    union_identities(rows, authors)
+}
+
+/// The authors the unresolved settlement consumed from native rows.
+fn reserved_native_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
+    let mut authors = Authors::default();
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth), agent_run_id \
+             FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+             AND coverage IN ('moment','replaced') \
+             GROUP BY actor_origin_id, actor_kind, on_behalf_of, agent_run_id",
         )
         .map_err(sql)?;
-    for row in rows {
-        let (actor, kind, on_behalf_of, depth, agent_run_id) = row.map_err(sql)?;
+    let rows = stmt
+        .query(params![key.workspace_id, key.version_id, key.object_id])
+        .map_err(sql)?;
+    union_identities(rows, &mut authors)?;
+    Ok(authors)
+}
+
+/// Adds one author per grouped identity row.
+fn union_identities(
+    mut rows: rusqlite::Rows<'_>,
+    authors: &mut Authors,
+) -> Result<(), CollabError> {
+    while let Some(row) = rows.next().map_err(sql)? {
+        let actor: String = row.get(0).map_err(sql)?;
+        let kind: String = row.get(1).map_err(sql)?;
         let attribution = ChangeAttribution {
             actor_kind: ChangeActorKind::parse(&kind)
                 .ok_or_else(|| corrupt("native author has an unknown kind"))?,
-            on_behalf_of,
-            depth,
+            on_behalf_of: row.get(2).map_err(sql)?,
+            depth: row.get(3).map_err(sql)?,
             run: None,
-            agent_run_id,
+            agent_run_id: row.get(4).map_err(sql)?,
         };
         if let Some(json) =
             dohc_engine_domain::moment_author_json(Some(actor.as_str()), Some(&attribution))
@@ -348,9 +403,10 @@ pub fn fold_in(conn: &Connection, key: &DocKey, through: i64) -> Result<(), Coll
         return Ok(());
     }
     conn.execute(
-        "UPDATE ydoc_native_authors SET folded=1 WHERE workspace_id=?1 AND version_id=?2 \
-         AND object_id=?3 AND folded=0 AND seq<=?4 AND seq>COALESCE((SELECT settled_update_seq \
-         FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),-1)",
+        "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
+         AND version_id=?2 AND object_id=?3 AND coverage='update' AND seq<=?4 \
+         AND seq>COALESCE((SELECT settled_update_seq FROM ydoc_docs \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3),-1)",
         params![key.workspace_id, key.version_id, key.object_id, through],
     )
     .map_err(sql)?;
@@ -361,8 +417,19 @@ pub fn fold_in(conn: &Connection, key: &DocKey, through: i64) -> Result<(), Coll
 pub(crate) fn forget_seed_in(conn: &Connection, key: &DocKey, seq: i64) -> Result<(), CollabError> {
     conn.execute(
         "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
-         AND object_id=?3 AND folded=0 AND seq=?4",
+         AND object_id=?3 AND coverage='update' AND seq=?4",
         params![key.workspace_id, key.version_id, key.object_id, seq],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// The resolved settlement's moment names the native authors it consumed.
+fn resolve_native_in(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+    conn.execute(
+        "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND coverage IN ('moment','replaced')",
+        params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(sql)?;
     Ok(())
@@ -428,7 +495,8 @@ pub fn shared_json(author: &SharedChangeAuthor) -> Result<String, CollabError> {
 /// History recovery keeps native authors too. Accepted settlement deliberately
 /// excludes the owner's private tail, so its updates keep their own authors,
 /// and its outbox keeps them for updates no delivery applied yet. An applied
-/// delivery's snapshot already replaced each author it named.
+/// delivery's snapshot already replaced each author it named. The outbox names
+/// no relay namespace, so its lineage's activations name the ones to check.
 pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabError> {
     let mut authors = reserved_in(conn, key)?;
     union_native_in(conn, key, None, i64::MAX, false, &mut authors)?;
@@ -440,7 +508,12 @@ pub fn recovery_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
            AND d.object_id=o.object_id AND d.lineage_claim_id=o.lineage_claim_id
          WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3
            AND e.pending=1 AND e.native_source_json IS NOT NULL
-           AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id)",
+           AND NOT EXISTS(SELECT 1 FROM live_owner_activations v
+             JOIN live_device_update_applications s
+               ON s.relay_database_namespace=v.relay_database_namespace
+              AND s.delivery_id=e.delivery_id
+             WHERE v.workspace_id=o.workspace_id AND v.main_version_id=o.main_version_id
+               AND v.object_id=o.object_id AND v.lineage_claim_id=o.lineage_claim_id)",
         )
         .map_err(sql)?;
     let sources = statement
@@ -759,11 +832,18 @@ fn advance(
         ],
     )
     .map_err(sql)?;
-    // The settlement names the folded authors. An accepted prefix leaves the
-    // private tail's own authors above the native boundary.
+    // The settlement names the interval's native authors. An accepted prefix
+    // leaves the private tail's own authors above the native boundary. A
+    // reserved attempt keeps them until it resolves, so compensation can
+    // restore each one as its own row.
+    let consumed = "workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+         AND (coverage='interval' OR (coverage='update' AND NOT ?4))";
     conn.execute(
-        "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
-         AND object_id=?3 AND (folded=1 OR NOT ?4)",
+        &if reserve_attempt {
+            format!("UPDATE ydoc_native_authors SET coverage='moment' WHERE {consumed}")
+        } else {
+            format!("DELETE FROM ydoc_native_authors WHERE {consumed}")
+        },
         params![
             key.workspace_id,
             key.version_id,
@@ -840,9 +920,27 @@ pub fn compensate_in(
             return Ok(());
         }
     }
-    // The consumed updates' authors return through the moment. Later updates
-    // keep their own authors.
+    // The consumed native authors return as their own rows, so a later
+    // accepted delivery of their update can still replace them. A row an
+    // accepted delivery already replaced does not return. The moment returns
+    // its other authors. Later updates keep their own authors.
+    let native = reserved_native_in(conn, key)?;
     let mut authors = unresolved_authors_in(conn, key)?;
+    for identity in native.0.keys() {
+        authors.0.remove(identity);
+    }
+    conn.execute(
+        "DELETE FROM ydoc_native_authors WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND coverage='replaced'",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(sql)?;
+    conn.execute(
+        "UPDATE ydoc_native_authors SET coverage='interval' WHERE workspace_id=?1 \
+         AND version_id=?2 AND object_id=?3 AND coverage='moment'",
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(sql)?;
     let pending: String = conn
         .query_row(
             "SELECT pending_authors_json FROM ydoc_docs \
@@ -921,6 +1019,7 @@ pub fn reconcile_in(conn: &Connection, key: &DocKey, now_ms: i64) -> Result<bool
     match attempt {
         Some(status) if status == "pending" => Ok(false),
         Some(status) if status == "complete" => {
+            resolve_native_in(conn, key)?;
             conn.execute(
                 "UPDATE ydoc_docs SET settle_prior_update_seq=NULL \
                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -961,6 +1060,7 @@ pub fn supersede_in(conn: &Connection, key: &DocKey, now_ms: i64) -> Result<(), 
         params![key.workspace_id, key.version_id, key.object_id, now_ms],
     )
     .map_err(sql)?;
+    resolve_native_in(conn, key)?;
     conn.execute(
         "UPDATE ydoc_docs SET settle_prior_update_seq=NULL \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",

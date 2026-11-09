@@ -5716,15 +5716,19 @@ mod tests {
     /// The authors of `kind` the next settlement names, as `[id, onBehalfOf,
     /// agentRunId]`.
     fn history(store: &EngineStore, kind: &str) -> Vec<Value> {
-        let interval: Value = serde_json::from_str(
-            &store
-                .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
-                .unwrap()
-                .json(),
-        )
-        .unwrap();
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        kind_authors(&interval, kind)
+    }
+
+    /// The authors of `kind` an author list names, as `[id, onBehalfOf,
+    /// agentRunId]`.
+    fn kind_authors(json: &str, kind: &str) -> Vec<Value> {
+        let authors: Value = serde_json::from_str(json).unwrap();
         let id = format!("{kind}Id");
-        interval
+        authors
             .as_array()
             .unwrap()
             .iter()
@@ -5733,6 +5737,48 @@ mod tests {
                 serde_json::json!([author[&id], author["onBehalfOf"], author["agentRunId"]])
             })
             .collect()
+    }
+
+    /// Settles the interval in a moment and returns the moment's authors. A
+    /// settlement whose file write is still pending keeps them reserved until
+    /// the write resolves.
+    fn settle(store: &mut EngineStore, pending_write: bool) -> String {
+        let authors = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        let moment = dohc_engine_domain::VersionedTextStore::new(store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "workspace-1".into(),
+                    version_id: "main".into(),
+                    object_id: "object-1".into(),
+                    path: "notes/a.md".into(),
+                    text: "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: booked\n---\n".into(),
+                    moment_id: "settlement".into(),
+                    metadata_origin: "ydoc".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: Some(authors.clone()),
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap()
+            .moment;
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::author_coverage::advance_in(tx, &key(), pending_write)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET settle_seq=?1 WHERE object_id='object-1'",
+                    [moment.moment_order],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, CollabError>(())
+            })
+            .unwrap();
+        authors
     }
 
     fn compact(store: &mut EngineStore) {
@@ -5747,14 +5793,31 @@ mod tests {
             let bytes = Ydoc::wire().frontmatter_set("status", "booked").unwrap();
             let agent = agent_for(SIGNED_OUT);
             let delivery = native_edit(&mut store, &mut cache, &bytes, "trip-agent", &agent);
-            // Enrolling at sign-in keeps the journal's authors before it
-            // replaces the journal; compaction keeps them before it prunes it.
+            // Enrolling at sign-in installs the relay's checkpoint, which
+            // keeps the journal's authors before it replaces the journal;
+            // compaction keeps them before it prunes it.
             if fold == "sign-in" {
                 store
                     .write_with(&NoFaults, |tx| {
-                        crate::author_coverage::reset_in(tx, &key(), true)
+                        let marker = durable::read_marker_in(tx, &key())?.unwrap();
+                        let local = durable::load_doc_in(tx, &key())?.encode_full_state();
+                        let checkpoint = Ydoc::wire().encode_full_state();
+                        let head = crate::owner_outbox::enrollment::install_native_checkpoint_in_tx(
+                            tx,
+                            &key(),
+                            &marker,
+                            &local,
+                            &checkpoint,
+                            &binding().lineage_claim_id,
+                            &Ydoc::wire().encode_state_vector(),
+                            2,
+                        )
+                        .unwrap();
+                        assert_eq!(head, marker.head_update_seq + 1);
+                        Ok::<_, CollabError>(())
                     })
                     .unwrap();
+                assert_eq!(count(&store, "ydoc_updates"), 0);
             } else {
                 compact(&mut store);
             }
@@ -5772,6 +5835,157 @@ mod tests {
                 "{fold}: the accepted snapshot names the edit's agent and run"
             );
             assert_eq!(history(&store, "human").len(), 1, "{fold}");
+        }
+    }
+
+    /// Rewrites the origin a queued delivery's native source recorded. An
+    /// adoption seed declares no agent.
+    fn rewrite_origin(
+        store: &mut EngineStore,
+        delivery: &str,
+        rewrite: impl FnOnce(&mut crate::owner_outbox::OwnerOutboxNativeOrigin),
+    ) {
+        store
+            .write_with(&NoFaults, |tx| {
+                let json: String = tx
+                    .query_row(
+                        "SELECT native_source_json FROM owner_ydoc_outbox_entries \
+                         WHERE delivery_id=?1",
+                        [delivery],
+                        |row| row.get(0),
+                    )
+                    .map_err(StorageError::persist_public)?;
+                let mut source: crate::owner_outbox::OwnerOutboxNativeSource =
+                    serde_json::from_str(&json).unwrap();
+                rewrite(&mut source.origin);
+                let seed =
+                    source.origin == crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed;
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET native_source_json=?1, \
+                     agent_declaration_json=CASE WHEN ?3 THEN NULL ELSE agent_declaration_json END \
+                     WHERE delivery_id=?2",
+                    params![serde_json::to_string(&source).unwrap(), delivery, seed],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_compensated_settlement_leaves_one_author_for_an_accepted_edit() {
+        for accepted_first in [false, true] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let bytes = Ydoc::wire().frontmatter_set("status", "booked").unwrap();
+            let agent = agent_for(SIGNED_OUT);
+            let delivery = native_edit(&mut store, &mut cache, &bytes, "trip-agent", &agent);
+            let moment = settle(&mut store, true);
+            assert_eq!(
+                kind_authors(&moment, "agent"),
+                [serde_json::json!(["trip-agent", SIGNED_OUT, "run-1"])]
+            );
+            let authors = account_with_agent();
+            let accept = |store: &mut EngineStore, cache: &mut WriterDocCache| {
+                let accepted = (delivery.as_str(), 1, bytes.clone());
+                accept_own(store, cache, &handle, accepted, &authors);
+            };
+            if accepted_first {
+                accept(&mut store, &mut cache);
+            }
+            // The settlement's file write fails, so its authors return.
+            store
+                .write_with(&NoFaults, |tx| {
+                    crate::author_coverage::compensate_in(tx, &key(), None, 4)
+                })
+                .unwrap();
+            if !accepted_first {
+                accept(&mut store, &mut cache);
+            }
+            assert_eq!(
+                history(&store, "agent"),
+                [serde_json::json!(["trip-agent", "owner-1", "run-1"])],
+                "accepted first: {accepted_first}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_acceptance_keeps_a_native_author_it_names_under_another_run_or_kind() {
+        let namesake = LiveAuthorEntry::Human {
+            human_id: "trip-agent".into(),
+            human_name: "Trip".into(),
+        };
+        for (case, run, authors) in [
+            ("another run", Some("run-1"), account_with_agent()),
+            ("another kind", None, vec![namesake]),
+        ] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let bytes = Ydoc::wire().frontmatter_set("status", "booked").unwrap();
+            let agent = dohc_engine_domain::ChangeAttribution {
+                agent_run_id: run.map(Into::into),
+                ..agent_for(SIGNED_OUT)
+            };
+            let delivery = native_edit(&mut store, &mut cache, &bytes, "trip-agent", &agent);
+            if run.is_some() {
+                // The acceptance names the run its source recorded.
+                rewrite_origin(&mut store, &delivery, |origin| {
+                    if let crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                        agent_run_id,
+                        ..
+                    } = origin
+                    {
+                        *agent_run_id = Some("run-2".into());
+                    }
+                });
+            }
+            let accepted = (delivery.as_str(), 1, bytes);
+            accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+            let native = serde_json::json!(["trip-agent", SIGNED_OUT, run]);
+            assert!(history(&store, "agent").contains(&native), "{case}");
+        }
+    }
+
+    /// Signed out, a settlement can name an edit's agent before the relay
+    /// accepts the edit, and its moment keeps that author. A seed delivery
+    /// carries no native source or declaration, so its acceptance names the
+    /// account's person, never the agent again. An acceptance that named the
+    /// agent would list it again under the account. No current path settles
+    /// an update whose own delivery names its agent before that acceptance.
+    #[test]
+    fn an_edit_settled_before_its_acceptance_keeps_its_settled_author() {
+        for case in ["seed", "named again"] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let bytes = Ydoc::wire().frontmatter_set("status", "booked").unwrap();
+            let agent = agent_for(SIGNED_OUT);
+            let delivery = native_edit(&mut store, &mut cache, &bytes, "trip-agent", &agent);
+            let moment = settle(&mut store, false);
+            assert_eq!(
+                kind_authors(&moment, "agent"),
+                [serde_json::json!(["trip-agent", SIGNED_OUT, "run-1"])],
+                "{case}"
+            );
+            assert!(history(&store, "agent").is_empty(), "{case}");
+            let authors = if case == "seed" {
+                rewrite_origin(&mut store, &delivery, |origin| {
+                    *origin = crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed;
+                });
+                vec![account_person()]
+            } else {
+                account_with_agent()
+            };
+            let accepted = (delivery.as_str(), 1, bytes);
+            accept_own(&mut store, &mut cache, &handle, accepted, &authors);
+            let later = if case == "seed" {
+                vec![]
+            } else {
+                vec![serde_json::json!(["trip-agent", "owner-1", "run-1"])]
+            };
+            assert_eq!(history(&store, "agent"), later, "{case}");
+            assert_eq!(
+                history(&store, "human"),
+                [serde_json::json!(["owner-1", null, null])],
+                "{case}"
+            );
         }
     }
 
