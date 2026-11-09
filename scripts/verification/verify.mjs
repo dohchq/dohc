@@ -8,7 +8,7 @@ import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
-import { testWorkspace } from "./js-tests.mjs";
+import { takeJsShard, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences, readWorkspacePackages, selectedGates, selectsRepositoryTests } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
@@ -196,6 +196,7 @@ export async function verify(args) {
   if (ownerIndex >= 0 && (mode !== "pr" || !ownerName?.trim() || ownerName.startsWith("--"))) throw new Error("Use --owner <name> with a PR run.");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
   const { grant, output: grantOutput } = takeGrant();
+  const jsShard = takeJsShard();
   const reuseIndex = args.indexOf("--reuse-rust");
   const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
   if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
@@ -235,7 +236,7 @@ export async function verify(args) {
   let branch = null;
   const output = grant ? grantOutput : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, scope: job ?? "all", full, keepGoing, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], failed: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", ...(jsShard ? { jsShard } : {}), full, keepGoing, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], failed: [], output, verdict: "RUNNING" };
   // Tests that passed only on retry: { step, test }, with passedAlone when they failed both tries and passed only alone.
   const flaky = report.flaky;
   // Tests that failed on their last try, named as in `flaky`.
@@ -529,7 +530,7 @@ export async function verify(args) {
         // escalation before database cleanup, without a competing parent timer.
         try {
           await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests, full,
+            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests, full, shard: jsShard,
               beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled), stop: cancellation,
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {
