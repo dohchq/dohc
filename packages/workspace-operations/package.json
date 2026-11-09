@@ -1,0 +1,23 @@
+{
+  "name": "@dohc/workspace-operations",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./chats": "./src/chats.ts",
+    "./documents": "./src/documents.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dohc/cli": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

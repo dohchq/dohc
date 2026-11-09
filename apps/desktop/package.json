@@ -110,6 +110,7 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine-client": "workspace:*",
+    "@dohc/workspace-operations": "workspace:*",
     "@dohc/workspace-fs": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "@legendapp/list": "3.3.11",

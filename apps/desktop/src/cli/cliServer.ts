@@ -15,6 +15,34 @@ import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/auto
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
+  authorForCli,
+  buildThreadContent,
+  cliMessageId,
+  cliThreadId,
+  exactChannel,
+  FILES_GROUP,
+  groupForCli,
+  listChannelThreads,
+  listFileChats,
+  listGroups,
+  listGroupsWithThreads,
+  listGroupThreads,
+  loadChannels,
+  loadMessagesByThread,
+  loadThreads,
+  readChat,
+  resolveChannel,
+  resolveMessageInThread,
+  resolveThread,
+  resolveThreadOrMessage,
+  showChat,
+  threadCounts,
+  type ChatsHost,
+  type LoadedThread,
+  type ShownThreadRead,
+} from "@dohc/workspace-operations/chats";
+import { documentsUnavailable, readDocument, type DocumentsHost } from "@dohc/workspace-operations/documents";
+import {
   CLI_PROTOCOL_VERSION,
   CHAT_WATCH_TIMEOUT_MS,
   MAX_CLI_REQUEST_BYTES,
@@ -24,21 +52,16 @@ import {
   parseCliResult,
   type CliActor,
   type CliNoticeOpens,
-  type CliAuthor,
-  type CliGroup,
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
   type CliReportedAgent,
   type CliRequest,
   type CliResultByVerb,
-  type CliShowMessage,
-  type CliShowThreadResult,
-  type CliStreamPosition,
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import { versionNameRefusal } from "../ipc/errorWords";
-import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
+import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
 import type {
@@ -65,13 +88,10 @@ import type {
 } from "@dohc/workspace-contracts/collection";
 import { UNNAMED_AGENT_ID, type ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type {
-  ChannelThreadSummary,
   ChatAgentReader,
   ChatChannel,
-  ChatChannelSummary,
   ChatChannelType,
   ChatMessage,
-  ChatStreamItem,
   ChatThread,
   LinkedChatStore,
   VersionedTextMoment,
@@ -236,8 +256,7 @@ export interface CliCollectionsPort {
 // Live Markdown documents for the document verbs. Main answers through the
 // editor session that holds a document, so an edit reaches an open editor
 // as the person's own typing would.
-export interface CliDocumentsPort {
-  read(path: string): Promise<{ path: string; markdown: string }>;
+export interface CliDocumentsPort extends DocumentsHost {
   edit(input: {
     allowLossySourceSha256?: string;
     path: string;
@@ -512,18 +531,6 @@ export interface CliServerHandle {
   close(): Promise<void>;
 }
 
-interface LoadedThread {
-  thread: ChatThread;
-  group: CliGroup;
-  summary?: ChannelThreadSummary;
-}
-
-interface LoadedMessage {
-  thread: LoadedThread;
-  message: ChatMessage;
-  messages: ChatMessage[];
-}
-
 class CliCommandError extends Error {
   constructor(message: string) {
     super(message.startsWith("dohc:") ? message : `dohc: ${message}`);
@@ -568,121 +575,11 @@ function cliErrorLine(error: unknown): string {
   return message.startsWith("dohc:") ? message : `dohc: ${message}`;
 }
 
-function shortenedEngineId(id: string, enginePrefix: string, cliPrefix: string): string {
-  return id.startsWith(enginePrefix)
-    ? `${cliPrefix}${id.slice(enginePrefix.length)}`
-    : id;
-}
-
-function cliChannelId(id: string): string {
-  return shortenedEngineId(id, "channel-", "ch_");
-}
-
-export function cliThreadId(id: string): string {
-  return shortenedEngineId(id, "thread-", "th_");
-}
-
-export function cliMessageId(id: string): string {
-  return formatMessageHandle(id);
-}
-
 // A conversation a notice opens, under the ids `show` takes.
 function cliNoticeOpens(opens: SentNoticeTarget): CliNoticeOpens {
   if (opens.to !== "chat") return opens;
   const { message, ...chat } = opens;
   return { ...chat, thread: cliThreadId(opens.thread), ...(message === undefined ? {} : { message: cliMessageId(message) }) };
-}
-
-// The engine's `channel` kind is a Group everywhere a reader sees it.
-export function cliGroupKind(kind: ChatChannelSummary["kind"]): CliGroup["kind"] {
-  return kind === "channel" ? "group" : kind;
-}
-
-// A thread linked to a file belongs to no engine channel; it lists here.
-export const FILES_GROUP: CliGroup = {
-  id: "files",
-  name: "files",
-  slug: "files",
-  kind: "group",
-};
-
-function groupForCli(channel: Pick<ChatChannelSummary, "id" | "kind" | "name" | "slug" | "purpose">): CliGroup {
-  return {
-    id: cliChannelId(channel.id),
-    name: channel.kind === "agent" ? channel.slug : channel.name,
-    slug: channel.slug,
-    kind: cliGroupKind(channel.kind),
-    ...(channel.purpose ? { purpose: channel.purpose } : {}),
-  };
-}
-
-async function listCliChannelThreads(context: CliWorkspaceContext, channel: ChatChannelSummary) {
-  // Any group can hold both lanes: an agent DM keeps its old posts beside its conversation.
-  const pages = await Promise.all((["posts", "chat"] as const).map(lane => context.store.listChannelThreads({
-    workspaceId: context.workspaceId, channelId: channel.id, lane,
-  })));
-  return pages.flat();
-}
-
-function authorForCli(message: ChatMessage): CliAuthor {
-  return {
-    kind: message.author.kind,
-    displayName: message.author.displayName,
-  };
-}
-
-function rawChatThread(thread: ChatThread) {
-  return {
-    id: thread.id,
-    title: thread.title,
-    createdAtMs: thread.createdAtMs,
-    updatedAtMs: thread.updatedAtMs,
-    ...(thread.linkedFile?.pathHint
-      ? { linkedPathHint: thread.linkedFile.pathHint }
-      : {}),
-  };
-}
-
-function rawChatMessage(
-  message: ChatMessage,
-  decision: ChatStreamItem["decision"],
-) {
-  return {
-    id: message.id,
-    threadId: message.threadId,
-    authorKind: message.author.kind,
-    authorDisplayName: message.author.displayName,
-    ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
-    body: message.body,
-    createdAtMs: message.createdAtMs,
-    ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
-    attachments: message.attachments.map(({ objectId, pathHint }) => ({
-      ...(objectId ? { objectId } : {}),
-      ...(pathHint ? { pathHint } : {}),
-    })),
-    needsDecision: decision !== undefined,
-    ...(decision ? {
-      decisionState: decision.state,
-      ...(decision.options ? { options: [...decision.options] } : {}),
-      ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
-      ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
-    } : {}),
-    ...agentRequestsFor(message),
-    ...reportedFor(message),
-  };
-}
-
-// What an agent's client reported about itself, so an agent reading the
-// chat sees what a person sees beside the name.
-function reportedFor(message: ChatMessage) {
-  return message.authorReported ? { authorReported: { ...message.authorReported } } : {};
-}
-
-// The agents still asked to answer a message, as the engine reports them.
-function agentRequestsFor(message: ChatMessage) {
-  return message.agentRequests?.length
-    ? { agentRequests: message.agentRequests.map((request) => ({ ...request })) }
-    : {};
 }
 
 // A history row carries only facts the path admission checked. The moment's
@@ -998,116 +895,10 @@ function automationPressResult(pressed: { result: NamedPressResult; waiting: Pre
   };
 }
 
-function documentsUnavailable() {
-  return {
-    ok: false as const,
-    reason: "documents are not available in this workspace",
-  };
-}
-
-async function loadChannels(
-  context: CliWorkspaceContext,
-): Promise<{
-  channels: Array<{ engine: ChatChannelSummary; cli: CliGroup }>;
-  provisioned: boolean;
-}> {
-  const before = await context.store.listChannels({
-    workspaceId: context.workspaceId,
-  });
-  if (!context.readOnly) {
-    await context.store.ensureGeneralChannel({ workspaceId: context.workspaceId });
-  }
-  const channels = await context.store.listChannels({
-    workspaceId: context.workspaceId,
-  });
-  return {
-    channels: channels.map((engine) => ({ engine, cli: groupForCli(engine) })),
-    provisioned: channels.length !== before.length,
-  };
-}
-
-function withoutChannelMarker(value: string): string {
-  return value.startsWith("#") ? value.slice(1) : value;
-}
-
-function ambiguous(label: string, input: string, ids: readonly string[]): never {
-  throw new CliCommandError(
-    `ambiguous ${label} prefix '${input}': ${ids.join(", ")}`,
-  );
-}
-
-function resolveIdPrefix<T>(
-  input: string,
-  label: string,
-  values: readonly T[],
-  idFor: (value: T) => string,
-  aliasesFor: (value: T) => readonly string[] = () => [],
-): T {
-  const handlesFor = (value: T) => [idFor(value), ...aliasesFor(value)];
-  const exact = values.filter((value) => handlesFor(value).includes(input));
-  if (exact.length === 1) return exact[0]!;
-  if (exact.length > 1) ambiguous(label, input, exact.map(idFor));
-  const matches = values.filter((value) =>
-    handlesFor(value).some((handle) => handle.startsWith(input)));
-  if (matches.length === 1) return matches[0]!;
-  if (matches.length > 1) ambiguous(label, input, matches.map(idFor));
-  throw new CliCommandError(`no such ${label}: ${input}`);
-}
-
-function resolveChannel(
-  input: string,
-  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
-): { engine: ChatChannelSummary; cli: CliGroup } {
-  const normalized = withoutChannelMarker(input);
-  const slugMatches = channels.filter(
-    ({ engine, cli }) => cli.slug === normalized || cli.name === normalized || engine.name === normalized,
-  );
-  if (slugMatches.length === 1) return slugMatches[0]!;
-  if (slugMatches.length > 1) {
-    ambiguous("group", input, slugMatches.map(({ cli }) => cli.id));
-  }
-  return resolveIdPrefix(
-    normalized,
-    "group",
-    channels,
-    ({ cli }) => cli.id,
-    ({ engine }) => [engine.id],
-  );
-}
-
-async function loadThreads(
-  context: CliWorkspaceContext,
-  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
-): Promise<LoadedThread[]> {
-  const summaries = await Promise.all(
-    channels.map(async ({ engine, cli }) => ({
-      cli,
-      summaries: await listCliChannelThreads(context, engine),
-    })),
-  );
-  const byId = new Map<string, LoadedThread>();
-  for (const entry of summaries) {
-    for (const summary of entry.summaries) {
-      byId.set(summary.thread.id, {
-        thread: summary.thread,
-        group: entry.cli,
-        summary,
-      });
-    }
-  }
-  const all = await context.store.listThreads({ workspaceId: context.workspaceId });
-  for (const thread of all) {
-    if (!byId.has(thread.id)) {
-      byId.set(thread.id, { thread, group: FILES_GROUP });
-    }
-  }
-  return [...byId.values()];
-}
-
 async function readReplyThread(
   context: CliWorkspaceContext,
+  chats: ChatsHost,
   input: string,
-  options: CliServerOptions,
 ): Promise<{ threadId: string; messages: ChatMessage[] }> {
   try {
     const messages = await context.store.listMessages({ workspaceId: context.workspaceId, threadId: input });
@@ -1115,83 +906,9 @@ async function readReplyThread(
   } catch (error) {
     if (!(error instanceof Error) || error.message !== "thread-not-found") throw error;
   }
-  const loaded = await loadChannels(context);
-  if (loaded.provisioned) await notifyWrite(options, context);
-  const threadId = resolveThread(input, await loadThreads(context, loaded.channels)).thread.id;
+  const threadId = resolveThread(input, await loadThreads(chats, await loadChannels(chats))).thread.id;
   const messages = await context.store.listMessages({ workspaceId: context.workspaceId, threadId });
   return { threadId, messages };
-}
-
-async function loadMessagesByThread(
-  context: CliWorkspaceContext,
-  threads: readonly LoadedThread[],
-): Promise<Map<string, ChatMessage[]>> {
-  const entries = await Promise.all(
-    threads.map(async (thread) => [
-      thread.thread.id,
-      await context.store.listMessages({
-        workspaceId: context.workspaceId,
-        threadId: thread.thread.id,
-      }),
-    ] as const),
-  );
-  return new Map(entries);
-}
-
-function resolveThread(input: string, threads: readonly LoadedThread[]): LoadedThread {
-  return resolveIdPrefix(
-    input,
-    "thread",
-    threads,
-    ({ thread }) => cliThreadId(thread.id),
-    ({ thread }) => [thread.id],
-  );
-}
-
-function resolveMessageInThread(
-  input: string,
-  messages: readonly ChatMessage[],
-): ChatMessage {
-  return resolveIdPrefix(
-    input,
-    "message",
-    messages,
-    (message) => cliMessageId(message.id),
-    (message) => [message.id],
-  );
-}
-
-function resolveThreadOrMessage(
-  input: string,
-  threads: readonly LoadedThread[],
-  messagesByThread: ReadonlyMap<string, ChatMessage[]>,
-): { thread: LoadedThread; rootMessage?: ChatMessage } {
-  const candidates: Array<{
-    id: string;
-    thread: LoadedThread;
-    rootMessage?: ChatMessage;
-  }> = [];
-  for (const thread of threads) {
-    candidates.push({ id: cliThreadId(thread.thread.id), thread });
-    for (const message of messagesByThread.get(thread.thread.id) ?? []) {
-      candidates.push({
-        id: cliMessageId(message.id),
-        thread,
-        rootMessage: message,
-      });
-    }
-  }
-  const resolved = resolveIdPrefix(
-    input,
-    "thread or message",
-    candidates,
-    (item) => item.id,
-    (item) => [item.rootMessage?.id ?? item.thread.thread.id],
-  );
-  return {
-    thread: resolved.thread,
-    ...(resolved.rootMessage ? { rootMessage: resolved.rootMessage } : {}),
-  };
 }
 
 // Where a run's reply goes when the agent names no message: under the
@@ -1220,186 +937,6 @@ async function askingThreadParent(
   }
 }
 
-function branchFromMessage(
-  messages: readonly ChatMessage[],
-  rootMessage: ChatMessage,
-): ChatMessage[] {
-  const byId = new Map(messages.map((message) => [message.id, message]));
-  function isDescendant(message: ChatMessage): boolean {
-    if (message.id === rootMessage.id) return true;
-    let parentId = message.parentMessageId;
-    const visited = new Set<string>();
-    while (parentId && !visited.has(parentId)) {
-      if (parentId === rootMessage.id) return true;
-      visited.add(parentId);
-      parentId = byId.get(parentId)?.parentMessageId;
-    }
-    return false;
-  }
-  return messages.filter(isDescendant);
-}
-
-async function threadCounts(
-  context: CliWorkspaceContext,
-  loaded: LoadedThread,
-  messages: readonly ChatMessage[],
-): Promise<{ commentCount: number; openDecisionCount: number }> {
-  if (loaded.summary) {
-    return {
-      commentCount: Math.max(0, loaded.summary.messageCount - 1),
-      openDecisionCount: loaded.summary.openDecisionCount,
-    };
-  }
-  const decisions = await context.store.listThreadDecisions(
-    context.workspaceId,
-    loaded.thread.id,
-  );
-  return {
-    commentCount: Math.max(0, messages.length - 1),
-    openDecisionCount: decisions.filter((decision) => decision.state === "open").length,
-  };
-}
-
-async function buildThreadContent(
-  context: CliWorkspaceContext,
-  loaded: LoadedThread,
-  allMessages: readonly ChatMessage[],
-  rootMessage?: ChatMessage,
-): Promise<Omit<CliShowThreadResult, "dispatch">> {
-  const decisions = await context.store.listThreadDecisions(
-    context.workspaceId,
-    loaded.thread.id,
-  );
-  const decisionByMessage = new Map(
-    decisions.map((decision) => [decision.messageId, decision]),
-  );
-  const counts = await threadCounts(context, loaded, allMessages);
-  const selected = rootMessage
-    ? branchFromMessage(allMessages, rootMessage)
-    : [...allMessages];
-  const messages = selected.map((message) => cliShowMessage(message, decisionByMessage.get(message.id)));
-  return {
-    thread: {
-      id: cliThreadId(loaded.thread.id),
-      title: loaded.thread.title,
-      group: loaded.group,
-      ...counts,
-    },
-    messages,
-  };
-}
-
-function cliShowMessage(message: ChatMessage, decision: ChatStreamItem["decision"]): CliShowMessage {
-  return {
-    id: cliMessageId(message.id),
-    author: authorForCli(message),
-    body: message.body,
-    createdAtMs: message.createdAtMs,
-    ...(message.parentMessageId
-      ? { parentMessageId: cliMessageId(message.parentMessageId) }
-      : {}),
-    ...(decision ? {
-      decisionState: decision.state,
-      ...(decision.options ? { decisionOptions: [...decision.options] } : {}),
-      ...(decision.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
-    } : {}),
-    attachments: message.attachments.map((attachment) => ({
-      ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
-      ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
-    })),
-    ...agentRequestsFor(message),
-    ...reportedFor(message),
-  };
-}
-
-// One page of a group's stream, read the same way by `dohc chat show <group>`
-// and dohc_read_chat. `ids` picks CLI handles or engine ids for what it names.
-async function readGroupStream(
-  context: CliWorkspaceContext,
-  channel: ChatChannelSummary,
-  page: { before?: CliStreamPosition; limit?: number },
-  ids: "cli" | "engine",
-) {
-  const before = page.before && {
-    ...page.before,
-    id: page.before.lane === "posts"
-      ? engineIdForHandle(page.before.id, "th_", "thread-")
-      : engineIdForHandle(page.before.id, "msg_", "message-"),
-  };
-  const stream = await context.store.listGroupStream({
-    workspaceId: context.workspaceId,
-    channelId: channel.id,
-    ...(before ? { before } : {}),
-    ...(page.limit ? { limit: page.limit } : {}),
-  });
-  const threadId = (id: string) => ids === "cli" ? cliThreadId(id) : id;
-  const messageId = (id: string) => ids === "cli" ? cliMessageId(id) : id;
-  const position = (value: ChatStreamItem["position"]): CliStreamPosition => ({
-    ...value,
-    id: value.lane === "posts" ? threadId(value.id) : messageId(value.id),
-  });
-  return {
-    items: stream.items.map((item) => ({
-      position: position(item.position),
-      threadId: threadId(item.message.threadId),
-      message: item.message,
-      decision: item.decision,
-      ...(item.post ? {
-        post: {
-          replyCount: item.post.replyCount,
-          repliers: item.post.repliers.map((replier) => ({
-            author: { kind: replier.author.kind, displayName: replier.author.displayName },
-            lastReplyAtMs: replier.lastReplyAtMs,
-          })),
-          ...(item.post.lastReplyAtMs === undefined ? {} : { lastReplyAtMs: item.post.lastReplyAtMs }),
-          ...(item.post.latestAgentReply ? {
-            latestAgentReply: {
-              id: messageId(item.post.latestAgentReply.id),
-              author: {
-                kind: item.post.latestAgentReply.author.kind,
-                displayName: item.post.latestAgentReply.author.displayName,
-              },
-              createdAtMs: item.post.latestAgentReply.createdAtMs,
-              bodyExcerpt: item.post.latestAgentReply.bodyExcerpt,
-            },
-          } : {}),
-          openDecisionCount: item.post.openDecisionCount,
-        },
-      } : {}),
-    })),
-    nextBefore: stream.nextBefore && position(stream.nextBefore),
-    readPosition: stream.readPosition && position(stream.readPosition),
-  };
-}
-
-function engineIdForHandle(id: string, handlePrefix: string, enginePrefix: string): string {
-  return id.startsWith(handlePrefix) ? `${enginePrefix}${id.slice(handlePrefix.length)}` : id;
-}
-
-// A group named exactly, by name, #slug or id. A prefix names a thread or
-// message instead.
-function exactChannel(
-  input: string,
-  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
-): { engine: ChatChannelSummary; cli: CliGroup } | undefined {
-  const normalized = withoutChannelMarker(input);
-  const matches = channels.filter(({ engine, cli }) =>
-    [cli.slug, cli.name, cli.id, engine.name, engine.id].includes(normalized));
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-async function buildShowResult(
-  context: CliWorkspaceContext,
-  loaded: LoadedThread,
-  allMessages: readonly ChatMessage[],
-  rootMessage?: ChatMessage,
-): Promise<CliShowThreadResult> {
-  return {
-    ...await buildThreadContent(context, loaded, allMessages, rootMessage),
-    dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, loaded.thread.id),
-  };
-}
-
 // Which agent reads: an agent you run as itself, then the agent of `runId`,
 // a run dohc dispatched, then the unnamed agents.
 function chatAgentReader(context: CliWorkspaceContext, runId: string | null): ChatAgentReader {
@@ -1420,28 +957,22 @@ async function markShownThreadRead(
   context: CliWorkspaceContext,
   actor: CliActor,
   reader: ChatAgentReader,
-  threadId: string,
-  messages: readonly ChatMessage[],
+  { threadId, messageCount, latest }: ShownThreadRead,
 ): Promise<void> {
-  if (messages.length === 0) return;
+  if (latest === null) return;
   if (actor === "agent") {
-    const latest = messages.reduce((current, candidate) =>
-      candidate.createdAtMs > current.createdAtMs ||
-      (candidate.createdAtMs === current.createdAtMs && candidate.id > current.id)
-        ? candidate
-        : current);
     await context.store.markThreadReadByAgent({
       workspaceId: context.workspaceId,
       reader,
       threadId,
-      upTo: { createdAtMs: latest.createdAtMs, messageId: latest.id },
+      upTo: latest,
     });
     return;
   }
   await context.store.markThreadRead({
     workspaceId: context.workspaceId,
     threadId,
-    upToSequence: messages.length,
+    upToSequence: messageCount,
   });
 }
 
@@ -1662,6 +1193,20 @@ async function notifyWrite(
   } catch (error) {
     options.onError?.(error);
   }
+}
+
+// The chat operations read through the workspace's own store and lookups.
+// Provisioning General writes outside chatWrites, so it is reported here.
+function chatsHost(context: CliWorkspaceContext, options: CliServerOptions): ChatsHost {
+  return {
+    workspaceId: context.workspaceId,
+    store: context.store,
+    fileObjectId: (path) => context.fileObjectIdForPath(path),
+    filePath: (objectId) => context.filePathForObjectId(objectId),
+    dispatch: (threadId) => readThreadDispatchState(context.dispatchStore, context.workspaceId, threadId),
+    writable: !context.readOnly,
+    provisioned: () => notifyWrite(options, context),
+  };
 }
 
 // The CLI client itself gives up after DEFAULT_RESPONSE_TIMEOUT_MS (30 s,
@@ -2644,6 +2189,7 @@ async function dispatchWorkspace(
   if (request.verb === "reply" && request.args.choose !== undefined && request.args.resolve === undefined) {
     throw new CliCommandError("--choose needs --resolve <message>");
   }
+  const chats = chatsHost(context, options);
   switch (request.verb) {
     case "notices": {
       if (!options.notices) throw new CliCommandError("Notices are unavailable.");
@@ -2767,142 +2313,14 @@ async function dispatchWorkspace(
       };
     }
 
-    case "fileChats": {
-      const validated = validateUserReadPath(request.args.path, { platform: process.platform });
-      if (!validated.ok) {
-        return {
-          ok: false as const,
-          reason: `path rejected (${validated.reason}): ${request.args.path}`,
-        };
-      }
-      try {
-        const fileObjectId = await context.fileObjectIdForPath(validated.normalized);
-        const threads = fileObjectId
-          ? await context.store.listThreadsForFile({
-              workspaceId: context.workspaceId,
-              objectId: fileObjectId,
-            })
-          : [];
-        return {
-          ok: true as const,
-          path: validated.normalized,
-          fileObjectId,
-          threads: threads.map(rawChatThread),
-        };
-      } catch (error) {
-        return mcpFailure(error, `failed to list chats for: ${request.args.path}`);
-      }
-    }
+    case "fileChats":
+      return listFileChats(chats, request.args.path, process.platform);
 
-    case "chat": {
-      if ("group" in request.args) {
-        const { group, before, limit } = request.args;
-        try {
-          const channels = (await context.store.listChannels({ workspaceId: context.workspaceId }))
-            .map((engine) => ({ engine, cli: groupForCli(engine) }));
-          const channel = resolveChannel(group, channels).engine;
-          const page = await readGroupStream(context, channel, { ...(before ? { before } : {}), ...(limit ? { limit } : {}) }, "engine");
-          return {
-            ok: true as const,
-            stream: {
-              group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
-              ...page,
-              items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
-            },
-          };
-        } catch (error) {
-          return mcpFailure(error, `failed to read group: ${group}`);
-        }
-      }
-      const { threadId } = request.args;
-      try {
-        const messages = await context.store.listMessages({
-          workspaceId: context.workspaceId,
-          threadId,
-        });
-        const threads = await context.store.listThreads({
-          workspaceId: context.workspaceId,
-        });
-        const thread = threads.find(
-          (candidate) => candidate.id === threadId,
-        );
-        if (!thread) {
-          return {
-            ok: false as const,
-            reason: `chat thread not found: ${threadId}`,
-          };
-        }
-        const currentPath = thread.linkedFile
-          ? await context.filePathForObjectId(thread.linkedFile.objectId)
-          : null;
-        const projection = await context.store.getThreadProjection({
-          workspaceId: context.workspaceId,
-          threadId: thread.id,
-          linkedFileAccess: currentPath
-            ? { kind: "allowed", path: currentPath }
-            : { kind: "unknown" },
-        });
-        const decisions = await context.store.listThreadDecisions(context.workspaceId, thread.id);
-        const decisionByMessage = new Map(decisions.map((decision) => [decision.messageId, decision]));
-        return {
-          ok: true as const,
-          thread: rawChatThread(thread),
-          dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, thread.id),
-          messages: messages.map((message) => rawChatMessage(message, decisionByMessage.get(message.id))),
-          projection: {
-            path: projection.path,
-            readOnly: projection.readOnly,
-            text: projection.text,
-          },
-        };
-      } catch (error) {
-        return mcpFailure(error, `failed to read chat: ${threadId}`);
-      }
-    }
+    case "chat":
+      return readChat(chats, request.args);
 
-    case "groupsFull": {
-      try {
-        const before = await context.store.listChannels({
-          workspaceId: context.workspaceId,
-        });
-        if (!context.readOnly) {
-          await context.store.ensureGeneralChannel({
-            workspaceId: context.workspaceId,
-          });
-        }
-        const fullChannels = await context.store.listChannels({
-          workspaceId: context.workspaceId,
-        });
-        if (fullChannels.length !== before.length) {
-          await notifyWrite(options, context);
-        }
-        const wireIds = await Promise.all(fullChannels.map(channel =>
-          context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: channel.id }).catch(() => null)));
-        const withThreads = [];
-        for (const [index, channel] of fullChannels.entries()) {
-          const threads = await listCliChannelThreads(context, channel);
-          withThreads.push({
-            id: channel.id,
-            channelWireId: wireIds[index] ?? null,
-            name: channel.name,
-            slug: channel.slug,
-            kind: cliGroupKind(channel.kind),
-            threadCount: threads.length,
-            ...(channel.purpose ? { purpose: channel.purpose } : {}),
-            threads: threads.map((entry) => ({
-              id: entry.thread.id,
-              title: entry.thread.title,
-              messageCount: entry.messageCount,
-              lane: entry.thread.lane,
-              updatedAtMs: entry.thread.updatedAtMs,
-            })),
-          });
-        }
-        return { ok: true as const, groups: withThreads };
-      } catch (error) {
-        return mcpFailure(error, "failed to list groups");
-      }
-    }
+    case "groupsFull":
+      return listGroupsWithThreads(chats);
 
     case "collectionQuery": {
       const collections = context.collections;
@@ -3269,18 +2687,12 @@ async function dispatchWorkspace(
       }, completion);
     }
 
-    case "documentRead": {
-      const documents = context.documents;
-      if (!documents) return documentsUnavailable();
-      const path = request.args.path;
-      const validated = validateUserReadPath(path, { platform: process.platform });
-      if (!validated.ok) return cliPathRejected(validated.reason, request.args.path);
+    case "documentRead":
       try {
-        return { ok: true as const, ...(await documents.read(validated.normalized)) };
+        return await readDocument(context.documents, request.args.path, process.platform);
       } catch (error) {
         return mcpFailure(error, `failed to read document: ${request.args.path}`);
       }
-    }
 
     case "versionList":
     case "versionCompare":
@@ -3556,22 +2968,41 @@ async function dispatchWorkspace(
         completion,
       );
     }
+
+    case "groups":
+      return listGroups(chats);
+
+    case "threads":
+      return listGroupThreads(chats, {
+        group: request.args.group,
+        reader: request.args.actor === "agent" ? chatAgentReader(context, context.run?.runId ?? null) : null,
+      });
+
+    case "show": {
+      const shown = await showChat(chats, request.args);
+      if ("stream" in shown) return shown;
+      if (!request.args.peek) {
+        if (context.readOnly) {
+          throw new CliCommandError("show requires --peek in a read-only workspace");
+        }
+        // A read from the run dohc started is its agent's, whatever actor it
+        // names, so it never moves your read place.
+        await markShownThreadRead(
+          context,
+          context.run ? "agent" : request.args.actor,
+          chatAgentReader(context, context.run?.runId ?? null),
+          shown.read,
+        );
+        await notifyWrite(options, context);
+      }
+      return shown.thread;
+    }
   }
 
-  const loadedChannels = request.verb === "reply"
-    ? { channels: [], provisioned: false }
-    : await loadChannels(context);
-  const channels = loadedChannels.channels;
-  if (loadedChannels.provisioned) await notifyWrite(options, context);
+  const channels = request.verb === "reply" ? [] : await loadChannels(chats);
   const nowMs = options.nowMs ?? Date.now;
 
   switch (request.verb) {
-    case "groups":
-      return { groups: await Promise.all(channels.map(async ({ cli, engine }) => ({
-        ...cli,
-        channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }).catch(() => null),
-      }))) };
-
     case "groupCreate": {
       if (!context.createGroup) throw new CliCommandError("Groups cannot be created in this workspace.");
       const channel = await context.createGroup({
@@ -3583,41 +3014,12 @@ async function dispatchWorkspace(
       return { group: groupForCli(channel) };
     }
 
-    case "threads": {
-      const channel = resolveChannel(request.args.group, channels);
-      const summaries = await listCliChannelThreads(context, channel.engine);
-      const agentUnread = request.args.actor === "agent"
-        ? new Set(
-            (await context.store.listAgentUnreadThreads(
-              context.workspaceId,
-              chatAgentReader(context, context.run?.runId ?? null),
-            )).map(
-              (thread) => thread.id,
-            ),
-          )
-        : null;
-      return {
-        group: channel.cli,
-        threads: summaries.map((summary) => ({
-          id: cliThreadId(summary.thread.id),
-          lane: summary.thread.lane,
-          title: summary.thread.title,
-          commentCount: Math.max(0, summary.messageCount - 1),
-          openDecisionCount: summary.openDecisionCount,
-          unread: agentUnread
-            ? agentUnread.has(summary.thread.id)
-            : summary.unreadCount > 0,
-          updatedAtMs: summary.thread.updatedAtMs,
-        })),
-      };
-    }
-
     case "inbox": {
       if (request.args.actor === "human") {
         const groups = await Promise.all(
           channels.map(async (channel) => ({
             channel,
-            summaries: await listCliChannelThreads(context, channel.engine),
+            summaries: await listChannelThreads(chats, channel.engine),
           })),
         );
         const channelThreads = groups.flatMap(({ channel, summaries }) =>
@@ -3634,14 +3036,14 @@ async function dispatchWorkspace(
             })),
         );
         const unreadFileIds = await humanUnreadFileThreadIds(context);
-        const fileThreads = (await loadThreads(context, channels)).filter((thread) =>
+        const fileThreads = (await loadThreads(chats, channels)).filter((thread) =>
           thread.thread.linkedFile && unreadFileIds.has(thread.thread.id));
-        const messagesByThread = await loadMessagesByThread(context, fileThreads);
+        const messagesByThread = await loadMessagesByThread(chats, fileThreads);
         const unreadFileThreads = await Promise.all(fileThreads.map(async (thread) => ({
           id: cliThreadId(thread.thread.id),
           title: thread.thread.title,
           ...await threadCounts(
-            context,
+            chats,
             thread,
             messagesByThread.get(thread.thread.id) ?? [],
           ),
@@ -3655,7 +3057,7 @@ async function dispatchWorkspace(
         return { threads, mentions: [] };
       }
 
-      const loadedThreads = await loadThreads(context, channels);
+      const loadedThreads = await loadThreads(chats, channels);
       const loadedById = new Map(
         loadedThreads.map((thread) => [thread.thread.id, thread]),
       );
@@ -3687,7 +3089,7 @@ async function dispatchWorkspace(
               workspaceId: context.workspaceId,
               threadId: thread.thread.id,
             });
-            const counts = await threadCounts(context, thread, messages);
+            const counts = await threadCounts(chats, thread, messages);
             return {
               id: cliThreadId(thread.thread.id),
               title: thread.thread.title,
@@ -3730,56 +3132,6 @@ async function dispatchWorkspace(
       return { threads: inboxThreads, mentions };
     }
 
-    case "show": {
-      const group = exactChannel(request.args.target, channels);
-      if (group) {
-        const page = await readGroupStream(context, group.engine, request.args, "cli");
-        return {
-          stream: {
-            group: group.cli,
-            ...page,
-            items: page.items.map(({ message, decision, ...item }) => ({
-              ...item,
-              message: cliShowMessage(message, decision),
-            })),
-          },
-        };
-      }
-      if (request.args.before || request.args.limit) {
-        throw new CliCommandError("--before and --limit page a group's stream; name a group");
-      }
-      const threads = await loadThreads(context, channels);
-      const messagesByThread = await loadMessagesByThread(context, threads);
-      const target = resolveThreadOrMessage(
-        request.args.target,
-        threads,
-        messagesByThread,
-      );
-      const messages = messagesByThread.get(target.thread.thread.id) ?? [];
-      const result = await buildShowResult(
-        context,
-        target.thread,
-        messages,
-        target.rootMessage,
-      );
-      if (!request.args.peek) {
-        if (context.readOnly) {
-          throw new CliCommandError("show requires --peek in a read-only workspace");
-        }
-        // A read from the run dohc started is its agent's, whatever actor it
-        // names, so it never moves your read place.
-        await markShownThreadRead(
-          context,
-          context.run ? "agent" : request.args.actor,
-          chatAgentReader(context, context.run?.runId ?? null),
-          target.thread.thread.id,
-          messages,
-        );
-        await notifyWrite(options, context);
-      }
-      return result;
-    }
-
     case "post": {
       const channel = resolveChannel(request.args.group, channels);
       if (channel.engine.kind === "dm") {
@@ -3820,7 +3172,7 @@ async function dispatchWorkspace(
     }
 
     case "reply": {
-      const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
+      const { threadId, messages } = await readReplyThread(context, chats, request.args.thread);
       const actor = writeActor(request.args.actor, context, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
@@ -3917,8 +3269,8 @@ async function dispatchWorkspace(
     }
 
     case "react": {
-      const threads = await loadThreads(context, channels);
-      const messagesByThread = await loadMessagesByThread(context, threads);
+      const threads = await loadThreads(chats, channels);
+      const messagesByThread = await loadMessagesByThread(chats, threads);
       const target = resolveThreadOrMessage(
         request.args.message,
         threads,
@@ -3944,7 +3296,7 @@ async function dispatchWorkspace(
     }
 
     case "grep": {
-      const threads = await loadThreads(context, channels);
+      const threads = await loadThreads(chats, channels);
       const scopedChannel = request.args.group
         ? resolveChannel(request.args.group, channels).cli
         : null;
@@ -3969,7 +3321,7 @@ async function dispatchWorkspace(
       const scanThreads = !request.args.regex && fts
         ? selected.filter((thread) => fts.threadIds.has(thread.thread.id))
         : selected;
-      const messagesByThread = await loadMessagesByThread(context, scanThreads);
+      const messagesByThread = await loadMessagesByThread(chats, scanThreads);
       let matchesText: (text: string) => boolean;
       if (request.args.regex) {
         const searchableTexts = [...new Set(scanThreads.flatMap((thread) => [
@@ -4033,7 +3385,7 @@ async function dispatchWorkspace(
     }
 
     case "export": {
-      const threads = await loadThreads(context, channels);
+      const threads = await loadThreads(chats, channels);
       let selected: LoadedThread[];
       if (request.args.scope.kind === "thread") {
         selected = [resolveThread(request.args.scope.thread, threads)];
@@ -4055,7 +3407,7 @@ async function dispatchWorkspace(
           workspaceId: context.workspaceId,
           threadId: thread.thread.id,
         });
-        const result = await buildThreadContent(context, thread, messages);
+        const result = await buildThreadContent(chats, thread, messages);
         const channelDir = join(outputRoot, nameSlug(thread.group.slug) || "chat");
         await mkdir(channelDir, { recursive: true });
         const publicThreadId = cliThreadId(thread.thread.id);
@@ -4081,9 +3433,7 @@ async function dispatchMentionAndLinkReads(
     let channelWireId: string | null;
     if ("group" in request.args) {
       const context = await workspaceContextForRequest(request, options, runSecret);
-      const loaded = await loadChannels(context);
-      if (loaded.provisioned) await notifyWrite(options, context);
-      const channel = resolveChannel(request.args.group, loaded.channels);
+      const channel = resolveChannel(request.args.group, await loadChannels(chatsHost(context, options)));
       channelWireId = await context.store.getChannelWireId({
         workspaceId: context.workspaceId, channelId: channel.engine.id,
       }).catch(() => null);
@@ -4251,14 +3601,14 @@ async function watchMessages(
   let channelId: string | undefined;
   let threadId: string | undefined;
   if (request.args.group !== undefined || request.args.thread !== undefined) {
-    const { channels, provisioned } = await loadChannels(context);
-    if (provisioned) await notifyWrite(options, context);
+    const chats = chatsHost(context, options);
+    const channels = await loadChannels(chats);
     if (request.args.group !== undefined) {
       const group = exactChannel(request.args.group, channels);
       if (!group) throw new CliCommandError("Group not found. Use chat groups to choose a Group.");
       channelId = group.engine.id;
     }
-    if (request.args.thread !== undefined) threadId = resolveThread(request.args.thread, await loadThreads(context, channels)).thread.id;
+    if (request.args.thread !== undefined) threadId = resolveThread(request.args.thread, await loadThreads(chats, channels)).thread.id;
   }
   const empty = { messages: [], cursor: request.args.cursor ?? encode([]) };
   const seenIds = new Set(seen.map(([, messageId]) => messageId));
