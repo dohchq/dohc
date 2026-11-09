@@ -1,81 +1,77 @@
 # dohc
 
-dohc is a local-first workspace where people and their agents build, share, and manage small apps alongside their files, documents, data, and chat.
-It provides sync, sharing, permissions, and history so each app and workflow does not have to recreate them.
-Users own their work and choose their tools, agents, and workflows.
-
-dohc is an early alpha released as nightly builds. Nobody outside the team uses it yet.
+dohc is a local-first workspace where people and agents build, share, and manage small apps alongside files, documents, data, and chat.
+It supplies sync, sharing, permissions, and history. Users own their work and choose their tools, agents, and workflows.
+It is an early alpha released as nightly builds, with no users outside the team yet.
 
 ## How to use this document
 
-The product sections below are decision boundaries, not a feature checklist. Use them to reject work that would turn dohc into the wrong product.
-
-- If an instruction conflicts with the task, explain the conflict and get human approval before breaking it.
-- Treat the remaining instructions as repository defaults. An explicit developer request can override them.
+Product sections are decision boundaries, not a feature checklist or claims of shipped capability.
+Explain conflicts with a product boundary or invariant and get human approval before breaking it.
+Other instructions are repository defaults; an explicit developer request can override them.
+Verify implementation before making claims. Distinguish illustrative demos from working behavior.
 
 ## Product model
 
-The workspace is the primary product object. It can contain files, live documents, structured data, chats, and apps.
+The workspace is the primary object. Files, live documents, structured data, chats, and apps share its permissions and history.
+Files provide portability; use Y.Doc, SQLite, or another state model when it fits.
+Keep work owned, inspectable, exportable, and recoverable without dohc.
+Keep routine work useful without programming or an agent. Expose source and advanced controls when people need to change an app.
 
-Keep routine work useful without programming knowledge or an agent.
-Expose source and advanced controls when people need to change an app.
-
-Files are the portable foundation, not the required runtime representation for every feature. Use the state model that fits the subsystem. A live document can be a Y.Doc and structured data can live in SQLite. Keep work owned, inspectable, and exportable instead of forcing all state into flat text.
-
-Start with a job people need to finish. Design capabilities around how they use, change, and share its result.
-Chat references the work, apps use explicitly exposed data, and collaborators continue within its permissions and history.
-Explain each connection through a concrete user action.
-
-Product commitments describe intended behavior. Verify the current implementation before claiming a capability is available.
-Keep illustrative demos distinguishable from working product behavior.
-
-When explaining differentiation, compare a concrete workflow with the tools people already use.
-Separate product choices from demonstrated advantages. Support claims of superiority or uniqueness with evidence.
-
-A workspace must be useful to one person on one device. Team collaboration is still core: adding another person or agent should extend the same work, not require exports, copied context, or a new system.
+Start with a concrete job. Trace how someone uses, changes, shares, and continues its result.
+Explain connections through user actions: chat references work, apps use exposed data, and collaborators continue within permissions and history.
+Compare concrete workflows with existing tools. Product choices alone do not prove superiority or uniqueness.
 
 ### The job
 
-An agent can build a small app really quickly. The hard part comes after. Each app needs these things:
-
-- a place for its data;
-- an interface people already know;
-- a safe way for other people to use it;
-- a way to work on it together;
-- a record of what each agent made and changed.
-
-Developers can assemble these from separate tools. Most people cannot. dohc provides them in one workspace.
-Prefer work that makes one of these easier.
-Documents, Collections, and chat must stay useful without an app.
+Agents can build apps; people still need somewhere to keep data, familiar controls, safe sharing, and collaboration.
+They also need a record of what each agent made and changed.
+dohc supplies these in one workspace. Prefer work that makes one of them easier.
+Documents, Collections, and chat must remain useful without an app.
 
 ### Product commitments
 
-1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Drive should win through the managed network and operational experience, not a crippled local product.
+1. **Local first and user owned.** Local creation, inspection, and editing require no account or network.
+   Sync and sharing add capability; local work must not become a cache of a remote product.
+   Keep data inspectable or exportable for recovery without dohc.
+   Self-hosting must be meaningful. dohc Drive competes through managed operation, not restrictions on the local product.
+2. **Performance without compromise.** The desktop must feel native. Consider each change's performance impact; treat regressions as bugs.
+   Being slower than Notion in a browser defeats a reason to choose dohc.
+3. **Collaboration on the work itself.** Humans and agents continue durable objects with context, history, permissions, and provenance.
+   One person on one device must find the workspace useful.
+   Adding collaborators extends the same work without exports, copied context, or another system.
+   Collaboration extends beyond several people typing into an isolated document.
+4. **Built for humans and agents.** Design every feature for both from the start.
+   A share link alone should let either user read, edit, comment, and chat within its permissions.
+   Agent access needs no computer use, separate integration, or impersonation. An MCP server added later is insufficient.
+5. **Agent agnostic.** dohc neither provides nor supervises user agents or imposes a universal approval workflow.
+   Ordinary file-based agents remain useful; optional identity adds provenance and configured policy.
+   A control performs its named action rather than opening an agent prompt.
+   People ask agents through their tools or dohc chat. User-built automations may message agents.
+   Agents reach the same action through CLI or MCP.
+6. **Chat is part of the workspace.** Connect discussion, requests, handoffs, and proactive messages to durable files, data, and apps.
+   Useful outcomes must be able to become work beyond the transcript.
+7. **Apps are real web apps.** Apps are source-backed, inspectable, dynamic, and limited to explicitly exposed data and capabilities.
+   Source lives and syncs in the workspace so collaborators and agents can continue it.
+   Apps can be shared by URL with people who do not use dohc.
+   Keep execution, authentication, and workspace access as separate security boundaries.
+8. **Rigid substrate, flexible workflow.** Keep ownership, authentication, permissions, sync, history, provenance, links, and isolation strict.
+   Users choose folders, tools, rituals, agents, and workflows.
+   App source and Collection automation definitions live in the workspace for any agent to read and change.
+   People customize dohc through a settings file and pinned apps, not by rewriting built-in parts.
+   Updates preserve settings and apps. The core supplies the reliable foundations.
 
-2. **Performance without compromise.** Speed is a core reason to be local-first and to ship a desktop app. dohc must feel native, as if the OS came with it preinstalled. Lots of apps have gotten bogged down with bad tech decisions and slop; dohc does not join them. If Notion in a browser tab feels faster than dohc, dohc has lost its own argument. Make sure every change is considerate of its performance impact, and treat a regression as a bug, not a tradeoff.
-
-3. **Collaboration on the work itself.** Humans and agents share durable workspace objects with their context, history, permissions, and provenance. Do not reduce collaboration to exporting files, pasting context into a chat, or several people typing into an isolated document.
-
-4. **Built for humans and agents.** Design every feature and surface for two users from the start: a human and an agent. Parity is not an MCP server added after the fact; the feature itself must work for both. For example, a share link sent to an agent should work just like one sent to a friend: with the link alone, the agent can read, edit, comment, and chat, with no computer use, no separate integration, and no impersonating a person.
-
-5. **Agent agnostic.** dohc does not provide or supervise the user's agents. Any agent that can work with ordinary files should remain useful. dohc adds reliable tools and optional identity, provenance, and policy controls. It must not impose a universal agent approval workflow. A dohc control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat, and an automation they build may message their agent. An agent reaches the same action through the CLI or MCP.
-
-6. **Chat is part of the workspace.** Chat connects humans, agents, files, data, and apps. It supports requests, discussion, handoffs, and proactive agent messages. Users and agents can turn useful outcomes into durable work instead of losing them in a transcript.
-
-7. **Apps are real web apps.** A dohc app is source-backed, inspectable, dynamic, and connected only to data and capabilities the owner exposes. Its source lives and syncs in the workspace so collaborators and their agents can continue changing it. It can be shared by URL with someone who does not use dohc. Treat app execution, authentication, and workspace access as separate security boundaries.
-
-8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Apps and Collection automations extend the work; their source and definitions live in the workspace, where any agent can read and change them. People customize dohc through a settings file and pinned apps. They do not rewrite built-in parts, and updates keep their settings and apps. The core must already provide the reliable substrate.
-
-Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, an app builder whose apps live apart from the work, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
+Keep the core free of prescribed workflows, hardcoded business apps, and mandatory templates.
+dohc is not an AI wrapper, company brain, Notion clone, dashboard generator, disconnected app builder, chat overlay, or template marketplace.
+Reusable examples help; making people conform to them is not the product. Activity alone is not success.
 
 ### Design for work nobody has read
 
-Agents now write apps and changes that no person reads line by line. A person must still be able to trust that work, and an agent must still be able to continue it.
-
-- Shape each surface like the user's task, not its implementation. A person sees whether their work is saved, synced, and shared, not relay or engine state. An agent edits a file with ordinary tools without knowing about Y.Doc settlement.
-- Let a person oversee work they did not read. For any agent change or app, the person can see who made it, what it can reach, and how to reverse it without opening the source.
-- Make invalid states impossible to express. An app cannot request data its owner did not expose; a rule that tells it not to is not enough.
-- Keep capabilities composable. Changing sharing, apps, or chat must not require changing how the others store their state.
+- Shape each surface around the user's task. Show saved, synced, and shared state rather than engine or relay internals.
+  Agents should edit with ordinary tools without knowing Y.Doc settlement.
+- Let people oversee unread work: show who made a change, what it can access, and how to reverse it without reading source.
+- Make invalid states impossible to express. Apps cannot request unexposed data; a rule telling them not to is insufficient.
+- Keep capabilities composable. Changing sharing, apps, or chat must not require changing how the others store state.
 
 ### A note from Ice
 
@@ -87,56 +83,60 @@ If a folder and a capable agent can already do the job, dohc must earn its place
 
 ## What dohc looks like in practice
 
-These examples describe intended workflows, not a list of shipped features. Use them to test product proposals.
+These are intended workflows, not shipped-feature claims. Use them to test proposals.
 
 ### Plan a trip
 
-- ✅ **dohc.** A person works with an agent through files and chat, then builds the trip app they want. They share the app, files, and conversation with the group. The group and their agents can continue the same work from a phone or browser. dohc handles sync, identity, permissions, and history underneath. The trip is the work. Agent orchestration is only one possible means.
-- ❌ **Not dohc.** The person downloads a "travel team" template, configures agent roles and heartbeats, then accepts its prescribed workflow.
+Keep the trip app, files, and discussion together so the group and their agents can continue them from a phone or browser.
+dohc supplies sync, identity, permissions, and history. Agent orchestration is optional; prescribed roles and heartbeats are not the product.
 
 ### Run a fundraiser
 
-- ✅ **dohc.** An organizer asks their agent to build a signup app in an event workspace. Participants register through a share link. Organizers manage registrations, discuss changes, and keep editing the app's source in the same workspace. The app uses only the data and capabilities its owner exposes. dohc provides sync, access, and history.
-- ❌ **Not dohc.** The demo ends at a signup page. There is no path to store registrations, control access, or continue the work together.
+A signup app accepts registrations through a share link, using only data and capabilities its owner exposes.
+It stores registrations, controls access, and keeps source editable in the event workspace.
+Organizers discuss and continue the work there. A demo ending at a signup page is incomplete.
 
 ### Share work in progress
 
-- ✅ **dohc.** A person shares the relevant part of a workspace with its files, data, app, chat, history, and declared dependencies. The recipient and their agent can inspect what happened and continue the same work without reconstructing its context.
-- ❌ **Not dohc.** The person exports a file, pastes an old chat, or sends a zip. The recipient must start again in another tool. Sharing should transfer continuity, not only bytes.
+Share relevant files, data, apps, chat, history, permissions, and declared dependencies so recipients and agents can continue the work.
+An export, zip, or pasted old chat transfers bytes without continuity.
 
 ### Tailor the workspace
 
-- ✅ **dohc.** A user asks an agent to create or change an app or a Collection automation for their workflow. They can inspect it, fork it, and share it. The result can fit their work without forcing the same workflow on everyone else.
-- ❌ **Not dohc.** dohc ships a hardcoded CRM, requires a project ritual, or becomes a template marketplace. dohc supplies reliable building blocks. Users and agents decide what to build.
+Users and agents inspect, fork, and share apps or Collection automations suited to their work.
+The core supplies building blocks, not a hardcoded CRM, prescribed ritual, or template marketplace.
 
 ## Product invariants
 
-Do not weaken authorization, ownership, isolation, or explicitly configured controls for convenience.
+Do not weaken authorization, ownership, isolation, or configured controls for convenience.
 
-- Derive authorization server-side. Never trust a browser or client caller to provide user identity.
-- Scope every file, folder, document, chat, share, capture, and app capability to a workspace.
-- Apply the same storage, permission, path access, sharing, and configured policy boundaries to human and agent changes. Agent identity is optional provenance, not a separate storage authority.
-- Sandbox sites, apps, and HTML previews. They receive only explicitly granted capabilities and data; they do not inherit workspace authority.
-- Treat a live document session's Y.Doc as canonical. On settlement, the engine writes the Markdown artifact. Do not make raw full-body Markdown patching the source of truth for live editing.
-- Give every reversible state change a visible reverse path. Warn the user before an irreversible action runs.
-- Put every message where the user expects it. A top bar only when the whole workspace is degraded. Every other error arrives as a bottom-right toast and stays as a row in Notices with Try again and copy. Copy sits beside the text it copies. The rules are in [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md).
-- Guard every asynchronous renderer response with a workspace/request token, abort signal, or equivalent before setting workspace-scoped UI state. A slow response for workspace A must never repaint workspace B.
+- Derive authorization server-side. Never trust client-supplied user identity.
+- Scope files, folders, documents, chats, shares, captures, and app capabilities to a workspace.
+  Apply the same storage, permissions, paths, sharing, and configured policies to human and agent changes.
+  Agent identity is optional provenance, not separate storage authority.
+- Sandbox sites, apps, and HTML previews. Grant explicit data and capabilities; they inherit no workspace authority.
+- A live document session's Y.Doc is canonical. The engine writes Markdown on settlement.
+  Raw full-body Markdown patches cannot be the source of truth for live editing.
+- Give reversible state changes a visible reverse path. Warn before irreversible actions.
+- Show a top bar only for whole-workspace degradation. Other errors belong in bottom-right toasts and durable Notices rows.
+  Include Try again and copy. Put copy beside its text. Follow [dohc-interface](.agents/skills/dohc-interface/SKILL.md).
+- Guard async renderer responses with a workspace/request token, abort signal, or equivalent before changing workspace-scoped state.
+  A slow workspace A response must never repaint workspace B.
 
-Within these boundaries, authors decide what their apps do and which web frameworks and external services they use. Authors are responsible for app behavior, including where an app sends data it receives.
+Within these boundaries, app authors choose frameworks and services and own app behavior, including where received data goes.
 
 ## Work against the current design
 
-There are no users yet. Optimize for the best current design instead of preserving old internal contracts.
-
-- Replace obsolete contracts instead of adding compatibility layers.
-- Remove deprecated aliases, dual formats, fallbacks, shims, and dead paths.
-- Update all internal callers, tests, fixtures, and docs in the same change.
-- Add a migration path only when the user asks for one.
-- Shipped engine migrations are append-only. A store the build cannot migrate stops its workspace until a fixed build opens it. To reset a development store, delete `<workspace>/.dohc/engine`.
+There are no external users yet. Prefer the best current design over old internal contracts.
+Replace obsolete contracts and update callers, tests, fixtures, and docs together.
+Remove deprecated aliases, dual formats, fallbacks, shims, and dead paths. Add migration paths only when requested.
+Shipped engine migrations are append-only. If a build cannot migrate a store, stop that workspace until a fixed build opens it.
+Reset a development store by deleting `<workspace>/.dohc/engine`.
 
 ## Engineering defaults
 
-Understand the constraint before building. Choose the smallest model that makes the required behavior and performance unsurprising. Do not preserve complexity because it exists or add machinery because it looks architecturally impressive.
+Understand the constraint. Choose the smallest design that makes correct behavior and performance clear.
+Question existing complexity rather than preserving it or adding machinery for appearance.
 
 ### Effect in TypeScript
 
@@ -145,142 +145,128 @@ Understand the constraint before building. Choose the smallest model that makes 
 - Prefer Effect Schema for new or changed external contracts in modules whose runtime already uses Effect.
 - Keep renderer and preload runtime imports Effect-free.
 - Keep native and OS resource limits when adding Effect timeouts or interruption.
-- Preserve the operation's error precedence through cleanup and shutdown.
-- Wait for owned resources to close before returning.
-- Before retaining a conversion, measure the production artifact containing the changed module.
-  Compare size and first-load time against baseline under matching build and machine conditions.
+- Preserve error precedence through cleanup and shutdown. Wait for owned resources to close before returning.
+- Before retaining a conversion, measure its production artifact's size and first-load time against a baseline under matching conditions.
 
 ### Continue from approved work
 
-- Treat approved behavior and design choices as the working baseline. Interpret feedback at the requested scope.
-- Preserve a recoverable comparison before a broad redesign.
-- When a direction is rejected, restore the affected change while preserving unrelated work. Carry the correction into subsequent work.
+Preserve approved behavior and interpret feedback at its requested scope.
+Before broad redesign, keep a recoverable comparison.
+If a direction is rejected, restore that change while preserving unrelated work. Carry the correction into later edits.
 
 ### Finish the experience
 
-Craft includes layout, interaction, loading, failure, and recovery. Evaluate the complete experience, including transitions between states.
-- Choose layouts for their content. Give comparisons enough room, with consistent spacing and varied composition.
-- Show, don't tell. A person should see what a surface is, what state it is in, and what to do next at a glance, without reading. Let icons, placement, shape, and color that means something carry the meaning; keep words for the user's own content and for facts only words can state.
-- For broad redesigns, develop one representative section before extending the treatment.
-- Inspect affected layouts, both themes, keyboard access, reduced motion, loading transitions, and failure states in the browser.
-- Match preview and live visuals. Keep content useful while visuals load, and suspend animation offscreen.
-- Measure startup and interaction when changing rendering or loading. Judge the experience alongside automated performance scores.
+Read [dohc-interface](.agents/skills/dohc-interface/SKILL.md) before changing words, controls, tokens, or recipes.
+Finish layout, interaction, loading, failure, recovery, and transitions.
+Show what a surface is, its state, and the next action through meaningful icons, placement, shape, and color.
+Keep words for the user's content and facts only words can state.
+Choose layouts for their content. Give comparisons enough room, consistent spacing, and varied composition.
+Develop one representative section before extending a broad redesign.
+Inspect both themes, keyboard access, reduced motion, loading, and failure in the browser.
+Match preview and live visuals. Keep content useful while visuals load and suspend offscreen animation.
+Measure affected startup and interactions alongside automated scores.
 
 ## Documentation and writing
 
-Name the reader before adding a document to main. If nobody will use it to make a decision or perform work, do not add it. Git records what happened. Tests should enforce rules that code can break.
-
-Keep `docs/` for people using dohc, including app authors and agents. Put essential maintainer procedures and security boundaries in `docs/engineering/`. Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`. Remove them when the task ends. Existing tracked plans may stay in `docs/engineering/plans/` while their coordinating sessions still need them.
-
+Add a document only when a named reader needs it for work or a decision.
+Git records history; tests enforce rules code can break.
+Keep docs for users, app authors, and agents in `docs/`; put maintainer procedures and security boundaries in `docs/engineering/`.
+Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`; remove them when the task ends.
+Existing tracked plans may stay in `docs/engineering/plans/` while coordinating sessions need them.
 Release owners follow the [desktop release procedure](docs/engineering/desktop-release.md).
 
-Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
-
-Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term list; check terms against it and the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
+Before writing prose, read [dohc-writing](.agents/skills/dohc-writing/SKILL.md).
+For in-app words, use [dohc-interface](.agents/skills/dohc-interface/SKILL.md).
+Use [CONTEXT.md](CONTEXT.md) for canonical terms; check surrounding code before naming a concept.
+Fix a workaround rather than defending it with a paragraph-long comment.
 
 ## Where code lives
 
-- `apps/desktop` contains the Electron app. Most user-visible product work lands here.
-- `apps/site` contains the marketing site and product demo.
-- `packages` contains shared TypeScript contracts, clients, tools, auth, and UI code.
-- `services` contains opt-in auth, sync relay, and SQLite services.
-- `crates` contains the Rust workspace engine and supporting crates. `dohc-workspace-engine` builds the daemon used by the desktop app.
-- `tools/rust-engine-program` contains the Rust gate scripts, fixture goldens, and evidence tools.
+Use [README.md](README.md) for the repository map, setup, and development commands.
 
 ## Local development
 
-Use Node 24.16 or newer and pnpm 11.20.0, as pinned in `package.json`.
-
-- `pnpm dev:desktop` starts the desktop app. `pnpm dev` is an alias.
-- `pnpm dev:site` starts the marketing site.
-- `pnpm dev:workspace-api` starts the workspace API.
-- `pnpm dev:postgres` starts development Postgres; `pnpm migrate` applies migrations; `pnpm reset:postgres` clears development data. The desktop app does not need Postgres.
-- When a task ends, remove its worktree, build targets, and stale verification evidence.
+Use the Node and pnpm versions pinned in `package.json`, and its scripts for available commands.
+The desktop does not need Postgres. Remove task worktrees, build targets, and stale verification output when work ends.
+Preserve required evidence and source.
 
 ## Verification
 
-Use [the agent verification procedure](docs/engineering/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
-For desktop QA, start with `pnpm run doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
-
+Read [the verification procedure](docs/engineering/verify-agent-work.md) for setup, desktop QA, debug access, and PR evidence.
 Run the smallest check that proves the change.
-
-- Run the affected package's typecheck and focused unit or integration tests while editing.
-- One verification owner runs the full selected gates through `pnpm verify:pr --base <target-ref>`.
-- Other agents run focused checks and reuse the owner's evidence instead of repeating full gates.
-- `pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before launching Playwright.
-- For Rust work, use the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Read the gate's `== summary ==` block rather than its exit code.
-- A test that needs a sleep to pass is wrong. Wait for the actual condition.
+Run affected-package typechecks and focused tests while editing and during review.
+For desktop QA, start with `pnpm run doctor`; use `pnpm qa:smoke` for boot, editing, persistence, and restart.
+`pnpm test:desktop:e2e` prepares and verifies the desktop and native engine before Playwright.
+Wait for actual conditions; do not make a test pass by adding a sleep.
+For Rust, use [rust-gate](.agents/skills/rust-gate/SKILL.md), never bare Cargo. Read the summary verdicts, not the exit code.
 
 ## Pull requests and merging
 
-Use the [PR template](.github/pull_request_template.md) for the problem, resulting behavior, and verification evidence. Include screenshots or a recording when they help a reviewer assess a visible change. State any unverified behavior.
+Keep required contracts, callers, and tests together.
+Keep unfinished work on a branch.
+Finish implementation, simplification, self-review, and focused checks before requesting independent review or opening a PR ready for review.
+Use drafts only for specific early feedback or a dependency needing a PR link.
+State why the draft exists, what feedback is needed, and what remains. Drafts are not progress placeholders or backups.
+Use the [PR template](.github/pull_request_template.md). State the problem, resulting behavior, evidence, and unverified behavior.
+Include screenshots or recordings when they help assess a visible change.
 
-Blacksmith stays off until a maintainer enables the repository variable `BLACKSMITH_ENABLED`.
-While off, run PR verification locally. Manual GitHub checks use GitHub-hosted `ubuntu-24.04` runners.
-When enabled, ready PRs from this repository use Blacksmith.
-Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with maintainer credentials. Ask a maintainer how to verify it.
-Use passing cloud evidence instead of repeating full gates locally when it covers the change.
-Before changing CI activation, read [the Blacksmith setup procedure](docs/engineering/enable-blacksmith.md).
-Keep required contract, caller, and test changes together.
-Finish implementation, self-simplification, and focused checks before requesting independent review.
+Blacksmith stays off until a maintainer enables `BLACKSMITH_ENABLED`.
+While off, verify locally; manual GitHub checks use GitHub-hosted `ubuntu-24.04` runners.
+When enabled, ready same-repository PRs use Blacksmith. Reuse covered passing cloud evidence instead of repeating full local gates.
+Before changing CI activation, read [the setup procedure](docs/engineering/enable-blacksmith.md).
+Never check out, install, build, or test fork PR code on shared Windows/Mac hosts or machines with maintainer credentials.
+Ask a maintainer how to verify it.
 
 ### Verify the change
 
-The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
-Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
-A selected JavaScript gate runs the complete JavaScript suite with every integration proof.
+One verification owner runs `pnpm verify:pr --base <target-ref>`; others reuse that evidence and run focused checks.
+Inspect job selection with `pnpm verify:plan --base <target-ref>` using `.github/workflows/pr-checks.yml` filters.
+A selected JS gate runs the complete suite, including every integration proof.
+After required reviews resolve blockers, run full verification once unless passing cloud evidence covers the reviewed head.
+On failure, fix the cause, review the affected delta, and rerun.
 
-- One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
-- Run focused checks while implementing and during review rounds.
-- After the required reviews finish with no open blocking findings, the verification owner runs `pnpm verify:pr` once, unless passing cloud evidence already covers the reviewed head. If it fails, fix the cause, get the affected delta reviewed, and run it again.
-- Before merging, require passing canonical gate evidence that covers the PR's changes.
-- After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
-- When reusing passing evidence, rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
-- Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
-- If a job reads a changed file outside its filter, correct the filter and run that job.
-- When impact is unclear, use `pnpm verify:pr --base <target-ref> --full` to run both jobs.
-- Record the tested commit, target ref, selected gates, result, and evidence location. Explain any reuse across commits.
-- If no code gate applies, record the runner's selection and reason.
-- Add focused platform verification when changed behavior depends on Windows or macOS.
+- Require covered passing canonical evidence before merge. Every selected job must pass, subject to the Windows screenshot exception below.
+- Reuse evidence across rebases and merges after checking the delta and recording coverage.
+  Rerun only checks affected by source, dependency, configuration, or conflict resolution. Advancing main alone needs no rerun.
+- Missing, cancelled, or failed runs are not passes. Record failures accurately.
+- If a job reads a changed file outside its filter, fix the filter and run it.
+  When impact is unclear, use `pnpm verify:pr --base <target-ref> --full`.
+- Record tested commit, target, selected jobs, results, evidence paths, and reuse decisions. Record the selection when no gate applies.
+- Add platform checks for Windows- or macOS-dependent behavior.
 
-Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
-It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/engineering/verify-agent-work.md#verify-a-pull-request).
-On the shared Windows host and the shared Mac it queues the commit with the verification service, which verifies it in its own checkout; stopping the command does not stop the request. Elsewhere, keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
-The Rust gate retains its build budget and mandatory summary-verdict checks.
-Only `verify:pr` holds the host's verification lane. Run focused checks, benchmarks, and packaging outside it.
+Windows screenshot baseline differences do not block merges. Record them and require every other check to pass.
+The nightly detects drift; maintainers update PNGs in a separate follow-up PR.
+
+Full verification owns service setup, prebuilds, selection, and evidence. Follow [the procedure](docs/engineering/verify-agent-work.md#verify-a-pull-request).
+On shared Windows/Mac hosts, the service queues and verifies the commit in its own checkout; stopping submission does not cancel it.
+Elsewhere, keep the tested checkout unchanged. Preserve original commit and target in `result.json`.
+Keep Rust's build budget and summary-verdict checks.
+Only `verify:pr` holds the verification lane. Run focused checks, benchmarks, and packaging outside it.
 
 ### Select reviewers
 
-- Routine changes need one primary independent reviewer. Additional bots provide optional feedback.
-- Non-trivial code changes need a primary reviewer from a different model family than the implementation agent.
-- Combine correctness and simplification in that review. Give the reviewer the diff, relevant source, and required behavior.
-- Authorization, isolation, security, privacy, migration, durability, and major integration changes need a second independent reviewer of those risks.
-- Add a second reviewer for a disputed blocking finding. Give that reviewer the disputed behavior and source.
-- Name the required reviewers and their scopes in the PR.
-
-Keep each appointed reviewer through the fix rounds. Replace an unavailable reviewer once and record the reason.
-The replacement owns the remaining review, including necessary checks of later fixes.
-The original reviewer's return does not require another pass.
+- Routine changes need one primary independent reviewer. Non-trivial code needs a primary reviewer from another model family.
+  Combine correctness and simplification; provide the diff, relevant source, and required behavior.
+- Authorization, isolation, security, privacy, migration, durability, and major integrations need a second independent risk reviewer.
+  Disputed blockers also need a second reviewer. Name reviewers and scopes in the PR.
+- Keep appointed reviewers through fix rounds. Replace an unavailable reviewer once and record why.
+  The replacement owns remaining review; the original reviewer's return adds no extra pass.
 
 ### Review findings
 
-Treat a finding as evidence, not a command. Verify it against the current head and required behavior.
-
-- Fix concrete regressions in correctness, security, privacy, durability, compatibility, performance, or user-visible behavior.
-- Decline false positives, speculative hardening, alternative designs, and out-of-scope work with a short technical reason.
-- Prefer the smallest safe fix. Do not add policy or machinery only to satisfy a reviewer.
+Verify findings against the current head and required behavior. Fix concrete regressions with the smallest safe change.
+That includes correctness, security, privacy, durability, compatibility, performance, and user-visible behavior.
+Decline false positives, speculative hardening, alternative designs, and out-of-scope requests with a technical reason.
+Do not add policy or machinery only to satisfy a reviewer.
 
 ### Complete the review
 
-- Batch verified fixes into one update. Ask the responsible reviewer to check the affected delta.
-- Request further rounds only for a new verified blocker or an unresolved high-risk concern.
-- For a rebase with an unchanged patch, the verification owner can record that comparison without restarting full review.
-- Conflict resolutions and substantive integration changes need review of the affected delta.
-- Before merging, account for the full reviewed diff, subsequent deltas, and every known finding on the final head.
-- Optional bot approval and reviewer unanimity are not merge requirements. Every verified blocker must still be resolved.
-- Record reviewed commits, delta coverage, and dispositions in one maintained PR review note.
-
-When ready to merge, add the review-round count, useful fixes, and any reviewer or verification delays to that note.
-Use local step durations for verification time. Report unknown durations as unknown.
-Use these records to identify repeated delays and slow or overlapping tests before adding gates or removing coverage.
-For narrower gates, account for shared dependencies in both the canonical runner and workflow filters before changing coverage.
+Batch verified fixes and have the responsible reviewer inspect the affected delta.
+Further rounds need a new verified blocker or unresolved high-risk concern.
+Unchanged rebases need a recorded comparison, not restarted review. Review conflict resolutions and substantive integration changes.
+Before merge, account for the full diff, later deltas, and every known finding on the final head. Resolve all verified blockers.
+Optional bot approval and reviewer unanimity are not merge conditions.
+Maintain one PR review note with reviewed commits, delta coverage, dispositions, round count, useful fixes, and reviewer/verification delays.
+Use local step durations; mark unknown times as unknown.
+Use these records to identify repeated delays and overlapping tests before changing coverage.
+Narrower gates must account for shared dependencies in both the runner and workflow filters.
