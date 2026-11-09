@@ -1,4 +1,5 @@
 import type { RefreshSharedViewResult } from "../ipc/bridgeContract";
+import type { ErrorDetailField } from "./shell/copyDetails";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -10,9 +11,8 @@ export type UnjournalableSharePath = Extract<
   { ok: true }
 >["unjournalablePaths"][number];
 
-function namedUnjournalablePaths(paths: readonly UnjournalableSharePath[]): string {
-  const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
-  return paths.length > 3 ? `${named}, and ${paths.length - 3} more` : named;
+function sharedFiles(count: number): string {
+  return count === 1 ? "a shared file" : `${count} shared files`;
 }
 
 export function shareNoticePaths(paths: readonly UnjournalableSharePath[]): string[] {
@@ -21,9 +21,39 @@ export function shareNoticePaths(paths: readonly UnjournalableSharePath[]): stri
     : entry.reason === "local-collision" ? [entry.owner, entry.path] : [entry.path, entry.owner]))];
 }
 
-export function shareUnjournalableNotice(
+// A Notices row's title. The row lists the paths under its text, so it
+// shows the text whole: each reason and next step.
+export function shareUnjournalableTitle(paths: readonly UnjournalableSharePath[], label: string): string {
+  return `dohc skipped ${sharedFiles(new Set(paths.map(entry => entry.path)).size)} from ${label}`;
+}
+
+export function shareUnjournalableNotice(paths: readonly UnjournalableSharePath[]): string {
+  return shareUnjournalableLines(paths).join(" ");
+}
+
+// A Notices row's text, as many whole reasons as `budget` holds, then a
+// count of the rest, which Details holds.
+export function shareUnjournalableRow(
   paths: readonly UnjournalableSharePath[],
-): string {
+  budget: number,
+): { message: string; details: ErrorDetailField[] } {
+  const lines = shareUnjournalableLines(paths);
+  const text = (shown: readonly string[]) => {
+    const rest = lines.length - shown.length;
+    return [...shown, ...(rest > 0 ? [`Details has ${rest === 1 ? "1 more reason" : `${rest} more reasons`}.`] : [])].join(" ");
+  };
+  const shown: string[] = [];
+  for (const line of lines) {
+    if ([...text([...shown, line])].length > budget) break;
+    shown.push(line);
+  }
+  return {
+    message: text(shown),
+    details: lines.slice(shown.length).map(line => ["Reason", line] as const),
+  };
+}
+
+function shareUnjournalableLines(paths: readonly UnjournalableSharePath[]): string[] {
   const groups = new Map<
     UnjournalableSharePath["reason"],
     UnjournalableSharePath[]
@@ -45,55 +75,51 @@ export function shareUnjournalableNotice(
   ] as const) {
     const group = groups.get(reason);
     if (!group || group.length === 0) continue;
-    const shown = reason === "local-collision"
-      ? [...new Set(group.map(entry => entry.owner ?? entry.path))].map(path => ({ path, reason }))
-      : group;
-    const names = namedUnjournalablePaths(shown);
-    const one = shown.length === 1;
-    if (reason === "oversized-text") {
+    // Each line names no path, so the clamp cuts no reason or next step.
+    // The notice lists the paths under it.
+    const files = sharedFiles(group.length);
+    const one = group.length === 1;
+    if (reason === "oversized-text" || reason === "oversized-binary") {
+      const limit = reason === "oversized-text"
+        ? `${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text`
+        : `${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary`;
       lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text limit. ` +
-          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
-      );
-    } else if (reason === "oversized-binary") {
-      lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary limit. ` +
-          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
+        `dohc could not track changes in ${files}. ` +
+          `${one ? "It is" : "They are"} larger than the ${limit} limit. ` +
+          `Make ${one ? "it" : "them"} smaller, then refresh.`,
       );
     } else if (reason === "non-utf8") {
       lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "This file is" : "These files are"} not readable as text. ` +
-          `Save ${one ? "the file" : "the files"} as UTF-8 text, then refresh.`,
+        `dohc could not track changes in ${files}. ` +
+          `${one ? "It is" : "They are"} not readable as text. ` +
+          `Save ${one ? "it" : "them"} as UTF-8 text, then refresh.`,
       );
     } else if (reason === "non-file-replacement") {
       lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "A folder or another entry replaces this file" : "Folders or other entries replace these files"}. ` +
+        `dohc could not track changes in ${files}. ` +
+          `${one ? "A folder or another entry replaces it" : "Folders or other entries replace them"}. ` +
           `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
       );
     } else if (reason === "local-collision") {
+      const yours = new Set(group.map(entry => entry.owner ?? entry.path)).size === 1;
       lines.push(
-        `dohc could not receive ${names}. ` +
-          `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
-          `Move or rename ${one ? "the file" : "the files"}, then refresh.`,
+        `dohc could not receive ${files}. ` +
+          `${yours ? "A file from this machine is in the way" : "Files from this machine are in the way"}. ` +
+          `Move or rename ${yours ? "your file" : "your files"}, then refresh.`,
       );
     } else if (reason === "spelling-collision") {
-      const owner = one ? group[0]!.owner : undefined;
       lines.push(
-        `dohc could not receive ${names}. ` +
-          (owner === undefined
-            ? "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."
-            : `This machine treats ${names} and ${owner} as the same name. Ask the person who shared the files to rename one of them.`),
+        `dohc could not receive ${files}. ` +
+          (one && group[0]!.owner !== undefined
+            ? "This machine treats its name and another shared file's as the same name. Ask the person who shared the files to rename one of them."
+            : "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."),
       );
     } else {
       lines.push(
-        `dohc could not read ${names}. ` +
-          `Close anything using ${one ? "the file" : "the files"}, or wait, then refresh.`,
+        `dohc could not read ${files}. ` +
+          `Close anything using ${one ? "it" : "them"}, or wait, then refresh.`,
       );
     }
   }
-  return lines.join(" ");
+  return lines;
 }

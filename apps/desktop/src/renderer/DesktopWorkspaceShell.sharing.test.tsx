@@ -210,7 +210,7 @@ describe("workspace share handoff placement", () => {
 
     expect(
       await screen.findByText(
-        "dohc couldn't reach the server. Check your connection, then choose Try again.",
+        "dohc could not reach the server. Check your connection, then choose Try again.",
       ),
     ).toBeTruthy();
     await userEvent.setup().click(
@@ -320,6 +320,54 @@ describe("refreshing shares added to this workspace", () => {
     const notices = await screen.findByTestId("notice-center");
     expect(within(notices).getAllByText(words, { exact: false })).toHaveLength(1);
     expect(notices.textContent).not.toContain("could not refresh");
+  });
+
+  describe("a share's skipped files", () => {
+    const tooLarge = "dohc could not track changes in a shared file. It is larger than the 10.0 MB text limit. Make it smaller, then refresh.";
+    const inTheWay = "dohc could not receive a shared file. A file from this machine is in the way. Move or rename your file, then refresh.";
+    const unreadable = "dohc could not read a shared file. Close anything using it, or wait, then refresh.";
+    const skippedRow = async (unjournalablePaths: { path: string; reason: string }[]) => {
+      const bridge = makeBridge(Promise.resolve(null));
+      Object.assign(bridge, { refreshShareMounts: vi.fn(() => Promise.resolve({
+        results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0, unjournalablePaths }],
+      } as RefreshShareMountsResult)) });
+      renderShell(bridge, {
+        ...WORKSPACE,
+        shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+      });
+      await waitFor(() => expect(screen.getByTestId("notice-center-toggle").textContent).not.toBe(""));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notices = await screen.findByTestId("notice-center");
+      return (await within(notices).findByText(tooLarge, { exact: false })).closest<HTMLElement>("[data-notice-row]")!;
+    };
+
+    it("are titled, with each reason whole under the title", async () => {
+      const row = await skippedRow([
+        { path: "docs/big.md", reason: "oversized-text" },
+        { path: "docs/local.md", reason: "local-collision" },
+      ]);
+      expect(row.querySelector("[id$='-title']")?.textContent).toBe("dohc skipped 2 shared files from alex");
+      expect(row.querySelector("[id$='-body']")?.textContent).toBe(`${tooLarge} ${inTheWay}`);
+      expect(row.querySelector("[id$='-body']")?.className).not.toContain("line-clamp");
+    });
+
+    it("show whole reasons up to the row's limit, and count the rest, which Details holds", async () => {
+      const row = await skippedRow([
+        { path: "docs/big.md", reason: "oversized-text" },
+        { path: "docs/big.png", reason: "oversized-binary" },
+        { path: "docs/replaced.md", reason: "non-file-replacement" },
+        { path: "docs/local.md", reason: "local-collision" },
+        { path: "docs/locked.md", reason: "unreadable" },
+      ]);
+      const body = row.querySelector("[id$='-body']")?.textContent ?? "";
+      expect(body.startsWith(`${tooLarge} `)).toBe(true);
+      expect(body.endsWith(" then refresh. Details has 2 more reasons.")).toBe(true);
+      expect(body).not.toContain("…");
+      fireEvent.click(within(row).getByRole("button", { name: "Details" }));
+      expect(await within(row).findByText(unreadable, { exact: false })).toBeTruthy();
+      const details = row.querySelector("pre")?.textContent ?? "";
+      expect(details.split("\n").filter(line => line.startsWith("Reason: "))).toEqual([`Reason: ${inTheWay}`, `Reason: ${unreadable}`]);
+    });
   });
 
   // The warning is the press's toast, and its summary waits in Notices. The

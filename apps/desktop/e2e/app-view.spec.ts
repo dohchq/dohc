@@ -77,6 +77,20 @@ async function dragTabTo(page: Page, tab: Locator, group: Locator) {
   await page.mouse.move(to.x + to.width / 2, to.y + 80, { steps: 8 });
   await page.mouse.up();
 }
+// Whether the app shows a light or dark page in its tab's bottom-left corner, clear of the fixture's content and of
+// toasts. A guest can't capture itself, and a clipped capture of the window leaves the guest out.
+async function appBackground(page: Page, app: ElectronApplication) {
+  const view = (await page.getByTestId("app-view-webview").boundingBox())!;
+  const point = { x: view.x + 4, y: view.y + view.height - 8, width: page.viewportSize()?.width ?? await page.evaluate(() => innerWidth) };
+  const png = await page.screenshot();
+  const [r, g, b] = await app.evaluate(({ nativeImage }, { data, point }) => {
+    const image = nativeImage.createFromBuffer(Buffer.from(data, "base64"));
+    const scale = image.getSize().width / point.width;
+    const pixel = image.crop({ x: Math.round(point.x * scale), y: Math.round(point.y * scale), width: 1, height: 1 }).toBitmap();
+    return [pixel[2]!, pixel[1]!, pixel[0]!];
+  }, { data: png.toString("base64"), point });
+  return Math.min(r, g, b) >= 200 ? "light" : Math.max(r, g, b) <= 40 ? "dark" : `rgb(${r}, ${g}, ${b})`;
+}
 async function shown(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(true); }
 async function hidden(locator: Locator) { await expect.poll(() => locator.isVisible()).toBe(false); }
 
@@ -264,6 +278,14 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
         await window.dohcDesktop!.appView({ action: "colorScheme", workspaceId, colorScheme: theme });
       }, { theme, workspaceId });
       await expect.poll(() => inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches")).toBe(theme === "dark");
+      // The fixture sets no colors, so in either theme its black text sits on a light page, as on a share link.
+      expect(await inFrame(electronApp, guestId, "getComputedStyle(document.querySelector('h1')).color")).toBe("rgb(0, 0, 0)");
+      await expect.poll(() => appBackground(page, electronApp)).toBe("light");
+      // An app that declares it follows the system theme gets that theme's page.
+      await inFrame(electronApp, guestId, "document.documentElement.style.colorScheme = 'light dark'; true");
+      await expect.poll(() => appBackground(page, electronApp)).toBe(theme);
+      await inFrame(electronApp, guestId, "document.documentElement.style.colorScheme = ''; true");
+      await expect.poll(() => appBackground(page, electronApp)).toBe("light");
       await page.getByTestId("tabs-overflow").last().click();
       const menu = page.getByTestId("tabs-overflow-menu");
       await shown(menu);
@@ -294,8 +316,8 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
     await shown(page.getByTestId("quick-open"));
     await page.getByTestId("quick-open").getByRole("textbox").press("Escape");
     await hidden(page.getByTestId("quick-open"));
-    // Reload reloads the same guest, so the app starts over in a new frame, which main gives dohc's dark. Until then, a
-    // read through main can reach the old frame and wait for its renderer to exit. Playwright's frame fails at once.
+    // Reload reloads the same guest, so the app starts over in a new frame, which main gives dohc's dark scheme. Until
+    // then, a read through main can reach the old frame and wait for its renderer to exit. Playwright's frame fails at once.
     const guestUrl = await electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId);
     const guest = electronApp.windows().find(window => window.url() === guestUrl)!;
     const appFrame = async (script: string) => guest.mainFrame().childFrames()[0]!.evaluate(script);

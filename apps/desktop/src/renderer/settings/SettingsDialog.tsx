@@ -41,6 +41,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { applyLookSettings, currentLookRevision } from "../theme";
 import { reportInstallationFailure } from "../shell/installationNotices";
 import { palette } from "../tokens";
+import { useColorScheme } from "../useColorScheme";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ownPresentation } from "../workbench/actorPresentation";
 import { UpdateStepLabel, updateStatusLine, useDesktopUpdate } from "../UpdateButton";
@@ -559,6 +560,7 @@ export function SettingsDialog(props: {
   }, [props.onError, requestTrust, restrict]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
+  const colorScheme = useColorScheme();
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
   const activeMeta =
     SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
@@ -675,7 +677,7 @@ export function SettingsDialog(props: {
                 <ColorControl
                   label="Accent color"
                   value={userSettings.appearance.accentColor ??
-                    palette[document.documentElement.dataset.theme === "dark" ? "dark" : "light"].accent}
+                    palette[colorScheme].accent}
                   onChange={(accentColor) => void saveAppearance({ accentColor })}
                 />
               </SettingRow>
@@ -810,7 +812,7 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("cloud")}>
             <SettingsSection>
               {props.cloud ? (
-                <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} />
+                <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} agents={userSettings.agents} />
               ) : null}
               {!props.sharedView && props.onOpenLiveDocuments ? (
                 <SettingRow

@@ -159,6 +159,84 @@ async fn dispatch_claim_requires_an_agent_and_takes_only_its_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cover_delivered_takes_the_running_agents_delivered_requests_only() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-cover-delivered").await;
+    let mut id = 1;
+    for (trigger, agent, thread, at) in [
+        ("asked", "default", "thread-asked", 10),
+        ("answer", "default", "thread-blocker", 20),
+        ("other", "codex", "thread-blocker", 30),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.enqueue",
+            json!({ "triggerMessageId": trigger, "agentId": agent, "threadId": thread, "nowMs": at }),
+        )
+        .await;
+    }
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "agentId": "default", "runId": "run", "nowMs": 40 }),
+    )
+    .await;
+    let too_many: Vec<String> = (0..101).map(|index| format!("m{index}")).collect();
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.coverDelivered",
+        json!({ "runId": "run", "messageIds": too_many }),
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    let covered = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.coverDelivered",
+        json!({ "runId": "run", "messageIds": ["answer", "other", "missing"] }),
+    )
+    .await;
+    assert_eq!(covered, json!(1));
+    let pending = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({}),
+    )
+    .await;
+    let pending = pending["dispatches"].as_array().expect("pending");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["triggerMessageId"], json!("other"));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.complete",
+        json!({ "runId": "run", "exitCode": 0, "nowMs": 50 }),
+    )
+    .await;
+    let after = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.coverDelivered",
+        json!({ "runId": "run", "messageIds": ["other"] }),
+    )
+    .await;
+    assert_eq!(after, json!(0));
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_thread_revision_is_zero_until_the_first_visible_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

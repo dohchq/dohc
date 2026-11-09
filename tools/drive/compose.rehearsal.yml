@@ -1,0 +1,39 @@
+# Local stand-in for Neon, used only by tools/drive/rehearse.mjs. Never part of a deployment.
+# It joins the rehearsal deployment's own network at a fixed address outside the network's dynamic range,
+# and accepts only TLS connections with a certificate from the rehearsal's local CA.
+services:
+  neon:
+    image: postgres:17.9-alpine
+    environment:
+      POSTGRES_DB: drive
+      POSTGRES_USER: drive
+      POSTGRES_PASSWORD: ${REHEARSAL_POSTGRES_PASSWORD:?Run tools/drive/rehearse.mjs}
+    # Postgres refuses a key that other users can read, so the container copies it before it starts.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        install -o postgres -g postgres -m 0600 /tls/neon.key /tmp/neon.key &&
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/neon.pem -c ssl_key_file=/tmp/neon.key
+        -c hba_file=/tls/pg_hba.conf
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U drive -d drive']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - type: bind
+        source: ${REHEARSAL_TLS_DIRECTORY:?Run tools/drive/rehearse.mjs}
+        target: /tls
+        read_only: true
+        bind: {create_host_path: false}
+    networks:
+      deployment:
+        ipv4_address: ${REHEARSAL_POSTGRES_ADDRESS:?Run tools/drive/rehearse.mjs}
+        # A second name for the same server. Its certificate does not cover this name.
+        aliases: [neon-rehearsal]
+
+networks:
+  deployment:
+    external: true
+    name: ${REHEARSAL_NETWORK:?Run tools/drive/rehearse.mjs}

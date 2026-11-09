@@ -121,6 +121,7 @@ These commands run development services. Use the [self-hosting guide](docs/how-t
 
 ```text
 apps/desktop          Electron desktop app
+apps/mobile           phone app in React Native with Expo, on demo data until its server work lands
 apps/site             marketing site and interactive product demo
 crates                Rust workspace engine and supporting crates
 docs                  user guides and reference; engineering guidance in docs/engineering

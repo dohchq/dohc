@@ -45,7 +45,9 @@ describe("ChatsView agents' chats", () => {
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2);
     await act(async () => { for (const listener of [...listeners]) listener({ workspaceId: "workspace-a" }); });
     expect(await screen.findByTestId("chats-my-agent")).toBeTruthy();
-    await waitFor(() => expect(listeners.size).toBe(0));
+    // Found: the wait ends, and the suspended navigator goes back to keeping
+    // only its Group list current.
+    await waitFor(() => expect(listeners.size).toBe(1));
   });
 
   it.each([

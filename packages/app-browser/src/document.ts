@@ -76,6 +76,20 @@ const LINK_SCRIPT = 'addEventListener("click",e=>{const a=e.target instanceof El
   'const t=a.getAttribute("target");a.target="_blank";' +
   'setTimeout(()=>{if(a.getAttribute("target")==="_blank")t===null?a.removeAttribute("target"):a.setAttribute("target",t);});},true);';
 
+// The app's frame is transparent, so the launch page paints the page behind it. This tells the launch page whether
+// the app uses a light or dark color scheme, from its root's color-scheme or color-scheme meta and the viewer's
+// theme, each time either can change. The launch page reads only that word.
+const COLOR_SCHEME_SCRIPT = '{const dark=matchMedia("(prefers-color-scheme: dark)");let sent;const report=()=>{' +
+  'let value=getComputedStyle(document.documentElement).colorScheme;' +
+  'if(value==="normal")value=document.querySelector("meta[name=color-scheme]")?.content??"";' +
+  'const schemes=value.split(/\\s+/).filter(name=>name==="light"||name==="dark"),wanted=dark.matches?"dark":"light";' +
+  'const scheme=schemes.includes(wanted)?wanted:schemes[0]??"light";' +
+  'if(scheme!==sent){sent=scheme;parent.postMessage({kind:"dohc-color-scheme",scheme},"*");}};' +
+  'dark.addEventListener("change",report);addEventListener("DOMContentLoaded",report);addEventListener("load",report);' +
+  'const watch=new MutationObserver(report);watch.observe(document.documentElement,{attributes:true});' +
+  'watch.observe(document.head,{childList:true,subtree:true,attributeFilter:["content"]});report();}';
+const FRAME_SCRIPT = LINK_SCRIPT + COLOR_SCHEME_SCRIPT;
+
 /**
  * Embed only as srcdoc with sandbox="allow-scripts", without allow-same-origin.
  * Links to other sites open only with allow-popups and allow-popups-to-escape-sandbox.
@@ -113,7 +127,7 @@ export function createAppDocument(
   const loader = `{const style=document.createElement("style");style.textContent=${inlineJson(contents.get("bundle.css") ?? "")};` +
     `document.head.append(style);const script=document.createElement("script");script.textContent=${inlineJson(script)};document.body.append(script);}`;
   // A page is parsed by the browser as written; bundle.js runs first in <head>, inline, before any page node.
-  const texts = new Set(page ? [LINK_SCRIPT, script, ...page.scripts] : [LINK_SCRIPT, loader, script]);
+  const texts = new Set(page ? [FRAME_SCRIPT, script, ...page.scripts] : [FRAME_SCRIPT, loader, script]);
   const scriptSources = [...texts].map(text => `'sha256-${createHash("sha256").update(text).digest("base64")}'`);
   // Inline styles support React style properties. Script hashes limit browser
   // script loading; approved code can still interpret data it fetches.
@@ -124,7 +138,7 @@ export function createAppDocument(
   const policy = '<meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<meta name="referrer" content="no-referrer">' +
-    `<meta http-equiv="Content-Security-Policy" content="${csp}"><script>${LINK_SCRIPT}</script>`;
+    `<meta http-equiv="Content-Security-Policy" content="${csp}"><script>${FRAME_SCRIPT}</script>`;
   const html = page
     ? `<!doctype html><html${page.htmlAttributes.map(([name, value]) => ` ${name}="${attributeValue(value)}"`).join("")}><head>${policy}` +
       `<script>${script}</script>${page.head}</head>${page.body}</html>`

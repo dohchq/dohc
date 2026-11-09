@@ -219,6 +219,11 @@ describe("desktop user settings model", () => {
     // Naming the DM's own agent wakes it once.
     expect(agentIdsToWake(settings, "@Nova and @Codex", "default")).toEqual(["default", "codex"]);
     expect(agentIdsToWake(settings, "@Nova", "terminal")).toEqual(["default"]);
+    // A reply wakes the agent it answers when dohc starts it, once.
+    expect(agentIdsToWake(settings, "Friday", null, "codex")).toEqual(["codex"]);
+    expect(agentIdsToWake(settings, "@Codex, Friday", null, "codex")).toEqual(["codex"]);
+    expect(agentIdsToWake(settings, "Friday", null, "terminal")).toEqual([]);
+    expect(agentIdsToWake(settings, "Friday", null, "elsewhere")).toEqual([]);
   });
 
   it("finds an agent you run only among entries dohc never starts", () => {

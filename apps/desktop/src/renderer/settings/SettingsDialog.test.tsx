@@ -23,6 +23,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import { SettingsDialog } from "./SettingsDialog";
 import { AGENTS_RESTRICTED_MESSAGE } from "../../agents/agentToolCatalog";
 import { applyLookSettings } from "../theme";
+import { palette } from "../tokens";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
@@ -747,6 +748,22 @@ describe("SettingsDialog", () => {
     });
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
+  });
+
+  it("shows the current theme's default accent after the theme changes outside Settings", async () => {
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+    const picker = within(await screen.findByTestId("settings-row-accent")).getByLabelText<HTMLInputElement>("Accent color");
+    expect(picker.value).toBe(palette.light.accent);
+    // The system theme listener sets data-theme outside React.
+    act(() => { document.documentElement.dataset.theme = "dark"; });
+    await waitFor(() => expect(picker.value).toBe(palette.dark.accent));
   });
 
   it("saves your colors, the accent, and the editor type", async () => {

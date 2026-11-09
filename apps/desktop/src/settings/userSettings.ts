@@ -164,12 +164,13 @@ export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name
  * code and file links. An agent you run reads its own messages, and a
  * personal agent's id starts with p-, so neither gets a run. A DM's agent
  * this computer doesn't list still gets one, so its notice says it has no
- * chat runner.
+ * chat runner. A reply also wakes the agent it answers, when dohc starts it.
  */
 export function agentIdsToWake(
   settings: Pick<DesktopUserSettings, "agents">,
   body: string,
   dmAgentId: string | null,
+  answeredAgentId?: string | null,
 ): string[] {
   const agents = listAgents(settings);
   const named = new Set(chatMentionTokens(body).map(({ handle }) => normalizeHandle(handle)));
@@ -181,7 +182,9 @@ export function agentIdsToWake(
       return agent.launch && handle && named.has(normalizeHandle(handle));
     })
     .map(({ id }) => id);
-  return [...new Set([...dmAgent, ...namedAgents])];
+  const answered = answeredAgentId !== undefined && answeredAgentId !== null &&
+    agents.some((agent) => agent.id === answeredAgentId && agent.launch) ? [answeredAgentId] : [];
+  return [...new Set([...dmAgent, ...namedAgents, ...answered])];
 }
 
 /** The settings with one agent changed. */

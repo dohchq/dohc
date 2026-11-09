@@ -255,7 +255,7 @@ function isDump(message: string): boolean {
   try { return typeof JSON.parse(message) === "object"; } catch { return false; }
 }
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
-const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?: /;
+const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s=]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?(?: \[stopped=(read|call)\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
 // `reason`.
@@ -291,17 +291,24 @@ function decodedComputer(wire: string | undefined): string | null {
   try { return decodeURIComponent(wire) || null; } catch { return null; }
 }
 
-/** Main's IPC boundary: keeps the error's code, wait and computer in the one string Electron sends. */
-export function ipcWireError(error: unknown): unknown {
+/** A call on the workspace its window has stopped: a read, which lost nothing, or any other call. */
+export type StoppedWorkspaceCall = "read" | "call";
+
+/**
+ * Main's IPC boundary: keeps the error's code, wait and computer in the one
+ * string Electron sends, and whether the call failed on the workspace its
+ * window has stopped.
+ */
+export function ipcWireError(error: unknown, stopped?: StoppedWorkspaceCall): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
   // Electron sends only toString(). Keep safe compiler facts in Copy details,
   // while readError maps this name back to the unchanged sentence above.
   const details: unknown = error.name === "AppCompilerTimeoutError"
     ? Reflect.get(error, "details") : undefined;
-  if (code === null && typeof details !== "string") return error;
+  if (code === null && typeof details !== "string" && stopped === undefined) return error;
   const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, { cause: error });
-  wire.name = code === null ? error.name : wireName(error, code);
+  wire.name = `${code === null ? error.name : wireName(error, code)}${stopped === undefined ? "" : ` [stopped=${stopped}]`}`;
   return wire;
 }
 
@@ -322,6 +329,7 @@ function parse(error: unknown) {
     code: match?.[2],
     retryAfterMs: match?.[3] === undefined ? undefined : Number(match[3]),
     computer: decodedComputer(match?.[4]),
+    stopped: match?.[5] as StoppedWorkspaceCall | undefined,
     message: (match ? text.slice(match[0].length) : text).trim(),
   };
 }
@@ -587,6 +595,16 @@ export function needsNewerDohc(error: unknown): boolean {
 /** The code an error carries, read back from the string main's IPC boundary sends. */
 export function refusalCode(error: unknown): string | undefined {
   return parse(error).code;
+}
+
+/** A read that failed on the workspace its window has stopped. It lost nothing. */
+export function isStoppedWorkspaceRead(error: unknown): boolean {
+  return parse(error).stopped === "read";
+}
+
+/** A call that failed on the workspace its window has stopped. Try again cannot succeed until the stop ends. */
+export function isStoppedWorkspaceCall(error: unknown): boolean {
+  return parse(error).stopped !== undefined;
 }
 
 /** The engine refuses reads this way while it reads a new workspace's files. */

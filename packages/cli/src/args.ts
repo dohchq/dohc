@@ -37,6 +37,7 @@ type CliCommandBody =
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "collectionSetFields"; recordPath: string; fields: Record<string, string>; agent?: string }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
@@ -46,6 +47,7 @@ type CliCommandBody =
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
   | { verb: "groups" }
+  | { verb: "groupCreate"; name: string; purpose?: string; type?: "posts" | "chat" | "both" }
   | { verb: "threads"; group: string }
   | { verb: "watch"; cursor?: string; group?: string; thread?: string; timeoutMs: number; once: boolean }
   | { verb: "inbox" }
@@ -320,6 +322,27 @@ const DOCUMENT_VERBS = {
       "The path must end in .md or .markdown. Frontmatter is refused."],
     parse: (input) => documentWrite(input, "documentCreate"),
   },
+  "set-fields": {
+    capabilityId: "collection.record.edit",
+    summary: "Set fields on a Collection record.",
+    operands: "<record>",
+    flags: [
+      { name: "--field", value: "name=value", text: "Set this field to this text. Repeat for more fields." },
+      { name: "--agent", value: "name", text: "Record this agent name with the change." },
+    ],
+    notes: ["The change lands in the record's frontmatter, and record history attributes it to the agent. Use dohc_set_record_fields for a value that is not text."],
+    parse: input => {
+      const recordPath = parsePath(input, "document set-fields");
+      const fields = Object.fromEntries(allValues(input, "--field").map(entry => {
+        const at = entry.indexOf("=");
+        if (at <= 0) fail("--field takes name=value");
+        return [entry.slice(0, at), entry.slice(at + 1)];
+      }));
+      if (Object.keys(fields).length === 0) fail("document set-fields requires --field");
+      const agent = lastValue(input, "--agent");
+      return { verb: "collectionSetFields", recordPath, fields, ...(agent === undefined ? {} : { agent }) };
+    },
+  },
   chats: {
     capabilityId: "file.chats.list",
     summary: "List chats linked to a workspace file.",
@@ -445,6 +468,25 @@ const CHAT_VERBS = {
       return { verb: "groups" };
     },
   },
+  "create-group": {
+    capabilityId: "group.create",
+    summary: "Create a Group and its folder, as New group does.",
+    operands: "<name>",
+    flags: [
+      { name: "--purpose", value: "text", text: "Say what the Group is for, in up to 200 characters." },
+      { name: "--type", value: "posts|chat|both", text: "Choose what the Group holds. The default is both." },
+    ],
+    notes: ["The folder is the Group's name as a slug. A Group with the same name is refused."],
+    parse: input => {
+      const [name, ...extra] = input.operands;
+      if (!name) fail("create-group requires a name");
+      noExtraArgs(extra, "create-group");
+      const type = lastValue(input, "--type");
+      if (type !== undefined && type !== "posts" && type !== "chat" && type !== "both") fail("--type must be posts, chat or both");
+      const purpose = lastValue(input, "--purpose");
+      return { verb: "groupCreate", name, ...(purpose !== undefined ? { purpose } : {}), ...(type !== undefined ? { type } : {}) };
+    },
+  },
   threads: {
     capabilityId: "chat.threads.list",
     summary: "List the threads in a Group.",
@@ -467,6 +509,7 @@ const CHAT_VERBS = {
       { name: "--timeout", value: "seconds", text: "Wait up to this many seconds per batch. The default and maximum are 25." },
       { name: "--once", text: "Return after one batch, including an empty batch at the timeout." },
     ],
+    notes: ["In a run dohc started, watch returns the run's own requests, including replies to its posts. Those messages start no new run."],
     parse: input => {
       noExtraArgs(input.operands, "watch");
       const timeout = lastValue(input, "--timeout");

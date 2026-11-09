@@ -1,0 +1,28 @@
+# Serves published apps on DOHC_SHARE_WEB_APP_DOMAIN behind Cloudflare. Add it after compose.cloudflare.yml.
+# The app hosts use the certificate and key you supply. Caddy never requests a certificate for them.
+# Compose merges gateway mounts by their container path, so the trust file and the certificate volumes stay.
+services:
+  gateway:
+    environment:
+      DOHC_SHARE_WEB_APP_DOMAIN: ${DOHC_SHARE_WEB_APP_DOMAIN:?Set DOHC_SHARE_WEB_APP_DOMAIN}
+    volumes:
+      - type: bind
+        source: ./tools/self-host/Caddyfile.cloudflare-apps
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./tools/self-host/Caddyfile.cloudflare
+        target: /etc/caddy/Caddyfile.cloudflare
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${DOHC_APP_TLS_CERT_FILE:?Set DOHC_APP_TLS_CERT_FILE}
+        target: /etc/caddy/app-tls/cert.pem
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${DOHC_APP_TLS_KEY_FILE:?Set DOHC_APP_TLS_KEY_FILE}
+        target: /etc/caddy/app-tls/key.pem
+        read_only: true
+        bind: {create_host_path: false}

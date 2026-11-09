@@ -38,6 +38,7 @@ import {
   listAutomationRuns,
   listAutomations, switchAutomation,
   listGroups,
+  createGroup,
   pressButton,
   inspectButtons,
   queryCollection,
@@ -593,7 +594,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   register("dohc_wait_for_messages", {
-    description: "Wait for this agent's unread requests without marking them read. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Without it, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
+    description: "Wait for this agent's unread requests without marking them read. In a run dohc started, they are the run's own requests, including replies in threads its agent posted in, and the ones it returns start no new run. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Otherwise, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
     inputSchema: chatWatchInputSchema.shape,
   }, async (args, extra) => {
     if (waits >= 4) return text({ ok: false, reason: "Too many chat waits. Finish an existing wait and try again." });
@@ -629,6 +630,20 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: {},
     },
     async () => text(await listGroups(ctx)),
+  );
+
+  register(
+    "dohc_create_group",
+    {
+      description:
+        "Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.",
+      inputSchema: {
+        name: z.string().min(1).max(80),
+        purpose: z.string().max(200).optional(),
+        type: z.enum(["posts", "chat", "both"]).optional(),
+      },
+    },
+    async (args) => text(await createGroup(ctx, args)),
   );
 
   const chatWriteInput = {

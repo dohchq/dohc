@@ -31,6 +31,7 @@ mod settlement_publication;
 pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
+pub use settlement_publication::rollback_waits_for_publication_in_tx;
 mod path_policy;
 mod references;
 mod refusal_notices;

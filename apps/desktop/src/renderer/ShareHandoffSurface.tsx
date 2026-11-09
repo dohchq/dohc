@@ -12,13 +12,13 @@ import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
 const REFUSED_COPY =
-  "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
+  "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
-  "dohc couldn't reach the server. Check your connection, then choose Try again.";
+  "dohc could not reach the server. Check your connection, then choose Try again.";
 const BUSY_COPY =
   "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
-  "dohc couldn't find this share in your account. The person who shared it may have ended it.";
+  "dohc could not find this share in your account. The person who shared it may have ended it.";
 // A Group invitation or message request waits in Chats.
 const CHATS_COPY = "Find it in Chats, in a workspace of your own.";
 const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create one from Manage workspaces first.`;
