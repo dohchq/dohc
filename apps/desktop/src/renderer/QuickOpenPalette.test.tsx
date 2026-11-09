@@ -107,3 +107,14 @@ it("rebuilds derived file data when each ranking input identity changes", () => 
   );
   expect(prepareQuickOpenPaths).toHaveBeenCalledTimes(4);
 });
+
+it.each([
+  { files, query: "zzz", text: 'No files match "zzz". Try a shorter search.' },
+  { files, query: " ", text: 'No files match " ". Try a shorter search.' },
+  { files: [], query: "", text: "No files yet." },
+])("says what is missing when no file matches $query", ({ files: listed, query, text }) => {
+  render(palette({ files: listed }));
+  fireEvent.change(screen.getByRole("textbox", { name: "File" }), { target: { value: query } });
+  const list = screen.getByRole("listbox");
+  expect(list.textContent).toBe(text);
+});
