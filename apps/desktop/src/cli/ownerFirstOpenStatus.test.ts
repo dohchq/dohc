@@ -1,4 +1,5 @@
 import {expect, it, vi} from "vitest";
+import {firstOpenOutcome, firstOpenRefusal} from "@dohc/workspace-contracts/first-open";
 import {createOwnerFirstOpenStatusReader} from "./ownerFirstOpenStatus";
 import type {OwnerLiveDocumentActionDependencies} from "../ipc/relaySharesIpc";
 
@@ -40,6 +41,26 @@ it("rejects source feedback for another workspace, object or path", async () => 
   }
 });
 
+
+// Proves: agents read a refused activation with the same reason, code, source
+// and recovery as Live documents, the engine's own code in its stable form, and
+// the stop beside it. A row with a code in no stable form never reaches them,
+// and never hides the others.
+it("gives agents a refused activation's stable code and a stop exactly as Live documents shows them", async () => {
+  const f = fixture();
+  const refusal = (path: string, code: string) => firstOpenRefusal(firstOpenOutcome({...source, objectId: path, path},
+    {kind: "refused", reason: "ordinary-activation-refused", code}));
+  const refused = (path: string, code: string) => ({path, objectId: path, status: "unavailable", reason: "live-first-open-refused", firstOpen: refusal(path, code)});
+  const stopped = {path: "a.md", objectId: "o", status: "unavailable", reason: "live-first-open-retry-stopped", firstOpen};
+  const raw = {...refused("raw.md", "LIMIT_EXCEEDED"), firstOpen: {...refusal("raw.md", "LIMIT_EXCEEDED"), code: "LIMIT_EXCEEDED"}};
+  f.reply({ok: true, documents: [refused("limit.md", "LIMIT_EXCEEDED"), refused("checked.md", "activation-validation"), raw, stopped]});
+  expect(await f.list()).toEqual([
+    {path: "limit.md", objectId: "limit.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: {reason: "ordinary-activation-refused",
+      code: "limit-exceeded", recovery: "report", source: {...source, objectId: "limit.md", path: "limit.md"}}},
+    refused("checked.md", "activation-validation"),
+    stopped,
+  ]);
+});
 
 it("drops a malformed row while returning the good rows", async () => {
   const f = fixture();

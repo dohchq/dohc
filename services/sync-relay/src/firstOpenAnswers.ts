@@ -64,6 +64,18 @@ export class FirstOpenAnswers {
     return held && !held.retry ? firstOpenRefusal(held.outcome) : undefined;
   }
 
+  /**
+   * The source of the base the document's first open published or replayed, while that answer or a later refused
+   * activation of it stands, so a Try again that is refused the same way reports it again.
+   */
+  base(document: {workspaceId: string; objectId: string}): FirstOpenSourceIdentity | undefined {
+    const outcome = this.#held.get(documentKey(document))?.outcome;
+    if (!outcome) return undefined;
+    const started = outcome.kind === "published" || outcome.kind === "replayed" ||
+      (outcome.kind === "refused" && outcome.reason === "ordinary-activation-refused");
+    return started ? outcome.source : undefined;
+  }
+
   /** Whether the document has an answer, so a caller reads its current source only then. */
   has(document: {workspaceId: string; objectId: string}): boolean {return this.#held.has(documentKey(document));}
 

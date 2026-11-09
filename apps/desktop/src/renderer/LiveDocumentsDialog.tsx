@@ -177,6 +177,8 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
   if (row.reason === "live-first-open-refused") return "Can't start";
+  // Temporary: Resume or an edit lets the server try again.
+  if (row.reason === "live-first-open-retry-stopped") return "Server timed out";
   switch (row.status) {
     case "ready":
       return "Live";

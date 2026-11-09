@@ -778,13 +778,20 @@ function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined):
 const sharingDeclinedKey = (workspaceId: string, declined: SharingDeclined): string =>
   JSON.stringify([workspaceId, declined.objectId, declined.versionId, declined.headBlobSha256]);
 
-// A file whose first open the server refused. Each reason says why and what
-// the owner can still do; only Try again asks the server again, and nothing
-// here promises that it helps. The copied details carry the codes.
+// A file whose first open the server refused, or stopped trying after repeated
+// build deadlines. Each reason says why and what the person can still do; only
+// Try again asks the server again, and nothing here promises that it helps.
+// The copied details carry the codes.
 type LiveFirstOpen = NonNullable<SyncStatusResult["ownerLiveFirstOpen"]>[number];
 function liveFirstOpenCopy(refusal: LiveFirstOpen): { title: string; body: string } {
-  const title = `Live editing can't start for ${refusal.source.path.split("/").pop() ?? refusal.source.path}`;
+  const name = refusal.source.path.split("/").pop() ?? refusal.source.path;
+  const title = `Live editing can't start for ${name}`;
   switch (refusal.reason) {
+    case "retry-stopped":
+      return {
+        title: `Live editing did not start for ${name}`,
+        body: `The server took too long to prepare this file ${refusal.deadlineAnswers} times, so it stopped trying. The file is unchanged, and you can still edit it normally.`,
+      };
     case "unsupported-source":
       return {
         title,

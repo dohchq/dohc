@@ -1,5 +1,5 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import type {FirstOpenOutcome,FirstOpenRefusal,FirstOpenSourceIdentity,FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
+import {firstOpenOutcome,type FirstOpenOutcome,type FirstOpenRefusal,type FirstOpenSourceIdentity,type FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
 import {FirstOpenAnswers,type FirstOpenAnswerContext} from "./firstOpenAnswers";
 import {FirstOpenRetry} from "./firstOpenRetry";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
@@ -92,6 +92,16 @@ export interface RetirementScope {
 export type RetirementStep={kind:"retired"}|{kind:"held"}|{kind:"pending";reason:string};
 const RETIREMENT_ROUNDS=4;
 const retiring={kind:"pending" as const,reason:"Service activation is retiring."};
+// The engine's own code for refusing a capture, which it answers the same way on every pass. Undefined for
+// cancellation, the pass deadline, and a document that is only not ready yet or still has no lineage.
+function captureRefusal(error:unknown,signal:AbortSignal){
+  if(signal.aborted || !(error instanceof EngineRequestError) || error.wireError?.retry!=="no" ||
+    isHostedDocumentUnready(error) || isLiveDocumentWithoutLineage(error))return undefined;
+  return error.wireError.code==="CANCELLED" || error.wireError.code==="DEADLINE_EXCEEDED"?undefined:error.wireError.code;
+}
+/** The code a document's first open reports when the relay's activation validation refused its capture. */
+export const ACTIVATION_VALIDATION_REFUSED="activation-validation";
+
 // The engine's answer for its `status`, with exactly that status's keys.
 function answer(value:unknown,statuses:Record<string,readonly string[]>):Record<string,unknown>&{status:string}{
   const status=value && typeof value==="object"?(value as {status?:unknown}).status:undefined;
@@ -294,6 +304,17 @@ export class ServiceActivationDriver {
       this.#firstOpenError=message;
       try{console.error("Service first-open request failed.",message);}catch{ /* Reporting must not stop activation. */ }
     }).finally(()=>{if(this.#opening.get(key)===abort)this.#opening.delete(key);});
+  }
+  // The source of the base the target's first open published, while it or a refused activation of it stands.
+  #firstOpenBase(target:ServiceActivationTarget){
+    const objectId=this.#objects.get(targetKey(target));
+    return objectId===undefined?undefined:this.#firstOpen.base({workspaceId:target.workspaceId,objectId});
+  }
+  // A document its first open started whose activation was then refused shows that refusal's code in
+  // Live documents and agent status, and captures again only after Try again.
+  #refuseActivation(key:string,base:FirstOpenSourceIdentity,code:string){
+    this.#firstOpen.record(firstOpenOutcome(base,{kind:"refused",reason:"ordinary-activation-refused",code}),this.#firstOpenContext);
+    this.#blocked.set(key,{reason:"refused"});
   }
   /** The digest of the binding the target is held with for released retained work, if it is. Activation skips it. */
   releasedHold(target:ServiceActivationTarget){
@@ -707,12 +728,15 @@ export class ServiceActivationDriver {
       try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
       catch(error){
         this.#refused(key,saved!==null,update,error);
+        const base=saved?undefined:this.#firstOpenBase(target),code=base && captureRefusal(error,signal);
+        if(base && code)this.#refuseActivation(key,base,code);
         if(!saved)this.#openFirst(target);
         throw error;
       }
       // A fresh capture's lease stays recorded until the relay retains it, so a pass releases it after any failure, as at the pass deadline.
       if(!saved)this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
       check();
+      const firstOpened=saved?undefined:this.#firstOpenBase(target);
       this.#unblock(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
       // It has lineage now, however it got it, so no first-open answer or stop stands for it.
       this.#cancelFirstOpen(key);this.#forgetFirstOpen({workspaceId:target.workspaceId,objectId:capture.source.objectId});
@@ -721,11 +745,18 @@ export class ServiceActivationDriver {
         throw new Error("Native service activation source changed.");
       }
       if(!saved){
+        const validation={refused:false};
         try{
           await this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,signal,
-            validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
-              maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
+            validate:async(work,validating)=>{const result=await c.validateActivation(work,validating);validation.refused=result.kind==="refused";return result;},
+            bounds:{maxCaptureBytes:c.maxCaptureBytes,maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
+          // Validation answers the same capture the same way, so a base its first open published waits for Try again.
+          if(validation.refused && firstOpened){
+            this.#refuseActivation(key,firstOpened,ACTIVATION_VALIDATION_REFUSED);
+            await releaseStale();
+            return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
+          }
           const tooLarge=error instanceof ServiceActivationTooLarge;
           if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge)throw error;
           // The same capture would run its validation out of memory again, so it waits for its owner.
