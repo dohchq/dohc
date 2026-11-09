@@ -4624,11 +4624,13 @@ fn documents_that_rotate_spellings_of_their_paths_all_move() {
 
 /// #2421's guard: in a trade of spellings, the first document moves while
 /// the other still waits, and the other's own move can then fail for
-/// another reason. Here `doc-c` takes `a.md` as soon as `doc-a` leaves it,
-/// so `doc-b` can't move to `A.md`. `doc-a` now sits at another spelling of
-/// `doc-b`'s path, so it is held naming `doc-b`, and no pass writes `B.md`
-/// over `doc-b`'s file. Once `doc-c` moves away, `doc-b` moves, and both
-/// are ready.
+/// another reason. Here `doc-c` takes `a.md` between the two renames, and
+/// joins the scope only once both are held, so the pass that reads its
+/// creation also moves `doc-a` first and then meets `doc-c` at a spelling of
+/// the path `doc-b` wants. `doc-b` can't move to `A.md`. `doc-a` now sits at
+/// another spelling of `doc-b`'s path, so it is held naming `doc-b`, and no
+/// pass writes `B.md` over `doc-b`'s file. Once `doc-c` moves away, `doc-b`
+/// moves, and both are ready.
 #[test]
 fn a_document_that_moved_first_in_a_trade_waits_until_the_other_moves() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -4650,9 +4652,10 @@ fn a_document_that_moved_first_in_a_trade_waits_until_the_other_moves() {
         "hosted a",
         "moment-owner-1",
     );
+    feed.create("owner", 4, "doc-c", "a.md", "hosted c");
     feed.rename(
         "owner",
-        4,
+        5,
         "doc-b",
         "b.md",
         "A.md",
@@ -4662,9 +4665,9 @@ fn a_document_that_moved_first_in_a_trade_waits_until_the_other_moves() {
     feed.share("doc-a", "B.md");
     feed.share("doc-b", "A.md");
     sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-a"), Some(path_held("B.md", "doc-b")));
     assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
 
-    feed.create("owner", 5, "doc-c", "a.md", "hosted c");
     feed.share("doc-c", "a.md");
     let changes = sync_changes(&client, &mut store);
     assert!(
@@ -4683,7 +4686,7 @@ fn a_document_that_moved_first_in_a_trade_waits_until_the_other_moves() {
         "a.md",
         "z.md",
         "hosted c",
-        "moment-owner-5",
+        "moment-owner-4",
     );
     feed.share("doc-c", "z.md");
     sync(&client, &mut store);
