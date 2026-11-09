@@ -5,7 +5,6 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { AppViewEvent, AppViewRequest, AppViewResult } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { matchesShortcut } from "../shortcuts/shortcutRegistry";
-import { palette } from "../renderer/tokens";
 import type { LocalAppLaunchSession } from "../workspaces/localAppLaunch";
 
 type ColorScheme = "light" | "dark";
@@ -219,10 +218,6 @@ export function registerAppViews<Workspace extends { workspaceId: string }>(depe
         await guest.debugger.sendCommand("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
       }
       await guest.debugger.sendCommand("Emulation.setEmulatedMedia", media(entry));
-      const hex = palette[entry.colorScheme].bg;
-      await guest.debugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", { color: {
-        r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16), b: parseInt(hex.slice(5, 7), 16), a: 1,
-      } });
       await Promise.all([...entry.frames].map(sessionId =>
         guest.debugger.sendCommand("Emulation.setEmulatedMedia", media(entry), sessionId).catch(() => {})));
     };

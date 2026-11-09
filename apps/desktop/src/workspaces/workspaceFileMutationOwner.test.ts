@@ -1086,7 +1086,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "notes/delete.txt",
       }),
-    ).resolves.toEqual({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: false, paths: ["notes/delete.txt"], reason: `Cannot undo the delete. notes/delete.txt is ${process.platform === "win32" ? "in the Recycle Bin" : "in the Trash"}. Restore it there.` } });
+    ).resolves.toEqual({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: false, paths: ["notes/delete.txt"], reason: `Cannot undo the delete. notes/delete.txt is in the system trash. Restore it there.` } });
 
     expect(test.ownsDocument).toHaveBeenCalledWith(
       attachmentB,

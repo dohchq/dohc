@@ -93,6 +93,7 @@ function createVerificationFixtures(directory) {
     import assert from 'node:assert/strict';
     import {testWorkspace as realTests} from './js-tests-real.mjs';
     import {finishRuntimeReader} from './process.mjs';
+    export {takeJsShard} from './js-tests-real.mjs';
     export const testWorkspace = options => realTests({...options, beforeDesktopScripts: async () => {
       const pending = options.beforeDesktopScripts();
       let settled = false;

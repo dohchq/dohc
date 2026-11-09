@@ -8452,7 +8452,7 @@ describe("share-refresh records in .dohc/local", () => {
       const first = await view.refresh();
       if (!first.ok) throw new Error(first.errorMessage);
       expect(shareUnjournalableNotice(first.unjournalablePaths.filter(entry => entry.path.startsWith("docs/blocked/")))).toBe(
-        "dohc could not receive docs/blocked. A file from this machine already uses this path. Move or rename the file, then refresh.",
+        "dohc could not receive a shared file. A file from this machine is in the way. Move or rename your file, then refresh.",
       );
       expect(first).toMatchObject({ ok: true,
         unjournalablePaths: expect.arrayContaining([{ path, reason: "local-collision", owner: "docs/blocked" }]) });
@@ -8465,7 +8465,7 @@ describe("share-refresh records in .dohc/local", () => {
       const second = await view.refresh();
       if (!second.ok) throw new Error(second.errorMessage);
       expect(shareUnjournalableNotice(second.unjournalablePaths.filter(entry => entry.path.startsWith("docs/blocked/")))).toBe(
-        "dohc could not receive docs/blocked. A file from this machine already uses this path. Move or rename the file, then refresh.",
+        "dohc could not receive 2 shared files. A file from this machine is in the way. Move or rename your file, then refresh.",
       );
       expect(second).toMatchObject({ ok: true,
         unjournalablePaths: expect.arrayContaining([
@@ -8481,7 +8481,7 @@ describe("share-refresh records in .dohc/local", () => {
         const next = await view.refresh();
         if (!next.ok) throw new Error(next.errorMessage);
         expect(shareUnjournalableNotice(next.unjournalablePaths.filter(entry => entry.path.startsWith("docs/blocked/")))).toBe(
-          "dohc could not receive docs/blocked. A file from this machine already uses this path. Move or rename the file, then refresh.",
+          "dohc could not receive 2 shared files. A file from this machine is in the way. Move or rename your file, then refresh.",
         );
         expect(next).toMatchObject({ ok: true,
           unjournalablePaths: expect.arrayContaining([

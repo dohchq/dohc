@@ -52,7 +52,7 @@ describe("what a finished tree change says", () => {
   });
 
   it("adds no place without Undo, because main's reason names it", () => {
-    const reason = "Cannot undo the delete. big.bin is in the Recycle Bin. Restore it there.";
+    const reason = "Cannot undo the delete. big.bin is in the system trash. Restore it there.";
     expect(doneNotice([trashed("a.md", true), trashed("big.bin", true, "delete-file", reason)])).toEqual({
       message: `Deleted 2 items. ${reason}`, undoable: false,
     });
