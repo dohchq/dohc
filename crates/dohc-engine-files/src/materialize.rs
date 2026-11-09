@@ -5680,9 +5680,10 @@ fn filesystem_job_component(id: &str) -> String {
 
 /// Replace the file at `rel` whole with `content`, outside any job: a temp
 /// named `temp_name` beside it takes the file's access as a job's temp does,
-/// is flushed and renamed over it, then the folder is flushed. On macOS that
-/// temp never takes the folder's inherited ACL entries. A temp a stopped
-/// write left at that name is removed first.
+/// is flushed and renamed over it, then the folder is flushed. On macOS the
+/// temp for a file that exists, or for a secret, takes none of the folder's
+/// inherited ACL entries; a new ordinary file takes them, as a job's does. A
+/// temp a stopped write left at that name is removed first.
 pub fn replace_file_whole(
     root: &Path,
     rel: &str,

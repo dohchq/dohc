@@ -1,8 +1,8 @@
 //! `files.replace` writes given bytes over a workspace file whole, through the
-//! materializer's temp, flush and rename. The temp's macOS access, created
-//! without the folder's inherited ACL entries and given the replaced file's
-//! ACL, is covered by `create_uninherited` and `copy_acl` in
-//! dohc-macos-files.
+//! materializer's temp, flush and rename. On macOS the temp of a replaced file
+//! or a secret is created without the folder's inherited ACL entries, and a
+//! replaced ordinary file's ACL is copied to it. `create_uninherited` and
+//! `copy_acl` in dohc-macos-files cover that.
 
 mod common;
 
