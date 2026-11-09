@@ -1,5 +1,5 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {firstOpenOutcome,type FirstOpenOutcome,type FirstOpenRefusal,type FirstOpenSourceIdentity,type FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
+import {FIRST_OPEN_ACTIVATION_CODE,firstOpenOutcome,type FirstOpenOutcome,type FirstOpenRefusal,type FirstOpenSourceIdentity,type FirstOpenTemporaryStop} from "@dohc/workspace-contracts/first-open";
 import {FirstOpenAnswers,type FirstOpenAnswerContext} from "./firstOpenAnswers";
 import {FirstOpenRetry} from "./firstOpenRetry";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
@@ -92,12 +92,15 @@ export interface RetirementScope {
 export type RetirementStep={kind:"retired"}|{kind:"held"}|{kind:"pending";reason:string};
 const RETIREMENT_ROUNDS=4;
 const retiring={kind:"pending" as const,reason:"Service activation is retiring."};
-// The engine's own code for refusing a capture, which it answers the same way on every pass. Undefined for
-// cancellation, the pass deadline, and a document that is only not ready yet or still has no lineage.
+// The engine's own code for refusing a capture, which it answers the same way on every pass: its message
+// when that is a stable code, such as `live-application-byte-budget-exceeded`, else its wire code. Undefined
+// for cancellation, the pass deadline, and a document that is only not ready yet or still has no lineage.
 function captureRefusal(error:unknown,signal:AbortSignal){
   if(signal.aborted || !(error instanceof EngineRequestError) || error.wireError?.retry!=="no" ||
     isHostedDocumentUnready(error) || isLiveDocumentWithoutLineage(error))return undefined;
-  return error.wireError.code==="CANCELLED" || error.wireError.code==="DEADLINE_EXCEEDED"?undefined:error.wireError.code;
+  const {code,message}=error.wireError;
+  if(code==="CANCELLED" || code==="DEADLINE_EXCEEDED")return undefined;
+  return FIRST_OPEN_ACTIVATION_CODE.test(message)?message:code;
 }
 /** The code a document's first open reports when the relay's activation validation refused its capture. */
 export const ACTIVATION_VALIDATION_REFUSED="activation-validation";

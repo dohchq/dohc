@@ -5331,7 +5331,7 @@ it("reports a refused capture after a first open published its base, and capture
   o = await neverOpenedHost({onCheck: () => o.refuseCaptureAt(neverOpened.path, limitExceeded())});
   const plain = {workspaceId: "workspace", objectId: neverOpened.objectId};
   const status = () => o.host.firstOpenStatus(plain, () => ({...plain, path: neverOpened.path, sourceMomentId: "later", sourceDigest: "b".repeat(64)}));
-  const refused = {reason: "ordinary-activation-refused", code: "limit-exceeded", recovery: "report",
+  const refused = {reason: "ordinary-activation-refused", code: "capture-too-large", recovery: "report",
     source: expect.objectContaining({...plain, path: neverOpened.path, sourceMomentId: "plain-moment"})};
   await vi.waitFor(() => expect(o.bases()).toHaveLength(1));
   await vi.waitFor(() => expect(o.captures()).toBe(2));
