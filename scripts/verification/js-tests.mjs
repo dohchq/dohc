@@ -257,9 +257,10 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const runRepository = async () => {
       await repositoryChecks;
       const tasks = await plan;
-      // Desktop-only release preflight shares a four-CPU hosted runner. Its
-      // Windows compiler owner must compile C# before its deadline expires.
-      if (onlyPackage === "@dohc/desktop") await packages;
+      // Desktop-only release preflight and the desktop shard each have a four-CPU hosted runner,
+      // so isolated scripts wait for the unit tests. The preflight's Windows compiler owner
+      // must compile C# before its deadline expires.
+      if (onlyPackage === "@dohc/desktop" || shard === "desktop") await packages;
       if (tasks.some(task => task.name === "@dohc/desktop")) {
         await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: desktopRoot });
       }

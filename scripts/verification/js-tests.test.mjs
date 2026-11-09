@@ -816,11 +816,12 @@ test("each shard runs its own lanes one package at a time, and together they run
       export const repoRoot=resolve(import.meta.dirname,'../..');
       export const pnpm=args=>['pnpm',args];
       export const started=[], active=new Set();
-      export let packagePeak=0;
+      export let packagePeak=0, scriptsBesideDesktop=false;
       export async function run(_command,args){
         if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','relay','tail'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
         const name=args[0]==='proof'?'proofs':args[0]==='run'?'repository':args[3].startsWith('test:scripts:')?args[3]:args[1];
         started.push(name);active.add(name);
+        if(active.has('@dohc/desktop')&&[...active].some(name=>name.startsWith('test:scripts:')))scriptsBesideDesktop=true;
         packagePeak=Math.max(packagePeak,[...active].filter(name=>name.startsWith('@dohc/')).length);
         for(let i=0;i<5;i++)await setImmediate();
         active.delete(name);return {stdout:''};
@@ -829,11 +830,11 @@ test("each shard runs its own lanes one package at a time, and together they run
     put("driver.mjs", `
       import {readFileSync} from 'node:fs';
       import {testWorkspace} from './scripts/verification/js-tests.mjs';
-      import {run,started,packagePeak} from './scripts/verification/process.mjs';
+      import {run,started,packagePeak,scriptsBesideDesktop} from './scripts/verification/process.mjs';
       const shard=process.argv[2]||null;
       await testWorkspace({prepared:true,output:'evidence',shard,runProofs:async()=>{await run('fixture',['proof']);}});
       const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
-      console.log(JSON.stringify({started:started.filter(name=>name!=='inventory').sort(),packagePeak,concurrency:report.concurrency,shard:report.shard??null,proofs:report.proofs,verdict:report.verdict}));
+      console.log(JSON.stringify({started:started.filter(name=>name!=='inventory').sort(),packagePeak,scriptsBesideDesktop,concurrency:report.concurrency,shard:report.shard??null,proofs:report.proofs,verdict:report.verdict}));
     `);
     const drive = shard => {
       const result = spawnSync(process.execPath, ["driver.mjs", ...(shard ? [shard] : [])], {cwd: root, encoding: "utf8", timeout: 20_000});
@@ -845,6 +846,7 @@ test("each shard runs its own lanes one package at a time, and together they run
     assert.equal(whole.concurrency, 2);
     const desktop = drive("desktop"), packages = drive("packages"), proofs = drive("proofs");
     assert.deepEqual(desktop.started, ["@dohc/desktop", "test:scripts:isolated", "test:scripts:runtime"]);
+    assert.equal(desktop.scriptsBesideDesktop, false, "the desktop shard's isolated scripts wait for its unit tests");
     assert.deepEqual(packages.started, ["@dohc/relay", "@dohc/share-web", "@dohc/tail"]);
     assert.deepEqual(proofs.started, ["proofs", "repository"]);
     assert.deepEqual([...desktop.started, ...packages.started, ...proofs.started].sort(), whole.started, "the shards together run every step once");
