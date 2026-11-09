@@ -147,7 +147,7 @@ export function createFirstOpenPublisher(options: {
   const admissionIntervalMs = options.admissionIntervalMs ?? 60_000;
   if (!Number.isSafeInteger(admissionIntervalMs) || admissionIntervalMs < 0) throw new Error("Invalid first-open admission interval.");
   const admitted = new Map<string, number>();
-  // Resolves to the admission's release, which charges the quiet interval unless it is told the request ran no work.
+  // Resolves to the admission's release, which charges the quiet interval unless it is told not to.
   const admit = (workspaceId: string, objectId: string): ((ranWork: boolean) => void) | false => {
     if (admissionIntervalMs === 0) return () => {};
     const key = JSON.stringify([workspaceId, objectId]), now = nowMs();
@@ -258,7 +258,9 @@ export function createFirstOpenPublisher(options: {
     }
     const releaseAdmission = admit(workspaceId, objectId);
     if (!releaseAdmission) return answer({kind: "unavailable", reason: "busy"});
-    // Only a build that found no free worker ran no work: reading and preparing the source, or a build that ran, charge the interval.
+    // Every admitted request charges the interval except one whose build found no free worker, even if that request
+    // read the source and prepared its history first. While one object holds the worker, other notes may repeat those
+    // reads on each host retry; the host's backoff, from 1 s doubling to 300 s, bounds them.
     let ranWork = true;
     try {
       const bytes = storage.getBlob(workspaceId, head.sourceDigest);
