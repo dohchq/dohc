@@ -8414,6 +8414,47 @@ mod tests {
             .unwrap();
     }
 
+    /// Roll back the change `moment_id` to `doc.md` as the runtime's rollback
+    /// does: check that it may go back, then reconcile the editor history
+    /// with the text it brings back.
+    fn roll_back_doc_change(store: &mut EngineStore, moment_id: &str) {
+        VersionedTextStore::new(store)
+            .rollback_text_file_mutation_with(
+                &dohc_engine_domain::RollbackTextFileMutation {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "doc.md".to_owned(),
+                    mutation_moment_id: moment_id.to_owned(),
+                    request_id: None,
+                    metadata_origin: "restore".to_owned(),
+                    author_json: None,
+                },
+                &NoFaults,
+                |tx, change| {
+                    crate::rollback_waits_for_publication_in_tx(tx, "ws", &change.moment_id)
+                },
+                |tx, object_id, restored, _, recorded_at_ms| {
+                    let resulting = restored
+                        .map_or(crate::ResultingHead::BinaryOrAbsent, |(path, text)| {
+                            crate::ResultingHead::Text { path, text }
+                        });
+                    crate::reconcile_local_resulting_head_in_tx(
+                        tx,
+                        "ws",
+                        "main",
+                        object_id,
+                        resulting,
+                        None,
+                        None,
+                        recorded_at_ms,
+                    )
+                    .unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     /// The other machine's `text` in `doc.md`, as this machine's conflict
     /// shows it.
     fn peer_snapshot(text: &str) -> TextSnapshot {
@@ -8812,6 +8853,38 @@ mod tests {
         apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
         let edited = "base text\nTokyo";
         import_peer_kept_copy(&mut store, &key, (&base, &first), edited);
+
+        assert_eq!(text_keep_open_rows(&store), 1);
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "doc.md")
+            .unwrap();
+        assert!(head.is_none(), "{head:?}");
+    }
+
+    /// This machine rolled back its deletion, which leaves no row for it, and
+    /// removed the note again before the other machine's typing arrived. The
+    /// other machine reviewed only the first deletion, so its kept copy opens
+    /// a review here and the note stays deleted.
+    #[test]
+    fn a_kept_copy_over_a_deletion_asks_when_this_machine_rolled_back_the_first_deletion() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, key) = deleter_with_retired_history(&base, &[], 0);
+        roll_back_doc_change(&mut store, "moment-deleted");
+        assert_eq!(text_keep_head(&mut store).text, "base text");
+        delete_doc_as(&mut store, "moment-deleted-again", 35);
+        let deletions: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE object_id='object-a' AND operation='delete'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(deletions, 1);
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
+        import_peer_kept_copy(&mut store, &key, (&base, &first), "base text\nTokyo");
 
         assert_eq!(text_keep_open_rows(&store), 1);
         let head = VersionedTextStore::new(&mut store)
