@@ -257,7 +257,7 @@ mod capture_file_hold_tests {
         let deletes = Arc::new(AtomicUsize::new(0));
         let observed = deletes.clone();
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
                     if matches!(
                         ctx.action,
@@ -2636,7 +2636,7 @@ mod capture_batch_fast_path_tests {
         let trigger_compiles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_compiles = Arc::clone(&trigger_compiles);
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
                     if matches!(
                         context.action,

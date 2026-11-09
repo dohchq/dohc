@@ -261,34 +261,36 @@ fn traced_actor(event: TraceEvent<'_>) {
     traced(Link::Actor, event);
 }
 
-fn trace_on(conn: &rusqlite::Connection, callback: fn(TraceEvent<'_>)) {
+fn trace_on(conn: &mut rusqlite::Connection, callback: fn(TraceEvent<'_>)) {
     conn.trace_v2(
         TraceEventCodes::SQLITE_TRACE_STMT | TraceEventCodes::SQLITE_TRACE_PROFILE,
         Some(callback),
-    );
+    )
+    .unwrap();
 }
 
-fn trace_off(conn: &rusqlite::Connection) {
-    conn.trace_v2(TraceEventCodes::empty(), None);
+fn trace_off(conn: &mut rusqlite::Connection) {
+    conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+        .unwrap();
 }
 
 /// Trace a connection tails validation opened.
-fn trace_reader(conn: &rusqlite::Connection) {
+fn trace_reader(conn: &mut rusqlite::Connection) {
     if let Some(traced) = TRACED.lock().unwrap().as_mut() {
         traced.readers_opened += 1;
     }
     trace_on(conn, traced_readers);
 }
 
-fn trace_actor(conn: &rusqlite::Connection) {
+fn trace_actor(conn: &mut rusqlite::Connection) {
     trace_on(conn, traced_actor);
 }
 
 /// Trace the store's connection, the actor's and every connection tails
 /// validation opens, or stop.
-async fn trace(w: &RetainedWindow, on: bool) {
+async fn trace(w: &mut RetainedWindow, on: bool) {
     w.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             if on {
                 trace_on(conn, traced_store);
             } else {
@@ -297,7 +299,7 @@ async fn trace(w: &RetainedWindow, on: bool) {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
-    on_released_tail_reader(on.then_some(trace_reader as fn(&rusqlite::Connection)));
+    on_released_tail_reader(on.then_some(trace_reader as fn(&mut rusqlite::Connection)));
     w.actor
         .on_connection(if on { trace_actor } else { trace_off })
         .await
@@ -477,10 +479,10 @@ struct Setup {
 
 fn invalidate(w: &RetainedWindow) -> Setup {
     let before = window_generation(&w.store);
-    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    let mut raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
     raw.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")
         .unwrap();
-    trace_on(&raw, traced_store);
+    trace_on(&mut raw, traced_store);
     let clock = Clock::start();
     raw.execute_batch(INVALIDATION).unwrap();
     let write = clock.stop();
@@ -886,7 +888,7 @@ async fn measure_released_window_protection() {
             };
             let mut w = retained_window(Retained::Carried).await;
             retained_history(&w, entries, applied);
-            trace(&w, true).await;
+            trace(&mut w, true).await;
             let incoming = IncomingCoordinate {
                 relay_namespace: Some("relay".into()),
                 replication_epoch: "epoch".into(),
@@ -961,7 +963,7 @@ async fn measure_released_window_protection() {
             for (phase, samples, setups) in &phases {
                 phase.summarize(samples, setups);
             }
-            trace(&w, false).await;
+            trace(&mut w, false).await;
             w.close().await;
         }
     }

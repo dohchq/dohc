@@ -3166,7 +3166,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         let log = owner.store.table_row_count("replication_log").unwrap();
         owner
             .store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.authorizer(Some(move |ctx: AuthContext<'_>| {
                     if matches!(
                         ctx.action,
@@ -3186,7 +3186,7 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         let result = apply_detailed(&mut owner.store, &settlement, &NoFaults, &crate::AlwaysLive);
         owner
             .store
-            .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+            .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
             .unwrap();
         assert!(denied.load(Ordering::SeqCst));
         assert!(matches!(result, Err(SyncError::Storage(_))));

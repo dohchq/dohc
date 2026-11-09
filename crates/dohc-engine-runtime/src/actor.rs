@@ -820,9 +820,12 @@ impl ActorHandle {
     /// attribute its statements.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
-    pub async fn on_connection(&self, hook: fn(&rusqlite::Connection)) -> Result<(), RuntimeError> {
+    pub async fn on_connection(
+        &self,
+        hook: fn(&mut rusqlite::Connection),
+    ) -> Result<(), RuntimeError> {
         self.run(move |store, _| {
-            store.read_with(|conn| {
+            store.hooks_with(|conn| {
                 hook(conn);
                 Ok(())
             })

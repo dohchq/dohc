@@ -118,13 +118,13 @@ fn assert_refusal<T: std::fmt::Debug>(
     assert_eq!(refusal.reason, expected);
 }
 
-fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
+fn watch_fence_writes(f: &mut Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let writes = Arc::new(AtomicUsize::new(0));
     let seen = writes.clone();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -141,10 +141,10 @@ fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
     writes
 }
 
-fn stop_watching_fence_writes(f: &Fixture, writes: &std::sync::atomic::AtomicUsize) {
+fn stop_watching_fence_writes(f: &mut Fixture, writes: &std::sync::atomic::AtomicUsize) {
     use rusqlite::hooks::{AuthContext, Authorization};
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(
         writes.load(std::sync::atomic::Ordering::SeqCst),
@@ -167,7 +167,7 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
         }
         let before = binding_state(&f);
         let bytes = f.canonical().encode_full_state();
-        let writes = watch_fence_writes(&f);
+        let writes = watch_fence_writes(&mut f);
         let result = f.owner.fence_restore(
             &mut f.store,
             None,
@@ -176,7 +176,7 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
             90,
             &NoFaults,
         );
-        stop_watching_fence_writes(&f, &writes);
+        stop_watching_fence_writes(&mut f, &writes);
         if let Some(saved) = saved {
             assert_eq!(result.unwrap(), saved);
         } else {
@@ -1469,10 +1469,9 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
         },
         update_bytes: bytes,
     };
-    let result = f
-        .store
-        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
-            tx.authorizer(Some(|context: AuthContext<'_>| match context.action {
+    f.store
+        .hooks_with(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
                 AuthAction::Read {
                     table_name: "live_restore_fences",
                     column_name: "proposal_json" | "application_json",
@@ -1483,12 +1482,16 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
                 } => Authorization::Deny,
                 _ => Authorization::Allow,
             }))
-            .map_err(read_sql)?;
-            let appended = accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024);
-            tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-                .map_err(read_sql)?;
-            appended
         })
+        .unwrap();
+    let result = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+            accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024)
+        })
+        .unwrap();
+    f.store
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(matches!(result, TxnOutcome::Committed(())));
     f.store
@@ -5305,7 +5308,7 @@ fn recheck_selected_terminal(unknown_history: bool) {
     let replacement = f.terminal.as_ref().unwrap().update_digest.clone();
     let begins = Arc::new(AtomicUsize::new(0));
     let seen = begins.clone();
-    f.store.read_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
+    f.store.hooks_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
         if matches!(context.action, AuthAction::Transaction { operation: TransactionOperation::Begin })
             && seen.fetch_add(1, Ordering::SeqCst) == usize::from(unknown_history) {
             assert_eq!(other.execute("UPDATE live_accepted_updates SET update_sha256=?1 WHERE journal_cursor=3", [&replacement]).unwrap(), 1);
@@ -5316,7 +5319,7 @@ fn recheck_selected_terminal(unknown_history: bool) {
         f.owner
             .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults);
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(
         begins.load(Ordering::SeqCst),
@@ -5345,7 +5348,7 @@ fn native_fence_does_not_rebuild_the_selected_point() {
     let reads = Arc::new(AtomicUsize::new(0));
     let seen = reads.clone();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -5365,7 +5368,7 @@ fn native_fence_does_not_rebuild_the_selected_point() {
         .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
         .unwrap();
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 }
@@ -5378,7 +5381,7 @@ fn fence_rechecks_reader_history_signal_before_writing() {
     let before = binding_state(&f);
     let other = Connection::open(f.dir.join("engine.db")).unwrap();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -5406,7 +5409,7 @@ fn fence_rechecks_reader_history_signal_before_writing() {
         &NoFaults,
     );
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(
         matches!(result, Err(ApplicationError::Interrupted)),
@@ -5618,7 +5621,7 @@ fn native_accepted_append_avoids_reader_signal_sql() {
         "a new native bootstrap must establish the shortcut"
     );
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
                 AuthAction::Read {
                     table_name: "live_accepted_reader_history",
@@ -5637,7 +5640,7 @@ fn native_accepted_append_avoids_reader_signal_sql() {
         .unwrap();
     f.edit("native edit\n", 3);
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     let signal: bool = f
         .store
@@ -5728,7 +5731,7 @@ fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
     let reads = Arc::new(AtomicUsize::new(0));
     let seen = reads.clone();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -5748,7 +5751,7 @@ fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
         .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
         .unwrap();
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(reads.load(Ordering::SeqCst) > 0);
 }

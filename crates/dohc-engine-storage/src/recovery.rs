@@ -119,6 +119,12 @@ impl Source {
             .expect("a source keeps its connection until it becomes a store")
     }
 
+    fn conn_mut(&mut self) -> &mut Connection {
+        self.conn
+            .as_mut()
+            .expect("a source keeps its connection until it becomes a store")
+    }
+
     /// The source read in place, as a store for queries only.
     fn into_prepared(mut self, path: &Path, passive: bool) -> PreparedRecovery {
         PreparedRecovery {
@@ -206,6 +212,7 @@ fn prepare(
         return Err(RecoveryError::Refused);
     }
     if ledger == LedgerState::Current {
+        let conn = held.conn_mut();
         crate::schema::check_current(conn)?;
         conn.execute_batch("COMMIT")
             .map_err(StorageError::corrupt)?;
@@ -287,7 +294,7 @@ fn open_copy(copy: &Path, cancelled: &Arc<AtomicBool>) -> Result<EngineStore, St
 /// never creates the file. Its statements stop once `cancelled` is set.
 fn open_source(path: &Path, cancelled: Arc<AtomicBool>) -> Result<Connection, StorageError> {
     crate::schema::reject_undersized_database(path)?;
-    let conn = crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    let mut conn = crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(StorageError::corrupt)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .map_err(StorageError::corrupt)?;

@@ -73,6 +73,7 @@ dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support
 rusqlite = { version = "0.41", features = ["limits"] }
 # Integration tests need the library built with its test APIs.
 dohc-engine-collab = { path = ".", features = ["test-support"] }
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 # The heap profiler the held-proof memory measurement reads, and the crate

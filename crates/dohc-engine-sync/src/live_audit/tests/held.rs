@@ -1028,11 +1028,11 @@ fn work_from_an_earlier_build_stays_ready_while_a_document_waits() {
 }
 
 /// Whether `op` waits on a held audit, and the SQLite steps that took.
-fn wait_steps(store: &EngineStore, op: &ReplicationEnvelope) -> (bool, u64) {
+fn wait_steps(store: &mut EngineStore, op: &ReplicationEnvelope) -> (bool, u64) {
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = steps.clone();
     store
-        .read_with(|c| {
-            let steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let counter = steps.clone();
+        .hooks_with(|c| {
             c.progress_handler(
                 1,
                 Some(move || {
@@ -1040,16 +1040,17 @@ fn wait_steps(store: &EngineStore, op: &ReplicationEnvelope) -> (bool, u64) {
                     false
                 }),
             )
-            .unwrap();
-            let wait = SyncError::RetryableState { reason: "waits" };
-            let waits = crate::live_audit::waits_on_held(c, op, &wait);
-            c.progress_handler(0, None::<fn() -> bool>).unwrap();
-            Ok::<_, SyncError>((
-                waits?.is_some(),
-                steps.load(std::sync::atomic::Ordering::Relaxed),
-            ))
         })
-        .unwrap()
+        .unwrap();
+    let wait = SyncError::RetryableState { reason: "waits" };
+    let waits = store.read_with(|c| crate::live_audit::waits_on_held(c, op, &wait));
+    store
+        .hooks_with(|c| c.progress_handler(0, None::<fn() -> bool>))
+        .unwrap();
+    (
+        waits.unwrap().is_some(),
+        steps.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 /// A waiting document does not slow each sync.
@@ -1061,7 +1062,7 @@ fn a_waiting_document_does_not_slow_each_sync() {
             hold_event(&mut f.store, &f.binding, &format!("held-{count}"), count);
         }
         next.payload["eventCount"] = json!(2 + held);
-        wait_steps(&f.store, &next)
+        wait_steps(&mut f.store, &next)
     };
     let (few_wait, few) = steps(10);
     let (many_wait, many) = steps(400);
@@ -1091,7 +1092,7 @@ fn the_history_lookup_is_keyed_by_workspace_and_document() {
                 .map_err(SyncError::persist)
             })
             .unwrap();
-        wait_steps(&f.store, &next)
+        wait_steps(&mut f.store, &next)
     };
     let (few_wait, few) = steps(10);
     let (many_wait, many) = steps(400);

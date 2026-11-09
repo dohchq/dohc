@@ -1115,24 +1115,23 @@ async fn the_writer_releases_a_proof_with_bounded_reads_alone() {
             .unwrap()
             .expect("held")
     };
-    let trace = |store: &EngineStore, on: bool| {
+    let trace = |store: &mut EngineStore, on: bool| {
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 if on {
-                    conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(releasing));
+                    conn.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(releasing))
                 } else {
-                    conn.trace_v2(TraceEventCodes::empty(), None);
+                    conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
                 }
-                Ok::<_, rusqlite::Error>(())
             })
             .unwrap();
     };
 
     let proof = prove(&w.store);
     RELEASING.lock().unwrap().clear();
-    trace(&w.store, true);
+    trace(&mut w.store, true);
     let answer = release(&w.store, proof);
-    trace(&w.store, false);
+    trace(&mut w.store, false);
     assert_eq!(answer.status, HeldBindingStatus::Current);
     assert!(answer.contributions.is_some());
     let statements = std::mem::take(&mut *RELEASING.lock().unwrap());

@@ -756,8 +756,10 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
             store.read_with(|conn| {
                 let count: i64 = conn.query_row("SELECT count(*) FROM materialization_jobs WHERE workspace_id=?1 AND status='pending'",[&ws],|r|r.get(0))?;
                 assert_eq!(count, sources as i64);
-                conn.trace_v2(rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW, Some(trace_store_work));
                 Ok::<_, rusqlite::Error>(())
+            }).map_err(StorageError::corrupt_public)?;
+            store.hooks_with(|conn| {
+                conn.trace_v2(rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW, Some(trace_store_work))
             }).map_err(StorageError::corrupt_public)?;
             Ok(())
         }).await.unwrap();

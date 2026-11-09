@@ -1187,7 +1187,7 @@ fn checked_delete_receipt_failure_returns_retained_original() {
         let hook = commits.clone();
         let competing_target = target.clone();
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.commit_hook(Some(move || {
                     let refuse = hook.fetch_add(1, Ordering::SeqCst) == 1;
                     if refuse && occupied {
@@ -1205,7 +1205,7 @@ fn checked_delete_receipt_failure_returns_retained_original() {
         ));
         assert!(commits.load(Ordering::SeqCst) >= 3);
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.commit_hook(None::<fn() -> bool>).unwrap();
                 Ok::<_, dohc_engine_storage::StorageError>(())
             })
@@ -1440,7 +1440,7 @@ fn checked_delete_rollback_stat_failure_preserves_receipt_error() {
     let hook_staging = staging.clone();
     let hook_saved = displaced_directory.clone();
     store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.commit_hook(Some(move || {
                 // Register succeeds; the receipt trigger refuses; release then fails.
                 if hook.fetch_add(1, Ordering::SeqCst) == 2 {
@@ -1486,10 +1486,10 @@ fn checked_delete_rollback_stat_failure_preserves_receipt_error() {
         b"before"
     );
     store
-        .read_with(|conn| {
-            conn.commit_hook(None::<fn() -> bool>).unwrap();
-            conn.execute_batch("DROP TRIGGER fail_receipt")
-        })
+        .hooks_with(|conn| conn.commit_hook(None::<fn() -> bool>))
+        .unwrap();
+    store
+        .read_with(|conn| conn.execute_batch("DROP TRIGGER fail_receipt"))
         .unwrap();
     std::fs::remove_file(&staging).unwrap();
     std::fs::rename(displaced_directory, staging).unwrap();

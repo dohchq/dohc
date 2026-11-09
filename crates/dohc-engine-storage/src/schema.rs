@@ -41,7 +41,7 @@ pub(crate) const OPEN_WORK_STEP_OPS: std::ffi::c_int = 1_000;
 /// Count the SQLite work of this open into `work` until [`stop_counting`], and
 /// interrupt it once `cancelled` is set.
 fn count_open_work(
-    conn: &Connection,
+    conn: &mut Connection,
     work: Option<Arc<AtomicU64>>,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<(), StorageError> {
@@ -63,7 +63,7 @@ fn count_open_work(
 }
 
 /// The open is done: later statements on this connection count nothing.
-fn stop_counting(conn: &Connection) -> Result<(), StorageError> {
+fn stop_counting(conn: &mut Connection) -> Result<(), StorageError> {
     conn.progress_handler(0, None::<fn() -> bool>)
         .map_err(StorageError::corrupt)
 }
@@ -386,7 +386,7 @@ fn open_engine_db_configured(
     // must not fold them into engine.db.
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work, cancelled)?;
+    count_open_work(&mut conn, work, cancelled)?;
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
@@ -460,8 +460,8 @@ fn open_engine_db_configured(
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;
-    stop_counting(&conn)?;
-    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
+    stop_counting(&mut conn)?;
+    crate::search_generation::install(&mut conn).map_err(StorageError::corrupt)?;
     if let Some(checkpoints) = &checkpoints {
         if disposition == Disposition::Fresh {
             checkpoints.checkpoint_fresh_schema(&conn);
@@ -487,12 +487,12 @@ pub(crate) fn open_engine_db_read_only(
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
-    let conn =
+    let mut conn =
         crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work, cancelled)?;
+    count_open_work(&mut conn, work, cancelled)?;
     apply_session_pragmas(&conn)?;
-    validate_current(&conn)?;
-    stop_counting(&conn)?;
+    validate_current(&mut conn)?;
+    stop_counting(&mut conn)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
@@ -514,7 +514,7 @@ pub(crate) fn classify_existing(
 }
 
 /// Refuse a store this build cannot read as it is, then check it.
-fn validate_current(conn: &Connection) -> Result<(), StorageError> {
+fn validate_current(conn: &mut Connection) -> Result<(), StorageError> {
     if classify_existing(conn)? == crate::migration::LedgerState::Pending {
         return Err(StorageError::MigrationPending);
     }
@@ -522,7 +522,7 @@ fn validate_current(conn: &Connection) -> Result<(), StorageError> {
 }
 
 /// Check a current store's schema and pages once and ready its queries.
-pub(crate) fn check_current(conn: &Connection) -> Result<(), StorageError> {
+pub(crate) fn check_current(conn: &mut Connection) -> Result<(), StorageError> {
     validate_v2(conn)?;
     integrity_check(conn)?;
     crate::search_generation::install(conn).map_err(StorageError::corrupt)

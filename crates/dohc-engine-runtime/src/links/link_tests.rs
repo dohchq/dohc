@@ -11,11 +11,16 @@ thread_local! {
     static WAL_CHECKPOINT_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub(super) fn observe_checkpoints(store: &EngineStore) {
+pub(super) fn observe_checkpoints(store: &mut EngineStore) {
     store
         .read_with(|c| {
             let threshold: i32 = c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))?;
             WAL_THRESHOLD.set(threshold);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    store
+        .hooks_with(|c| {
             // Match sqlite3WalDefaultHook: same threshold, passive checkpoint,
             // and ignored checkpoint errors. This hook exists only in tests.
             c.wal_hook(Some(|wal, frames| {
@@ -25,8 +30,7 @@ pub(super) fn observe_checkpoints(store: &EngineStore) {
                     let _ = wal.checkpoint();
                 }
                 Ok(())
-            }));
-            Ok::<_, rusqlite::Error>(())
+            }))
         })
         .unwrap();
 }
@@ -717,7 +721,7 @@ fn five_hundred_links_publish_atomically_in_bounded_actor_slices() {
     let mut s = open(&db);
     write(&mut s, "a", "a.md", &"[[target]] ".repeat(500), 2);
     let mut staged = parsed(&s);
-    observe_checkpoints(&s);
+    observe_checkpoints(&mut s);
     let mut batches = 0;
     let mut durations = Vec::new();
     let began = Instant::now();
