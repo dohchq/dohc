@@ -42,7 +42,11 @@ it("asks PostHog not to look up a location, and drops the address after its ? or
     const sent = before_send({
       uuid: "u",
       event,
-      properties: { $current_url: "https://dohc.computer/?utm_source=x#top", $referrer: "https://dohc.computer/privacy?a=b" },
+      properties: {
+        $current_url: "https://dohc.computer/?utm_source=x#top",
+        $referrer: "https://dohc.computer/privacy?a=b",
+        ph_keyword: "a search",
+      },
     });
     expect(sent?.properties).toEqual({
       $current_url: "https://dohc.computer/",

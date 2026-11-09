@@ -11,8 +11,9 @@ it("keeps nothing and sends no part of a link after its ? or #", async () => {
   // campaign tags and query an email link may carry.
   const toolbar = btoa(JSON.stringify({ action: "ph_authorize", token: "phc_4EUB88JK9BzR2LEtJ24xVwMV8pczEBs95yTMpwJuvu4" }));
   history.replaceState(null, "", `/?utm_source=news&gclid=abc123&email=a%40b.c&__posthog_debug=true#__posthog=${toolbar}`);
-  // From another page of this site, the browser sends that page's whole address.
-  Object.defineProperty(document, "referrer", { value: "http://localhost:3000/privacy?from=b%40c.d#top" });
+  // From another page of this site, the browser sends that page's whole
+  // address, and the SDK reads "google" in it as a search with the term in q.
+  Object.defineProperty(document, "referrer", { value: "http://localhost:3000/privacy?utm_source=google&q=b%40c.d#top" });
   const bodies: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
     const body = new Uint8Array(await new Response(init?.body).arrayBuffer());
@@ -32,7 +33,7 @@ it("keeps nothing and sends no part of a link after its ? or #", async () => {
   const sent = bodies.join();
   expect(sent).toContain('"$current_url":"http://localhost:3000/"');
   expect(sent).toContain('"$referrer":"http://localhost:3000/privacy"');
-  for (const part of ["utm_source", "news", "gclid", "abc123", "a%40b.c", "__posthog", "b%40c.d", "#top"]) {
+  for (const part of ["utm_source", "news", "gclid", "abc123", "a%40b.c", "__posthog", "b%40c.d", "b@c.d", "#top"]) {
     expect(sent, part).not.toContain(part);
   }
 });
