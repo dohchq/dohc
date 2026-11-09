@@ -38,14 +38,23 @@ function productionSources(directory: string): string[] {
   });
 }
 const findings = (text: string) => FORBIDDEN.flatMap(([rule, pattern]) => [...text.matchAll(pattern)].map(match => ({rule, match: match[0], index: match.index})));
+// A Stop restore's control entry takes the live-update journal's next cursor by
+// advancing that table's counter in `allocateJournalCursor`. It never names the log's.
+function journalCounterWrite(file: string, text: string, index: number | undefined) {
+  if (file !== "storage/liveRestoreOperation.ts" || index === undefined) return false;
+  const start = text.indexOf("function allocateJournalCursor("), end = text.indexOf("\n}\n", start);
+  return start >= 0 && start < index && index < end && text.slice(start, end).includes(`const name = "sync_relay_live_update_journal";`);
+}
 
 it("keeps the relay log append-only in production code", () => {
   const sources = productionSources(ROOT), names = sources.map(path => relative(ROOT, path).replaceAll("\\", "/"));
   expect(names).toContain("storage/log.ts");
   expect(names).toContain("relayDeploymentCrash.fixture.ts");
-  const found = sources.flatMap(path => {
+  const found = sources.flatMap((path, i) => {
     const text = readFileSync(path, "utf8");
-    return findings(text).map(({rule, match, index}) => `${relative(ROOT, path)}:${text.slice(0, index).split("\n").length} ${rule}: ${match}`);
+    return findings(text)
+      .filter(({rule, index}) => !(rule === "writes SQLite's AUTOINCREMENT counters" && journalCounterWrite(names[i], text, index)))
+      .map(({rule, match, index}) => `${names[i]}:${text.slice(0, index).split("\n").length} ${rule}: ${match}`);
   });
   expect(found).toEqual([]);
 });
@@ -72,4 +81,12 @@ it("finds each forbidden shape however the table is named", () => {
   expect(rules("INSERT OR IGNORE INTO sync_relay_log(workspace_id) VALUES (?)")).toEqual([]);
   expect(rules("INSERT OR REPLACE INTO sync_relay_log_other(workspace_id) VALUES (?)")).toEqual([]);
   expect(rules("SELECT relay_seq FROM sync_relay_log")).toEqual([]);
+});
+
+it("excuses only the journal cursor's own counter", () => {
+  const source = (name: string) => `function allocateJournalCursor(storage) {\n  const name = "${name}";\n  storage.db.prepare("UPDATE sqlite_sequence SET seq=seq+1 WHERE name=?").run(name);\n}\n`;
+  const excused = (file: string, name: string) => journalCounterWrite(file, source(name), source(name).indexOf("UPDATE sqlite_sequence"));
+  expect(excused("storage/liveRestoreOperation.ts", "sync_relay_live_update_journal")).toBe(true);
+  expect(excused("storage/liveRestoreOperation.ts", "sync_relay_log")).toBe(false);
+  expect(excused("storage/log.ts", "sync_relay_live_update_journal")).toBe(false);
 });
