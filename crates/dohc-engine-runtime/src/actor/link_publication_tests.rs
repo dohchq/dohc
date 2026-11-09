@@ -187,7 +187,7 @@ impl Fixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publishes_three_closed_sources_and_an_open_document_without_a_placement_caller() {
     for open in [false, true] {
-        let f = Fixture::new(3, 3);
+        let f = Fixture::new(3, 3).await;
         let lease = if open {
             Some(f.open_document("source-0001").await.0)
         } else {
@@ -210,7 +210,7 @@ async fn publishes_three_closed_sources_and_an_open_document_without_a_placement
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupted_placement_recovers_and_retries_without_another_request() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let fault = Arc::new(CrashNth {
         point: FaultPoint::MaterializeAfterDisplaceBeforePlace,
         nth: 1,
@@ -231,7 +231,7 @@ async fn interrupted_placement_recovers_and_retries_without_another_request() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_receipt_restarts_unpublished_work_after_actor_restart() {
-    let mut f = Fixture::new(3, 3);
+    let mut f = Fixture::new(3, 3).await;
     let hold = f.capture.clone().lock_owned().await;
     let reply = f.pass("receipt-debt", Arc::new(NoFaults)).await.unwrap();
     assert_eq!(
@@ -249,7 +249,7 @@ async fn completed_receipt_restarts_unpublished_work_after_actor_restart() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn undo_cancels_publication_between_complete_file_placements() {
-    let f = Fixture::new(3, 3);
+    let f = Fixture::new(3, 3).await;
     let hold = f.capture.clone().lock_owned().await;
     f.pass("undo-publication", Arc::new(NoFaults))
         .await
@@ -303,7 +303,7 @@ impl FaultInjector for FlushTimings {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
-    let f = Fixture::new(2000, 2001);
+    let f = Fixture::new(2000, 2001).await;
     let _index = f.actor.hold_link_drain();
     let ws = f.ws.clone();
     f.actor.run(move |store, _| {
@@ -424,7 +424,7 @@ async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_placement_stays_pending_and_retries_after_its_hold_is_released() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let capture = f.capture.clone().lock_owned().await;
     f.pass("held-publication", Arc::new(NoFaults))
         .await
@@ -484,7 +484,7 @@ async fn a_refused_placement_stays_pending_and_retries_after_its_hold_is_release
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_undo_before_its_plan_resumes_pending_publication() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let capture = f.capture.clone().lock_owned().await;
     f.pass("cancel-undo-publication", Arc::new(NoFaults))
         .await
@@ -542,7 +542,7 @@ async fn cancelling_undo_before_its_plan_resumes_pending_publication() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let (_lease, _) = f.open_document("source-0000").await;
     let gate = f.capture.clone().lock_owned().await;
     f.pass("open-conflict", Arc::new(NoFaults)).await.unwrap();
@@ -594,7 +594,7 @@ async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reopen() {
-    let mut f = Fixture::new(2, 2);
+    let mut f = Fixture::new(2, 2).await;
     let gate = f.capture.clone().lock_owned().await;
     f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
     let path = f.root.join("source-0000.md");
@@ -717,7 +717,7 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
     let mut expected_staging_entries = Vec::new();
     for pending in [20, 2000] {
         let sources = pending + 1;
-        let f = Fixture::new(sources, sources);
+        let f = Fixture::new(sources, sources).await;
         let _index = f.actor.hold_link_drain();
         let ws = f.ws.clone();
         f.actor.run(move |store, _| {
@@ -827,7 +827,7 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {
-    let f = Fixture::new(1, 1);
+    let f = Fixture::new(1, 1).await;
     let gate = f.capture.clone().lock_owned().await;
     f.pass("temporary-error", Arc::new(NoFaults)).await.unwrap();
     let staging = f.root.join(".dohc/engine/displaced");
