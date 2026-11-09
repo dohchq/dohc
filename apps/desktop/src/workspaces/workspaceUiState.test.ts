@@ -15,7 +15,7 @@ vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>(
     "node:fs/promises",
   );
-  return { ...actual, rename: vi.fn(actual.rename) };
+  return { ...actual, rename: vi.fn(actual.rename), readFile: vi.fn(actual.readFile) };
 });
 
 afterEach(async () => {
@@ -133,6 +133,35 @@ describe("ui-state file store", () => {
     } finally {
       Object.defineProperty(process, "platform", descriptor);
     }
+  });
+
+  // Another program, such as a virus scanner, can hold the file for a moment.
+  // A read Windows keeps refusing is refused too, so the renderer saves no
+  // defaults over the saved tabs.
+  it.each(["EBUSY", "EACCES"])("reads again while Windows refuses the file with %s, then refuses the read", async (code) => {
+    const workspace = await openedWorkspace();
+    const root = workspace.rootPath;
+    await writeUiStateFile(workspace, STATE);
+    const busy = () => Object.assign(new Error("file is busy"), { code });
+    const readMock = vi.mocked(readFile);
+
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+    try {
+      readMock.mockClear();
+      readMock.mockRejectedValueOnce(busy());
+      expect(await readUiStateFile(root)).toEqual(STATE);
+      expect(readMock).toHaveBeenCalledTimes(2);
+
+      readMock.mockClear();
+      readMock.mockRejectedValue(busy());
+      await expect(readUiStateFile(root)).rejects.toMatchObject({ code });
+      expect(readMock).toHaveBeenCalledTimes(6);
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+      readMock.mockReset();
+    }
+    expect(await readUiStateFile(root)).toEqual(STATE);
   });
 
   it("a missing or corrupt file reads as null, never an error", async () => {
