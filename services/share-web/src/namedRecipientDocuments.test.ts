@@ -75,6 +75,18 @@ it.each(["other-account", "revoked", "view", "comment", "link", "pinned", "overs
     expect(await response.json()).toEqual({ok: false, error: "not found"});
   }
 });
+it("lists the selected pages that can open beside one that can't", async () => {
+  const f = await fixture();
+  f.storage.putBlob({workspaceId: "workspace", sha256: sha256("# Unopenable"), content: Buffer.from("# Unopenable"), createdAtMs: 1});
+  const {payload, ...op} = moment("docs/unopenable.md", "# Unopenable", {objectId: null});
+  f.storage.appendLogBatch({workspaceId: "workspace", originId: "owner", ops: [{...op,
+    payloadJson: JSON.stringify({...payload, payloadAfterContentKind: "text", payloadAfterByteLength: 12})}]});
+  expect(f.storage.readCurrentFileState({workspaceId: "workspace", versionId: "main", selectorPaths: ["docs"], limit: 8})
+    .files.map(file => file.path)).toContain("docs/unopenable.md");
+  const response = await f.web(request());
+  expect(response.status).toBe(200);
+  expect((await response.json()).files).toEqual([{objectId: "a", path: "docs/a.md"}]);
+});
 it("rechecks the grant after reading current files", async () => {
   const f = await fixture(), read = f.storage.readCurrentFileState.bind(f.storage);
   vi.spyOn(f.storage, "readCurrentFileState").mockImplementation(input => {
