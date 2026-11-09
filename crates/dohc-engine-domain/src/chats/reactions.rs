@@ -4,7 +4,8 @@ use super::{
     follow_thread_implicitly, insert_local_replication_op, is_js_trim_ws,
     local_replication_coordinate, lookup_request, map_reaction_row, nfc, non_empty,
     normalize_display_name, normalize_replicated_chat_id, persisted_safe_integer, record_request,
-    relay_log_has_authored_message, require_thread, thread_has_message, validate_message_id,
+    relay_log_has_authored_message, requested_name, require_thread, thread_has_message,
+    validate_message_id,
 };
 use crate::error::DomainError;
 use crate::store::hash_fields;
@@ -453,7 +454,7 @@ impl<'a> LinkedChatStore<'a> {
             author_id.as_bytes(),
             replication_author_id.as_deref().unwrap_or("").as_bytes(),
             input.author_kind.as_str().as_bytes(),
-            author_display_name.as_bytes(),
+            requested_name(&input.author_display_name).as_bytes(),
             input.state.as_str().as_bytes(),
         ]);
         if let Some(recorded) = self

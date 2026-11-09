@@ -1994,17 +1994,22 @@ fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8>
     out
 }
 
-/// `normalizeDisplayName`: trim, 1..=200 chars.
-/// Trim and validate a chat sender display name.
+/// A chat sender display name as [`crate::names::shown_name`] shows it,
+/// trimmed, 1..=200 UTF-16 units.
 pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
-    let normalized = display_name.trim_matches(is_js_trim_ws);
-    if normalized.is_empty() || normalized.encode_utf16().count() > MAX_DISPLAY_NAME_CHARS {
-        return Err(DomainError::chat(
-            "invalid-sender",
-            "Chat sender display name is required.",
-        ));
+    let invalid = || DomainError::chat("invalid-sender", "Chat sender display name is required.");
+    let shown = crate::names::shown_name(display_name).ok_or_else(invalid)?;
+    let normalized = shown.trim_matches(is_js_trim_ws);
+    if normalized.encode_utf16().count() > MAX_DISPLAY_NAME_CHARS {
+        return Err(invalid());
     }
     Ok(normalized.to_owned())
+}
+
+/// A name as a request hash takes it: trimmed only, as before names dropped
+/// hidden characters, so a request recorded then still matches its retry.
+pub(crate) fn requested_name(name: &str) -> &str {
+    name.trim_matches(is_js_trim_ws)
 }
 
 /// The person an agent or automation message acts for. A human message
@@ -3242,8 +3247,12 @@ impl<'a> LinkedChatStore<'a> {
             title.as_bytes(),
             body.as_bytes(),
             input.author_kind.as_str().as_bytes(),
-            display_name.as_bytes(),
-            owner_name.as_deref().unwrap_or("").as_bytes(),
+            requested_name(&input.author_display_name).as_bytes(),
+            input
+                .author_owner_display_name
+                .as_deref()
+                .map_or("", requested_name)
+                .as_bytes(),
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
             if input.needs_decision { b"1" } else { b"0" },
@@ -3614,8 +3623,12 @@ impl<'a> LinkedChatStore<'a> {
             input.message_id.as_bytes(),
             body.as_bytes(),
             input.author_kind.as_str().as_bytes(),
-            display_name.as_bytes(),
-            owner_name.as_deref().unwrap_or("").as_bytes(),
+            requested_name(&input.author_display_name).as_bytes(),
+            input
+                .author_owner_display_name
+                .as_deref()
+                .map_or("", requested_name)
+                .as_bytes(),
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             parent.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),

@@ -60,6 +60,8 @@ pub use capture_write::{
     write_published_text_in_tx, write_text_in_tx,
 };
 
+pub(crate) use capture_write::write_revived_text_in_tx;
+
 pub use delete_rename::{
     delete_text_in_tx, delete_text_in_tx_checked, finish_checked_delete_in_tx,
     moment_has_replication_dependents_in, prepare_checked_delete_in_tx, rename_text_in_tx,

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { SHELL_ERROR_MAX_CHARS, useShellError } from "./useShellError";
-import { SyncedDeletionRevivalError } from "../../workspaces/syncedDeletionRefusal";
+import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
@@ -155,6 +155,25 @@ describe("useShellError", () => {
     expect(notice.retry).toBeNull();
     act(() => result.current.hideShellError(notice.id));
     expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true, message: notice.message });
+  });
+  // Copy details is the message, the title and these details. The error's
+  // own message is an instruction or the Reason, so it adds no Cause.
+  it.each([
+    ["a conflict choice", new SyncedDeletionRevivalError("tasks/trip.txt"),
+      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.",
+      "trip.txt is removed on this machine and was changed on your other machine. Bringing it back could stop sync between your machines."],
+    ["a History restore", new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true),
+      "Copy its text from its History into a file with a new name.",
+      "A sync conflict between your machines removes trip.txt. Bringing it back could stop sync between them."],
+    ["a conflict whose file changed after it appeared", new SyncedDeletionStaleError("tasks/trip.txt"),
+      "Move your newer lines into the new file, and leave trip.txt and its copies alone. Your other files keep syncing.",
+      "trip.txt changed on this machine after the conflict appeared, so either choice would overwrite the newer lines."],
+  ])("copies one instruction for a refused synced deletion: %s", (_, error, instruction, reason) => {
+    const { result } = renderHook(() => useShellError("guard-copy"));
+    act(() => result.current.reportShellError("dohc could not apply that choice.", error));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.message).toBe(instruction);
+    expect(notice.details).toEqual([["Reason", reason]]);
   });
 
   it("toasts each copy once, restores its row on restart, and clears it on open", () => {

@@ -569,19 +569,20 @@ fn apply_pending_message(
     author_reported: Option<super::ChatReportedAgent>,
     automation_claims: &mut Vec<AutomationClaim>,
 ) -> Result<PendingReplayOutcome, DomainError> {
-    let owner_name = normalize_agent_owner_name(
+    // An older build parked names that this build refuses.
+    let Ok(owner_name) = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
-    )
-    .map_err(|_| DomainError::StateCorrupt {
-        reason: "chat message owner display name is invalid",
-    })?;
-    let author_display_name =
-        normalize_display_name(&payload.author_display_name).map_err(|_| {
-            DomainError::StateCorrupt {
-                reason: "pending chat message display name is invalid",
-            }
-        })?;
+    ) else {
+        return Ok(PendingReplayOutcome::Refused(
+            "pending chat message owner display name is invalid",
+        ));
+    };
+    let Ok(author_display_name) = normalize_display_name(&payload.author_display_name) else {
+        return Ok(PendingReplayOutcome::Refused(
+            "pending chat message display name is invalid",
+        ));
+    };
     let author_user_id =
         normalize_author_user_id(payload.author_user_id.as_deref()).map_err(|_| {
             DomainError::StateCorrupt {
