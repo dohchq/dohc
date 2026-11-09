@@ -6,15 +6,13 @@ import {
   type EmailMessage,
   type SendEmail,
 } from "@dohc/workspace-auth/smtp";
-import { toNodeHandler } from "better-auth/node";
-import { createServer } from "node:http";
 import { Pool } from "pg";
 import { accountEmailDelivery } from "./emailDelivery";
-import { sanitizeAuthHeaders } from "./clientAddress";
 import { ConfigError, readConfig, type WorkspaceApiConfig } from "./config";
 import { createCrashReportIntake, createPostgresCrashReportStore } from "./crashReports";
 import { createReadinessProbe } from "./readiness";
 import { createRouter, type AuthGateway } from "./routes";
+import { createWorkspaceServer } from "./server";
 import { createSignUpAdmission } from "./signUpAdmission";
 import { createAccountDeletion } from "./accountDeletion";
 
@@ -132,21 +130,7 @@ const router = createRouter({
   },
 });
 
-// The client address is derived from the socket and this server's own trusted
-// proxy list before Better Auth sees a single header, so no caller can choose
-// the address its rate limit is counted against.
-const handler = toNodeHandler(router);
-const server = createServer((request, response) => {
-  try {
-    sanitizeAuthHeaders(request.headers, request.socket.remoteAddress, config.trustedProxies);
-  } catch {
-    // A connection with no address of its own cannot be rate limited; it has
-    // usually already gone away by the time the request parses.
-    response.writeHead(400).end();
-    return;
-  }
-  return handler(request, response);
-});
+const server = createWorkspaceServer(router, config.trustedProxies);
 server.listen(config.port, config.bindHost, () => {
   const resume = () => {void accountDeletion.resume().catch(() => console.error("[workspace-api] Resuming account deletion failed."));};
   resume();

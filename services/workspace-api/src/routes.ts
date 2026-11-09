@@ -50,6 +50,9 @@ export interface RouterOptions {
   };
 }
 
+// Every body a dohc client sends to /api/auth is a small JSON object.
+export const AUTH_BODY_MAX_BYTES = 64 * 1024;
+
 /** Routes that make Better Auth send mail, and so need a transport. */
 const EMAIL_ROUTES = new Set([
   "/api/auth/sign-up/email",
@@ -106,7 +109,11 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
           cors,
         );
       }
-      const response = await options.auth.handler(request);
+      const bounded = await withBodyAtMost(request, AUTH_BODY_MAX_BYTES);
+      if (!bounded) {
+        return json({ code: "BODY_TOO_LARGE", message: "This request is too large." }, 413, { ...cors, connection: "close" });
+      }
+      const response = await options.auth.handler(bounded);
       response.headers.set("cache-control", "no-store");
       for (const [name, value] of Object.entries(cors)) response.headers.set(name, value);
       return response;
@@ -214,6 +221,29 @@ function deviceErrorKind(error: unknown): "expired" | "invalid" | null {
   if (code === "expired_token") return "expired";
   if (code === "invalid_request") return "invalid";
   return null;
+}
+
+// The request with its body read into memory, or null once the body is
+// declared or read past maxBytes. It never cancels the body, because the
+// adapter would then destroy the socket before the 413 reached the client.
+async function withBodyAtMost(request: Request, maxBytes: number): Promise<Request | null> {
+  if (!request.body) return request;
+  if (Number(request.headers.get("content-length") ?? "0") > maxBytes) return null;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) return null;
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new Request(request, { body: Buffer.concat(chunks, total) });
 }
 
 function readyResponse(report: ReadinessReport): Response {
