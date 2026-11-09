@@ -8,7 +8,7 @@ const host = window as Window & { __dohcPage?: PageConfig; __dohcWarm?: boolean 
 post("started", { at: Date.now() });
 // Inter loads before the page draws, so its text never swaps or hides: all three faces, so every property, line and
 // letter typed later has its face (the warm web view loads them at launch). If they can't load within 5 seconds, the
-// page doesn't draw, and the app shows "Couldn't open this file." with Try again. A large file's text is monospace only,
+// page doesn't draw, and the app shows "dohc could not open this file." with Try again. A large file's text is monospace only,
 // so it doesn't wait.
 const fontsLoaded = Promise.race([
   document.fonts.load('1rem "Inter Variable"', "aĀạ").then(faces => faces.length === 3),

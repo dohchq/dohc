@@ -535,18 +535,12 @@ The phone app (`apps/mobile`) uses this skill's words and behavior. Shared words
 5. **Properties** are read-only for now, with nothing that looks editable: no field outlines, and a chevron only on a value that opens something.
 6. **The state mark** opens its explanation on tap. VoiceOver hears the mark's label with the explanation as its value.
 7. **Lossy and large files** have no Open externally. The large-file strip says to open it on a computer. A large file's state mark reads Read-only, as every read-only page's does, and its explanation says the file is too large to edit.
-8. **No device-file states.** The phone saves to the server, so it has no Saved to host, Saved locally · Pending share, File in use, Changed outside dohc, Reloaded, or Replaced. Deleted keeps the last text, read-only, with phone words that name no trash.
+8. **No device-file states.** The phone saves to the server, so it has no Saved to host, Saved locally · Pending share, File in use, Changed outside dohc, Reloaded, or Replaced. Deleted keeps the last text, read-only, and does not mention the trash.
 9. **Page and chat buttons.** A page's header has "Chat about <file>", and a file chat's header has "Open <file>".
 10. **Computer-only**, with no disabled entry on the phone: Collection delete, Versions, and in Sharing the conflicts banner, skipped changes, Copy code, and the waiting-changes review.
-11. **A page that fails to load** (its view, or the editor files it needs) shows "Couldn't open this file." with Try again, as Couldn't read does. If the editor files couldn't be written for lack of space, a second line says "Not enough storage. Free up space, then try again." The could-not-open strip is only for text shown read-only because editing couldn't start. A page that's gone offers no Try again.
-12. **A page's last pixel row** at the screen's bottom edge, under the home indicator, can differ by a third of a point from the approved frames. Look again only if it shows on another page or grows.
-13. **End share names the file.** The phone's alert asks "End the share of <file>?", where the desktop asks "End this share?" beside its row. With changes waiting, it asks "End the share of <file> and decline <N> changes <who> sent?".
-14. **A failed End share's toast** has a 2-line title, not 4. It cuts the file's name and each person's in the middle to fit. Its Notices row and Copy keep the whole text.
-
-Two rules are the same on both, so they aren't differences:
-
-- **The safe choice is Cancel.** Use Go back only when a warning comes from leaving a screen with typed work dohc hasn't kept, such as an unsent draft, and choosing it returns the person to that work.
-- **Delete, Forget, Leave, and Remove** use the danger style.
+11. **A page that fails to load** (its view, or the editor files it needs) shows "dohc could not open this file." with Try again. If the editor files could not be written for lack of space, a second line says "Not enough storage on this phone. Free up space, then choose Try again." The could-not-open strip is only for text shown read-only because editing could not start. A page that's gone offers no Try again.
+12. **End share names the file.** The phone's alert asks "End the share of <file>?", where the desktop asks "End this share?" beside its row. With changes waiting, it asks "End the share of <file> and decline <N> changes <who> sent?".
+13. **A failed End share's toast** has a 2-line title, not 4. It cuts the file's name and each person's in the middle to fit. Its Notices row and Copy keep the whole text.
 
 Browser alerts gain the message text after phone push lands (Ice, Nov 9).
 

@@ -9,6 +9,11 @@ that introduces it. A difference that changes what another surface shows needs I
 
 What the phone does differently from the desktop is listed in the dohc-interface skill's phone section (`.agents/skills/dohc-interface/SKILL.md`, "The phone app"). Add a new difference there, with its reason, in the PR that introduces it.
 
+## Screenshot comparisons
+
+A page's last pixel row at the screen's bottom edge, under the home indicator, can differ by a third of a point from
+the approved frames. It's a known difference; look again only if it shows on another page or grows.
+
 ## Android
 
 On iOS the sync band on Notices and Sharing sits in a small native host (`modules/bar-band`), through

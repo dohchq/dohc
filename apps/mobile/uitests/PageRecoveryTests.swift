@@ -17,7 +17,7 @@ final class PageRecoveryTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "page", "-dohcDemo", "page-cache-cleared"]
     app.launch()
-    XCTAssertTrue(app.staticTexts["Couldn't open this file."].waitForExistence(timeout: 30),
+    XCTAssertTrue(app.staticTexts["dohc could not open this file."].waitForExistence(timeout: 30),
                   "With the editor files gone, the page should say it couldn't open")
     keep(app, "04-cache-cleared-failed")
     app.buttons["Try again"].firstMatch.tap()
@@ -34,7 +34,7 @@ final class PageRecoveryTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "page", "-dohcDemo", "page-fonts-missing"]
     app.launch()
-    XCTAssertTrue(app.staticTexts["Couldn't open this file."].waitForExistence(timeout: 30),
+    XCTAssertTrue(app.staticTexts["dohc could not open this file."].waitForExistence(timeout: 30),
                   "With its font files gone, the page should say it couldn't open")
     XCTAssertFalse(app.webViews.firstMatch.staticTexts["Packing list"].exists, "Without its fonts the page shouldn't draw")
     keep(app, "04-fonts-missing-failed")

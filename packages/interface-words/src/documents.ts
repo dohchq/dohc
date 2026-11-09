@@ -8,9 +8,9 @@ export const documentWords = {
   tryAgain: "Try again",
   couldntRead: "Couldn't read this file.",
   /** Phone: the page's view couldn't load (or its editor files couldn't be written), so nothing is on screen. */
-  couldntOpen: "Couldn't open this file.",
-  /** Phone: under "Couldn't open this file." when the editor files couldn't be written for lack of space. */
-  notEnoughStorage: "Not enough storage. Free up space, then try again.",
+  couldntOpen: "dohc could not open this file.",
+  /** Phone: under "dohc could not open this file." when the editor files could not be written for lack of space. */
+  notEnoughStorage: "Not enough storage on this phone. Free up space, then choose Try again.",
   noLongerAvailable: "This file is no longer available at this path.",
   couldNotOpenForEditing: "dohc could not open this document for editing. You can still read it.",
   documentActions: "Document actions",
