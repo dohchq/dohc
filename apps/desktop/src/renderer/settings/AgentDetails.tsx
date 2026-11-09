@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, CircleAlert } from "lucide-react";
+import { ChevronDown, CircleAlert, Monitor } from "lucide-react";
 import { AGENT_TOOLS, launchCommand, launchCommandHint, launchFromCommand, launchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { Agent, AgentSettings } from "../../settings/userSettings";
 import { isComposingKey } from "../ui/keys";
@@ -107,7 +107,8 @@ function Term(props: { label: string; children: ReactNode }) {
 
 /**
  * An agent's details under its row: its color, how dohc starts it, and how
- * long a run may take. Each change saves at once.
+ * long a run may take, or what an agent you run reaches. Each change saves
+ * at once.
  */
 export function AgentDetails(props: {
   agent: Agent;
@@ -177,6 +178,11 @@ export function AgentDetails(props: {
           )}
         </Term>
       </dl>
+      {agent.launch ? null : (
+        <p className="m-0 mt-2.5 flex items-center gap-1.5 text-[12px] text-muted">
+          <Monitor size={14} aria-hidden />Reaches every workspace dohc opens on this computer.
+        </p>
+      )}
     </div>
   );
 }

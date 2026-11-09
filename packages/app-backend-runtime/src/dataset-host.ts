@@ -64,11 +64,11 @@ export interface DatasetAuthority {
   chainDepth?: number;
   /**
    * Set only when the owner's agent writes, directly or through an app, with
-   * the chain depth its run's writes declare: 0 outside a chain. Attribution
-   * that grants nothing: it requires the owner caller, and owner
-   * administration refuses it.
+   * the chain depth its run's writes declare: 0 outside a chain, and the id
+   * of an agent the person runs themselves. Attribution that grants nothing:
+   * it requires the owner caller, and owner administration refuses it.
    */
-  agent?: { depth: number };
+  agent?: { depth: number; agentId?: string };
   /**
    * The person the owner's or an automation's commit is made by or for, as
    * the host's trusted context names them: the owner's person on the
@@ -188,7 +188,7 @@ const MAX_DECLARED_DEPTH = 64;
 function agent(value: DatasetAuthority["agent"], caller: AppBackendCaller): DatasetAuthority["agent"] {
   if (value === undefined) return undefined;
   if (caller.kind !== "owner" || !Number.isSafeInteger(value.depth) || value.depth < 0 || value.depth > MAX_DECLARED_DEPTH) denied();
-  return { depth: value.depth };
+  return value.agentId === undefined ? { depth: value.depth } : { depth: value.depth, agentId: text(value.agentId) };
 }
 function person(value: string | undefined, caller: AppBackendCaller): string | undefined {
   if (value === undefined) return undefined;
@@ -200,7 +200,10 @@ function actor(authority: DatasetAuthority): DatasetActor {
   const person = authority.person === undefined ? {} : { userId: authority.person };
   if (authority.caller.kind === "automation") return { kind: "automation", automationId: authority.caller.automationId, depth: authority.chainDepth!, ...person };
   const app = authority.appId === undefined ? {} : { appId: authority.appId }, caller = authority.caller;
-  if (authority.agent) return { kind: "agent", depth: authority.agent.depth, ...app, ...person };
+  if (authority.agent) {
+    const agentId = authority.agent.agentId === undefined ? {} : { agentId: authority.agent.agentId };
+    return { kind: "agent", depth: authority.agent.depth, ...agentId, ...app, ...person };
+  }
   if (caller.kind === "named") return { kind: "named", userId: caller.userId, ...app };
   return caller.kind === "owner" ? { kind: "owner", ...app, ...person } : { kind: "link", ...app };
 }

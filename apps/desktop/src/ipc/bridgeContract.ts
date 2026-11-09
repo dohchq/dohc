@@ -7070,6 +7070,18 @@ export const chatDispatchPauseOperations = {
   },
 } as const satisfies OperationTable;
 
+// The agents you run that hold a chat wait on this computer now, by id.
+export const AgentsListeningEvent = z.strictObject({ agentIds: z.array(z.string().min(1)) });
+export type AgentsListeningEvent = z.infer<typeof AgentsListeningEvent>;
+export const agentsListeningOperations = {
+  readAgentsListening: {
+    capabilityId: "agent.listening.read",
+    scope: "device",
+    channel: "desktop:read-agents-listening",
+    payload: z.strictObject({}), result: AgentsListeningEvent, guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
@@ -7638,6 +7650,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
+    OperationBridge<typeof agentsListeningOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7875,6 +7888,8 @@ export interface DohcDesktopBridge
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // Agent dispatch was paused or resumed on this computer, from any window or the tray.
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
+  // An agent you run started or stopped waiting for messages on this computer.
+  onAgentsListening(listener: (event: AgentsListeningEvent) => void): () => void;
   // An agent request changed state in a group this window shows: re-read
   // that group's page.
   onChatAgentRequestsChanged(listener: (event: ChatAgentRequestsChangedEvent) => void): () => void;

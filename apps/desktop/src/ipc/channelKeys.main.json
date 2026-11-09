@@ -4,6 +4,7 @@
   "addRelayShareLink",
   "agentColorChanged",
   "agentRunState",
+  "agentsListening",
   "appViewEvent",
   "appendRelayShareDiscussion",
   "applyDatabaseEdit",

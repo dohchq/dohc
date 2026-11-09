@@ -988,6 +988,58 @@ describe("CLI socket server", () => {
         .resolves.toMatchObject([{ authorAgentId: "terminal", author: { kind: "agent", displayName: "Terminal" } }]);
     });
 
+    it("invokes a Collection action as itself, in no run, while a run dohc dispatched holds the workspace", async () => {
+      context.dataset = vi.fn(async () => ({ kind: "invoked" as const, result: { accepted: true }, revision: 1, replayed: false }));
+      const request = { action: "invoke" as const, workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", operationId: "00000000-0000-4000-8000-000000000002",
+        revision: 1, revisionSha256: "a".repeat(64), input: { name: "Equipment" }, idempotencyKey: "create-1" };
+      dispatchedRun = "codex";
+      agentWriteRunId = "run-1";
+      agentRunDepth = 2;
+      await invoke("dataset", { ...terminalArgs(), request });
+      // The run's own invocation stays as it was: the run's depth, no agent id.
+      await invoke("dataset", { cwd: workspaceRoot, actor: "agent", request });
+      expect(vi.mocked(context.dataset).mock.calls.map(call => call[1])).toEqual([{ depth: 2, agentId: "terminal" }, { depth: 2 }]);
+    });
+
+    it("listens from the start of its wait until the wait ends, aborts or times out", async () => {
+      const waiting: string[] = [];
+      const ended = vi.fn();
+      serverOptions.agentWaiting = (agentId) => {
+        waiting.push(agentId);
+        return () => ended(agentId);
+      };
+      // A wait that times out at once.
+      await waitFor("terminal");
+      expect(waiting).toEqual(["terminal"]);
+      expect(ended).toHaveBeenCalledTimes(1);
+      // An unnamed wait is nobody's.
+      await waitFor(null);
+      expect(waiting).toEqual(["terminal"]);
+
+      // A wait that ends with a message.
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const answered = invoke("watch", terminalArgs());
+      await vi.waitFor(() => expect(waiting).toHaveLength(2));
+      await personPosts(general.id, "@Terminal are you there?");
+      chatWriteSignals.signalChatWrite(WORKSPACE_ID);
+      expect((await answered).messages).toHaveLength(1);
+      expect(ended).toHaveBeenCalledTimes(2);
+
+      // A wait its workspace attachment aborts. The cursor has seen that
+      // message, which stays unread, so this wait waits.
+      const cancellation = new AbortController();
+      context.signal = cancellation.signal;
+      const seen = (await waitFor("terminal")).cursor;
+      expect(ended).toHaveBeenCalledTimes(3);
+      const aborted = rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { ...terminalArgs(), cursor: seen } });
+      await vi.waitFor(() => expect(waiting).toHaveLength(4));
+      expect(ended).toHaveBeenCalledTimes(3);
+      cancellation.abort();
+      expect(await aborted).toMatchObject({ ok: false, error: expect.stringContaining("cancelled") });
+      expect(ended).toHaveBeenCalledTimes(4);
+      expect(ended.mock.calls.every(([agentId]) => agentId === "terminal")).toBe(true);
+    });
+
     it("takes one of your agents' ids as a name only through its agent id", async () => {
       const authors = recordWriteAuthors();
       const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));

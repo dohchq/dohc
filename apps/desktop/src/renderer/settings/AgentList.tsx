@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
+import { Check, CircleAlert, Ear, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, AGENTS_RESTRICTED_MESSAGE, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
@@ -27,6 +27,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Menu, MENU_SEPARATOR } from "../ui/Menu";
+import { useAgentsListening } from "../useAgentsListening";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { useRequestSequence } from "../useRequestSequence";
 import { ownPresentation } from "../workbench/actorPresentation";
@@ -113,8 +114,9 @@ async function stillListed(agentId: string): Promise<boolean> {
   }
 }
 
-function configSnippet(config: Extract<McpConfigResult, { command: string }>): string {
-  return JSON.stringify({ mcpServers: { dohc: { command: config.command, args: config.args } } }, null, 2);
+// The MCP config that runs dohc's MCP server as this agent you run.
+export function configSnippet(config: Extract<McpConfigResult, { command: string }>, agentId: string): string {
+  return JSON.stringify({ mcpServers: { dohc: { command: config.command, args: [...config.args, "--agent-id", agentId] } } }, null, 2);
 }
 
 function presentationFor(hue: AgentHue | undefined): ActorPresentation {
@@ -129,7 +131,6 @@ const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
 const TILE_LINE = "mt-0.5 text-[12px]";
 const BUTTON_ICON = "inline-flex shrink-0 items-center gap-1.5";
 // Holds the place of a control the row does not have, so every row's controls line up.
-const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
 const menuSpace = <span aria-hidden className="size-6 shrink-0" />;
 
 function AgentNameField(props: {
@@ -221,6 +222,11 @@ function AutomationChip(props: { hue: AgentHue | undefined }) {
 function AgentRow(props: {
   agent: Agent;
   agents: DesktopUserSettings["agents"];
+  workspaceId: string;
+  // For an agent you run: its MCP config, or null when this workspace has none.
+  mcpConfig: string | null;
+  // An agent you run holds a wait for messages on this computer.
+  listening: boolean;
   paused: boolean;
   checking: boolean;
   check: CheckState | undefined;
@@ -250,9 +256,11 @@ function AgentRow(props: {
   const launch = agent.launch;
   const toolId = launch && "tool" in launch ? launch.tool : null;
   const tool = !launch ? null : toolId ? AGENT_TOOLS.find((entry) => entry.id === toolId)!.name : "Your command";
-  const status = !launched ? (
+  const status = !launched ? (props.listening ? (
+    <span className="inline-flex items-center gap-1 text-success"><Ear size={12} aria-hidden />Listening</span>
+  ) : (
     <span className="inline-flex items-center gap-1 text-muted"><Plug size={12} aria-hidden />Through MCP</span>
-  ) : props.checking ? (
+  )) : props.checking ? (
     <span className="inline-flex items-center gap-1 text-muted"><LoaderCircle size={12} aria-hidden className="animate-spin" />Checking</span>
   ) : props.paused && !off ? (
     <span className="inline-flex items-center gap-1 text-muted"><Pause size={12} aria-hidden />Paused</span>
@@ -310,7 +318,16 @@ function AgentRow(props: {
               tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`}
               description={agent.enabled ? "Turn off" : "Turn on"} checked={agent.enabled}
               onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
-          ) : switchSpace}
+          ) : (
+            <CopyButton
+              key={props.workspaceId}
+              label="Copy MCP config"
+              size="button"
+              testId="mcp-config-copy"
+              disabled={props.mcpConfig === null}
+              getText={() => props.mcpConfig}
+            />
+          )}
           <Menu
             label={`${agent.name} actions`}
             testId="agent-menu"
@@ -400,9 +417,10 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
 }
 
 /**
- * Settings › Agents: every agent in the order the file lists them, each with
- * its state and its controls, and the entries dohc could not use in their
- * place. Pause all holds every agent on this computer until Resume or quit.
+ * Settings › Agents: the agents dohc starts, then the agents you run, each in
+ * the order the file lists them with its state and its controls, and the
+ * entries dohc could not use in their place among the first. Pause all holds
+ * every agent dohc starts on this computer until Resume or quit.
  */
 export function AgentList(props: {
   workspaceId: string;
@@ -428,6 +446,7 @@ export function AgentList(props: {
   const { workspaceId, settings, onSave, onOrder, onError, onClearError, onNotice } = props;
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent replies are paused.", cause), cause));
+  const listening = useAgentsListening();
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
@@ -462,6 +481,10 @@ export function AgentList(props: {
   }, [detectTools]);
 
   const rows = agentListRows(settings, props.agentProblems);
+  // An agent with a launch, or an entry dohc could not use, is one dohc starts.
+  const youRun = (row: AgentListRow) => row.kind === "agent" && row.agent.launch === undefined;
+  const startedRows = rows.filter((row) => !youRun(row));
+  const yourRows = rows.filter(youRun);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
   // The chip shows only when there is more than one agent to choose from.
   const automation = automationAgent(settings);
@@ -539,14 +562,15 @@ export function AgentList(props: {
     setChecking(null);
   }, [onClearError, onError, requests, workspaceId]);
 
-  // A new agent takes the first free id and name, is on, and is checked at once.
-  const add = async (fields: Required<Pick<AgentSettings, "name" | "launch" | "enabled">>, idBase: string) => {
+  // A new agent takes the first free id, name and color. One dohc starts is
+  // on and checked at once; one you run has nothing to check.
+  const add = async (fields: Pick<AgentSettings, "name" | "enabled"> & Partial<Pick<AgentSettings, "launch">>, idBase: string) => {
     const id = newAgentId([...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)], idBase);
     const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
-    if (saved && !paused && checkNote === null) void check({ id, ...agent });
+    if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
   };
 
   const neighbours = (id: string) => {
@@ -637,106 +661,125 @@ export function AgentList(props: {
     ));
   };
 
+  const mcpConfig = (agentId: string) => (config && !("unavailable" in config) ? configSnippet(config, agentId) : null);
+  const agentRow = (row: AgentListRow) => row.kind === "broken" ? (
+    <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
+  ) : (
+    <AgentRow
+      key={row.agent.id}
+      agent={row.agent}
+      agents={settings.agents}
+      workspaceId={workspaceId}
+      mcpConfig={mcpConfig(row.agent.id)}
+      listening={listening.has(row.agent.id)}
+      paused={paused}
+      checking={checking === row.agent.id}
+      check={checks[row.agent.id]}
+      // One check at a time: main runs one runner per workspace.
+      canCheck={!paused && checking === null && checkNote === null}
+      checkNote={checkNote}
+      tools={tools}
+      editing={renaming === row.agent.id}
+      onEditingChange={(editing) => setRenaming(editing ? row.agent.id : null)}
+      forAutomations={choosing && automation?.id === row.agent.id}
+      {...(row.agent.launch && automation?.id !== row.agent.id
+        ? { onUseForAutomations: () => void wakeForAutomations(row.agent) }
+        : {})}
+      onRemove={() => void remove(row.agent)}
+      onCheck={() => void check(row.agent)}
+      onRename={async (name) => (await onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))) !== null}
+      onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
+    />
+  );
+
   return (
     <section data-testid="agent-list" aria-labelledby="agents-title">
-      {/* The title sits where every Settings page title sits; the buttons beside it reach 4 px higher. */}
-      <div className="-mt-1 mb-5 flex min-h-8 items-center gap-2">
-        <h3 ref={heading} tabIndex={-1} id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
-        <CopyButton
-          key={workspaceId}
-          label="Copy MCP config"
-          size="button"
-          testId="mcp-config-copy"
-          disabled={!config || "unavailable" in config}
-          getText={() => (config && !("unavailable" in config) ? configSnippet(config) : null)}
-        />
-        {anyLaunch ? (
-          <SecondaryButton
-            data-testid="agents-pause"
-            onClick={() => setPaused(!paused)}
-            className={BUTTON_ICON}
-          >
-            {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}
-            {paused ? "Resume" : "Pause all"}
-          </SecondaryButton>
-        ) : null}
+      {/* The title sits where every Settings page title sits. */}
+      <div className="-mt-1 mb-5 flex min-h-8 items-center">
+        <h3 ref={heading} tabIndex={-1} id="agents-title" className="m-0 text-base font-semibold text-ink">Agents</h3>
       </div>
-      {paused && anyLaunch ? (
-        <p data-testid="agents-paused" className="-mt-3 mb-6 flex items-center gap-1.5 text-[12px] text-muted">
-          <Pause size={13} aria-hidden />Paused until you resume or quit dohc.
-        </p>
-      ) : null}
-      {config && "unavailable" in config ? (
-        <p data-testid="mcp-unavailable" className="-mt-3 mb-6 text-[12px] text-danger">{config.message}</p>
-      ) : null}
-      <div ref={card} className="rounded-lg border border-line bg-panel px-4">
-        {restricted && props.trust ? (
-          <div className="-mx-4 overflow-hidden rounded-t-lg">
-            <RestrictedAgentsBand asking={asking} onTrust={() => {
-              trustPressed.current = true;
-              props.trust?.onTrust();
-            }} />
-          </div>
-        ) : null}
-        {rows.map((row) => row.kind === "broken" ? (
-          <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
-        ) : (
-          <AgentRow
-            key={row.agent.id}
-            agent={row.agent}
-            agents={settings.agents}
-            paused={paused}
-            checking={checking === row.agent.id}
-            check={checks[row.agent.id]}
-            // One check at a time: main runs one runner per workspace.
-            canCheck={!paused && checking === null && checkNote === null}
-            checkNote={checkNote}
-            tools={tools}
-            editing={renaming === row.agent.id}
-            onEditingChange={(editing) => setRenaming(editing ? row.agent.id : null)}
-            forAutomations={choosing && automation?.id === row.agent.id}
-            {...(row.agent.launch && automation?.id !== row.agent.id
-              ? { onUseForAutomations: () => void wakeForAutomations(row.agent) }
-              : {})}
-            onRemove={() => void remove(row.agent)}
-            onCheck={() => void check(row.agent)}
-            onRename={async (name) => (await onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))) !== null}
-            onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
-          />
-        ))}
-        <div data-testid="agent-add" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
-          {(["claude", "codex"] as const).map((tool) => {
-            const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
-            const found = toolTileState(tool, tools);
-            return (
-              <AddTile
-                key={tool}
-                title={`Add ${name}`}
-                disabled={found?.status !== "ready" || adding || checking !== null}
-                hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
-                state={found ? (
-                  <ToolReadiness tone={TILE_STATE[found.status].tone} className={TILE_LINE}>{TILE_STATE[found.status].text}</ToolReadiness>
-                ) : detection === "failed" ? (
-                  <span className={`${TILE_LINE} block text-muted`}>Couldn't check</span>
-                ) : (
-                  <span className={`${TILE_LINE} flex text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
-                )}
-                onAdd={() => {
-                  if (found?.status === "ready") {
-                    void add({ name: newAgentName(settings.agents, name), launch: { tool, executable: found.executable }, enabled: true }, tool);
-                  }
-                }}
-              />
-            );
-          })}
+      <section data-testid="agents-started" aria-labelledby="agents-started-title">
+        <div className="mb-2 flex min-h-8 items-center gap-2">
+          <h4 id="agents-started-title" className="m-0 mr-auto text-sm font-semibold text-ink">Started by dohc</h4>
+          {anyLaunch ? (
+            <SecondaryButton
+              data-testid="agents-pause"
+              onClick={() => setPaused(!paused)}
+              className={BUTTON_ICON}
+            >
+              {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}
+              {paused ? "Resume" : "Pause all"}
+            </SecondaryButton>
+          ) : null}
         </div>
-      </div>
-      <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">
-        <Monitor size={14} aria-hidden />Runs on this computer. Turn an agent on for one computer per workspace.
-      </p>
-      {checkNote && !restricted ? (
-        <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">{checkNote}</p>
-      ) : null}
+        {paused && anyLaunch ? (
+          <p data-testid="agents-paused" className="m-0 mb-3 flex items-center gap-1.5 text-[12px] text-muted">
+            <Pause size={13} aria-hidden />Paused until you resume or quit dohc.
+          </p>
+        ) : null}
+        <div ref={card} className="rounded-lg border border-line bg-panel px-4">
+          {restricted && props.trust ? (
+            <div className="-mx-4 overflow-hidden rounded-t-lg">
+              <RestrictedAgentsBand asking={asking} onTrust={() => {
+                trustPressed.current = true;
+                props.trust?.onTrust();
+              }} />
+            </div>
+          ) : null}
+          {startedRows.map(agentRow)}
+          <div data-testid="agent-add" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
+            {(["claude", "codex"] as const).map((tool) => {
+              const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
+              const found = toolTileState(tool, tools);
+              return (
+                <AddTile
+                  key={tool}
+                  title={`Add ${name}`}
+                  disabled={found?.status !== "ready" || adding || checking !== null}
+                  hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
+                  state={found ? (
+                    <ToolReadiness tone={TILE_STATE[found.status].tone} className={TILE_LINE}>{TILE_STATE[found.status].text}</ToolReadiness>
+                  ) : detection === "failed" ? (
+                    <span className={`${TILE_LINE} block text-muted`}>Couldn't check</span>
+                  ) : (
+                    <span className={`${TILE_LINE} flex text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
+                  )}
+                  onAdd={() => {
+                    if (found?.status === "ready") {
+                      void add({ name: newAgentName(settings.agents, name), launch: { tool, executable: found.executable }, enabled: true }, tool);
+                    }
+                  }}
+                />
+              );
+            })}
+          </div>
+        </div>
+        <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">
+          <Monitor size={14} aria-hidden />Runs on this computer. Turn an agent on for one computer per workspace.
+        </p>
+        {checkNote && !restricted ? (
+          <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">{checkNote}</p>
+        ) : null}
+      </section>
+      <section data-testid="agents-yours" aria-labelledby="agents-yours-title" className="mt-8">
+        <div className="mb-2 flex min-h-8 items-center">
+          <h4 id="agents-yours-title" className="m-0 text-sm font-semibold text-ink">You run on this computer</h4>
+        </div>
+        {config && "unavailable" in config ? (
+          <p data-testid="mcp-unavailable" className="m-0 mb-3 text-[12px] text-danger">{config.message}</p>
+        ) : null}
+        <div className="rounded-lg border border-line bg-panel px-4">
+          {yourRows.map(agentRow)}
+          <div data-testid="agent-add-yours" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
+            <AddTile
+              title="Add an agent you run"
+              disabled={adding}
+              state={<span className={`${TILE_LINE} flex items-center gap-1 text-muted`}><Plug size={12} aria-hidden />Through MCP</span>}
+              onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
+            />
+          </div>
+        </div>
+      </section>
     </section>
   );
 }

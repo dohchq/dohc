@@ -198,6 +198,7 @@ import {
   chatDispatchNoticeOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
+  agentsListeningOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -563,6 +564,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
 import { agentIdsToWake, agentYouRun, automationAgent, listAgents, isOwnAgentId, type Agent, type ThemeMode } from "./settings/userSettings";
+import { createAgentWaits } from "./agents/agentWaits";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -5026,6 +5028,13 @@ const moveAcceptedEdits = createMoveAcceptedEditsGuard({
   relayCatchUp: (workspaceId, signal) => activity.catchUpCloudSync(workspaceId, signal),
 });
 
+// Settings › Agents shows an agent you run as listening while it holds a chat wait.
+const agentWaits = createAgentWaits((agentIds) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    sendIfOpen(window, CHANNELS.agentsListening, { agentIds });
+  }
+});
+
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,
@@ -5121,6 +5130,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   findWorkspace,
   agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
   isOwnAgentId: async (name) => isOwnAgentId((await readCachedUserSettingsFile(stateDir())).settings, name),
+  agentWaiting: (agentId) => agentWaits.begin(agentId),
   listWorkspaces,
   openWorkspaceActivity,
   stopWorkspaceSync: async (operation, author) => {
@@ -7729,6 +7739,10 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchPauseOperations, {
     readChatDispatchPaused: () => ({ paused: chatDispatchService.isPaused() }),
     setChatDispatchPaused: ({ paused }) => chatDispatchService.setPaused(paused),
+  });
+
+  registerOperations(operationBoundary, agentsListeningOperations, {
+    readAgentsListening: () => ({ agentIds: agentWaits.listening() }),
   });
 
   registerOperations(operationBoundary, agentRunStateOperations, {

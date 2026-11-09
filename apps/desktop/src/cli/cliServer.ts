@@ -456,6 +456,9 @@ export interface CliServerOptions {
   connectedAgent(workspaceId: string, agentId: string): Promise<CliConnectedAgent | null>;
   // Whether a name is one of the person's agents' ids.
   isOwnAgentId(name: string): Promise<boolean>;
+  // An agent you run started a chat wait. The returned function runs once
+  // when the wait ends, aborts or times out.
+  agentWaiting?(agentId: string): () => void;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -845,14 +848,16 @@ function collectionWriteAuthor(
 
 // The agent a dataset invocation through this socket is, as writeActor
 // decides: an agent that names itself, at 0 outside a chain, or any caller
-// during a run an automation started, at its depth. Null for the person.
+// during a run an automation started, at its depth. An agent you run also
+// gives its id; a run's id stays out. Null for the person.
 function datasetAgent(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): LocalDatasetAgent | null {
   const depth = options.agentRunDepth(context.workspaceId);
-  return depth > 0 || actor === "agent" ? { depth } : null;
+  if (depth === 0 && actor !== "agent") return null;
+  return context.connected ? { depth, agentId: context.connected.agentId } : { depth };
 }
 
 // A person edits documents and records in the app. Through this socket, an
@@ -4205,7 +4210,9 @@ async function watchMessages(
   let waiters = chatWaiters.get(options);
   if (!waiters) chatWaiters.set(options, waiters = new ChatMessageWaiters());
   const signals = [connectionSignal, context.signal].filter((value): value is AbortSignal => value !== undefined);
-  return waiters.wait<CliResultByVerb["watch"]>({
+  // An agent you run reads as listening until the wait ends, aborts or times out.
+  const endWait = context.connected ? options.agentWaiting?.(context.connected.agentId) : undefined;
+  const waited = waiters.wait<CliResultByVerb["watch"]>({
     signal: signals.length ? AbortSignal.any(signals) : undefined,
     timeoutMs: request.args.timeoutMs ?? CHAT_WATCH_TIMEOUT_MS,
     empty,
@@ -4262,6 +4269,7 @@ async function watchMessages(
       return { messages, cursor: encode([...kept, ...returned]) };
     },
   });
+  return endWait ? waited.finally(endWait) : waited;
 }
 
 export async function handleCliRequestLine(

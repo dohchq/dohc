@@ -132,6 +132,7 @@ interface DesktopCliServerDependencies<State> {
   agentYouRun(agentId: string): Promise<{ name: string } | null>;
   /** Whether a name is one of the person's agents' ids. */
   isOwnAgentId(name: string): Promise<boolean>;
+  agentWaiting?: CliServerOptions["agentWaiting"];
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
   activity: {
@@ -739,6 +740,7 @@ export function createDesktopCliServer<State>(
           : null;
       },
       isOwnAgentId: (name) => dependencies.isOwnAgentId(name),
+      agentWaiting: dependencies.agentWaiting,
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

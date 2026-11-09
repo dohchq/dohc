@@ -50,9 +50,10 @@ export interface LocalDatasetAutomationContext { readonly automationId: string; 
 /**
  * The owner's agent, as main derives it for one invocation: the owner's
  * authority, attributed to the agent at its run's chain depth, 0 outside a
- * chain. Attribution never grants access.
+ * chain. `agentId` names an agent you run; a run dohc dispatched leaves it
+ * out. Attribution never grants access.
  */
-export interface LocalDatasetAgent { readonly depth: number; readonly approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent }
+export interface LocalDatasetAgent { readonly depth: number; readonly agentId?: string; readonly approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent }
 type AgentContext = { readonly agent: LocalDatasetAgent };
 type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
@@ -151,6 +152,7 @@ const artifactBytes = 256 * 1024;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const decode = (value: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(value);
 const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path) && !path.toLowerCase().split("/").includes(".dohc");
+const datasetAuthorityAgent = (agent: LocalDatasetAgent) => agent.agentId === undefined ? { depth: agent.depth } : { depth: agent.depth, agentId: agent.agentId };
 
 /** Owner-only local data authority. Apps do not receive this object or its storage paths. */
 export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
@@ -330,7 +332,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const agent = agentContexts.has(context as AgentContext) ? context as AgentContext : null;
         if (context !== owner && automation === null && agent === null) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
         if (request.workspaceId !== workspaceId || request.access.kind !== "data") throw new Error("Collection access is not permitted.");
-        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agent.depth }, person: options.localPersonId() };
+        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: datasetAuthorityAgent(agent.agent), person: options.localPersonId() };
         if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, person: options.localPersonId() };
         return { caller: { kind: "automation", automationId: automation.automationId }, principalKey: automationKey(automation.automationId),
           chainDepth: automation.depth, authorizeOperation: automation.authorizeOperation, ...(automation.person === null ? {} : { person: automation.person }) };
@@ -450,7 +452,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       });
     }
     function agentContext(agent: LocalDatasetAgent): AgentContext {
-      const context = Object.freeze({ agent: Object.freeze({ depth: agent.depth }) });
+      const context = Object.freeze({ agent: Object.freeze(datasetAuthorityAgent(agent)) });
       agentContexts.add(context);
       return context;
     }
