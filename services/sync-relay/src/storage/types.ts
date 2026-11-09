@@ -3,7 +3,7 @@ import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-author
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
-import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus} from "./ownerRestoreOptions";
+import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus, OwnerUnfinishedRestores} from "./ownerRestoreOptions";
 import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import type {ReplicaLiveJournalRead, ReplicaLiveJournalPage} from "./liveUpdateJournal";
@@ -55,7 +55,10 @@ export interface CurrentLiveBindingRequest {
     | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
     | { readonly kind: "named"; readonly userId: string; readonly grantId: string }
     | { readonly kind: "link"; readonly sessionId: string;
-        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string };
+        readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string }
+    // An agent connected through its link edits as the link principal its connection holds.
+    | { readonly kind: "link"; readonly agentConnectionId: string; readonly accessTokenHash: string;
+        readonly resourceHash: string; readonly grantId: string; readonly workspaceId: string };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {
@@ -129,10 +132,21 @@ export interface SyncRelayLogRow extends SyncRelayLogInput {
 }
 
 export interface AppendLogBatchResult {
+  registeredReferences?: string[];
   inserted: number;
   skipped: number;
   currentMaxOriginSeq: number;
   settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
+  // Copies of retained work this batch published again, each with the creation the log accepted first.
+  redundantRecoveries?: RedundantRecovery[];
+}
+
+export interface RedundantRecovery {
+  originSeq: number;
+  recoveryMomentId: string;
+  acceptedOriginId: string;
+  acceptedOriginSeq: number;
+  acceptedRelaySeq: number;
 }
 
 export interface FetchLogPageResult {
@@ -608,6 +622,11 @@ export type CommittedLiveUpdateResult =
   | { readonly kind: "retry"; readonly reason: "host-unavailable" };
 
 export interface SyncRelayStorage {
+  indexReceivedWorkTargets(rows: Parameters<typeof import("./workReferences").indexReceivedWorkTargets>[1]): void;
+  prepareWorkReferenceRegistration(input: Parameters<typeof import("./workReferences").prepareWorkReferenceRegistration>[1]): ReturnType<typeof import("./workReferences").prepareWorkReferenceRegistration>;
+  makeWorkReference(input: Parameters<typeof import("./workReferences").makeWorkReference>[1]): ReturnType<typeof import("./workReferences").makeWorkReference>;
+  resolveWorkReference(input: Parameters<typeof import("./workReferences").resolveWorkReference>[1]): ReturnType<typeof import("./workReferences").resolveWorkReference>;
+  listWorkReferences(input: Parameters<typeof import("./workReferences").listWorkReferences>[1]): ReturnType<typeof import("./workReferences").listWorkReferences>;
   createDatasetHost(options: Omit<import("../datasetHost").RelayDatasetHostOptions, "storage">): Promise<import("../datasetHost").RelayDatasetHost>;
   enrollServiceHostDocuments(inputs: readonly import("./serviceHostEnrollment").EnrollServiceHostDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   enrollServiceHostDocument(input: import("./serviceHostEnrollment").EnrollServiceHostDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
@@ -617,6 +636,7 @@ export interface SyncRelayStorage {
   };
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readServiceHostEnrollmentByObjectId(workspaceId: string, objectId: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
   currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
@@ -645,6 +665,13 @@ export interface SyncRelayStorage {
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
+  /** Proves a settling document's settlement audits before the append's writer. */
+  prepareSettlementAudits(input: {workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean}, signal?: AbortSignal): Promise<void>;
+  /** Under the append's writer: null for a settling document's verified retirement output, otherwise why it is refused. */
+  admitRetirementPublication(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, op: SyncRelayLogInput,
+    batch: import("./serviceActivationPublication").RetirementBatch): import("./serviceActivationPublication").RetirementRefusal | null;
+  /** After confirmation: whether what that row's admission waited on was confirmed. */
+  retirementPublicationConfirmed(op: SyncRelayLogInput): boolean;
   /** Owner queues the service host keeps refused, until they are delivered or the host no longer holds them. */
   recordServiceKeptEdits(input: {identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity; outboxId: string;
     binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding; reason: string; headDeliveryId: string; refusalKey: string; nowMs: number}): void;
@@ -665,7 +692,21 @@ export interface SyncRelayStorage {
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
   serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
+  /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
+  serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  /** Whether the document has a restore that has neither resumed nor been declined. */
+  serviceRestoreInProgress(document: {workspaceId: string; objectId: string}): boolean;
+  serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
+    import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  /** The prepared activation a new Stop of the document would retire, once no retirement is open. */
+  retirableServiceActivation(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").RetirableServiceActivation | null;
+  /** The live journal's answer, for a retirement's reconciliation, for the deliveries it names. */
+  retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
+    {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readPushSubscription(installationId: string): import("./pushSubscriptions").PushSubscriptionRow | null;
+  bindPushSubscription(input: import("./pushSubscriptions").BindPushSubscriptionInput): import("./pushSubscriptions").PushSubscriptionRow;
+  removePushSubscription(input: {installationId: string; userId: string}): void;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
@@ -679,6 +720,7 @@ export interface SyncRelayStorage {
   takeOverAutomationHost(input: import("./automationHosts").AutomationHostTakeOverInput): import("@dohc/workspace-contracts/relay").RelayAutomationHostState;
   readAutomationGroupHandover(input: import("./automationHosts").AutomationGroupHandoverInput): import("./automationHosts").AutomationGroupHandover;
   authorizeLinkCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeLinkCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
+  authorizeAgentCollectionWrite(input: Parameters<typeof import("./collectionWrites").authorizeAgentCollectionWrite>[1]): import("../shareAuthorization").AuthorizedShareAction;
   automationHostRecord(workspaceId: string): import("@dohc/workspace-contracts/relay").RelayAutomationHost | null;
   readAutomationServerSchedules(workspaceId: string): import("./automationHosts").AutomationServerSchedules | null;
   beginAutomationServerCopy(input: { workspaceId: string; incarnation: number }): void;
@@ -738,9 +780,11 @@ export interface SyncRelayStorage {
   readLinkAppPublicationBlob(input: import("./publications").LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}): import("./publications").LinkAppPublicationAuthority & {file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number]; bytes: Uint8Array};
   readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
   readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
+  readOwnerUnfinishedRestores(input: {workspaceId: string; ownerUserId: string; after?: string}): OwnerUnfinishedRestores;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
   beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
   advanceStopRestoreFence(input: StopRestoreLookup, now: number): StopRestoreOperation;
+  declineStopRestore(input: StopRestoreLookup, now: number): StopRestoreOperation;
   readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;
   readonly unavailable: AbortSignal;
   captureStanding(): () => void;
@@ -890,6 +934,13 @@ export interface SyncRelayStorage {
     // Runs after the guard, under the same lock, with the ops at coordinates
     // the log does not hold yet. It may refuse an op or mark it departed.
     admit?: (ops: SyncRelayLogInput[]) => void;
+    // Runs after settlement and application confirmation, still under the
+    // lock, with the same ops. It may refuse an op that confirmation did not prove.
+    confirm?: (ops: SyncRelayLogInput[]) => void;
+    // The owner's publication lane: a copy of retained work another device
+    // already published keeps its coordinate and changes nothing else.
+    classifyRedundantRecoveries?: boolean;
+    workReferences?: {userId: string; references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[]; datasetAccess?: import("./workReferences").DatasetReferenceAccess};
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;
@@ -912,6 +963,20 @@ export interface SyncRelayStorage {
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
   appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
+  appendAgentChatPost(input: Parameters<typeof import("./linkChat").appendAgentChatPost>[1]): import("./linkChat").AppendAgentChatPostResult;
+  linkPrincipalThreadIds(workspaceId: string, principalId: string): Set<string>;
+  registerAgentClient(input: Parameters<typeof import("./agentConnections").registerAgentClient>[1]): boolean;
+  getAgentClient(clientId: string): import("./agentConnections").AgentClientRow | null;
+  beginAgentAuthorization(input: Parameters<typeof import("./agentConnections").beginAgentAuthorization>[1]): boolean;
+  readAgentAuthorization(requestHash: string, nowMs: number): import("./agentConnections").AgentAuthorizationRow | null;
+  decideAgentAuthorization(input: Parameters<typeof import("./agentConnections").decideAgentAuthorization>[1]): import("./agentConnections").AgentAuthorizationDecision;
+  redeemAgentAuthorizationCode(input: Parameters<typeof import("./agentConnections").redeemAgentAuthorizationCode>[1]): import("./agentConnections").AgentTokenGrantResult;
+  refreshAgentTokens(input: Parameters<typeof import("./agentConnections").refreshAgentTokens>[1]): import("./agentConnections").AgentTokenGrantResult;
+  authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
+  authenticateAgentAuthority(check: import("./agentConnections").AgentAccessCheck, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
+  recordAgentConnectionAction(connectionId: string, atMs: number): void;
+  listAgentConnections(input: Parameters<typeof import("./agentConnections").listAgentConnections>[1]): import("./agentConnections").AgentConnectionPage;
+  disconnectAgentConnection(input: Parameters<typeof import("./agentConnections").disconnectAgentConnection>[1]): import("./agentConnections").AgentConnectionRow | null;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
@@ -1024,15 +1089,7 @@ export interface SyncRelayStorage {
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null;
-  appendLinkDiscussionMessage(input: {
-    capabilityHash: string;
-    profileTokenHash: string;
-    claimedName?: string | null;
-    body: string;
-    idempotencyKey: string;
-    createdAtMs: number;
-    guard?: () => void;
-  }): AppendLinkDiscussionMessageResult;
+  appendLinkDiscussionMessage(input: import("./discussion").AppendLinkDiscussionMessageInput): AppendLinkDiscussionMessageResult;
   appendAuthenticatedDiscussionMessage(input: {
     shareId: string;
     authorUserId: string;
@@ -1300,6 +1357,7 @@ export interface SqliteDb {
 }
 
 export interface OpenSyncRelayStorageOptions {
+  pushConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;

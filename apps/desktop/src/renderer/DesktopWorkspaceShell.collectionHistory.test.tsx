@@ -10,7 +10,7 @@ import { deferred } from "../testing/deferred";
 import { timelinePage } from "../testing/historyPageFixture";
 import type { ConnectedTransactionalCollectionProps } from "./ConnectedTransactionalCollection";
 import { transactionalCollectionTabPath } from "./workbench/workbenchState";
-import { STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
+import { HOME_STATE, STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
 
 // The Collection page and its History are real; only the records table,
 // which reads records, stands aside. While `page.loading` is set, the page
@@ -115,7 +115,7 @@ describe("a Collection change in the History timeline", () => {
     page.loading = loading.promise;
     try {
       const user = userEvent.setup();
-      collectionShell();
+      collectionShell(HOME_STATE);
       await user.click(await collectionRow(user));
       await user.click(await screen.findByRole("button", { name: "Close Expenses" }));
       page.loading = null;
@@ -136,19 +136,52 @@ describe("the Collections section", () => {
   it("shows its controls once the list has loaded, and keeps them while the archived list loads", async () => {
     const user = userEvent.setup();
     const listed = deferred<DatasetResult>();
-    const bridge = makeBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(HOME_STATE));
     bridge.dataset = vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
       if (request.action !== "list") throw new Error(`Unexpected dataset action: ${request.action}`);
       return request.includeArchived ? await new Promise<DatasetResult>(() => {}) : await listed.promise;
     });
     renderShell(bridge);
     await waitFor(() => expect(bridge.dataset).toHaveBeenCalledOnce());
-    expect(screen.queryByLabelText("Archived collections")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
 
     await act(async () => listed.resolve({ kind: "list", datasets: [], nextCursor: null }));
-    await user.click(await screen.findByLabelText("Archived collections"));
-    expect(screen.getByRole("button", { name: "Restore from recovery file" })).toBeTruthy();
-    expect((screen.getByLabelText("Archived collections") as HTMLInputElement).checked).toBe(true);
+    await user.click(await screen.findByRole("button", { name: "Collections actions" }));
+    expect(screen.getByTestId("explorer-collections-empty").textContent).toBe("No Collections yet.");
+    await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
+    // The archived list is on its way, so the section doesn't say it's empty.
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Collections actions" }));
+    expect(screen.getByRole("menuitem", { name: "Restore from recovery file…" })).toBeTruthy();
+    expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("leaves Try again in its place when the archived list can't be read, and reads it again from there", async () => {
+    const user = userEvent.setup();
+    const archived = [deferred<DatasetResult>(), deferred<DatasetResult>()];
+    let archivedReads = 0;
+    const bridge = makeBridge(Promise.resolve(HOME_STATE));
+    bridge.dataset = vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
+      if (request.action !== "list") throw new Error(`Unexpected dataset action: ${request.action}`);
+      if (!request.includeArchived) return { kind: "list", datasets: [], nextCursor: null };
+      const read = archived[archivedReads++];
+      if (!read) throw new Error("Unexpected archived list read");
+      return await read.promise;
+    });
+    renderShell(bridge);
+
+    await user.click(await screen.findByRole("button", { name: "Collections actions" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
+    await act(async () => archived[0]!.reject(new Error("The archived list could not be read.")));
+    // The list isn't known, so nothing says it's empty, and Try again sits where it would be.
+    const failed = await screen.findByTestId("collections-failed");
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    expect(screen.queryByTestId("collections-failed")).toBeNull();
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    await act(async () => archived[1]!.resolve({ kind: "list", datasets: [], nextCursor: null }));
+    expect(screen.getByTestId("explorer-collections-empty").textContent).toBe("No Collections yet.");
+    expect(archivedReads).toBe(2);
   });
 });

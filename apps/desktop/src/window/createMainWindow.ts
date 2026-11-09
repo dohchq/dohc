@@ -21,6 +21,7 @@ import { resolveDesktopIconDirectory } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
 import { installTextContextMenu } from "./textContextMenu";
+import { installAppViewEmbedder } from "./appViews";
 import {
   createDebouncedSaver,
   DEFAULT_WINDOW_SIZE,
@@ -282,8 +283,9 @@ export function createMainWindow(options?: {
           titleBarStyle: "hidden" as const,
           titleBarOverlay: titleBarOverlayOptions(theme),
         }),
-    webPreferences: createMainWindowWebPreferences(preloadPath, options?.preloadArguments),
+    webPreferences: { ...createMainWindowWebPreferences(preloadPath, options?.preloadArguments), webviewTag: role === "workspace" },
   });
+  installAppViewEmbedder(window.webContents);
 
   // CDP input bypasses OS hit testing. Keep the real pointer out of e2e
   // windows without forwarding mousemove events or changing keyboard focus.
@@ -349,7 +351,19 @@ export function createMainWindow(options?: {
     denyDisallowed(event, event.url);
   });
 
-  window.once("ready-to-show", () => window.show());
+  const retireInitialShow = () => {
+    window.removeListener("ready-to-show", showInitially);
+    window.webContents.removeListener("dom-ready", showInitially);
+    window.removeListener("closed", retireInitialShow);
+  };
+  const showInitially = () => {
+    retireInitialShow();
+    window.show();
+  };
+  window.once("ready-to-show", showInitially);
+  // A hidden window can finish loading without a first-paint event.
+  window.webContents.once("dom-ready", showInitially);
+  window.once("closed", retireInitialShow);
 
   // Each load and each change tells this window's renderer whether it is
   // full screen, where macOS hides the traffic lights.
@@ -360,6 +374,14 @@ export function createMainWindow(options?: {
   window.on("enter-full-screen", () => sendFullScreen(true));
   window.on("leave-full-screen", () => sendFullScreen(false));
   contents.on("dom-ready", () => sendFullScreen(window.isFullScreen()));
+  // The same for whether the window has focus. Focus that moves into an
+  // app's webview leaves the window focused.
+  const sendFocused = (focused: boolean) => {
+    if (!contents.isDestroyed()) contents.send(CHANNELS.windowFocused, { focused });
+  };
+  window.on("focus", () => sendFocused(true));
+  window.on("blur", () => sendFocused(false));
+  contents.on("dom-ready", () => sendFocused(window.isFocused()));
 
   const devServer = devServerUrl();
   const query = role === "manager" ? { view: "manager" } : undefined;

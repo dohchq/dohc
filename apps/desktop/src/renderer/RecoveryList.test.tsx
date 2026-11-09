@@ -128,7 +128,7 @@ it("reports a failed projection instead of copying the readable half", async () 
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(() =>
     expect(screen.getByTestId("recovery-list-copy").textContent, "fold the projection failure back into the crude fallback — the button reports Copied and the lossy text reaches the clipboard.").toBe(
-      "Couldn't copy",
+      "Could not copy",
     ),
   );
   expect(writeText).not.toHaveBeenCalled();
@@ -179,7 +179,8 @@ it("copies the readable half when the recovery snapshot cannot be decoded", asyn
   const user = userEvent.setup();
   render(<RecoveryList rows={[rowFor(text)]} />);
 
-  await user.click(screen.getByTestId("recovery-list-copy"));
+  // It copies the person's own edits, so its name says so.
+  await user.click(screen.getByRole("button", { name: "Copy edits" }));
   await waitFor(async () =>
     expect(await navigator.clipboard.readText()).toBe("Crude fallback text"),
   );
@@ -202,7 +203,7 @@ it("reports a projection that fails over intact snapshot bytes", async () => {
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(() =>
     expect(screen.getByTestId("recovery-list-copy").textContent).toBe(
-      "Couldn't copy",
+      "Could not copy",
     ),
   );
   expect(writeText).not.toHaveBeenCalled();

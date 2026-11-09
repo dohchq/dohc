@@ -6,7 +6,7 @@ import { isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
 // existing text without touching the node's markdown round-trip.
 //
 // Only the languages offered by the code-block language <select> (see
-// CODE_LANGUAGE_OPTIONS in codeBlockChrome.tsx) are registered, keeping the
+// CODE_LANGUAGE_OPTIONS in codeLanguages.ts) are registered, keeping the
 // lowlight/highlight.js grammar bundle small. `tsx`/`jsx` intentionally reuse
 // the typescript/javascript grammars — there is no meaningfully different
 // highlight.js grammar for the JSX variants.

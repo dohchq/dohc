@@ -29,6 +29,12 @@ export class TokenBucketLimiter {
     return true;
   }
 
+  /** Says whether `key` holds `cost` tokens, without taking them or adding a bucket. */
+  has(key: string, nowMs: number, cost = 1): boolean {
+    if (!this.buckets.has(key || "unknown")) return this.capacity >= cost;
+    return this.bucketFor(key || "unknown", nowMs).tokens >= cost;
+  }
+
   get size(): number {
     return this.buckets.size;
   }

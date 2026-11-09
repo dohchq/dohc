@@ -1463,6 +1463,7 @@ async fn capture_env(
                 path: ".env".into(),
                 text: body.into(),
                 metadata_origin: "local-file".into(),
+                metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms,
                 claim_foreign_head: true,

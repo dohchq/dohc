@@ -1,16 +1,35 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DELETED_FILE_DRAFT_NOTICE, OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, OrphanedDraftNotices, REPLACED_HISTORY_DRAFT_NOTICE, ViewActions } from "./fileInspectorUi";
+import { DELETED_FILE_DRAFT_NOTICE, DocumentControls, OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, OrphanedDraftNotices, REPLACED_HISTORY_DRAFT_NOTICE, ViewActions } from "./fileInspectorUi";
 import { captureOrphanedDraft, loadLiveDraftRecovery, resetOrphanedDrafts } from "./orphanedDrafts";
 import { PENDING_SHARE_WORDS_DELAY_MS, StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
-import { EditorGroupFrame } from "./workbench/tabRowActions";
+import { EditorGroupFrame, NARROW_GROUP_HIDDEN } from "./workbench/tabRowActions";
 
 afterEach(cleanup);
 
 const noop = () => undefined;
 const NO_RECOVERY: ReadonlySet<string> = new Set();
+
+describe("DocumentControls", () => {
+  it.each(["dohc could not open this file.", "This note has parts dohc can't show.", OPENING_TITLE])(
+    "keeps a disabled toggle reachable and describes why: %s", async (reason) => {
+      const user = userEvent.setup();
+      const onClick = vi.fn();
+      render(<DocumentControls toggle={{ label: "Edit", disabled: true, title: reason, onClick }} menu={null} />);
+      const toggle = screen.getByRole("button", { name: "Edit", description: reason });
+      expect(toggle.getAttribute("title")).toBe(reason);
+      expect(toggle.getAttribute("aria-disabled")).toBe("true");
+      await user.tab();
+      expect(document.activeElement).toBe(toggle);
+      await user.keyboard("{Enter} ");
+      await user.click(toggle);
+      expect(onClick).not.toHaveBeenCalled();
+    },
+  );
+});
 
 // One editor group as the shell lays it out: its tab row, then the view.
 function Group(props: {
@@ -89,6 +108,9 @@ describe("ViewActions", () => {
     expect(precedes(tablist, share)).toBe(true);
     expect(precedes(share, toggle)).toBe(true);
     expect(precedes(toggle, within(row).getByTestId("create-editor-group-right"))).toBe(true);
+    // A narrow group moves Share into its tab list. Outside a group's row the
+    // query matches no container, so Share stays.
+    expect(share.classList).toContain(NARROW_GROUP_HIDDEN);
   });
 
   // Run arrives once main answers that the file is an app's entry. It stands
@@ -303,6 +325,8 @@ describe("OrphanedDraftNotices", () => {
     render(<OrphanedDraftNotices workspaceId="ws-1" path="refused.md" replacedDraftIds={[refused]} />);
     const row = await screen.findByTestId("orphaned-draft-notice");
     expect(row.textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
-    expect(row.textContent).toContain("Copy your text to keep it.");
+    expect(row.textContent).toContain("Copy your edits to keep them.");
+    // The set-aside edits are the person's own, so the copy says what it copies.
+    expect(within(row).getByRole("button", { name: "Copy edits" })).toBeTruthy();
   });
 });

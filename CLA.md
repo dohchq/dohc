@@ -2,7 +2,7 @@
 
 Thank you for your interest in dohc. In order to clarify the intellectual property license granted with Contributions from any person or entity, Ice de Vera ("dohc") must have a Contributor License Agreement ("CLA") on file that has been accepted by each Contributor, indicating agreement to the license terms below. This license is for your protection as a Contributor as well as the protection of dohc and its users; it does not change your rights to use your own Contributions for any other purpose.
 
-By explicitly accepting a version of this agreement linked at an immutable commit in Your pull request, You accept and agree to the following terms and conditions for Your past, present and future Contributions submitted to dohc. In return, dohc shall consider Your Contributions for inclusion in the official dohc project(s) for which they were submitted. Except for the license granted herein to dohc and to recipients of software distributed by dohc, You reserve all right, title, and interest in and to Your Contributions.
+By signing this version of this agreement with Your GitHub account, through the link dohc provides on Your pull request, You accept and agree to the following terms and conditions for Your past, present and future Contributions submitted to dohc. If You sign on behalf of a legal entity, You must name that entity when You sign. In return, dohc shall consider Your Contributions for inclusion in the official dohc project(s) for which they were submitted. Except for the license granted herein to dohc and to recipients of software distributed by dohc, You reserve all right, title, and interest in and to Your Contributions.
 
 1. Definitions.
 

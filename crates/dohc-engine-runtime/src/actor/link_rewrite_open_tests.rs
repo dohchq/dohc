@@ -92,11 +92,20 @@ impl Fixture {
             .unwrap();
     }
     async fn settle_document(&self, object: &str) {
+        let config = super::super::super::reader_tests::fake_reader(&self.root, "witness-safe");
+        self.actor
+            .configure_reader_resolver(Arc::new(
+                dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+                    dohc_engine_reader::Reader::new(Some(config)),
+                )),
+            ))
+            .await
+            .unwrap();
         let key = DocKey::new(&self.ws, "main", object).unwrap();
         let path = format!("{object}.md");
         let root = self.root.to_path_buf();
         self.actor
-            .run(move |store, cache| {
+            .run_with_reader_retry(move |store, cache| {
                 assert!(super::super::super::link_documents::baseline(
                     store,
                     cache,
@@ -147,6 +156,8 @@ impl Fixture {
                 let digest:String=tx.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND object_id=?2",params![ws,object],|r|r.get(0)).unwrap();
                 let binding=json!({"currentPath":format!("{object}.md")}).to_string();
                 tx.execute("INSERT INTO live_owner_adoptions VALUES('relay','adoption',?1,'main',?2,?3,?4,'source',?5,0,1,0,?3,?3,0,0,0,'null','{}',1000000,60000)",params![ws,object,sha,binding,digest]).unwrap();
+                // The activation the adoption makes current.
+                tx.execute("INSERT INTO live_owner_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms) SELECT relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE adoption_id='adoption'",[]).unwrap();
                 Ok::<_,StorageError>(())
             })?;Ok(())
         }).await.unwrap();

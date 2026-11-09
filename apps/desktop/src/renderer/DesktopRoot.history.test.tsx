@@ -39,6 +39,8 @@ it("remounts the shell when main activates B and keeps A's late history answer o
     onNoticesChanged: vi.fn(() => () => undefined),
     onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
     takeWorkspacePathOpenFailures: vi.fn(async () => []),
+    readOldWindowState: vi.fn(async () => null),
+    onOldWindowStateChanged: vi.fn(() => () => undefined),
     onShareHandoffStatus: vi.fn(() => () => undefined),
     getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
   });

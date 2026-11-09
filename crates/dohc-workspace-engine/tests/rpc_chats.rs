@@ -78,6 +78,87 @@ async fn call_error(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_claim_requires_an_agent_and_takes_only_its_requests() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-claim-agent").await;
+    let mut id = 1;
+    for params in [
+        json!({ "runId": "run" }),
+        json!({ "runId": "run", "agentId": null }),
+        json!({ "runId": "run", "agentId": 7 }),
+        json!({ "runId": "run", "agentId": "" }),
+        json!({ "runId": "run", "agentId": "Not an id" }),
+    ] {
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.claimNextPending",
+            params,
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+    for (trigger, agent, at) in [("other-first", "other", 10), ("listed", "default", 20)] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.enqueue",
+            json!({
+                "triggerMessageId": trigger,
+                "agentId": agent,
+                "threadId": "thread",
+                "nowMs": at,
+            }),
+        )
+        .await;
+    }
+    let claimed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "agentId": "default", "runId": "run", "command": "listed-command", "nowMs": 30 }),
+    )
+    .await;
+    assert_eq!(claimed["dispatch"]["triggerMessageId"], json!("listed"));
+    assert_eq!(claimed["dispatch"]["agentId"], json!("default"));
+    assert_eq!(claimed["run"]["agentId"], json!("default"));
+    assert_eq!(claimed["run"]["command"], json!("listed-command"));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.complete",
+        json!({ "runId": "run", "exitCode": 0, "nowMs": 40 }),
+    )
+    .await;
+    let empty = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "agentId": "default", "runId": "run-empty", "nowMs": 50 }),
+    )
+    .await;
+    assert_eq!(empty, Value::Null);
+    let pending = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending["dispatches"].as_array().expect("pending").len(), 1);
+    assert_eq!(pending["dispatches"][0]["agentId"], json!("other"));
+    assert_eq!(pending["dispatches"][0]["attemptCount"], json!(0));
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_thread_revision_is_zero_until_the_first_visible_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -1110,7 +1191,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         &handle,
         &mut id,
         "chats.mentions.listForHandle",
-        json!({ "handle": "AGENT", "unreadByAgentOnly": false, "pageLimit": 10 }),
+        json!({ "handle": "AGENT", "pageLimit": 10 }),
     )
     .await;
     assert_eq!(
@@ -1136,7 +1217,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
             &handle,
             &mut id,
             "chats.mentions.listForHandle",
-            json!({ "handle": query, "unreadByAgentOnly": false, "pageLimit": 10 }),
+            json!({ "handle": query, "pageLimit": 10 }),
         )
         .await;
         assert_eq!(
@@ -1164,7 +1245,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         &reopened,
         &mut id,
         "chats.mentions.listForHandle",
-        json!({ "handle": "raw", "unreadByAgentOnly": false, "pageLimit": 10 }),
+        json!({ "handle": "raw", "pageLimit": 10 }),
     )
     .await;
     assert!(
@@ -1225,6 +1306,7 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
         &mut id,
         "chats.agentReadState.markThreadRead",
         json!({
+            "reader": { "kind": "unnamed" },
             "threadId": "negative-thread",
             "upTo": { "createdAtMs": 0, "messageId": "after" },
         }),
@@ -1426,7 +1508,7 @@ async fn persisted_chat_identities_are_normalized() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-round-7", "nowMs": 41 }),
+        json!({ "agentId": "default", "runId": "run-round-7", "nowMs": 41 }),
     )
     .await;
     assert_eq!(
@@ -1524,7 +1606,7 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-round-8", "nowMs": 22 }),
+        json!({ "agentId": "default", "runId": "run-round-8", "nowMs": 22 }),
     )
     .await;
     assert_eq!(running["dispatch"]["state"], json!("running"));
@@ -1552,7 +1634,7 @@ async fn second_service_cannot_attach_to_a_live_workspace_actor() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-round-8", "nowMs": 24 }),
+        json!({ "agentId": "default", "runId": "run-round-8", "nowMs": 24 }),
     )
     .await;
     assert_eq!(retried, running);
@@ -2740,6 +2822,19 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         failed["bookmark"]["failureReason"],
         json!("disk unavailable")
     );
+    // A person's retry queues the failed archive again at its own generation.
+    let retried = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.retryFailed",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id, "generation": 3 }),
+    )
+    .await;
+    assert_eq!(retried["applied"], json!(true));
+    assert_eq!(retried["bookmark"]["generation"], json!(3));
+    assert_eq!(retried["bookmark"]["projectionState"], json!("pending"));
+    assert_eq!(retried["bookmark"]["failureReason"], Value::Null);
 
     let reactivated = call(
         &transport,
@@ -2838,7 +2933,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             &first_handle,
             &mut id,
             "chats.dispatch.claimNextPending",
-            json!({ "runId": run_id, "command": "agent", "nowMs": 2401 }),
+            json!({ "agentId": "default", "runId": run_id, "command": "agent", "nowMs": 2401 }),
         )
         .await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
@@ -2849,7 +2944,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             &first_handle,
             &mut id,
             "chats.dispatch.claimNextPending",
-            json!({ "runId": "run-1", "command": invalid_command, "nowMs": 2401 }),
+            json!({ "agentId": "default", "runId": "run-1", "command": invalid_command, "nowMs": 2401 }),
         )
         .await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
@@ -2861,6 +2956,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             &mut id,
             "chats.dispatch.claimNextPending",
             json!({
+                "agentId": "default",
                 "runId": "run-1",
                 "command": "agent",
                 "logPath": invalid_path,
@@ -2876,6 +2972,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &mut id,
         "chats.dispatch.claimNextPending",
         json!({
+            "agentId": "default",
             "runId": " run-1 ",
             "command": "  runner --once  ",
             "logPath": "  logs/run-1.log  ",
@@ -2902,6 +2999,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &mut id,
         "chats.dispatch.claimNextPending",
         json!({
+            "agentId": "default",
             "runId": "run-1",
             "command": "ignored retry command",
             "nowMs": 2402,
@@ -2914,7 +3012,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-other", "nowMs": 2402 }),
+        json!({ "agentId": "default", "runId": "run-other", "nowMs": 2402 }),
     )
     .await;
     assert!(blocked_claim.is_null());
@@ -2949,7 +3047,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-fail", "nowMs": 2411 }),
+        json!({ "agentId": "default", "runId": "run-fail", "nowMs": 2411 }),
     )
     .await;
     for invalid_reason in [json!("   "), json!("x".repeat(16_385)), json!(7)] {
@@ -2990,7 +3088,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-crashed", "nowMs": 2421 }),
+        json!({ "agentId": "default", "runId": "run-crashed", "nowMs": 2421 }),
     )
     .await;
     // No worker is killed here: closing the workspace simulates the process
@@ -3010,7 +3108,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-retry", "nowMs": 2423 }),
+        json!({ "agentId": "default", "runId": "run-retry", "nowMs": 2423 }),
     )
     .await;
     assert_eq!(retry["dispatch"]["attemptCount"], json!(2));
@@ -3031,7 +3129,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-none", "nowMs": 2425 }),
+        json!({ "agentId": "default", "runId": "run-none", "nowMs": 2425 }),
     )
     .await;
     assert!(no_claim.is_null());
@@ -3305,7 +3403,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-r11", "nowMs": 21 }),
+        json!({ "agentId": "default", "runId": "run-r11", "nowMs": 21 }),
     )
     .await;
     assert_eq!(claimed["run"]["command"], json!(""));
@@ -3330,7 +3428,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-r11b", "command": "   ", "nowMs": 24 }),
+        json!({ "agentId": "default", "runId": "run-r11b", "command": "   ", "nowMs": 24 }),
     )
     .await;
     assert_eq!(whitespace["run"]["command"], json!("   "));
@@ -3412,6 +3510,7 @@ async fn malformed_ready_generation_and_null_claim_metadata_are_rejected() {
     // proceeds, failing both refusal assertions.
     for field in ["command", "logPath"] {
         let mut params = serde_json::Map::new();
+        params.insert("agentId".into(), json!("default"));
         params.insert("runId".into(), json!("run-r12"));
         params.insert(field.into(), Value::Null);
         params.insert("nowMs".into(), json!(20));
@@ -3893,6 +3992,275 @@ async fn workspace_handle_overrides_a_spoofed_workspace_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-connected-reader").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.ensureAgent",
+        json!({
+            "channelId": "terminal-chat",
+            "agentId": "terminal",
+            "name": "Terminal",
+            "nowMs": 2,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "terminal-chat", "threadId": "dm", "messageId": "first",
+            "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+            "body": "first", "nowMs": 10,
+        }),
+    )
+    .await;
+    for (message, user, at) in [
+        ("second", "ada", 20),
+        ("third", "ada", 30),
+        ("bobs", "bob", 40),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "dm", "messageId": message, "authorKind": "human",
+                "authorDisplayName": "Ada", "authorUserId": user, "body": message,
+                "nowMs": at,
+            }),
+        )
+        .await;
+    }
+    let reader = json!({
+        "kind": "connected",
+        "agentId": "terminal",
+        "handle": "terminal",
+        "requesters": ["ada"],
+        "unattributedCounts": false,
+    });
+    let page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        page,
+        json!({
+            "requests": [{
+                "threadId": "dm",
+                "messageId": "first",
+                "channel": {
+                    "id": "terminal-chat",
+                    "kind": "agent",
+                    "name": "Terminal",
+                    "slug": "my-agent-terminal",
+                    "purpose": "",
+                },
+                "author": { "kind": "human", "displayName": "Ada" },
+                "body": "first",
+                "createdAtMs": 10,
+            }],
+            "more": true,
+        })
+    );
+    let rest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({
+            "reader": reader,
+            "threadId": "dm",
+            "after": { "createdAtMs": 10, "messageId": "first" },
+        }),
+    )
+    .await;
+    assert_eq!(rest["more"], json!(false));
+    assert_eq!(
+        rest["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .map(|request| request["messageId"].clone())
+            .collect::<Vec<_>>(),
+        [json!("second"), json!("third")],
+        "another person's post does not ask the agent you run."
+    );
+    let unnamed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadRequests",
+        json!({ "reader": { "kind": "unnamed" } }),
+    )
+    .await;
+    assert_eq!(unnamed["requests"], json!([]));
+
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadRequests",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    let cursor = first["nextCursor"].clone();
+    assert!(cursor.is_string());
+    let mut someone_else = reader.clone();
+    someone_else["requesters"] = json!(["bob"]);
+    let refused = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadRequests",
+        json!({ "reader": someone_else, "pageLimit": 1, "cursor": cursor }),
+    )
+    .await;
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::InvalidParams, "invalid-cursor"),
+        "a cursor from one reader is refused for another."
+    );
+    let unknown_field = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": { "kind": "unnamed", "agentId": "terminal" } }),
+    )
+    .await;
+    assert_eq!(unknown_field.code, ErrorCode::InvalidParams);
+}
+
+// The test loopback mirrors each case in chatsLiveAdapter.test.ts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_you_run_pages_trimmed_accounts_and_large_requests_after_its_place() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-connected-page-bytes").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.ensureAgent",
+        json!({
+            "channelId": "terminal-chat",
+            "agentId": "terminal",
+            "name": "Terminal",
+            "nowMs": 2,
+        }),
+    )
+    .await;
+    let body = "x".repeat(64 * 1024);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "terminal-chat", "threadId": "dm", "messageId": "read",
+            "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": " ada ",
+            "body": "read", "nowMs": 10,
+        }),
+    )
+    .await;
+    for n in 1..=5 {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "dm", "messageId": format!("ask-{n}"), "authorKind": "human",
+                "authorDisplayName": "Ada", "authorUserId": "ada", "body": body,
+                "nowMs": 10 + n * 10,
+            }),
+        )
+        .await;
+    }
+    let reader = json!({
+        "kind": "connected",
+        "agentId": "terminal",
+        "handle": "terminal",
+        "requesters": ["ada"],
+        "unattributedCounts": false,
+    });
+    let ids = |page: &Value| {
+        page["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .map(|request| request["messageId"].clone())
+            .collect::<Vec<_>>()
+    };
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader, "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        ids(&first),
+        [json!("read")],
+        "a post sent with a padded account asks the agent its account names."
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({
+            "reader": reader,
+            "threadId": "dm",
+            "upTo": { "createdAtMs": 10, "messageId": "read" },
+        }),
+    )
+    .await;
+    let page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({ "reader": reader }),
+    )
+    .await;
+    assert_eq!(
+        ids(&page),
+        [json!("ask-1"), json!("ask-2"), json!("ask-3")],
+        "a page stops at 256 KiB and skips what the reader has read."
+    );
+    assert_eq!(page["more"], json!(true));
+    let rest = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listRequestsPage",
+        json!({
+            "reader": reader,
+            "after": { "createdAtMs": 40, "messageId": "ask-3" },
+        }),
+    )
+    .await;
+    assert_eq!(ids(&rest), [json!("ask-4"), json!("ask-5")]);
+    assert_eq!(rest["more"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -3954,16 +4322,24 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.agentReadState.listUnreadThreads",
-        json!({}),
+        json!({ "reader": { "kind": "unnamed" } }),
     )
     .await;
     assert_eq!(unread["threads"][0]["id"], json!("thread"));
+    assert_eq!(
+        unread["threads"][0]["lastRead"],
+        json!({ "createdAtMs": 0, "messageId": "" })
+    );
     let read = call(
         &transport,
         &handle,
         &mut id,
         "chats.agentReadState.markThreadRead",
-        json!({ "threadId": "thread", "upTo": { "createdAtMs": 999, "messageId": "z" } }),
+        json!({
+            "reader": { "kind": "unnamed" },
+            "threadId": "thread",
+            "upTo": { "createdAtMs": 999, "messageId": "z" },
+        }),
     )
     .await;
     assert_eq!(
@@ -3973,15 +4349,19 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         ),
         (Some(10), Some("message"))
     );
-    // A caller names a run, never an agent, and only a running run moves its
-    // agent's place.
+    // A run reader names a run, never an agent, and only a running run moves
+    // its agent's place.
     let up_to = json!({ "createdAtMs": 999, "messageId": "z" });
     let named_agent = call_error(
         &transport,
         &handle,
         &mut id,
         "chats.agentReadState.markThreadRead",
-        json!({ "agentId": "codex", "threadId": "thread", "upTo": up_to }),
+        json!({
+            "reader": { "kind": "run", "runId": "run", "agentId": "codex" },
+            "threadId": "thread",
+            "upTo": up_to,
+        }),
     )
     .await;
     let unknown_run = call_error(
@@ -3989,19 +4369,33 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.agentReadState.markThreadRead",
-        json!({ "runId": "no-such-run", "threadId": "thread", "upTo": up_to }),
+        json!({
+            "reader": { "kind": "run", "runId": "no-such-run" },
+            "threadId": "thread",
+            "upTo": up_to,
+        }),
+    )
+    .await;
+    let no_reader = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "threadId": "thread", "upTo": up_to }),
     )
     .await;
     assert_eq!(
         (
             named_agent.code,
             unknown_run.code,
-            unknown_run.message.as_str()
+            unknown_run.message.as_str(),
+            no_reader.code
         ),
         (
             ErrorCode::InvalidParams,
             ErrorCode::InvalidParams,
-            "run-not-found"
+            "run-not-found",
+            ErrorCode::InvalidParams
         )
     );
 
@@ -4090,7 +4484,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run", "command": "agent" }),
+        json!({ "agentId": "default", "runId": "run", "command": "agent" }),
     )
     .await;
     assert_eq!(no_claim, Value::Null);
@@ -4107,7 +4501,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run", "command": "agent" }),
+        json!({ "agentId": "default", "runId": "run", "command": "agent" }),
     )
     .await;
     assert_eq!(claim["run"]["runId"], json!("run"));
@@ -4218,7 +4612,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
         json!({}),
     )
     .await;
@@ -4227,7 +4621,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
         json!({ "threadId": "thread" }),
     )
     .await;
@@ -4236,7 +4630,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
         json!({ "threadId": "other-thread" }),
     )
     .await;
@@ -5667,7 +6061,8 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         attachments: vec![],
         automation: None,
         author_agent_id: None,
-        named_agent_ids: Vec::new(),
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
         now_ms: 40,
         request_id: Some("passive-start".into()),
     };
@@ -5687,7 +6082,8 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         attachments: vec![],
         automation: None,
         author_agent_id: None,
-        named_agent_ids: Vec::new(),
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
         now_ms: 41,
         request_id: Some("passive-send".into()),
     };
@@ -5843,6 +6239,8 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
             json!({
                 "channelId": "group", "threadId": thread, "messageId": message, "lane": lane,
                 "authorKind": "agent", "authorDisplayName": "Scout", "body": message, "nowMs": at,
+                "needsDecision": message == "p-1" || message == "c-1",
+                "options": if message == "p-1" || message == "c-1" { vec!["Train", "Bus"] } else { vec![] },
             }),
         )
         .await;
@@ -5876,6 +6274,8 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
             .collect()
     };
     assert_eq!(ids(&newest), ["c-2", "p-2"]);
+    assert!(newest["items"][0].get("decision").is_none());
+    assert!(newest["items"][1].get("decision").is_none());
     assert_eq!(
         newest["items"][0]["message"]["agentRequests"],
         json!([
@@ -5898,7 +6298,45 @@ async fn group_stream_and_thread_get_round_trip_with_agent_requests() {
     )
     .await;
     assert_eq!(ids(&older), ["p-1", "c-1"]);
+    for (index, thread, message, at) in [(0, "post-1", "p-1", 10), (1, "chat", "c-1", 20)] {
+        assert_eq!(
+            older["items"][index]["decision"],
+            json!({
+                "threadId": thread, "messageId": message, "state": "open", "atMs": at,
+                "options": ["Train", "Bus"],
+            })
+        );
+    }
     assert_eq!(older["nextBefore"], Value::Null);
+
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve-stream-root",
+        json!({
+            "threadId": "post-1", "messageId": "p-1", "resolvedByMessageId": "p-1",
+            "chosenOption": "Train", "nowMs": 50,
+        }),
+    )
+    .await;
+    let resolved = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.stream.list",
+        json!({ "channelId": "group", "before": newest["nextBefore"].clone() }),
+    )
+    .await;
+    assert_eq!(
+        resolved["items"][0]["decision"],
+        json!({
+            "threadId": "post-1", "messageId": "p-1", "state": "resolved", "atMs": 50,
+            "options": ["Train", "Bus"], "chosenOption": "Train", "resolvedByMessageId": "p-1",
+        })
+    );
+    assert_eq!(resolved["items"][0]["post"]["openDecisionCount"], json!(0));
 
     let messages = call(
         &transport,

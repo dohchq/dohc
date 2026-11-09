@@ -103,6 +103,7 @@ export function OpenSharedView(props: {
   // share. `chosen` wins; `suggested` counts only for the share it answers.
   const [chosen, setChosen] = useState<string | null>(null);
   const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
+  const [settledSuggestionShareId, setSettledSuggestionShareId] = useState<string | null>(null);
   // The mode the person chose. Until they choose, the grant decides.
   const [pickedMode, setPickedMode] = useState<"mount" | "separate" | null>(null);
   // Whether each pasted share opens for live editing, asked once per share
@@ -181,7 +182,7 @@ export function OpenSharedView(props: {
     if (lookup === undefined) {
       lookup = bridge()
         .getRelayReceivedShare({ shareId: accessShareId })
-        .then((result) => result.found ? result.share : null)
+        .then((result) => "share" in result ? result.share : null)
         .catch(() => null);
       accessLookups.current.set(accessShareId, lookup);
     }
@@ -197,6 +198,7 @@ export function OpenSharedView(props: {
   // retires the request in flight, so an old answer never lands.
   useEffect(() => {
     const request = suggestRequestRef.next();
+    setSettledSuggestionShareId(null);
     if (mounting || shareId === null) return;
     void bridge()
       .getDefaultShareRoot({ shareId })
@@ -205,6 +207,9 @@ export function OpenSharedView(props: {
       })
       .catch(() => {
         if (suggestRequestRef.isCurrent(request)) setSuggested(null);
+      })
+      .finally(() => {
+        if (suggestRequestRef.isCurrent(request)) setSettledSuggestionShareId(shareId);
       });
     // suggestRequestRef is a stable ref holder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,6 +217,8 @@ export function OpenSharedView(props: {
 
   const folder =
     chosen ?? (!mounting && suggested?.shareId === shareId ? suggested.root : null);
+  const checkingDefaultFolder =
+    !mounting && shareId !== null && settledSuggestionShareId !== shareId;
 
   async function chooseFolder() {
     const request = folderRequestRef.next();
@@ -267,6 +274,16 @@ export function OpenSharedView(props: {
     !checkingAccess &&
     shareCode.length > 0 &&
     (mounting || folder !== null);
+  const missingInputReason =
+    canOpen || gate.kind === "checking" || opening || checkingAccess || checkingDefaultFolder
+      ? null
+      : shareCode.length === 0
+        ? !mounting && folder === null
+          ? "Paste a share code and choose a folder."
+          : "Paste a share code."
+        : !mounting && folder === null
+          ? "Choose an empty folder."
+          : null;
 
   return (
     <div
@@ -377,24 +394,32 @@ export function OpenSharedView(props: {
         )}
       </div>
 
-      <PrimaryButton
-        type="button"
-        data-testid="open-share-start"
-        disabled={!canOpen}
-        onClick={() => void open()}
-      >
-        {/* The busy label is the disabled button's reason, as it is while
-            opening, and it names no mode before the grant decides one. */}
-        {checkingAccess
-          ? "Checking the share…"
-          : opening
-          ? mounting
-            ? "Adding the share…"
-            : "Opening the share…"
-          : mounting
-            ? "Add share"
-            : "Open share"}
-      </PrimaryButton>
+      <div className="flex flex-col gap-2">
+        <PrimaryButton
+          type="button"
+          data-testid="open-share-start"
+          disabled={!canOpen}
+          aria-describedby={missingInputReason ? "open-share-missing-input" : undefined}
+          onClick={() => void open()}
+        >
+          {/* The busy label is the disabled button's reason, as it is while
+              opening, and it names no mode before the grant decides one. */}
+          {checkingAccess
+            ? "Checking the share…"
+            : opening
+            ? mounting
+              ? "Adding the share…"
+              : "Opening the share…"
+            : mounting
+              ? "Add share"
+              : "Open share"}
+        </PrimaryButton>
+        {missingInputReason ? (
+          <p id="open-share-missing-input" className="m-0 text-xs leading-relaxed text-muted">
+            {missingInputReason}
+          </p>
+        ) : null}
+      </div>
 
       {signingIn && gate.kind !== "signed-in" ? (
         <div

@@ -24,6 +24,8 @@ const author = z.object({
   kind: z.enum(["human", "agent", "automation", "link"]),
   displayName: z.string(),
   ownerDisplayName: z.string().optional(),
+  // A link holder that is an agent signed in with the link.
+  linkAgent: z.literal(true).optional(),
   presentation: z.object({
     group: z.string(), hue: z.enum(ACTOR_HUES).nullable(), self: z.boolean(),
   }).strict(),
@@ -58,6 +60,8 @@ export const ChatLinksEnginePage = z.object({
         authorOwnerDisplayName: z.string().optional(),
         authorUserId: z.string().optional(),
         authorActorKey: z.string().optional(),
+        // The agent that wrote the message in one of its runs.
+        authorAgentId: z.string().optional(),
       }).strict(),
       // A link holder names a link and no account.
       z.object({
@@ -65,6 +69,7 @@ export const ChatLinksEnginePage = z.object({
         authorDisplayName: z.string(),
         linkGrantId: id,
         linkPrincipalId: id,
+        agentConnectionId: id.optional(),
       }).strict(),
     ]),
   }).strict()),

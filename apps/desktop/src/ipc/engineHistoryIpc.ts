@@ -3,6 +3,7 @@
 // injects how agent, named, and automation authors read, and the Collection
 // automations it names them from; nothing here touches Electron or process
 // state.
+import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
   WorkspaceEngineCapture,
@@ -70,7 +71,7 @@ function isSnapshotPerson(author: MomentAuthor): boolean {
 function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
   switch (author.kind) {
     case "unattributed": return "An unrecorded author";
-    case "agent": return author.agentName ?? names.agent(author) ?? "Agent";
+    case "agent": return shownAgentName(author.agentName) ?? names.agent(author) ?? "Agent";
     case "human": return author.humanName ?? names.person(author) ?? "Another person";
     case "named": return names.named(author);
     case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
@@ -81,6 +82,17 @@ function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): stri
       return automation.collection === undefined ? automation.name : `${automation.name} in ${automation.collection}`;
     }
   }
+}
+
+// The person who made a moment, when one person did: a snapshot's account holder, this
+// computer's person, or a named member. Agents, links and automations give no name.
+export function momentPersonName(
+  moment: Pick<WorkspaceEngineMomentSummary, "authors">,
+  names: Pick<EngineMomentAuthorNames, "person" | "named">,
+): string | undefined {
+  const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
+  if (author?.kind === "human") return author.humanName ?? names.person(author);
+  return author?.kind === "named" ? names.named(author) : undefined;
 }
 
 export async function listEngineMomentsForIpc(
@@ -119,7 +131,7 @@ function engineMomentBaseForIpc(
 ) {
   // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
-  const agentAuthorName = author?.kind === "agent" ? author.agentName ?? names.agent(author) : undefined;
+  const agentAuthorName = author?.kind === "agent" ? shownAgentName(author.agentName) ?? names.agent(author) : undefined;
   const personAuthorName = author?.kind === "human" && !("humanName" in author) ? names.person(author) : undefined;
   const liveAuthorName = author !== undefined && isSnapshotPerson(author) ? authorLabel(author, names) : undefined;
   return {
@@ -240,6 +252,7 @@ export function versionConflictForIpc(conflict: {
   current: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   incoming: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   base: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
+  waitingVersion?: WorkspaceVersionConflict["waitingVersion"];
 }): WorkspaceVersionConflict {
   // Record-level kind answers one question: can these two sides be combined as
   // text? Only the live sides decide it. A binary BASE is history, and keying
@@ -280,6 +293,7 @@ export function versionConflictForIpc(conflict: {
     targetVersionId: conflict.targetVersionId,
     origin: conflict.metadata?.origin === "sync" ? "sync" : "merge",
     contentKind,
+    waitingVersion: conflict.waitingVersion ?? null,
     currentText: textSide(conflict.current),
     incomingText: textSide(conflict.incoming),
     baseText: textSide(conflict.base),

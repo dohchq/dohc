@@ -189,7 +189,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
       }
       if (name !== "selectorDrift") {
         const expected = selected.continuation?.expected ?? selected.resumed?.expected ?? before;
-        const settled = await h.host().settle(fixture.document); expect(settled.materialized).toBe(true);
+        const settled = await h.host().settle(fixture.document); expect(settled).toMatchObject({materialized: true});
         expect(hash(readFileSync(join(h.workspace, fixture.path)))).toBe(hash(expected.markdown));
         if (restoredViewer && continuationEvidence) {
           await h.publishSettled(fixture.document, fixture.path);

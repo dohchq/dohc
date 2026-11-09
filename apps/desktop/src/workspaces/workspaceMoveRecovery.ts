@@ -12,7 +12,7 @@ import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 const Roots = z.object({ operationId: HistoryOperationId, from: z.string(), to: z.string() });
 const Mover = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("human"), humanId: z.string() }).strict(),
-  z.object({ kind: z.literal("agent"), agentId: z.string(), onBehalfOf: z.string(), agentRunId: z.string().optional(), depth: z.number().optional() }).strict(),
+  z.object({ kind: z.literal("agent"), agentId: z.string(), agentName: z.string().optional(), onBehalfOf: z.string(), agentRunId: z.string().optional(), depth: z.number().optional() }).strict(),
   z.object({ kind: z.literal("automation"), automationId: z.string(), onBehalfOf: z.string().optional(), depth: z.number() }).strict(),
 ]);
 const FileRecord = Roots.extend({
@@ -146,7 +146,8 @@ export async function undoMoveRecovery(workspace: LocalStateWorkspace, record: F
   if (!record.engine) {
     const destination = await info(join(root, record.to));
     if (!destination) return refuse(`Nothing is at ${record.to} now. Check History for where it went.`);
-    if (await info(join(root, record.from))) return refuse(`${record.from} now occupies the old path. Move it first.`);
+    if (await info(join(root, record.from))) return { ok: false, reason: `Cannot undo the ${word}. ${record.from} now occupies the old path. Move it first.`,
+      refusal: { code: "old-path-occupied", path: record.from } };
     if (destination.isDirectory()) return refuse(`${record.to} is now a folder. Move it first.`);
     assertCurrent();
     record.engine = { requested: true };

@@ -1461,61 +1461,125 @@ mod tests {
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
+    /// Every admitted vector bootstraps its own document in one store, which
+    /// reopens once. Each replays as the same acknowledgement and reloads its
+    /// baseline.
     #[test]
     fn admitted_baselines_commit_atomically_and_replay_after_reopen() {
-        let empty_schema = {
-            let dir = ScratchDir::new_named("live-bootstrap-schema").unwrap();
-            let path = dir.join("engine.db");
-            drop(EngineStore::open(&path, 0).unwrap());
-            assert!(!dir.join("engine.db-wal").exists());
-            std::fs::read(path).unwrap()
+        let counts_of = |store: &EngineStore, object: &str| -> (i64, i64, i64, i64) {
+            store.read_with(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM live_device_bootstraps WHERE object_id=?1),(SELECT COUNT(*) FROM moments WHERE object_id=?1),(SELECT COUNT(*) FROM ydoc_docs WHERE object_id=?1),(SELECT COUNT(*) FROM snapshots WHERE object_id=?1)",[object],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap()
         };
-        for (index, vector) in vectors()
+        let vectors: Vec<Vector> = vectors()
             .into_iter()
             .filter(|vector| vector.registration_accepted && !vector.projection_refused)
+            .collect();
+        assert!(vectors.iter().any(|vector| vector.name == "negative-zero"));
+        let dir = ScratchDir::new_named("live-bootstrap").unwrap();
+        let path = dir.join("engine.db");
+        let mut store = EngineStore::open(&path, 0).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        let mut cache = WriterDocCache::new();
+        let documents: Vec<(String, LiveApplicationBootstrap, ApplicationHandle)> = vectors
+            .iter()
             .enumerate()
-        {
-            let (dir, mut store, mut cache, owner, handle) = if index == 0 {
-                fixture(&vector)
-            } else {
-                // Registration and bootstrap need empty domain state, not a
-                // fresh schema. Every vector retains its own owner and file.
-                let dir = ScratchDir::new_named("live-bootstrap").unwrap();
-                let path = dir.join("engine.db");
-                std::fs::write(&path, &empty_schema).unwrap();
-                let store = EngineStore::open(&path, 0).unwrap();
-                registered_fixture(&vector, dir, store)
+            .map(|(index, vector)| {
+                let object = format!("object-{index}");
+                let handle = owner
+                    .register(
+                        &mut store,
+                        "relay-A".into(),
+                        ApplicationHostCoordinate {
+                            host_id: "host".into(),
+                            host_epoch: 1,
+                            instance_id: "instance".into(),
+                            connection_id: "connection".into(),
+                        },
+                        LiveObjectBinding {
+                            workspace_id: "workspace".into(),
+                            main_version_id: "main".into(),
+                            object_id: object.clone(),
+                            lineage_claim_id: hex_sha256(&vector.bytes),
+                            current_path: format!("notes/{index}.md"),
+                            selector_paths: vec![format!("notes/{index}.md")],
+                            restore_fence_generation: 0,
+                        },
+                    )
+                    .unwrap();
+                let mut input = input(vector);
+                input.bootstrap_id = format!("bootstrap-{index}");
+                input.bootstrap_moment_id = format!("bootstrap-moment-{index}");
+                (object, input, handle)
+            })
+            .collect();
+        let bootstrap =
+            |store: &mut EngineStore,
+             cache: &mut WriterDocCache,
+             (_, input, handle): &(String, LiveApplicationBootstrap, ApplicationHandle),
+             vector: &Vector| {
+                bootstrap_committed(
+                    store,
+                    cache,
+                    handle,
+                    input.clone(),
+                    vector.bytes.clone(),
+                    &NoFaults,
+                    |_, _, _, _| Ok::<_, Error>(()),
+                )
+                .unwrap()
             };
+        for (document, vector) in documents.iter().zip(&vectors) {
             assert_eq!(
-                run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+                bootstrap(&mut store, &mut cache, document, vector),
                 BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(
-                    &input(&vector),
+                    &document.1,
                     0,
                     false
                 )),
                 "{}",
                 vector.name
             );
-            assert_eq!(counts(&store), (1, 1, 1, 1));
-            drop(store);
-            let mut store = EngineStore::open(&dir.join("engine.db"), 101).unwrap();
             assert_eq!(
-                run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap(),
+                counts_of(&store, &document.0),
+                (1, 1, 1, 1),
+                "{}",
+                vector.name
+            );
+        }
+        drop(store);
+        let mut store = EngineStore::open(&path, 101).unwrap();
+        for (document, vector) in documents.iter().zip(&vectors) {
+            assert_eq!(
+                bootstrap(&mut store, &mut cache, document, vector),
                 BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(
-                    &input(&vector),
+                    &document.1,
                     0,
                     true
-                ))
+                )),
+                "{}",
+                vector.name
             );
-            assert_eq!(counts(&store), (1, 1, 1, 1));
+            assert_eq!(
+                counts_of(&store, &document.0),
+                (1, 1, 1, 1),
+                "{}",
+                vector.name
+            );
             let loaded = store
                 .read_with(|conn| {
-                    durable::load_doc_in(conn, &DocKey::new("workspace", "main", "object").unwrap())
+                    durable::load_doc_in(
+                        conn,
+                        &DocKey::new("workspace", "main", &document.0).unwrap(),
+                    )
                 })
                 .unwrap();
             assert_eq!(
                 loaded.project(ContentKind::Richdoc).unwrap().content,
-                vector.markdown
+                vector.markdown,
+                "{}",
+                vector.name
             );
             if vector.name == "negative-zero" {
                 assert_eq!(
@@ -1524,8 +1588,10 @@ mod tests {
                     "persisted reopen preserves the signed-zero wire value"
                 );
             }
-            drop(owner);
         }
+        let n = vectors.len() as i64;
+        assert_eq!(counts(&store), (n, n, n, n));
+        drop(owner);
     }
     #[test]
     fn projection_mismatch_and_follow_up_failure_leave_no_partial_bootstrap() {

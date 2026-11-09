@@ -63,12 +63,47 @@ For native folder-dialog QA, run `pnpm qa:debug -- --native-dialogs`.
 Ask the operator to choose the printed disposable workspace, cancel a second picker, and confirm keyboard focus returns to the app.
 Record the operator's result with the session evidence. The automated picker seam does not prove native-dialog behavior.
 
+## Hand someone a fixed preview
+
+A debug session runs the checkout's changing build. To let a person try one commit beside their installed dohc on Windows, build a fixed preview instead.
+
+1. Commit the change. Check out that commit with no other changes.
+2. Run `pnpm qa:preview --commit <full SHA> --base <target-ref> --pr <number>`.
+3. Send the person the `Try it` text that the command prints at the end.
+
+The command builds the desktop and the release engine, then packages the app with `electron-builder --dir`. Cargo waits for the shared build budget.
+It refuses a checkout at another commit or with uncommitted changes. It checks the source again after packaging.
+It copies the package into a new delivery folder, `~/dohc-previews/<id>` unless you pass `--output`.
+It then runs the release workflow's Windows packaged smoke against that copy: an edit, persistence on disk, and a restart.
+The package is unsigned. The builder removes signing, telemetry, and Vite settings from its environment.
+
+The delivery folder holds:
+
+- `app`, the package.
+- `manifest.json`, with the commit, base, PR, build steps and log hashes, package tree hash, executable, ASAR and engine hashes, signing status, and smoke result.
+- `launch.mjs` and `Try it.cmd`, which start the preview.
+- `evidence`, with the build logs and the smoke's `result.json`.
+
+Start only with `Try it.cmd`, which uses the Node runtime inside the package. Opening `app/dohc.exe` directly uses the installed app's profile and link handler.
+The launcher reads nothing from the checkout. It refuses to start the app if any package file differs from the manifest, or if the smoke did not pass.
+The app gets its own profile, home, `APPDATA`, and `LOCALAPPDATA` in the folder's `data` subfolder. The launcher removes `DOHC_*` and agent configuration variables, and passes `--dohc-isolated-test`, so the app leaves the installed app's link handler and recent documents alone.
+The launcher also serves an update feed on `127.0.0.1` for as long as it runs. The feed offers version 0.0.0 with no files, so the preview never downloads or installs an update.
+Close all preview windows to quit. If it stays in the tray, use Quit dohc there. The app checks for unsaved work.
+The launcher does not force the app or engine to stop. Ctrl+C leaves an open preview running.
+If startup recovery relaunches the app, the launcher cannot track the replacement process. Close that preview's windows before starting another. If it stays in the tray, use Quit dohc there.
+
+This separates data. It is not an OS sandbox: the app runs as the current user, and a folder the person chooses is a real folder.
+The launcher redirects `HOME` and `USERPROFILE` and removes explicit agent configuration paths. Agents can still use configuration from the operating system account, environment credentials, or Windows Credential Manager.
+Open only a new folder or a copy of a workspace. Opening a workspace used by installed dohc can migrate its engine store and prevent the installed build from opening it.
+Build previews only from branches in this repository. Never build one from a fork's code on a host that holds credentials.
+The person deletes the delivery folder when they finish. That removes only its contents. Workspaces opened elsewhere and their engine stores remain there.
+
 ## Verify a pull request
 
 One verification owner records passing evidence for every selected gate in the PR.
-While Blacksmith is off, run the gates locally.
-When enabled, reuse passing CI evidence that covers the change instead of repeating full gates locally.
-Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change activation.
+PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
+When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
+Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change the optional Blacksmith runners.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
 Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).
 For platform-specific changes, add focused checks on that platform.

@@ -119,6 +119,35 @@ describe("workspace wire schemas", () => {
     ).toThrow("must be a JSON object");
   });
 
+  it("decodes a conflict's waiting version, its absence, and none", () => {
+    const waitingVersion = {
+      code: "resolve-existing-conflict",
+      objectId: "object",
+      originId: "computer-d",
+      originSeq: 0,
+    };
+    expect(decodeConflictRecord({ ...conflict, waitingVersion }).waitingVersion).toEqual(
+      waitingVersion,
+    );
+    expect(
+      decodeConflictRecord({ ...conflict, waitingVersion: null }).waitingVersion,
+    ).toBeNull();
+    // A resolve answer, and an engine from before the field, send none.
+    expect("waitingVersion" in decodeConflictRecord(conflict)).toBe(false);
+    for (const malformed of [
+      "resolve-existing-conflict",
+      { ...waitingVersion, code: "conflict-wait-limit" },
+      { ...waitingVersion, objectId: "" },
+      { ...waitingVersion, originSeq: -1 },
+      { ...waitingVersion, originSeq: "0" },
+      { ...waitingVersion, path: "note.md" },
+    ]) {
+      expect(() =>
+        decodeConflictRecord({ ...conflict, waitingVersion: malformed }),
+      ).toThrow(ProtocolShapeError);
+    }
+  });
+
   it("rejects nested excess fields", () => {
     expect(() =>
       decodeConflictRecord({
@@ -1003,6 +1032,7 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
   ["capture.retryHeld" as WorkspaceMethod, { deferredWrites: [], settled: true, running: true, degraded: false, retried: true }],
   [WORKSPACE_METHOD.captureFlush, { deferredWrites: [], settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.captureReconcile, { deferredWrites: [], settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureRetry, { deferredWrites: [], settled: true, running: true, degraded: false, restarted: true }],
   [WORKSPACE_METHOD.watcherStatus, {
     running: true,
     degraded: false,

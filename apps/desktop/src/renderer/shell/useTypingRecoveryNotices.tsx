@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Trash2 } from "lucide-react";
 import { bridge } from "../bridge";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { typingRecoveryMessage } from "../../workspaces/typingRecoveryWords";
@@ -49,7 +50,7 @@ export function useTypingRecoveryNotices(input: {
                     void importedRecovery(result.momentId, failure.path);
                   } else if (result.outcome !== "missing") {
                     showSuccessNotice(`dohc recovered your typing in "${failure.path}".`, undefined, undefined,
-                      {label: "Open History", run: openHistory});
+                      {label: "Open History", run: openHistory}, {to: "history"});
                   } else showWarningNotice("This kept copy is no longer on this computer.");
                 }
                 void refresh();
@@ -63,6 +64,7 @@ export function useTypingRecoveryNotices(input: {
               details: failure.reason === "drawing-unavailable" ? [["File", failure.path]] : [["File", failure.path], ["Reason", failure.detail]],
               kind: noticeKind,
               repeat: true,
+              target: {to: "file", path: failure.path},
               ...(failure.checkpointId ? {
                 identity,
                 action: {label: "Copy your typing", run: () => {void actOnCopy("copy");}, additional: [{label: "Discard your typing", run: requestDiscard}]},
@@ -84,11 +86,11 @@ export function useTypingRecoveryNotices(input: {
     return () => {cancelled = true; unsubscribe();};
   }, [workspaceId, ready, openHistory, importedRecovery, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity]);
   return discarding && discarding.workspaceId === workspaceId && ready ? (
-    <ConfirmDialog intent="danger" title="Discard your typing?" confirmLabel="Discard your typing"
+    <ConfirmDialog intent="danger" icon={Trash2} title="Discard your typing?" confirmLabel="Discard your typing"
       testId="typing-discard-dialog" cancelTestId="typing-discard-cancel" confirmTestId="typing-discard-confirm"
       onCancel={() => setDiscarding(null)}
       onConfirm={() => {setDiscarding(null); discarding.run();}}>
-      <p className="m-0 mt-2 text-[13px] text-muted">This deletes the kept typing for "{discarding.path}" from this computer. This cannot be undone.</p>
+      <p>This deletes the kept typing for "{discarding.path}" from this computer. This cannot be undone.</p>
     </ConfirmDialog>
   ) : null;
 }

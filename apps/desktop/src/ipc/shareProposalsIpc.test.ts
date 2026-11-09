@@ -14,6 +14,7 @@ import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOper
 import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 import { deferred } from "../testing/deferred";
+import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 
 const credentials: CloudCredentials = {
   serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test",
@@ -61,7 +62,7 @@ async function harness() {
   const readText = vi.fn<Dependencies["readOwnedWorkspaceTextFor"]>(async () => ({ text: "current", truncated: false, contentHash: "hash" }));
   const queue = vi.fn();
   const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(async () => ({
-    kind: "settle", capturedPaths: 2, repairedPaths: 1, unjournalablePaths: [], collisionRecordQuarantined: false,
+    kind: "settle", capturedPaths: 2, repairedPaths: 1, unjournalablePaths: [],
   }));
   const submit = vi.fn<EngineRelayWorkspaceClient["submitShareProposal"]>(async () => ({ submitted: 1, proposalId: "proposal", skippedOutsideShare: 0, morePending: false }));
   const pushDirect = vi.fn<EngineRelayWorkspaceClient["pushDirectWrites"]>(async () => ({ writes: [], morePending: false }));
@@ -434,7 +435,7 @@ describe("registered share proposal handlers", () => {
     h.reconcile.mockImplementation(() => { started.resolve(); return held.promise; });
     const result = h.invoke(shareProposalOperations.submitShareChanges.channel);
     await started.promise; h.recipient("view");
-    held.resolve({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: false });
+    held.resolve({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] });
     await expect(result).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
   });
 
@@ -453,9 +454,10 @@ describe("registered share proposal handlers", () => {
 
   it("refuses unsafe reconciliation and reports a raced withdrawal honestly", async () => {
     const h = await harness(); h.recipient();
-    h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: true });
-    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow("damaged shared file recovery");
-    h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }], collisionRecordQuarantined: false });
+    const refusal = await sharedViewRefusal();
+    h.reconcile.mockRejectedValue(refusal);
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toBe(refusal);
+    h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }] });
     await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
     h.withdraw.mockResolvedValue({ proposalId: "proposal", state: "accepted" });
     await expect(h.invoke(shareProposalOperations.withdrawShareChanges.channel, { workspaceId: "workspace", proposalId: "proposal" })).rejects.toThrow("already answered");

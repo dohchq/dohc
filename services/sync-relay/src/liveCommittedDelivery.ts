@@ -12,11 +12,11 @@ import {
 } from "./storage/liveJournalHistory";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import { snapshotHostCoordinate } from "./liveTicketInputs";
-import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations, sameLiveHostDocument} from "./liveHostRegistration";
-import {settlementResult, type CommittedSettlement} from "./liveSettlement";
+import {settlementResponse, settlementPending, type SettlementOutcome} from "./liveSettlement";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
@@ -141,11 +141,11 @@ export class LiveCommittedDelivery {
             // The host's author coverage is full. Settle once through what it
             // applied, then offer the identical event again.
             if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
-            const settling = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle",
+            const settled = await settlementResponse(this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle",
               workspace: this.#connection.workspace, params: { registrationId: registration.id, terminalReceipt: next.predecessor ? { ...next.predecessor } : null },
-              deadlineMs: this.#connection.deadlineMs }, signal);
+              deadlineMs: this.#connection.deadlineMs }, signal), next.predecessor);
             aborted();
-            const settled = settlementResult(settling.result, next.predecessor);
+            if (settlementPending(settled)) return settled;
             // Its file write has not landed; the next pass retries after it does.
             if (!settled.materialized) return { kind: "pending", reason: "settlement-materialization-pending" };
             settledSinceApply = true;
@@ -218,6 +218,15 @@ export class LiveCommittedDelivery {
     finally {this.#active.delete(key);}
   }
 
+  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {return await cancelStopRestore({store: this.#store, lookup, connection: this.#connection, signal});}
+    finally {this.#active.delete(key);}
+  }
+
   async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
     const restore = this.#connection.restore;
     if (!restore) throw new Error("Restore preparation is not configured on this host.");
@@ -230,7 +239,7 @@ export class LiveCommittedDelivery {
     finally {this.#active.delete(key);}
   }
 
-  async settle(document: LiveDocumentKey, signal?: AbortSignal): Promise<CommittedSettlement> {
+  async settle(document: LiveDocumentKey, signal?: AbortSignal): Promise<SettlementOutcome> {
     document = parseLiveDocumentKey(document);
     const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId]);
     if (this.#active.has(key)) throw new Error("A committed delivery operation already owns this document.");
@@ -245,10 +254,10 @@ export class LiveCommittedDelivery {
       aborted();
       this.#store.settlement(drain);
       const registrationId = registration.id;
-      const response = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle", workspace: this.#connection.workspace, params: { registrationId, terminalReceipt: captured.terminalReceipt ? { ...captured.terminalReceipt } : null }, deadlineMs: this.#connection.deadlineMs }, signal);
+      const response = await settlementResponse(this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle", workspace: this.#connection.workspace, params: { registrationId, terminalReceipt: captured.terminalReceipt ? { ...captured.terminalReceipt } : null }, deadlineMs: this.#connection.deadlineMs }, signal), captured.terminalReceipt);
       aborted();
       this.#store.settlement(drain);
-      return settlementResult(response.result, captured.terminalReceipt);
+      return response;
     } finally {
       if (drain) this.#store.close(drain);
       this.#active.delete(key);

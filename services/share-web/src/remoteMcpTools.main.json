@@ -21,10 +21,6 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 256
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "Your display name. This link sets it once; later posts must send the same name or none."
           }
         },
         "required": [
@@ -53,6 +49,33 @@
             "type": "integer",
             "exclusiveMinimum": 0,
             "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_wait_for_messages",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "description": "The cursor the last call returned. Omit it to wait for messages after now.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1048576
+          },
+          "thread": {
+            "description": "A threadId, to wait only for replies in that thread.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "timeoutMs": {
+            "description": "How long to wait, in milliseconds, at most 25000. The default is 25000.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 25000
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema"
@@ -466,10 +489,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -580,10 +599,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -694,10 +709,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -808,10 +819,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -922,10 +929,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -1203,10 +1206,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -1473,10 +1472,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [
@@ -1587,10 +1582,6 @@
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[\\x20-\\x7e]+$"
-          },
-          "claimedName": {
-            "type": "string",
-            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
           }
         },
         "required": [

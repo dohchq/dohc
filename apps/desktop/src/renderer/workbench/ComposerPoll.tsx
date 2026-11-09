@@ -4,7 +4,7 @@ import { MAX_POLL_CHOICE_LENGTH, MAX_POLL_CHOICES, repeatedPollChoices, trimChoi
 import { isComposingKey } from "../ui/keys";
 
 const GHOST_ICON =
-  "grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-40";
+  "grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:opacity-40";
 
 // A poll's choices while it is written. Each row looks like the choice it
 // posts as. Enter moves to the next choice, adding one at the end while there
@@ -56,7 +56,7 @@ export function ComposerPoll(props: {
       aria-label="Poll"
       disabled={props.disabled}
       className={`flex min-w-0 flex-col gap-1 ${
-        props.surface === "post" ? "mt-2" : "border-x border-t border-line bg-panel-2 px-2.5 py-2"
+        props.surface === "post" ? "mt-2" : "mt-1 px-3"
       }`}
     >
       {props.choices.map((choice, index) => {
@@ -65,7 +65,7 @@ export function ComposerPoll(props: {
         return (
           <Fragment key={index}>
             <div className="flex items-center gap-2">
-              <span aria-hidden className="size-3.5 shrink-0 rounded-full border border-line" />
+              <span aria-hidden className="w-3.5 shrink-0 text-right text-[12px] tabular-nums text-subtle">{index + 1}</span>
               <input
                 ref={(node) => { inputs.current[index] = node; }}
                 data-testid={`${props.testIdPrefix}-poll-choice`}
@@ -121,28 +121,29 @@ export function ComposerPoll(props: {
         );
       })}
       <div className="flex items-center gap-1">
-        {/* The plus sits in the circles' column and its words under the choices. */}
+        {/* The plus sits in the numbers' column and its words under the choices. */}
         {canAdd ? (
           <button
             type="button"
             data-testid={`${props.testIdPrefix}-poll-add`}
             onClick={add}
-            className="-ml-1.5 flex h-7 items-center gap-2 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink dohc-focus-visible"
+            className="-ml-1.5 flex h-7 items-center gap-2 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
           >
             <Plus size={12} aria-hidden />
             Add a choice
           </button>
         ) : null}
         <span className="flex-1" />
+        {/* Drawn as Add a choice is, so it reads as a step of the poll and
+            not as one choice's ×. */}
         <button
           type="button"
           data-testid={`${props.testIdPrefix}-poll-remove`}
-          aria-label="Remove poll"
-          title="Remove poll"
           onClick={props.onRemove}
-          className={GHOST_ICON}
+          className="flex h-7 items-center gap-2 rounded-md px-1.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
         >
           <Trash2 size={12} aria-hidden />
+          Remove poll
         </button>
       </div>
     </fieldset>

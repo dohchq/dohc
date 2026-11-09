@@ -118,6 +118,11 @@ it("keeps an empty multi-select visible and editable", async () => {
   expect(screen.getByRole("checkbox", { name: "Reviewed" })).toBeTruthy();
 });
 
+it("names the server that holds an owner's Collection beside its copy on this device", async () => {
+  setup({copy:{offline:false,savedAtMs:1,host:"sync.example.test"}}); await screen.findByText("Alice");
+  expect(screen.getByText(`On sync.example.test · Saved on this device · ${new Date(1).toLocaleString()}`).getAttribute("role")).toBe("status");
+});
+
 it("labels saved-page coverage without implying the entire Collection is downloaded", async () => {
   const copy = {offline:true,savedAtMs:1,coverage:"saved-pages" as const};
   setup({copy}); await screen.findByText("Alice");
@@ -165,7 +170,7 @@ describe("transactional Collection page", () => {
     const changes = invoke.mock.calls.filter(([input]) => input.operationId === edit);
     expect(changes).toHaveLength(2); expect(changes[1]![0]).toEqual(changes[0]![0]);
     expect(screen.queryByText("Change not confirmed")).toBeNull();
-    expect(result.onNotice).toHaveBeenCalledWith("Saved the edit");
+    expect(result.onNotice).not.toHaveBeenCalled();
   });
   it.each([false, true])("invalidates an old revision's pending edit and stale retry after rule changes (in flight: %s)", async inFlight => {
     const pending = deferred<{ result: AppBackendJson }>();
@@ -221,12 +226,41 @@ describe("transactional Collection page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(result.onNotice).toHaveBeenCalledWith("Saved the edit"));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull());
+    expect(result.onNotice).not.toHaveBeenCalled();
     expect(result.onError).not.toHaveBeenCalled();
     expect(screen.queryByText("Change not confirmed")).toBeNull();
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
   });
 
+  it("shows no notice for a change the page shows", async () => {
+    const result = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Undo last edit" });
+    expect(result.onNotice).not.toHaveBeenCalled();
+  });
+  it("tells the person which Collection a change saved in after its page closed", async () => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
+    result.unmount();
+    // The page opens again unlocked while the change is still saving.
+    render(<TransactionalCollectionPage {...result.props} />);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Edit Name for record 1" }) as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => answer.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } }));
+    expect(result.onNotice).toHaveBeenCalledOnce();
+    expect(result.onNotice).toHaveBeenCalledWith("Saved the edit in People");
+    // The change went out once, the closed page read nothing more, and the open page shows no Undo for it.
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === read)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
+  });
   it("keeps an uncertain edit and its exact request while refreshing and browsing", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page("Alice", true) };
@@ -305,9 +339,9 @@ describe("transactional Collection page", () => {
   });
   it("shows saved offline records without mutation controls and refreshes the copy", async () => {
     const onRefresh = vi.fn();
-    setup({ copy: { offline: true, savedAtMs: 1_700_000_000_000 }, onRefresh, confirmDelete: async () => true });
+    setup({ copy: { offline: true, savedAtMs: 1_700_000_000_000, host: "sync.example.test" }, onRefresh, confirmDelete: async () => true });
     await screen.findByText("Alice");
-    expect(screen.getByText(/Offline copy · Read-only/)).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe(`Offline copy · Read-only until sync.example.test is reachable · ${new Date(1_700_000_000_000).toLocaleString()}`);
     expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Edit Name for record 1" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete record 1" })).toBeNull();
@@ -401,6 +435,50 @@ describe("transactional Collection page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create record" }));
     await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(true));
     expect(invoke.mock.calls.find(([request]) => request.operationId === create)![0].input).toEqual({ values: { [name]: "Bob", [amount]: 12.5, [status]: "New" } });
+  });
+
+  it.each([[false, "1 record"], [true, "1 record on this page"]] as const)("counts the records, and says on this page only when another page exists (next page: %s)", async (next, words) => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page("Alice", next) : { id: 1, version: 1 } }));
+    setup({ invoke }); await screen.findByText("Alice");
+    expect(screen.getByText(words, { selector: "footer span" })).toBeTruthy();
+  });
+
+  it("shows a field's error under the field, marks the field, and moves focus to it", async () => {
+    setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
+    const row = screen.getByRole("row", { name: "New record" });
+    const field = within(row).getByLabelText("Name"), status = within(row).getByLabelText("Status");
+    fireEvent.change(status, { target: { value: "" } });
+    const createButton = screen.getByRole("button", { name: "Create record" });
+    createButton.focus(); fireEvent.click(createButton);
+    const [error, statusError] = await screen.findAllByRole("alert");
+    expect(screen.getAllByRole("alert").map(alert => alert.textContent)).toEqual(["Enter Name.", "Enter Status."]);
+    expect(error!.querySelector("svg")).not.toBeNull();
+    expect(field.closest("td")!.contains(error!)).toBe(true);
+    expect(status.closest("td")!.contains(statusError!)).toBe(true);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.getAttribute("aria-describedby")).toBe(error!.id);
+    expect(status.getAttribute("aria-describedby")).toBe(statusError!.id);
+    expect(document.activeElement).toBe(field);
+    // Changing a field clears only its own error.
+    fireEvent.change(field, { target: { value: "Bob" } });
+    expect(screen.getAllByRole("alert").map(alert => alert.textContent)).toEqual(["Enter Status."]);
+    expect(field.getAttribute("aria-invalid")).toBeNull();
+    expect(status.getAttribute("aria-invalid")).toBe("true");
+
+    // The one-field edit form does the same.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    const input = screen.getByLabelText("Name");
+    fireEvent.change(input, { target: { value: "" } });
+    const save = screen.getByRole("button", { name: "Save" });
+    save.focus(); fireEvent.click(save);
+    const editError = await screen.findByRole("alert");
+    expect(editError.textContent).toBe("Enter Name.");
+    expect(input.parentElement!.contains(editError)).toBe(true);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(editError.id);
+    expect(document.activeElement).toBe(input);
   });
 
   it("shows an empty Collection's columns and adds a record in the table's New record row", async () => {
@@ -564,15 +642,17 @@ describe("transactional Collection page", () => {
     expect(screen.queryByText("Workspace A")).toBeNull();
   });
 
-  it("ignores a completed old mutation and disables a stale retry after switching workspaces", async () => {
+  it("reports a completed old mutation to its own workspace and disables a stale retry after switching workspaces", async () => {
     const pending = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page(request.workspaceId) }) : pending.promise);
     const { props, rerender, onNotice, onError } = setup({ invoke });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "changed" } }); fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    rerender(<TransactionalCollectionPage {...props} workspaceId="workspace-B" />); await screen.findByText("workspace-B");
+    const nextNotice = vi.fn();
+    rerender(<TransactionalCollectionPage {...props} workspaceId="workspace-B" onNotice={nextNotice} />); await screen.findByText("workspace-B");
     await act(async () => { pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "workspace-A" } } }); });
-    expect(onNotice).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
+    // The notice goes to its own workspace's handler, which the shell drops once the window has left that workspace.
+    expect(onNotice).toHaveBeenCalledWith("Saved the edit in People"); expect(nextNotice).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
   });
 });

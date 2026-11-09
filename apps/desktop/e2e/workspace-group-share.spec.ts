@@ -45,7 +45,7 @@ test("@two-client a group shares its channel and folder together, and both sides
   const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
 
   try {
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
 
     // The owner's synced workspace, signed in as the granter. The relay
     // only issues shares for a workspace the owner has claimed.
@@ -115,6 +115,8 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-share-email").fill(MEMBER_EMAIL);
     await owner.page.getByTestId("chats-share-submit").click();
     await expect(owner.page.getByTestId("chats-share-member")).toContainText(MEMBER_EMAIL);
+    await owner.page.getByTestId("chats-share-close").click();
+    await expect(owner.page.getByTestId("chats-share-panel")).toHaveCount(0);
 
     // The relay holds one grant, a group naming the channel and its folder.
     const listing = await fetch(`${relay.baseUrl}/sync/shares`, {

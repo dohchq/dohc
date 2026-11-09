@@ -26,9 +26,10 @@ async function registryHarness() {
   const steps: string[] = [];
   const emptyFolders = new Set<string>();
   const trusted: Array<{ workspaceId: string; folder: string | null }> = [];
-  const createFolder = vi.fn(async ({ homeDir, computer, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared"; computer: Computer }) => {
+  const createFolder = vi.fn(async ({ homeDir, stateDir, computer, ...input }: { rootPath: string; homeDir: string; stateDir: string; kind: "personal" | "shared"; computer: Computer }) => {
     steps.push("create");
     expect(homeDir).toBe(home);
+    expect(stateDir).toBe("dohc-state");
     expect(computer, "a new workspace runs its schedules on this computer").toEqual({ installId: "install-here", label: "This Mac" });
     // The real creation reports a folder it made from nothing.
     const fresh = emptyFolders.has(input.rootPath) ? { folder: "7:42" } : null;
@@ -43,12 +44,13 @@ async function registryHarness() {
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     app: { isPackaged: false }, dialog: { showOpenDialog: pick }, roots,
-    effectiveHome: () => home, workspaceSummaries: () => summaries,
+    effectiveHome: () => home, stateDir: () => "dohc-state", workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
     createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
     trustNewWorkspace: async (workspace, fresh) => { steps.push("trust"); trusted.push({ workspaceId: workspace.workspaceId, folder: fresh.folder }); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
+    forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
     refreshNativeWorkspaceSurfaces: refresh,
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });

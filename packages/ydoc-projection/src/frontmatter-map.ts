@@ -75,7 +75,10 @@ export function setFrontmatterValue(doc: Y.Doc, key: string, value: unknown): vo
  * maps a key in `remove` to the key in `values` that takes its place. The
  * kept text writes that entry under the new name where it was, with its
  * comments and value text, and the new key keeps that text while the old
- * one did. Values, kept text, and items change in one transaction.
+ * one did. A rename onto a name the document already has, whatever its case
+ * or the spaces around it, is refused, so it never writes over a property
+ * another device added. Values, kept text, and items change in one
+ * transaction.
  */
 export function patchFrontmatter(
   doc: Y.Doc,
@@ -86,8 +89,10 @@ export function patchFrontmatter(
   const frontmatter = doc.getMap<unknown>('frontmatter')
   const meta = doc.getMap<unknown>('meta')
   const current = Object.assign(nullPrototypeRecord(), frontmatterMapValues(frontmatter))
+  const name = (key: string) => key.trim().toLowerCase()
   for (const [from, to] of renamed) {
-    if (from === to || !remove.includes(from) || !values.has(to) || !Object.hasOwn(current, from)) {
+    if (from === to || !remove.includes(from) || !values.has(to) || !Object.hasOwn(current, from)
+      || Object.keys(current).some(key => key !== from && name(key) === name(to))) {
       throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
     }
   }

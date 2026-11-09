@@ -2455,6 +2455,93 @@ fn relay_base_arbitration_is_ordered_and_claim_safe() {
 }
 
 #[test]
+fn a_successor_over_a_collection_record_updates_its_fields() {
+    let mut ts = fresh_store("collection-successor-index");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    seed_collection_index_context(&mut ts.store, &key);
+    let predecessor_claim_id = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Richdoc,
+            &collection_base(),
+            &NoFaults,
+            1_000,
+        )
+        .expect("claim collection base"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("the first base must be claimed: {other:?}"),
+    };
+    committed(
+        ts.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET path='tasks/record.md' \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("set record path"),
+    );
+    let predecessor = load_persisted(&ts.store, &key)
+        .expect("load predecessor")
+        .expect("predecessor marker");
+    let predecessor_text = predecessor
+        .doc
+        .project(ContentKind::Richdoc)
+        .expect("project predecessor")
+        .content;
+    let successor_text = predecessor_text.replace("status: open", "status: done");
+    assert_ne!(successor_text, predecessor_text);
+    let predecessor_state_vector_sha256 =
+        dohc_engine_collab::hex_sha256(&predecessor.doc.encode_state_vector());
+    let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &predecessor_claim_id,
+        predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-successor",
+        artifact_preimage_sha256: &dohc_engine_collab::hex_sha256(predecessor_text.as_bytes()),
+        content_kind: ContentKind::Richdoc,
+        result_sha256: &dohc_engine_collab::hex_sha256(successor_text.as_bytes()),
+    });
+    let successor =
+        fresh_successor_base(&identity, &successor_text).expect("construct successor base");
+    let status_history = field_history(&ts.store, &key, "status");
+
+    committed(
+        replace_lineage_with_successor(
+            &mut ts.store,
+            SuccessorReplacement {
+                key: &key,
+                expected_predecessor_claim_id: &predecessor_claim_id,
+                expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+                path: "tasks/record.md",
+                successor: &successor,
+                scene_result: None,
+                now_ms: 1_200,
+            },
+            &NoFaults,
+        )
+        .expect("install successor"),
+    );
+
+    // Resolving a conflict installs the successor, so the record's fields follow it.
+    assert_eq!(
+        indexed_fields(&ts.store, &key),
+        BTreeMap::from([
+            ("status".to_owned(), "\"done\"".to_owned()),
+            ("title".to_owned(), "\"Original\"".to_owned()),
+        ])
+    );
+    assert_eq!(field_history(&ts.store, &key, "status"), status_history);
+}
+
+#[test]
 fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     let scratch = unique_dir("successor-cas");
     let mut store = open_at(&scratch, 1_000);
@@ -4181,6 +4268,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         on_behalf_of: Some("automation:triage".to_owned()),
         depth: 2,
         run: None,
+        agent_run_id: Some("run-triage".to_owned()),
     };
     let expected_row = (
         Some("agent".to_owned()),
@@ -4219,20 +4307,33 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         history_attribution(&a.store, &key),
         vec![expected_row.clone()]
     );
-    let update_row: (Option<String>, Option<String>, Option<i64>) = a
-        .store
-        .read_with(|conn| -> Result<_, CollabError> {
-            conn.query_row(
-                "SELECT actor_kind,on_behalf_of,chain_depth FROM ydoc_updates                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3                  ORDER BY seq DESC LIMIT 1",
-                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|error| CollabError::Corrupt {
-                reason: error.to_string(),
+    type UpdateRow = (
+        (Option<String>, Option<String>, Option<i64>),
+        Option<String>,
+    );
+    let update_row = |store: &dohc_engine_storage::EngineStore| -> UpdateRow {
+        store
+            .read_with(|conn| -> Result<_, CollabError> {
+                conn.query_row(
+                    "SELECT actor_kind,on_behalf_of,chain_depth,agent_run_id FROM ydoc_updates                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3                  ORDER BY seq DESC LIMIT 1",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| {
+                        Ok((
+                            (row.get(0)?, row.get(1)?, row.get(2)?),
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })
             })
-        })
-        .expect("update row attribution");
-    assert_eq!(update_row, expected_row);
+            .expect("update row attribution")
+    };
+    assert_eq!(
+        update_row(&a.store),
+        (expected_row.clone(), Some("run-triage".to_owned()))
+    );
 
     // Remote apply of the same bytes on the other device: the payload's
     // attribution persists and returns identically, and the facts carry the
@@ -4257,6 +4358,11 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         .expect("a remote apply derives facts on the receiving device");
     assert_eq!(facts.attribution.as_ref(), Some(&attribution));
     assert_eq!(facts.source, Some(("origin-a".to_owned(), 7)));
+    // The owner's other device keeps the agent run its replicated update named.
+    assert_eq!(
+        update_row(&b.store),
+        (expected_row.clone(), Some("run-triage".to_owned()))
+    );
     assert_eq!(history_attribution(&b.store, &key), vec![expected_row]);
 
     // An unattributed write stays NULL on every column: absent means absent.
@@ -4290,6 +4396,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         on_behalf_of: Some(String::new()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     };
     record_local_update(
         &mut a.store,
@@ -4326,6 +4433,7 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
             claim_id: "run-a".into(),
             automation_name: "Original name".into(),
         }),
+        agent_run_id: None,
     };
     let marker = Some(MarkerCreation {
         path: Some("notes/original.txt"),
@@ -4374,6 +4482,7 @@ fn original_record_replay_after_compaction_and_restart_binds_complete_attributio
         on_behalf_of: Some("bob".into()),
         depth: 1,
         run: None,
+        agent_run_id: None,
     };
     let delete_append = LocalAppend {
         marker,

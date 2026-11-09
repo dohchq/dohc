@@ -190,7 +190,6 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
           await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText()), { timeout: remainingMs() }).toContain(sentinels[2]!);
         });
         await desktop.page.getByTestId("engine-diff-restore-file").click();
-        await desktop.page.getByTestId("engine-diff-confirm-restore").click();
         await expect(desktop.page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
         await expect.poll(() => readFile(join(temp.rootPath, path), "utf8")).toContain(sentinels[2]!);
         const restored = await readFile(join(temp.rootPath,path),"utf8");

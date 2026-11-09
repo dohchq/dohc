@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { identityHues, palette } from "../tokens";
 import { ownPresentation, neutralPresentation, presentationColor, presentationClasses, relayPresentation, setOwnPresentation, ownAgentPresentation, bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides, subscribePresentation, goneAgentPresentation, agentTextClass, canChooseAgentColor } from "./actorPresentation";
-import { setChosenColors } from "./chosenColors";
-import { settingsWithAgent } from "../../testing/agentSettings";
+import { resetChosenColorsForTests, setChosenColors } from "./chosenColors";
+import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 afterEach(() => { clearAgentColorOverrides(); setChosenColors(DEFAULT_USER_SETTINGS); setOwnPresentation(undefined); });
 it("maps frozen relay slots and neutral, own and chosen hues in both themes", () => {
@@ -23,6 +23,52 @@ it("marks an agent no longer in Settings in subtle ink, never the default olive"
   expect(agentTextClass(goneAgentPresentation)).toBe("text-subtle");
   expect(presentationClasses(neutralPresentation, "agent")).toContain("text-agent");
   expect(canChooseAgentColor(goneAgentPresentation)).toBe(false);
+});
+
+it("colors your agent's run by its own agent in Settings, and a removed agent's in subtle ink", () => {
+  const twoAgents = { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }), codex: testAgent({ name: "Codex", hue: "blue" }) } };
+  setChosenColors(twoAgents);
+  const codex = { group: "codex-group", hue: null, self: true, agentId: "codex" } as const;
+  const nova = { group: "nova-group", hue: "rose", self: true, agentId: "default" } as const;
+  expect(presentationClasses(codex, "agent")).toContain("text-hue-blue");
+  expect(agentTextClass(codex)).toBe("text-hue-blue");
+  expect(presentationClasses(nova, "agent")).toContain("text-agent");
+  expect(canChooseAgentColor(codex)).toBe(false);
+  // A message from your agent that names no agent keeps your first agent's olive.
+  expect(presentationClasses(ownAgentPresentation, "agent")).toContain("text-agent");
+
+  const repaint = vi.fn();
+  const unsubscribe = subscribePresentation(repaint);
+  setChosenColors({ ...twoAgents, agents: { ...twoAgents.agents, codex: testAgent({ name: "Codex", hue: "rose" }) } });
+  expect(repaint).toHaveBeenCalledOnce();
+  expect(presentationClasses(codex, "agent")).toContain("text-hue-rose");
+  unsubscribe();
+
+  // Settings wins over a color chosen for the author from a post.
+  let changed: Parameters<import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]>[0] = () => undefined;
+  const stop = bindAgentColorUpdates({ onAgentColorChanged: listener => { changed = listener; return () => undefined; } }, () => "w");
+  changed({ workspaceId: "w", group: "codex-group", hue: "teal" });
+  expect(presentationClasses(codex, "agent")).toContain("text-hue-rose");
+  stop();
+
+  setChosenColors({ ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }) } });
+  expect(presentationClasses(codex, "agent")).toBe("border-subtle bg-panel text-subtle");
+  expect(agentTextClass(codex)).toBe("text-subtle");
+});
+
+it("paints your agent's run olive until Settings are read, then in its Settings color", () => {
+  resetChosenColorsForTests();
+  const codex = { group: "codex-group", hue: null, self: true, agentId: "codex" } as const;
+  expect(presentationClasses(codex, "agent")).toBe("border-agent bg-bg text-agent");
+  expect(agentTextClass(codex)).toBe("text-agent");
+  const repaint = vi.fn();
+  const unsubscribe = subscribePresentation(repaint);
+  setChosenColors({ ...DEFAULT_USER_SETTINGS, agents: { codex: testAgent({ name: "Codex", hue: "blue" }) } });
+  expect(repaint).toHaveBeenCalledOnce();
+  expect(presentationClasses(codex, "agent")).toContain("text-hue-blue");
+  unsubscribe();
+  setChosenColors(DEFAULT_USER_SETTINGS);
+  expect(agentTextClass(codex)).toBe("text-subtle");
 });
 
 it("applies the main own hue and keeps chosen human and agent colours overriding it", () => {

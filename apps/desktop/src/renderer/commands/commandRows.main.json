@@ -97,12 +97,12 @@
       "label": "View: Graph"
     },
     {
-      "id": "show-sites",
-      "label": "View: Apps"
-    },
-    {
       "id": "show-history",
       "label": "View: History"
+    },
+    {
+      "id": "open-versions",
+      "label": "Show all versions"
     },
     {
       "id": "show-app-view:apps%2FTrip%20planner",

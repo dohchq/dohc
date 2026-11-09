@@ -18,4 +18,5 @@ render avatar-dark.html   dohc-avatar-dark.png   1024 1024
 render mark-graphite.html dohc-mark-graphite.png 1024 1024
 render mark-bone.html     dohc-mark-bone.png     1024 1024
 render banner.html        dohc-social-banner.png 1280 640
+render 'banner.html#dark' dohc-readme-banner-dark.png 1280 640
 echo "done"

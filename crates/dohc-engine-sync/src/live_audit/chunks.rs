@@ -1,10 +1,23 @@
 use super::*;
+use dohc_engine_collab::live_update_application::MAX_CANCELLED_RESTORES;
 use std::io::{self, Read, Write};
 
 pub(super) const CHUNK_BYTES: usize = 4 * 1024 * 1024;
-// Native metadata fits its u32 ingress reservation. The remainder covers
-// source coordinates and the portable record wrapper, not more update bytes.
-const MAX_RECORD_BYTES: u64 = u32::MAX as u64 + 32_768;
+/// Native metadata fits its u32 ingress reservation.
+const METADATA_BYTES: u64 = u32::MAX as u64;
+/// Each other object nested in the record, and each struct range.
+const OBJECT_BYTES: u64 = 262_144;
+/// One restore cancellation an event crosses: the receipt as its native
+/// validator bounds it, in the wrapper naming an origin adoption of at most
+/// 1,024 bytes, each of which may escape to two.
+const CANCELLED_RESTORE_BYTES: u64 = (dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES
+    + r#"{"originAdoptionId":"","cancellation":}"#.len()
+    + 2 * 1024) as u64;
+/// The header, source application, source restore and content coordinate,
+/// with the record's own keys and separators.
+const WRAPPER_BYTES: u64 = 32_768;
+const MAX_RECORD_BYTES: u64 =
+    METADATA_BYTES + MAX_CANCELLED_RESTORES as u64 * (CANCELLED_RESTORE_BYTES + 1) + WRAPPER_BYTES;
 const MAX_CHUNKS: usize = MAX_RECORD_BYTES.div_ceil(CHUNK_BYTES as u64) as usize;
 
 pub(super) fn require_blob_length(
@@ -160,7 +173,8 @@ pub(super) struct ChunkReader<'a> {
     escaped: bool,
     token_length: usize,
     depth: usize,
-    bounded_container: Option<(usize, u64)>,
+    listed: bool,
+    bounded_container: Option<(usize, u64, u64)>,
     storage_failure: Option<dohc_engine_storage::StorageError>,
 }
 
@@ -179,6 +193,7 @@ impl<'a> ChunkReader<'a> {
             escaped: false,
             token_length: 0,
             depth: 0,
+            listed: false,
             bounded_container: None,
             storage_failure: None,
         })
@@ -196,9 +211,11 @@ impl<'a> ChunkReader<'a> {
     fn token(&mut self, byte: u8, position: u64) -> io::Result<()> {
         // The accepted header is bounded separately from its range array.
         // Each range also gets a bound before wire_integer can build a Value.
+        // The record's one array at depth two holds its restore cancellations,
+        // each bounded by its own contract.
         if self
             .bounded_container
-            .is_some_and(|(_, start)| position - start > 262_144)
+            .is_some_and(|(_, start, limit)| position - start > limit)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -230,10 +247,18 @@ impl<'a> ChunkReader<'a> {
                 b'{' | b'[' => {
                     self.depth += 1;
                     self.token_length = 0;
+                    if self.depth == 2 {
+                        self.listed = byte == b'[';
+                    }
                     if self.bounded_container.is_none()
                         && ((self.depth == 3 && byte == b'{') || self.depth == 4)
                     {
-                        self.bounded_container = Some((self.depth, position));
+                        let limit = if self.depth == 3 && self.listed {
+                            CANCELLED_RESTORE_BYTES
+                        } else {
+                            OBJECT_BYTES
+                        };
+                        self.bounded_container = Some((self.depth, position, limit));
                     }
                     if self.depth > 32 {
                         return Err(io::Error::new(
@@ -245,7 +270,7 @@ impl<'a> ChunkReader<'a> {
                 b'}' | b']' => {
                     if self
                         .bounded_container
-                        .is_some_and(|(depth, _)| self.depth == depth)
+                        .is_some_and(|(depth, _, _)| self.depth == depth)
                     {
                         self.bounded_container = None;
                     }
@@ -359,6 +384,13 @@ mod tests {
 
     #[test]
     fn manifest_upper_bound_fits_existing_envelope() {
+        // 643,576 receipt bytes, a 39-byte wrapper and 2,048 for the
+        // adoption ID; then the metadata, 4,095 cancellations and their
+        // separators, and the record wrapper.
+        assert_eq!(CANCELLED_RESTORE_BYTES, 645_663);
+        assert_eq!(MAX_CANCELLED_RESTORES, 4_095);
+        assert_eq!(MAX_RECORD_BYTES, 4_294_967_295 + 4_095 * 645_664 + 32_768);
+        assert_eq!(MAX_RECORD_BYTES, 6_938_994_143);
         let mut remaining = MAX_RECORD_BYTES;
         let mut chunks = Vec::new();
         while remaining > 0 {
@@ -376,10 +408,55 @@ mod tests {
             chunks,
         };
         manifest.validate().unwrap();
-        assert_eq!(manifest.chunks.len(), 1025);
+        assert_eq!(manifest.chunks.len(), 1655);
         assert!(
             serde_json::to_vec(&manifest).unwrap().len() + 16_384 < crate::MAX_PAYLOAD_JSON_BYTES
         );
+    }
+
+    #[test]
+    fn only_a_restore_cancellation_reads_past_the_object_bound() {
+        let (_scratch, _path, store) = dohc_engine_testkit::open_store();
+        store
+            .read_with(|conn| {
+                // An object of `length` bytes at depth three, under the
+                // record's `field`.
+                let read = |field: &str, length: usize| {
+                    let (open, close) = if field == "cancelledRestores" {
+                        ("[", "]")
+                    } else {
+                        ("{\"point\":", "}")
+                    };
+                    let mut object = b"{\"x\":[\"a\"".to_vec();
+                    while object.len() + 4 + 2 <= length {
+                        object.extend_from_slice(b",\"a\"");
+                    }
+                    object.resize(length - 2, b' ');
+                    object.extend_from_slice(b"]}");
+                    let mut writer = ChunkWriter::new(conn);
+                    write!(writer, "{{\"{field}\":{open}").unwrap();
+                    writer.write_all(&object).unwrap();
+                    write!(writer, "{close}}}").unwrap();
+                    let manifest = writer.finish().unwrap();
+                    let reader = io::BufReader::new(ChunkReader::new(conn, &manifest).unwrap());
+                    serde_json::from_reader::<_, serde_json::Value>(reader)
+                        .map(|_| ())
+                        .map_err(|error| error.io_error_kind())
+                };
+                let cancellation = CANCELLED_RESTORE_BYTES as usize;
+                assert_eq!(read("cancelledRestores", cancellation), Ok(()));
+                assert_eq!(
+                    read("cancelledRestores", cancellation + 2),
+                    Err(Some(io::ErrorKind::InvalidData))
+                );
+                assert_eq!(read("sourceRestore", OBJECT_BYTES as usize), Ok(()));
+                assert_eq!(
+                    read("sourceRestore", OBJECT_BYTES as usize + 2),
+                    Err(Some(io::ErrorKind::InvalidData))
+                );
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
     }
 
     #[test]

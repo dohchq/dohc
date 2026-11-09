@@ -66,10 +66,11 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
     ],
   ],
   ["blobs", ["sha256", "text"]],
-  ["snapshots", ["path"]],
+  ["snapshots", ["workspace_id", "version_id", "object_id", "path"]],
   ["ydoc_updates", ["workspace_id", "version_id", "object_id", "seq", "actor_origin_id", "actor_kind"]],
   ["replication_log", ["op_kind", "payload_json"]],
-  ["ydoc_docs", ["workspace_id", "version_id", "object_id", "path", "regime", "head_update_seq", "head_snapshot_seq"]],
+  ["ydoc_docs", ["workspace_id", "version_id", "object_id", "path", "regime", "head_update_seq", "head_snapshot_seq",
+    "lineage_claim_status"]],
   ["ydoc_snapshots", ["workspace_id", "version_id", "object_id", "up_to_seq"]],
   ["ydoc_owner_bindings", ["workspace_id", "main_version_id", "object_id", "lineage_claim_id",
     "binding_json", "relay_database_namespace", "binding_revision", "accepted_cursor"]],
@@ -316,6 +317,21 @@ export function textFileTrackedByEngine(rootPath: string, path: string): boolean
   );
 }
 
+// Whether the Y.Doc lineage of the file at `path` has claimed a replicated
+// base ("exact"), has not ("unclaimed"), or does not exist (null).
+export function ydocLineageClaimStatus(rootPath: string, path: string): string | null {
+  return withEngineDb(rootPath, (db) => {
+    const row = db
+      .prepare(
+        `SELECT d.lineage_claim_status AS status FROM ydoc_docs d JOIN snapshots s
+         ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id AND s.object_id=d.object_id
+         WHERE s.path = ?`,
+      )
+      .get(path) as { status: string } | undefined;
+    return row?.status ?? null;
+  });
+}
+
 // Replication ops whose payload carries the given plaintext needle, grouped by
 // op_kind. A ydoc.update payload is opaque Yjs binary (plaintext is not
 // searchable), so the only way typed plaintext lands in a replication op is a
@@ -442,6 +458,23 @@ export function ownerOutboxDeclarations(rootPath: string): { entries: number; pe
 // The owner's imported copy of one accepted change's audit record.
 export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAuditRecord | null {
   return withEngineDb(rootPath, (db) => readLiveAuditRecord(db, deliveryId));
+}
+
+// The last operation this engine applied from each service host origin of the workspace.
+export function appliedServiceHostSeqs(rootPath: string, workspaceId: string): Record<string, number> {
+  return withEngineDb(rootPath, (db) => Object.fromEntries(db
+    .prepare("SELECT origin_id, acked_seq FROM replication_peers WHERE workspace_id=? AND origin_id LIKE 'service-host:%'")
+    .all(workspaceId)
+    .map((row) => [String(row.origin_id), Number(row.acked_seq)]))) ?? {};
+}
+
+// Each update the engine refused for the workspace's Notices, with its own reason.
+// A Notices row shows only one reason for all the refusals it folds together.
+export function noticedRefusals(rootPath: string, workspaceId: string): { originId: string; originSeq: number; reason: string }[] {
+  return withEngineDb(rootPath, (db) => db
+    .prepare("SELECT origin_id, origin_seq, reason_message FROM replication_pending_refusals WHERE workspace_id=? AND COALESCE(report_id,'') != 'direct-rpc'")
+    .all(workspaceId)
+    .map((row) => ({ originId: String(row.origin_id), originSeq: Number(row.origin_seq), reason: String(row.reason_message) }))) ?? [];
 }
 
 export function replicationOpKindCount(rootPath: string, opKind: string): number {

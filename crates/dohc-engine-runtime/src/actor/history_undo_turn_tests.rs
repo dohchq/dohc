@@ -71,7 +71,7 @@ fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
 }
 #[test]
 fn store_work_probe_counts_each_inverse_row_in_one_statement() {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE moments(metadata_origin TEXT);")
         .unwrap();
     conn.execute_batch(INVERSE_PROBE).unwrap();
@@ -79,7 +79,8 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     conn.trace_v2(
         rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
         Some(trace_store_work),
-    );
+    )
+    .unwrap();
     conn.execute_batch("INSERT INTO moments VALUES('restore'),('restore'),('api');")
         .unwrap();
     let work = STORE_WORK.with(std::cell::Cell::get);
@@ -90,7 +91,8 @@ fn store_work_probe_counts_each_inverse_row_in_one_statement() {
     conn.trace_v2(
         rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
         Some(trace_store_work),
-    );
+    )
+    .unwrap();
     for sql in [
         "PRAGMA main.wal_checkpoint(NOOP)",
         "PRAGMA main.wal_checkpoint(PASSIVE)",
@@ -1732,13 +1734,16 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
                     dohc_engine_storage::capture_phase::enable_for_current_thread();
                     // Count inserted inverse rows, including a regression that inserts
                     // several members with one SQL statement. Keep the engine's row hook.
-                    conn.execute_batch(INVERSE_PROBE)?;
+                    conn.execute_batch(INVERSE_PROBE)
+                })
+                .map_err(StorageError::corrupt_public)?;
+            store
+                .hooks_with(|conn| {
                     conn.trace_v2(
                         rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
                             | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
                         Some(trace_store_work),
-                    );
-                    Ok::<_, rusqlite::Error>(())
+                    )
                 })
                 .map_err(StorageError::corrupt_public)?;
             Ok::<_, RuntimeError>(())
@@ -1950,16 +1955,17 @@ async fn two_thousand_members_bound_store_work_and_ydoc_wait() {
     assert_eq!(inverses, 2000, "the probe must observe every inverse row");
 }
 
-pub(in crate::actor) fn enable_work_probe(store: &EngineStore) {
+pub(in crate::actor) fn enable_work_probe(store: &mut EngineStore) {
     store
-        .read_with(|conn| {
-            conn.execute_batch(INVERSE_PROBE).unwrap();
+        .read_with(|conn| conn.execute_batch(INVERSE_PROBE))
+        .unwrap();
+    store
+        .hooks_with(|conn| {
             conn.trace_v2(
                 rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
                     | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
                 Some(trace_store_work),
-            );
-            Ok::<_, rusqlite::Error>(())
+            )
         })
         .unwrap();
 }

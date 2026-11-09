@@ -25,6 +25,11 @@ export function isDeleteKey(event: { key: string; metaKey: boolean }, platform =
   return event.key === "Delete" || (platform === "darwin" && event.metaKey && event.key === "Backspace");
 }
 
+/** The keys that open the focused item's context menu: the Menu key, and Shift+F10. */
+export function isContextMenuKey(event: { key: string; shiftKey: boolean }): boolean {
+  return event.key === "ContextMenu" || (event.shiftKey && event.key === "F10");
+}
+
 /** On macOS, Control with the primary button opens the context menu instead of clicking. */
 export function isMacContextClick(event: { button: number; ctrlKey: boolean }, platform = window.dohcDesktop?.platform): boolean {
   return platform === "darwin" && event.button === 0 && event.ctrlKey;

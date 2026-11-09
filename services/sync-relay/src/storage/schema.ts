@@ -1,4 +1,5 @@
 import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
+import {initializeWorkReferenceSchema} from "./workReferenceSchema";
 import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
 import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
 import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
@@ -15,6 +16,7 @@ import { initializeRelayAdmissionColumn } from "./relayAdmission";
 import { initializeServiceHostUploadSchema } from "./serviceHostUploads";
 import { initializeServiceKeptEditsSchema } from "./serviceKeptEdits";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
+import { initializeLiveRestoreCancellationSchema } from "./liveRestoreCancellationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
 import {
@@ -28,6 +30,8 @@ import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
+import { initializePushSchema } from "./pushSchema";
+import { initializePushDeliveries } from "./pushDeliveries";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -35,6 +39,7 @@ import {
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
 } from "./limits";
 import { initializeLinkCreationSchema } from "./linkCreationSchema";
+import { initializeAgentConnectionSchema } from "./agentConnections";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1271,6 +1276,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeServiceHostUploadSchema(db);
     initializeServiceKeptEditsSchema(db);
     initializeLiveRestoreOperationSchema(db);
+    initializeLiveRestoreCancellationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveJournalWorkspaceIndex(db);
     initializeLiveCommittedDeliverySchema(db);
@@ -1295,12 +1301,16 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationServerScheduleSchema(db);
     initializeAutomationServerUnsentRunSchema(db);
     initializeCurrentFileKeySchema(db);
+    initializeWorkReferenceSchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);
+    initializePushSchema(db);
+    initializePushDeliveries(db);
     initializeLiveClaimIndex(db);
     initializeHostedDocumentIndex(db);
     initializeServiceHostFeedIndex(db);
+    initializeAgentConnectionSchema(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
@@ -1514,7 +1524,8 @@ function initializeDeviceHostCredentialSchema(db: SqliteDb): void {
 
 export const LIVE_TICKET_TABLE = "sync_relay_live_session_tickets";
 
-const LIVE_TICKET_MIGRATION = "live-session-tickets-v1";
+const LIVE_TICKET_MIGRATION = "live-session-tickets-v2";
+const LIVE_TICKET_V1_MIGRATION = "live-session-tickets-v1";
 
 const LIVE_TICKET_SCHEMA = {
   sync_relay_live_session_tickets: `
@@ -1565,8 +1576,14 @@ CREATE TABLE sync_relay_live_session_tickets (
     )
   ),
   link_session_id TEXT CHECK (
-    (principal_kind = 'named' AND link_session_id IS NULL) OR
-    (principal_kind = 'link' AND link_session_id IS NOT NULL AND length(CAST(link_session_id AS BLOB)) BETWEEN 1 AND 512)
+    link_session_id IS NULL OR length(CAST(link_session_id AS BLOB)) BETWEEN 1 AND 512
+  ),
+  agent_connection_id TEXT CHECK (
+    agent_connection_id IS NULL OR length(CAST(agent_connection_id AS BLOB)) BETWEEN 1 AND 512
+  ),
+  CHECK (
+    (principal_kind = 'named' AND link_session_id IS NULL AND agent_connection_id IS NULL) OR
+    (principal_kind = 'link' AND (link_session_id IS NULL) <> (agent_connection_id IS NULL))
   ),
   PRIMARY KEY (ticket_id),
   FOREIGN KEY (workspace_id)
@@ -1593,7 +1610,7 @@ export const LIVE_TICKET_COLUMNS = [
   "ticket_id", "token_hash", "audience", "workspace_id", "main_version_id", "object_id",
   "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
   "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
-  "minted_at_ms", "expires_at_ms", "redeemed_at_ms", "link_session_id",
+  "minted_at_ms", "expires_at_ms", "redeemed_at_ms", "link_session_id", "agent_connection_id",
 ] as const;
 
 export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
@@ -1614,7 +1631,7 @@ function assertLiveTicketSchema(db: SqliteDb): void {
   same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
   LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
-    (name === "redeemed_at_ms" || name === "link_session_id") ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
+    (name === "redeemed_at_ms" || name === "link_session_id" || name === "agent_connection_id") ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
   same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
     [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
   [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);
@@ -1637,6 +1654,11 @@ function assertLiveTicketSchema(db: SqliteDb): void {
 function initializeLiveTicketSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LIVE_TICKET_MIGRATION) !== undefined;
   if (marked) { assertLiveTicketSchema(db); return; }
+  // A v1 table cannot name an agent's connection. Its tickets expire within 30 seconds, so it is replaced, not copied.
+  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LIVE_TICKET_V1_MIGRATION) !== undefined) {
+    db.exec(`DROP TABLE IF EXISTS ${LIVE_TICKET_TABLE}`);
+    db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(LIVE_TICKET_V1_MIGRATION);
+  }
   const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)").all(...Object.keys(LIVE_TICKET_SCHEMA));
   if (existing.length) throw new Error("unmarked live-ticket schema already exists");
   for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { liveStopError } from "../../ipc/liveEditingStop";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -8,6 +9,8 @@ import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftSt
 import { disposeEngineDocLeasesForTests, withClosedEngineDocSession } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
+import { HOST_STOP_CASES, hostStopWireError } from "../../testing/liveStopHost.test-helper";
+import { pendingStopHarness } from "../../testing/ownerLiveStop.test-helper";
 import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 import {
@@ -114,6 +117,33 @@ beforeEach(() => {
   projectionGate.pending = null;
   projectionGate.completed = 0;
   projectionGate.held = null;
+});
+
+it.each([
+  ["edits-pending", liveStopError({code: "edits-pending"}), "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."],
+  ...HOST_STOP_CASES.map(([code, sessionHost, words]) => [code, hostStopWireError(code, sessionHost, "untrusted relay text"), words] as const),
+] as const)("reopens editors and clears the recorded Stop after %s", async (_code, refusal, words) => {
+  retainDocument();
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const previous = harness.sessionId()!;
+  act(() => editDocument());
+  const h = pendingStopHarness("ws-1", "notes/big.md", "object");
+  h.relay.mockRejectedValueOnce(refusal);
+  await act(async () => {
+    await expect(withClosedEngineDocSession("ws-1", {path: "notes/big.md"}, async () => {
+      expect(harness.mainText()).toBe("seed!");
+      expect(harness.closed).toContain(previous);
+      expect(retained.snapshot.outcome).toBeNull();
+      await h.actions.stop({workspaceId: "ws-1", path: "notes/big.md"}, {workspace: {workspaceId: "ws-1"}, assertCurrent() {}});
+    })).rejects.toThrow(words);
+  });
+  await waitFor(() => expect(harness.openCount()).toBe(2));
+  expect(harness.sessionId()).not.toBe(previous);
+  expect(h.recorded()).toBeUndefined();
+  expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+  expect(h.ownerLiveStop).toHaveBeenLastCalledWith({workspaceId: "ws-1"}, "clear", "notes/big.md", h.document);
+  act(() => editDocument());
+  await waitFor(() => expect(harness.mainText()).toBe("seed!!"));
 });
 
 it.each([false, true])("flushes and closes Stop's draft before the request, then reopens it (waiting=%s)", async waiting => {
@@ -236,6 +266,34 @@ async function flushLocalBatch(): Promise<void> {
   });
 }
 
+it("receives saved state at the resolved path when opened through a case alias", async () => {
+  let report!: Parameters<typeof harness.api.onEngineYDocSaveState>[0];
+  const subscribe = harness.api.onEngineYDocSaveState.bind(harness.api);
+  vi.spyOn(harness.api, "onEngineYDocSaveState").mockImplementation(listener => {
+    report = listener;
+    return subscribe(listener);
+  });
+  retainDocument("notes/folder/a.md");
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  act(() => editDocument());
+  await flushLocalBatch();
+  expect(retained.snapshot.saveState.kind).toBe("saving");
+  act(() => report({
+    sessionId: harness.sessionId()!, workspaceId: "ws-1", path: "Notes/Folder/A.md",
+    state: { kind: "saved-here" }, seq: harness.applied.at(-1)!.seq,
+  }));
+  expect(retained.snapshot.saveState.kind).toBe("saved-here");
+  harness.emitHead({ sha256: "a".repeat(64), committed: true });
+  const lastSave = { sha256: "a".repeat(64), pairedInstalls: 0 };
+  expect(boundOutcome()).toMatchObject({ headSha256: "a".repeat(64), lastSave, pairedInstalls: 0 });
+  // A read of the head the save wrote is that save. A read of another head
+  // counts as installed, and leaves the save's receipt as it was.
+  harness.emitHead({ sha256: "a".repeat(64) });
+  expect(boundOutcome()).toMatchObject({ headSha256: "a".repeat(64), lastSave, pairedInstalls: 0 });
+  harness.emitHead({ sha256: "b".repeat(64) });
+  expect(boundOutcome()).toMatchObject({ headSha256: "b".repeat(64), lastSave, pairedInstalls: 1 });
+});
+
 it("never flips back to Saved on a timer — only a real settle report clears it", async () => {
   await retainBound();
 
@@ -285,7 +343,7 @@ it("makes a change outside dohc unsaved when typing lands after it", async () =>
 it("makes a change outside dohc unsaved when an agent's edit lands after it", async () => {
   await retainBound();
   harness.emitChangedOutside(false, 0);
-  harness.emitRemoteEdit(" agent", 1);
+  harness.emitRemoteEdit(" agent");
   expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
   expect(retained.lease.unsavedEditsPending()).toBe(true);
 });
@@ -911,16 +969,9 @@ it("sets the text aside when another file takes the document's path", async () =
 });
 
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
-  // The boundary capture snapshots the doc synchronously at the
-  // deletion event and defers only the markdown PROJECTION (the part that
-  // needs the lazy Tiptap module). Nothing before this pin distinguished
-  // that from deferring the snapshot too — both pass every earlier test,
-  // because unmount alone does not corrupt a Y.Doc's encodable state.
-  //
-  // A remote update is the real discriminator: it is not gated by
-  // `writesRefused` (only LOCAL writes are refused after deletion), so it
-  // can still land on the same doc while the projection is in flight. A
-  // synchronous snapshot is immune to it; a deferred one would pick it up.
+  // The capture snapshots the doc at the deletion event and defers only the
+  // markdown projection. A remote edit landing while that projection is in
+  // flight must not reach the text set aside: the path it edits is gone.
   await retainBound();
 
   act(() => {
@@ -933,6 +984,55 @@ it("freezes the deleted doc's bytes at the event, immune to a remote edit that l
   harness.emitRemoteEdit("+remote");
 
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+});
+
+it("keeps remote edits on a winning lineage out of a deleted note's recovery", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  harness.emitRemoteEdit("+remote");
+
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("winner");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+
+  cleanup();
+  retained.release();
+  await disposeEngineDocLeasesForTests();
+  await retained.lease.dispose();
+  drafts = observeDrafts("notes/big.md");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+});
+
+it("applies remote edits on a winning lineage while the note exists", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  harness.emitRemoteEdit("+remote");
+
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("winner+remote");
+});
+
+it("takes a head after a deletion without its edit, so a pending check settles", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+
+  harness.emitRemoteEdit("+remote", { sha256: "c".repeat(64) });
+
+  expect(boundOutcome().headSha256).toBe("c".repeat(64));
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
 });
 
 it("stores a deleted scene as portable Excalidraw JSON", async () => {

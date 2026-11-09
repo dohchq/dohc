@@ -77,6 +77,9 @@ pub struct OwnerDraftAppendInput {
     pub now_ms: i64,
     /// The agent the edit declared, kept with its delivery. Never authority.
     pub agent_declaration: Option<dohc_engine_domain::AgentDeclaration>,
+    /// The run the declared agent made the edit in. It stays on this
+    /// computer: the declaration a recipient sees never names it.
+    pub agent_run_id: Option<String>,
     pub automation_declaration: Option<dohc_engine_domain::AutomationDeclaration>,
 }
 
@@ -349,6 +352,7 @@ pub fn append_draft_cached(
                 update: input.update,
                 now_ms: input.now_ms,
                 agent_declaration: input.agent_declaration.as_ref(),
+                agent_run_id: input.agent_run_id.as_deref(),
                 automation_declaration: input.automation_declaration.as_ref(),
             },
         )?;
@@ -398,7 +402,7 @@ pub(super) fn bounded(doc: &Ydoc) -> Result<Vec<u8>, OwnerOutboxError> {
 }
 
 /// Refuse ordinary publication and settlement before either writes durable state.
-pub(crate) fn require_ordinary_write(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+pub fn require_ordinary_write(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     let observed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
         params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
@@ -447,9 +451,11 @@ pub fn install_observed_binding_in_tx(
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
+    // An adopted lineage stays the owner's after its activation's release,
+    // while its native log may hold the deliveries the release carried.
     let adopted: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-        params![b.workspace_id,b.main_version_id,b.object_id], |row| row.get(0),
+        &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)", crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0),
     ).map_err(read_sql)?;
     if adopted {
         return Err(OwnerOutboxError::ParentMismatch);
@@ -742,6 +748,7 @@ pub fn append_draft_in_tx(
             update,
             now_ms,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         },
     )
@@ -754,6 +761,7 @@ struct PreparedDraftAppend<'a> {
     update: Vec<u8>,
     now_ms: i64,
     agent_declaration: Option<&'a dohc_engine_domain::AgentDeclaration>,
+    agent_run_id: Option<&'a str>,
     automation_declaration: Option<&'a dohc_engine_domain::AutomationDeclaration>,
 }
 
@@ -769,6 +777,7 @@ fn append_prepared_draft_in_tx(
         update,
         now_ms,
         agent_declaration,
+        agent_run_id,
         automation_declaration,
     } = input;
     let binding = &draft.observed.binding;
@@ -800,12 +809,18 @@ fn append_prepared_draft_in_tx(
         None,
         Some(draft.observed.revision),
         agent_declaration,
+        agent_run_id,
         automation_declaration,
         person_edit,
     )?;
     let attribution = automation_declaration
         .map(|declaration| declaration.attribution.clone())
-        .or_else(|| agent_declaration.map(AgentDeclaration::attribution));
+        .or_else(|| {
+            agent_declaration.map(|declaration| dohc_engine_domain::ChangeAttribution {
+                agent_run_id: agent_run_id.map(str::to_owned),
+                ..declaration.attribution()
+            })
+        });
     let actor = automation_declaration
         .map(|declaration| declaration.automation_id.as_str())
         .or_else(|| agent_declaration.map(|declaration| declaration.agent_id.as_str()));
@@ -1005,6 +1020,7 @@ mod tests {
                     update: revoked_delta,
                     now_ms: 5,
                     agent_declaration: None,
+                    agent_run_id: None,
                     automation_declaration: None
                 },
                 &NoFaults
@@ -1328,6 +1344,7 @@ mod tests {
                 update,
                 now_ms: 3,
                 agent_declaration: None,
+                agent_run_id: None,
                 automation_declaration: None,
             };
             append_draft_cached(
@@ -1399,6 +1416,16 @@ mod tests {
             update: &[u8],
             agent_declaration: Option<AgentDeclaration>,
         ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+            self.append_in_run(append_key, update, agent_declaration, None)
+        }
+
+        fn append_in_run(
+            &mut self,
+            append_key: &str,
+            update: &[u8],
+            agent_declaration: Option<AgentDeclaration>,
+            agent_run_id: Option<&str>,
+        ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
             let observed = self
                 .store
                 .read_with(|c| read_observed_in(c, &self.binding))
@@ -1412,6 +1439,7 @@ mod tests {
                 update: update.to_vec(),
                 now_ms: 3,
                 agent_declaration,
+                agent_run_id: agent_run_id.map(str::to_owned),
                 automation_declaration: None,
             };
             append_draft_cached(
@@ -1494,6 +1522,7 @@ mod tests {
             update: owner.richdoc_append_paragraph("Person typing"),
             now_ms: 3,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         };
         let appended = append_draft_cached(
@@ -1554,6 +1583,7 @@ mod tests {
             update: owner.richdoc_append_paragraph("Actorless"),
             now_ms: 3,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         };
         let appended = append_draft_cached(
@@ -1600,6 +1630,7 @@ mod tests {
                     claim_id: "claim".into(),
                     automation_name: "Mark done".into(),
                 }),
+                agent_run_id: None,
             },
         };
         let input = OwnerDraftAppendInput {
@@ -1610,6 +1641,7 @@ mod tests {
             update: owner.richdoc_append_paragraph("Done"),
             now_ms: 3,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: Some(declaration.clone()),
         };
         let appended = append_draft_cached(
@@ -1785,6 +1817,82 @@ mod tests {
             refuses(&mut drafts);
             assert_eq!(drafts.append("person", &own_edit, None).unwrap(), second);
         }
+    }
+
+    #[test]
+    fn an_agent_run_binds_its_append_key_beside_the_declaration_and_survives_reopen() {
+        let declared = Some(AgentDeclaration {
+            agent_id: "trip-agent".into(),
+            on_behalf_of: Some("local-person".into()),
+            depth: 1,
+        });
+        let (dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut drafts = Drafts {
+            store,
+            cache: crate::WriterDocCache::with_limits_for_test(16, 0),
+            binding: observed.binding.clone(),
+        };
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let edit = owner.richdoc_append_paragraph("agent edit in a run");
+        // A run names only a declared agent's edit, and is a bounded identifier.
+        for (declaration, run) in [
+            (None, "run-1"),
+            (declared.clone(), ""),
+            (declared.clone(), "run\u{1}"),
+        ] {
+            assert!(matches!(
+                drafts.append_in_run("refused", &edit, declaration, Some(run)),
+                Err(OwnerOutboxError::InvalidInput(_))
+            ));
+        }
+        let first = drafts
+            .append_in_run("agent", &edit, declared.clone(), Some("run-1"))
+            .unwrap();
+        let refuses = |drafts: &mut Drafts| {
+            for run in [None, Some("run-2")] {
+                assert!(matches!(
+                    drafts.append_in_run("agent", &edit, declared.clone(), run),
+                    Err(OwnerOutboxError::AppendKeyMismatch)
+                ));
+            }
+            assert_eq!(
+                drafts
+                    .append_in_run("agent", &edit, declared.clone(), Some("run-1"))
+                    .unwrap(),
+                first
+            );
+        };
+        refuses(&mut drafts);
+        let pending = |store: &EngineStore| {
+            super::super::read_pending(store, "workspace", &first.outbox_id)
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|entry| (entry.agent_declaration, entry.agent_run_id))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            pending(&drafts.store),
+            vec![(declared.clone(), Some("run-1".into()))]
+        );
+        // The header names the run beside the declaration, never inside it.
+        let header = entry_header(&drafts.store, &first.outbox_id, first.sequence);
+        assert_eq!(header["agentRunId"], "run-1");
+        assert!(header["agentDeclaration"].get("agentRunId").is_none());
+
+        drop(drafts);
+        let mut drafts = Drafts {
+            store: EngineStore::open(&dir.join("engine.db"), 13).unwrap(),
+            cache: crate::WriterDocCache::with_limits_for_test(16, 0),
+            binding: observed.binding.clone(),
+        };
+        assert_eq!(
+            pending(&drafts.store),
+            vec![(declared.clone(), Some("run-1".into()))]
+        );
+        refuses(&mut drafts);
     }
 
     fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {

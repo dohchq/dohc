@@ -2,13 +2,17 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
+import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 import type {
   ShareViewFiles,
   ShareViewFilesTarget,
   ShareViewProjectionStatus,
   ShareViewReconcileOutcome,
 } from "./shareViewFiles";
-import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
+import {
+  withExclusiveWorkspaceOperation,
+  withStaleSensitiveWorkspaceOperation,
+} from "./workspaceAssets";
 
 const target: ShareViewFilesTarget = {
   kind: "mount",
@@ -20,16 +24,21 @@ const validRepair: ShareViewReconcileOutcome = {
   kind: "repair",
   repairedPaths: 0,
   unjournalablePaths: [],
-  collisionRecordQuarantined: false,
+  failedPaths: [],
 };
+
+const damagedRecord = new Error("record unreadable");
 
 function owner(input?: {
   statuses?: ShareViewProjectionStatus[];
-  repair?: ShareViewReconcileOutcome;
+  repair?: ShareViewReconcileOutcome | Error;
 }) {
   const statuses = [...(input?.statuses ?? [{ state: "current" }, { state: "current" }])];
   const projectionStatus = vi.fn(async () => statuses.shift() ?? { state: "current" as const });
-  const reconcile = vi.fn(async () => input?.repair ?? validRepair);
+  const reconcile = vi.fn(async () => {
+    if (input?.repair instanceof Error) throw input.repair;
+    return input?.repair ?? validRepair;
+  });
   return {
     files: { projectionStatus, reconcile } satisfies Pick<
       ShareViewFiles,
@@ -113,7 +122,6 @@ describe("createOwnedProjectionRepairer", () => {
         capturedPaths: 0,
         repairedPaths: 0,
         unjournalablePaths: [],
-        collisionRecordQuarantined: false,
       },
     });
 
@@ -124,9 +132,9 @@ describe("createOwnedProjectionRepairer", () => {
 
   it.each([
     {
-      name: "a quarantined collision record",
-      repair: { ...validRepair, collisionRecordQuarantined: true },
-      refusal: /damaged shared file recovery record/i,
+      name: "a damaged collision record",
+      repair: damagedRecord,
+      refusal: /record unreadable/,
     },
     {
       name: "an unjournalable path",
@@ -143,9 +151,20 @@ describe("createOwnedProjectionRepairer", () => {
     await expect(
       ensureCurrent(
         harness.files,
-        `dohc-owned-projection-${repair.kind}`,
+        `dohc-owned-projection-${repair instanceof Error ? "damaged-record" : repair.kind}`,
       ),
     ).rejects.toThrow(refusal);
+  });
+
+  it("passes a refusal from repair through unchanged", async () => {
+    const refusal = await sharedViewRefusal();
+    const harness = owner();
+    harness.reconcile.mockRejectedValue(refusal);
+    await expect(ensureCurrent(harness.files, "dohc-refused-repair")).rejects.toBe(refusal);
+    expect(harness.projectionStatus).toHaveBeenCalledOnce();
+    const failure = new Error("store unavailable");
+    harness.reconcile.mockRejectedValue(failure);
+    await expect(ensureCurrent(harness.files, "dohc-unavailable-repair")).rejects.toBe(failure);
   });
 
   it("waits for the workspace's exclusive lease before repairing", async () => {
@@ -181,5 +200,95 @@ describe("createOwnedProjectionRepairer", () => {
     await holding;
     await repairing;
     expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  const pending: ShareViewProjectionStatus = {
+    state: "pending",
+    pendingPathCount: 1,
+    pendingPaths: ["a.md"],
+    collisionPathCount: 0,
+    collisionPaths: [],
+    pullInFlight: false,
+  };
+
+  it.each<{
+    name: string;
+    repair: ShareViewReconcileOutcome | Error;
+    after?: ShareViewProjectionStatus | Error;
+    writeLands?: boolean;
+    refusal?: RegExp;
+  }>([
+    { name: "lets a write queued behind a no-op repair land", repair: validRepair, writeLands: true },
+    { name: "refuses a write queued behind a repair that restored a path", repair: { ...validRepair, repairedPaths: 1 } },
+    {
+      name: "refuses a write queued behind a repair that found a damaged record",
+      repair: damagedRecord,
+      refusal: /record unreadable/,
+    },
+    {
+      name: "refuses a write queued behind a repair that found an unjournalable path",
+      repair: { ...validRepair, unjournalablePaths: [{ path: "large.md", reason: "oversized-text" }] },
+      refusal: /large\.md/,
+    },
+    {
+      name: "refuses a write queued behind a repair that left the projection pending",
+      repair: validRepair,
+      after: pending,
+      refusal: /still being restored/i,
+    },
+    { name: "refuses a write queued behind a repair whose capture gave up on a path", repair: { ...validRepair, failedPaths: ["docs/a.md"] } },
+    {
+      name: "refuses a write queued behind a repair that left the projection unavailable",
+      repair: validRepair,
+      after: { state: "unavailable" },
+      refusal: /still being restored/i,
+    },
+    {
+      name: "refuses a write queued behind a repair whose status read failed",
+      repair: validRepair,
+      after: new Error("status unreadable"),
+      refusal: /status unreadable/,
+    },
+    {
+      name: "refuses a write queued behind an outcome from the wrong reconcile operation",
+      repair: { kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] },
+      refusal: /invalid result/i,
+    },
+    {
+      name: "refuses a write queued behind a repair outcome with no repaired-path count",
+      repair: { kind: "repair", unjournalablePaths: [], failedPaths: [] } as unknown as ShareViewReconcileOutcome,
+    },
+    {
+      name: "refuses a write queued behind a repair outcome with no failed-path list",
+      repair: { kind: "repair", repairedPaths: 0, unjournalablePaths: [] } as unknown as ShareViewReconcileOutcome,
+    },
+    {
+      name: "refuses a write queued behind a repair outcome with a field the check does not name",
+      repair: { ...validRepair, restoredFromBackup: true } as ShareViewReconcileOutcome,
+    },
+    { name: "refuses a write queued behind a repair that failed", repair: new Error("disk full"), refusal: /disk full/ },
+  ])("$name", async ({ name, repair, after = { state: "current" }, writeLands = false, refusal }) => {
+    const rootPath = join(tmpdir(), `dohc-owned-projection-write-${name.replaceAll(" ", "-")}`);
+    const statuses: Array<ShareViewProjectionStatus | Error> = [{ state: "current" }, after];
+    let write: Promise<string> | undefined;
+    const repairing = createOwnedProjectionRepairer({
+      projectionStatus: vi.fn(async () => {
+        const status = statuses.shift() ?? { state: "current" as const };
+        if (status instanceof Error) throw status;
+        return status;
+      }),
+      reconcile: vi.fn(async () => {
+        // The write arrives while the repair holds the workspace, so it is
+        // admitted before the repair ends and runs after it.
+        write = withStaleSensitiveWorkspaceOperation(rootPath, async () => "written");
+        if (repair instanceof Error) throw repair;
+        return repair;
+      }),
+    })({ rootPath, target });
+
+    if (refusal) await expect(repairing).rejects.toThrow(refusal);
+    else await repairing;
+    if (writeLands) await expect(write).resolves.toBe("written");
+    else await expect(write).rejects.toThrow(/changed before this write started/);
   });
 });

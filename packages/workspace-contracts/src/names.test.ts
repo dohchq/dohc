@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vitest";
-import { nameSlug, nameByteLength, isPortableNamePath, truncateName } from "./names";
+import { cutText, nameSlug, nameByteLength, isPortableNamePath, truncateName } from "./names";
 import { scanMentionTokens, normalizeHandle, activeMentionQuery } from "./chatMentions";
+
+it("cuts text to its limit with no space before the …", () => {
+  expect(cutText("Pack the tent", 13)).toBe("Pack the tent");
+  expect(cutText("Pack the tent", 8)).toBe("Pack th…");
+  expect(cutText("Pack the tent", 10)).toBe("Pack the…");
+});
 
 const cases: Array<{ name: string; input: string; slug: string }> = JSON.parse(readFileSync(new URL("../../../crates/dohc-engine-domain/tests/shared/names.json", import.meta.url), "utf8"));
 it.each(cases)("shares the engine slug: $name", ({ input, slug }) => {

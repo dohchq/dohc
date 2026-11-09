@@ -22,7 +22,7 @@ const FORMS: ReadonlyArray<{ form: UrlForm; label: string; icon: LucideIcon; tes
 
 const ROW_BUTTON =
   "flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] transition-colors duration-75";
-const ROW_BUTTON_TONE = { rest: "text-muted hover:bg-hover hover:text-ink", current: "bg-selected text-ink" };
+const ROW_BUTTON_TONE = { rest: "text-muted hover:bg-hover hover:text-ink", current: "bg-selected text-ink font-medium" };
 
 // The row itself, without a place: the editor floats it under the pasted
 // line, and the states page draws it in place. Before a choice it offers the

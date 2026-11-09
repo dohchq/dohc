@@ -20,6 +20,7 @@ fn solo_typing_credits_deltas_but_not_full_state_bases() {
                 on_behalf_of: Some("owner-account".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             is_base,
         );
@@ -83,11 +84,13 @@ fn ordinary_update_context_does_not_infer_a_person_for_declared_work() {
         (Some("agent"), ChangeActorKind::Agent),
         (Some("automation"), ChangeActorKind::Automation),
     ] {
+        // The replicated update carries an agent's run to the owner's devices.
         let attribution = ChangeAttribution {
             actor_kind: kind,
             on_behalf_of: Some("owner-account".into()),
             depth: 0,
             run: None,
+            agent_run_id: (kind == ChangeActorKind::Agent).then(|| "run-1".to_owned()),
         };
         let payload = crate::ydoc_update_payload(
             &key,
@@ -452,6 +455,9 @@ fn a_fresh_unavailable_mark_pushes_retries_and_echoes_exactly() {
         .unwrap();
     assert_eq!(client.transport().pushes.lock().unwrap()[1].ops, first);
     *client.transport().pull.lock().unwrap() = Some(PullResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
+        reference_has_more: false,
         ops: first,
         next_cursor: 2,
         has_more: false,
@@ -546,6 +552,9 @@ fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
             .unwrap();
         assert_eq!(client.transport().pushes.lock().unwrap()[1].ops, first);
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: first,
             next_cursor: 2,
             has_more: false,
@@ -580,6 +589,9 @@ fn queued_agent_and_automation_authors_push_and_echo_unchanged() {
         assert_eq!(pushed, stored);
         assert_eq!(pushed[1].payload, legacy);
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: stored,
             next_cursor: 2,
             has_more: false,
@@ -767,6 +779,9 @@ fn assert_unproven_authors_marked_before_first_push(authors: serde_json::Value) 
         let pushed = client.transport().pushes.lock().unwrap()[0].ops.clone();
         assert_eq!(pushed, ops);
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: pushed,
             next_cursor: 2,
             has_more: false,

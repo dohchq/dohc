@@ -9,7 +9,7 @@ afterEach(cleanup);
 const revision = { definition: { tables: [{ sqlName: "people", name: "Registrations", fields: [{ sqlColumn: "name", name: "Name" }, { sqlColumn: "id", name: "Registration" }] }] } } as DatasetRevision;
 function fixture(): MigrationDataPreviewProps {
   return { workspaceId: "workspace-a", preparationId: "review-a", previousRevision: revision, revision,
-    preview: { tables: [{table: "people", beforeRows: 2, afterRows: 2, changedRows: 2}], firstPage: { changes: [{ table: "people", kind: "update", key: { id: "first" }, before: {name: "Before", amount: {type: "integer", value: "9007199254740993"}}, after: {name: "After", amount: null} }], nextCursor: "next" } },
+    preview: { tables: [{table: "people", beforeRows: 2, afterRows: 2, changedRows: 2, deletedRows: 0, beforeValues: {}, afterValues: {}, clearedValues: {}}], firstPage: { changes: [{ table: "people", kind: "update", key: { id: "first" }, before: {name: "Before", amount: {type: "integer", value: "9007199254740993"}}, after: {name: "After", amount: null} }], nextCursor: "next" } },
     onLoad: vi.fn<MigrationDataPreviewProps["onLoad"]>(async () => ({ changes: [{ table: "people", kind: "delete", key: {id: "last"}, before: {name: "Removed"}, after: null }], nextCursor: null })), onError: vi.fn() };
 }
 it("shows exact changed values and loads bounded pages on request", async () => {

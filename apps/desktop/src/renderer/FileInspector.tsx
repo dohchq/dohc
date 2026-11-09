@@ -4,12 +4,14 @@ import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { filenameStem, MarkdownView, type HeadingTarget, type PageEditor, type ScrollTarget } from "./MarkdownView";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   DocumentControls,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   ViewActions,
   OrphanedDraftNotices,
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
@@ -311,6 +313,8 @@ type FileInspectorProps = {
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
+  // The engine holds a change to this lossy note until someone chooses Edit anyway.
+  changeHeld?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -364,6 +368,8 @@ export const FileInspector = memo(function FileInspector(
     props.path,
     props.engineVersionKey,
   );
+  const currentDocument = useRef(key);
+  currentDocument.current = key;
   const localBuffer = useRetainedLocalDocument(key);
   const fileKind = fileKindForPath(props.path);
   const kind = fileKind.displayKind;
@@ -455,8 +461,8 @@ export const FileInspector = memo(function FileInspector(
   // unmounts — and a version switch that removes the file bumps refreshKey and
   // engineVersionKey together, so the reread ENOENTs before the queued open
   // answers. The child went with the branch, the refusal landed on nobody, and
-  // the user was told "Couldn't read this file": true of the read, silent about
-  // the version.
+  // the user was told "dohc could not read this file": true of the read,
+  // silent about the version.
   //
   // `enabled` waits for the read to answer, so this opens no earlier than it
   // used to. A scene can open after a truncated read because the engine owns
@@ -512,17 +518,27 @@ export const FileInspector = memo(function FileInspector(
   // accepted saving would rewrite: the session seeded from them records them
   // as its source. A session that records another source, as when another
   // pane reloads a change made outside dohc into the shared session, needs
-  // its own check and consent.
-  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  // its own check and consent. So does a session that installs another
+  // state of the file, as a restore does. `installs` is the session's count
+  // of those at consent, which is none when consent comes before the session
+  // opens with it.
+  const [editAnyway, setEditAnyway] = useState<{
+    open: string; source: string | null; headSha256: string | null | undefined; installs: number;
+  } | null>(null);
   const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
+  // Edit anyway covers one save. Once that save commits, the open goes on as
+  // an ordinary checked note in the same editor while the file holds what
+  // this session saved last.
+  const [converted, setConverted] = useState<string | null>(null);
+  const convertedOpen = converted === lossyOpen;
   // A session that binds a different note from the one checked, as when the
   // file changed before the open, closes once its own check says lossy. It
   // stays closed until a read brings other bytes; the session that then
   // opens is checked in turn.
   const [sessionLossy, setSessionLossy] = useState<{ open: string; hash: string | null } | null>(null);
   const sessionRefused = sessionLossy?.open === lossyOpen && (contentHash === null || sessionLossy.hash === contentHash);
-  const allowed = consented ? "clear" : sessionRefused ? "lossy" : checked.state;
+  const allowed = consented || convertedOpen ? "clear" : sessionRefused ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -534,27 +550,50 @@ export const FileInspector = memo(function FileInspector(
       (large ? allowed !== "lossy" : allowed === "clear") &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
+    allowLossySourceSha256: consented && editAnyway?.source ? editAnyway.source : undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
   });
   useEffect(() => setBound(engine.available), [engine.available]);
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
-  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
+  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source)
+    && (!engine.available || (engine.headSha256 === editAnyway.headSha256
+      && engine.pairedInstalls === editAnyway.installs));
+  // This session saved over the source the person accepted with nothing
+  // installed in between, and the doc is still that save's: nothing
+  // installed since, or a read of the head it wrote. The note still records
+  // that source, or the engine has since cleared it.
+  const saved = engine.lastSave;
+  const conversionCommitted = consented && !editingAnyway && saved !== null
+    && saved.pairedInstalls === editAnyway.installs
+    && (engine.pairedInstalls === saved.pairedInstalls || engine.headSha256 === saved.sha256)
+    && (boundSource === editAnyway.source || boundSource === undefined);
+  const session = useBoundNoteCheck({
+    open: lossyOpen,
+    // Edit anyway already accepted what saving does. Received shares, the only
+    // sessions with a null head, never offer it, so their source changes stay checked.
+    doc: checksLossyNote && !editingAnyway ? engine.doc : null,
+    headSha256: engine.headSha256,
+  });
   useEffect(() => {
-    if (consented && !editingAnyway) {
+    if (conversionCommitted) {
+      setEditAnyway(null);
+      setSessionLossy(null);
+      setConverted(lossyOpen);
+    } else if (consented && !editingAnyway && engine.headSha256 !== undefined) {
+      // A head that is unknown waits for the state it pairs with.
       setEditAnyway(null);
       // The shared session has other bytes. Read them before asking again.
       setStaleConsentRead({ open: lossyOpen, seq: readSeq });
       refreshAfterConflict();
+    } else if (convertedOpen && (session === "lossy"
+      || (engine.headSha256 !== undefined && engine.headSha256 !== engine.lastSave?.sha256))) {
+      // The file changed outside dohc. Its own check decides from here.
+      setConverted(null);
     }
-  }, [consented, editingAnyway, lossyOpen, readSeq, refreshAfterConflict]);
-  const session = useBoundNoteCheck({
-    open: lossyOpen,
-    // Edit anyway already accepted what saving does.
-    doc: checksLossyNote && !editingAnyway ? engine.doc : null,
-    checkedHash: checked.checkedHash,
-  });
+  }, [consented, editingAnyway, conversionCommitted, convertedOpen, session,
+    engine.headSha256, engine.lastSave, lossyOpen, readSeq, refreshAfterConflict]);
   useEffect(() => {
     if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
   }, [session, lossyOpen, contentHash]);
@@ -633,9 +672,9 @@ export const FileInspector = memo(function FileInspector(
       : undefined;
   // An engine document that BOUND does not need the file read: the canonical
   // Y.Doc is the content, and main holds the live session. Without this, a
-  // read that failed before a successful retry left the user at "Couldn't
-  // read this file." with no document and no way back, while the session it
-  // describes was live.
+  // read that failed before a successful retry left the user at "dohc could
+  // not read this file." with no document, while the session it describes
+  // was live.
   const engineDocBound = engine.available && engine.doc !== null;
   // Consume the jump after the child view's own effects applied it (child
   // effects run before this parent effect). Text views wait for the loaded
@@ -701,8 +740,10 @@ export const FileInspector = memo(function FileInspector(
                 ? "dohc could not save this drawing. Copy your set-aside drawing to keep it."
                 : kind === "drawing" && engine.readOnlyWhileEditing
                   ? "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
+          : engine.permanentFailureWhileEditing
+            ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
           : engine.readOnlyWhileEditing
-            ? "This document became read-only before your edit saved. Copy your text to keep it."
+            ? "This document became read-only before your edit saved. Copy your edits to keep them."
             : undefined
       }
       replacedDraftIds={engine.replacedDraftIds}
@@ -716,7 +757,7 @@ export const FileInspector = memo(function FileInspector(
   const closedDocumentControls = (opening: boolean) =>
     kind === "markdown" ? (
       <DocumentControls
-        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : undefined }}
+        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : "dohc could not open this file." }}
         menu={{
           workspaceId: props.workspaceId,
           reportError: props.onButtonError,
@@ -809,11 +850,10 @@ export const FileInspector = memo(function FileInspector(
             branch withholds. */}
         {recoveryNotices}
         {error ? (
-          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file.">
-            {/* A note opens only once a read checks it, so reading again is its way back. */}
-            {checksLossyNote ? (
-              <SecondaryButton data-testid="file-read-retry" onClick={refreshAfterConflict}>Try again</SecondaryButton>
-            ) : null}
+          <EmptyState icon={TriangleAlert} tone="danger" title="dohc could not read this file.">
+            {/* Reading again is every text file's way back: a read that met a
+                locked file or a brief disk error can pass the next time. */}
+            <SecondaryButton data-testid="file-read-retry" onClick={refreshAfterConflict}>Try again</SecondaryButton>
           </EmptyState>
         ) : kind === "markdown" ? (
           // Where the title and the first lines land when the document opens:
@@ -869,7 +909,20 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
-            onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
+            changeHeld={props.changeHeld}
+            // A shared view's session drops Edit anyway's consent, so a
+            // received share doesn't offer it (#2991).
+            onEditAnyway={props.receivedShare ? undefined : () => {
+              const source = typeof boundSource === "string" ? boundSource : contentHash;
+              setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash,
+                installs: engine.available ? engine.pairedInstalls : 0 });
+              if (engine.available && source) {
+                void bridge().retryEngineYDocSave({ workspaceId: props.workspaceId, path: props.path,
+                  allowLossySourceSha256: source }).catch((error: unknown) => {
+                  if (currentDocument.current === key) props.onButtonError?.(lossyNoteRefusal(props.path), error, retryEngineOpen);
+                });
+              }
+            }}
             onRetryHeldCapture={props.captureHeld && props.onRetryHeldCapture ? () => props.onRetryHeldCapture?.(props.path) : undefined}
             onRetryEngineOpen={retryEngineOpen}
             onReloadChangedOutside={reloadChangedOutside}
@@ -955,8 +1008,9 @@ export const FileInspector = memo(function FileInspector(
             contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
-            testId={kind === "json" ? "view-json" : "view-text"}
-            language={kind === "json" ? "json" : extensionOf(props.path) || "text"}
+            // Only a .json file claims JSON; the other data files keep the text view.
+            testId={extensionOf(props.path) === "json" ? "view-json" : "view-text"}
+            language={extensionOf(props.path) || "text"}
             workspaceId={props.workspaceId}
             path={props.path}
             truncated={truncated}

@@ -1,13 +1,31 @@
 import { z } from "zod";
 
+// Claude Code flags that read a file or folder.
+const CLAUDE_PATH_FLAGS = new Set(["--settings", "--mcp-config", "--plugin-dir", "--add-dir", "--system-prompt-file", "--append-system-prompt-file", "--agents", "--debug-file"]);
+
 export const AgentLaunchProfile = z.object({
   tool: z.enum(["claude", "codex"]),
   executable: z.string().min(1).max(2048).refine(
     (value) => /^(?:\/|[a-z]:[\\/]|\\\\)/iu.test(value) && !/[\r\n\0]/u.test(value),
     "Choose an absolute executable path.",
   ),
-}).strict();
+  // The person's own flags, at most as long as a typed command.
+  arguments: z.array(z.string().refine((value) => !/[\r\n\0]/u.test(value)))
+    .max(2048).refine((values) => values.join(" ").length <= 4096).optional(),
+}).strict().refine((profile) => ownFlagsProblem(profile) === null);
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
+
+// The first rule the person's own flags break. Saving and each run refuse
+// them. Own flags start with a flag, so none is read as a subcommand. A bare
+// -- would turn dohc's flags after them into prompt text. A last path flag
+// would take dohc's next argument as a path in the workspace.
+export function ownFlagsProblem(profile: { tool: string; arguments?: readonly string[] }): string | null {
+  const flags = profile.arguments ?? [];
+  if (flags.length > 0 && !/^-[^-]|^--./u.test(flags[0]!)) return "The first word after the program must be a flag, such as --model.";
+  if (flags.includes("--")) return "Its flags cannot include a bare --.";
+  if (profile.tool === "claude" && CLAUDE_PATH_FLAGS.has(flags.at(-1) ?? "")) return "Its last flag needs a file or folder after it.";
+  return null;
+}
 
 // How dohc starts an agent: a tool it knows, or the person's own command.
 export const AgentLaunch = z.union([
@@ -23,8 +41,38 @@ export function launchProfile(launch: AgentLaunch): AgentLaunchProfile | undefin
 }
 
 /** The chosen tool, else the typed command, else null for neither. */
-export function launchFrom(profile: AgentLaunchProfile | undefined, command: string): AgentLaunch | null {
-  return profile ?? (command.trim() ? { command: command.trim() } : null);
+export function launchFrom(profile: AgentLaunchProfile | undefined, command: string, current?: AgentLaunchProfile): AgentLaunch | null {
+  return profile ?? launchFromCommand(command, current);
+}
+
+/**
+ * What a typed command saves. Only detection picks a tool's program, so a
+ * command keeps the current profile only while it starts that same program.
+ * The rest are the person's own flags. Any other command runs as typed.
+ */
+export function launchFromCommand(command: string, current?: AgentLaunchProfile): AgentLaunch | null {
+  const trimmed = command.trim();
+  if (!trimmed) return null;
+  let tokens: string[];
+  try {
+    tokens = tokenizeRunnerCommand(trimmed);
+  } catch {
+    return { command: trimmed };
+  }
+  const [executable = "", ...flags] = tokens;
+  if (!current || executable !== current.executable) return { command: trimmed };
+  const profile = AgentLaunchProfile.safeParse({ tool: current.tool, executable, ...(flags.length > 0 ? { arguments: flags } : {}) });
+  return profile.success ? profile.data : { command: trimmed };
+}
+
+const OWN_FLAGS_HINT = "Flags you add apply only to runs you start, and can change what dohc adds.";
+
+/** The line under a command field: what dohc adds when it starts the command. */
+export function launchCommandHint(launch: AgentLaunch | null): string {
+  const tool = launch ? launchProfile(launch)?.tool : undefined;
+  return tool === "claude" ? `dohc adds its reply tool. The conversation arrives through stdin. ${OWN_FLAGS_HINT}`
+    : tool === "codex" ? `dohc adds its reply tool and sandbox. The conversation arrives through stdin. ${OWN_FLAGS_HINT}`
+    : "dohc runs this command as typed. The conversation arrives through stdin.";
 }
 export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 
@@ -32,18 +80,23 @@ export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 // notice and the band in Chats.
 export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
 
+// The oldest Claude Code dohc starts. dohc checks it in Settings and again
+// before each run.
+export const CLAUDE_MIN_VERSION = "2.1.316";
+
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
   if (tool !== "claude" || !version) return false;
   const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(version);
   if (!match) return false;
-  const [, major, minor, patch] = match.map(Number);
-  return major! > 2 || (major === 2 && (minor! > 1 || (minor === 1 && patch! >= 259)));
+  const [major, minor, patch] = match.slice(1).map(Number) as [number, number, number];
+  const [minMajor, minMinor, minPatch] = CLAUDE_MIN_VERSION.split(".").map(Number) as [number, number, number];
+  return major !== minMajor ? major > minMajor : minor !== minMinor ? minor > minMinor : patch >= minPatch;
 }
 
 export const AGENT_TOOLS = [
   { id: "claude", name: "Claude Code", command: "claude", authArgs: ["auth", "status"],
-    permissions: "Edits workspace files and replies without asking. Other actions use your Claude permissions; approval requests are denied." },
+    permissions: "Edits workspace files and uses dohc's tools without asking. Other actions use your Claude permissions; approval requests are denied." },
   { id: "codex", name: "Codex", command: "codex", authArgs: ["login", "status"],
     permissions: "Workspace-write sandbox. Runs without approval prompts." },
   { id: "opencode", name: "OpenCode", command: "opencode", authArgs: ["auth", "list", "--pure"],
@@ -53,22 +106,89 @@ export const AGENT_TOOLS = [
 ] as const;
 
 // runArguments holds what one run adds: the dohc MCP server it replies
-// through and, for Codex, its sandbox and trust (codexRunConfig.ts).
-export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = []): string[] {
+// through and, for Codex, its sandbox and trust (codexRunConfig.ts). The
+// person's own flags come right after the subcommand, so where they set an
+// option dohc sets too, dohc's later one wins. A reply-only run leaves them
+// out, as it leaves out the person's saved approvals and hooks.
+// A read-only Claude Code run has only the built-in tools that read and only
+// the run's dohc server; a read-only Codex run gets that from codexRunConfig,
+// and loads none of the person's saved command rules. `codex mcp list`
+// takes no --ignore-rules, so it stays out of runArguments.
+export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
+  const own = readOnly ? [] : profile.arguments ?? [];
+  // If the person's last flag needs a value, it takes the next argument. That
+  // argument repeats one dohc sets again later, so a name or number taking it
+  // changes nothing. A path flag can't be last (CLAUDE_PATH_FLAGS).
+  const repeat = own.length === 0 ? [] : [profile.tool === "claude" ? "--setting-sources=user" : "--config=approval_policy=never"];
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
+  // mcp__dohc allows every tool the run's dohc server offers.
+  // --restricted drops the person's settings files too, and with them their
+  // hooks and plugins; --disable-slash-commands drops their skills.
+  const claudeTools = readOnly
+    ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+    : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
+  // Codex prints events with --json. Its other output repeats the prompt, the whole thread, into the run log.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
-    : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", ...own, ...repeat, "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
+    : ["exec", ...own, ...repeat, "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "--json", "-"];
 }
 
+// Double quotes group, and a backslash escapes only a double quote or
+// another backslash, so a Windows path reads as typed.
+export function tokenizeRunnerCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let token = "";
+  let inDoubleQuotes = false;
+  let tokenStarted = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (character === '"') {
+      inDoubleQuotes = !inDoubleQuotes;
+      tokenStarted = true;
+      continue;
+    }
+    if (character === "\\") {
+      const next = command[index + 1];
+      if (next === '"' || next === "\\") {
+        token += next;
+        tokenStarted = true;
+        index += 1;
+        continue;
+      }
+    }
+    if (/\s/u.test(character) && !inDoubleQuotes) {
+      if (tokenStarted) {
+        tokens.push(token);
+        token = "";
+        tokenStarted = false;
+      }
+      continue;
+    }
+    token += character;
+    tokenStarted = true;
+  }
+  if (inDoubleQuotes) {
+    throw new Error("Runner command has an unterminated double quote.");
+  }
+  if (tokenStarted) tokens.push(token);
+  if (tokens.length === 0 || !tokens[0]) {
+    throw new Error("Configure a runner command before dispatching.");
+  }
+  return tokens;
+}
+
+// The text tokenizeRunnerCommand reads back as value. A backslash doubles
+// only beside another backslash, before a double quote, or at the end.
 function quoteRunnerToken(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  const escaped = value.replace(/\\+(?="|$)|\\{2,}|"/gu, (match) => match === '"' ? '\\"' : match.repeat(2));
+  return value === "" || /[\s"]/u.test(value) ? `"${escaped}"` : escaped;
 }
 
+/** The command a person reads and edits. For a profile, dohc's own flags stay out of it. */
 export function launchCommand(launch: AgentLaunch): string {
   return "tool" in launch
-    ? [quoteRunnerToken(launch.executable), ...agentProfileArguments(launch).map((arg) => /\s/u.test(arg) ? quoteRunnerToken(arg) : arg)].join(" ")
+    ? [launch.executable, ...(launch.arguments ?? [])].map(quoteRunnerToken).join(" ")
     : launch.command.trim();
 }
 

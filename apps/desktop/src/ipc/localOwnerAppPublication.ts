@@ -4,9 +4,12 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { isShareablePath } from "@dohc/security-contract/share-selector";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { prepareLocalAppPublication } from "../workspaces/ownerAppPublication";
+import type { DatasetRevision } from "@dohc/security-contract/dataset";
+import { displayAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import { prepareLocalAppPublication, readLocalAppSource } from "../workspaces/ownerAppPublication";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
+import { hasGeneratedDatasetSources } from "../workspaces/datasetFieldMigration";
 
 export function createLocalOwnerAppPublicationHandler<Workspace extends { workspaceId: string }, Operation extends { workspace: Workspace; signal: AbortSignal; session?: { generation: number }; scope?: string; assertCurrent(): void }>(deps: {
   datasetForWorkspace(workspace: Workspace, signal: AbortSignal): Promise<Pick<LocalDatasetHost, "approvedArtifacts" | "apps">>;
@@ -20,7 +23,7 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
   const preparing = new Set<string>();
   return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution?: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null> => {
     const agent = parseApprovalAgent(attribution);
-    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" &&
+    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "checkLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" &&
       input.action !== "withdraw" && input.action !== "revokeCollection") return null;
     const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
     current();
@@ -59,33 +62,46 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
       return OwnerAppPublicationResult.parse({ kind: "localListed", publications: local.apps.list(input.appRoot) });
     }
+    if (input.action === "checkLocal") {
+      const capture = await deps.flushCapture(operation.workspace); current();
+      const source = await deps.withAdapter(operation.workspace, adapter => readLocalAppSource(input, {
+        adapter, signal: operation.signal, assertCurrent: current, deferredWrites: capture.deferredWrites,
+      }));
+      current();
+      if (!source) throw new Error("dohc could not read this app's source. Restart dohc and try again.");
+      return OwnerAppPublicationResult.parse({ kind: "localChecked", appRoot: input.appRoot, ...source });
+    }
     if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
     for (const entry of pending.values()) if (entry.callerKey === callerKey) entry.clear();
     if (pending.size + preparing.size >= 8) throw new Error("Too many apps await approval. Cancel another preparation and try again.");
     preparing.add(callerKey);
     try {
       const capture = await deps.flushCapture(operation.workspace); current();
+      let dataset: { revision: DatasetRevision; schemaSql: string } | undefined;
       const prepared = await deps.withAdapter(operation.workspace, adapter => prepareLocalAppPublication(input, {
         adapter, signal: operation.signal, assertCurrent: current, compile: deps.compile, deferredWrites: capture.deferredWrites,
         resolveDatasetRevision: async binding => {
           const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
           const approved = local.approvedArtifacts(binding.datasetId);
           if (!approved.active) throw new Error("This Collection is unavailable on this device.");
+          dataset = approved;
           return approved.revision;
         },
       }));
       current();
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const candidate = prepared.candidate;
-      if (!candidate.capabilities[0]) throw new Error("Connect this app to a Collection before preparing app data.");
       const approvalId = randomUUID(), digest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
       const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
       pending.set(approvalId, { prepared, workspaceId: input.workspaceId, callerKey, scope: operation.scope ?? callerKey, signal: operation.signal, digest, clear });
       operation.signal.addEventListener("abort", clear, { once: true });
+      // The digest binds the candidate. Review app also gets what each operation does, from the revision the candidate names.
+      const shown = candidate.capabilities.map(capability => capability.kind === "dataset" && dataset
+        ? displayAppDatasetCapability(capability, dataset.revision, hasGeneratedDatasetSources(dataset.revision, dataset.schemaSql)) : capability);
       return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest: digest, appRoot: candidate.appRoot,
         versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path),
-        capabilities: candidate.capabilities, externalNetwork: true, local: true });
+        capabilities: shown, externalNetwork: true, local: true });
     } finally { preparing.delete(callerKey); }
   };
 }

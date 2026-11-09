@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_SEPARATOR, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
+import { MENU_SEPARATOR, MENU_SHORTCUT, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
 
 function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
@@ -114,6 +114,88 @@ describe("Menu", () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
+  // A context menu has no trigger: it opens at a point and gives focus back
+  // to what had it, such as the row that was right-clicked.
+  describe("opened at a point", () => {
+    function AtPoint(props: { at: { x: number; y: number }; onClose: () => void }) {
+      return (
+        <>
+          <button type="button">Row</button>
+          <button type="button">Elsewhere</button>
+          <Menu label="Row actions" at={props.at} open onOpenChange={(open) => { if (!open) props.onClose(); }} items={items} width={200} />
+        </>
+      );
+    }
+
+    it("draws no trigger, starts at the point, and keeps inside the window", () => {
+      const view = render(<AtPoint at={{ x: 40, y: 50 }} onClose={vi.fn()} />);
+      expect(screen.queryByRole("button", { name: "Row actions" })).toBeNull();
+      const menu = screen.getByRole("menu", { name: "Row actions" });
+      expect(menu.style.left).toBe("40px");
+      expect(menu.style.top).toBe("50px");
+      view.unmount();
+      render(<AtPoint at={{ x: window.innerWidth - 20, y: 50 }} onClose={vi.fn()} />);
+      expect(screen.getByRole("menu").style.left).toBe(`${window.innerWidth - 12 - 200}px`);
+    });
+
+    it("starts at its point even with an anchor, which only a trigger's list follows", () => {
+      function Anchored(props: { open: boolean }) {
+        const box = useRef<HTMLDivElement | null>(null);
+        return <div ref={box}><Menu label="Row actions" at={{ x: 40, y: 50 }} anchor={box} open={props.open} onOpenChange={vi.fn()} items={items} width={200} /></div>;
+      }
+      const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(
+        { top: 100, bottom: 144, left: 8, right: 308, width: 300, height: 44, x: 8, y: 100, toJSON: () => ({}) },
+      );
+      try {
+        // Opened after the anchor's box is in place, as a right-click opens one.
+        render(<Anchored open={false} />).rerender(<Anchored open />);
+        const menu = screen.getByRole("menu", { name: "Row actions" });
+        expect(menu.style.left).toBe("40px");
+        expect(menu.style.top).toBe("50px");
+      } finally {
+        rect.mockRestore();
+      }
+    });
+
+    it("focuses its first row, and gives focus back to what had it on Escape", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      function Owner() {
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            <button type="button" onClick={() => setOpen(true)}>Row</button>
+            {open ? <Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={(next) => { if (!next) { setOpen(false); onClose(); } }} items={items} /> : null}
+          </>
+        );
+      }
+      render(<Owner />);
+      const row = screen.getByRole("button", { name: "Row" });
+      row.focus();
+      await user.keyboard("{Enter}");
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
+      await user.keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledOnce();
+      await waitFor(() => expect(document.activeElement).toBe(row));
+    });
+
+    it("closes on a press anywhere outside the list", () => {
+      const onClose = vi.fn();
+      render(<AtPoint at={{ x: 0, y: 0 }} onClose={onClose} />);
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Row" }));
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("shows a row's shortcut after its label and names it for assistive technology", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={[{ id: "rename", label: "Rename", onSelect: rename, shortcut: { label: "F2", keys: "F2" } }]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const row = screen.getByRole("menuitem", { name: "Rename" });
+    expect(row.getAttribute("aria-keyshortcuts")).toBe("F2");
+    expect(row.querySelector("kbd")?.textContent).toBe("F2");
+  });
+
   it("keeps focus on its rows when the list itself is pressed", async () => {
     const user = userEvent.setup();
     render(
@@ -125,7 +207,7 @@ describe("Menu", () => {
     // Default prevented: the press does not move focus to the page.
     expect(fireEvent.mouseDown(screen.getByRole("status"))).toBe(false);
     expect(fireEvent.mouseDown(screen.getByRole("menu"))).toBe(false);
-    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Duplicate" }));
   });
 
@@ -182,13 +264,14 @@ describe("Menu", () => {
     render(<Harness items={items} />);
     const trigger = screen.getByTestId("row-menu");
 
-    await user.click(trigger);
+    trigger.focus();
+    await user.keyboard("{Enter}");
     await user.keyboard("{Enter}");
     expect(rename).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
     expect(document.activeElement).toBe(trigger);
 
-    await user.click(trigger);
+    await user.keyboard(" ");
     await user.keyboard(" ");
     expect(rename).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("menu")).toBeNull();
@@ -218,7 +301,7 @@ describe("Menu", () => {
       </Harness>,
     );
     await user.click(screen.getByTestId("row-menu"));
-    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowDown}{Enter}");
     expect(rename).toHaveBeenCalledOnce();
     expect(screen.getByRole("menu").contains(screen.getByRole("status"))).toBe(true);
   });
@@ -255,11 +338,34 @@ describe("Menu", () => {
     expect(current.getAttribute("aria-current")).toBe("true");
     const forget = screen.getByRole("menuitem", { name: "Forget" });
     expect(forget.className).toContain("text-danger");
-    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(forget);
     // The current row keeps the selected fill after focus leaves it.
     expect(current.className.split(" ")).toContain("bg-selected");
+    expect(current.className.split(" ")).toContain("font-medium");
     expect(forget.className.split(" ")).not.toContain("bg-selected");
+    expect(forget.className.split(" ")).not.toContain("font-medium");
+  });
+
+  it("adds the keyboard's row line only beside a current or checked row", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const rename = screen.getByRole("menuitem", { name: "Rename" }).className.split(" ");
+    expect(rename).not.toContain("dohc-focus-row");
+    expect(rename).toContain("focus-visible:outline-none");
+    // A mouse open focuses the first row; only the keyboard may draw a line.
+    expect(rename.filter((name) => name.startsWith("focus:outline"))).toEqual([]);
+    cleanup();
+
+    render(<Harness items={[{ ...items[0]!, current: true }, items[1]!]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("menuitem", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+    cleanup();
+
+    render(<Harness items={[{ ...items[0]!, checked: true }, { ...items[1]!, checked: false }]} />);
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("menuitemradio", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
   });
 
   it("keeps the checked row's selected fill whatever has focus", async () => {
@@ -276,7 +382,36 @@ describe("Menu", () => {
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
     expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("font-medium");
     expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("font-medium");
+  });
+
+  // Inside the selected fill, styles.css's bg-selected utility shows subtle
+  // text in muted (tokens.test checks the rule). The hint must sit inside it.
+  it("keeps a shortcut hint inside the selected fill of the focused and the checked row", async () => {
+    const user = userEvent.setup();
+    const hinted = (label: string, keys: string) => (
+      <>
+        {label}
+        <span className={MENU_SHORTCUT}>{keys}</span>
+      </>
+    );
+    render(
+      <Harness
+        items={[
+          { id: "main", label: hinted("Main", "Ctrl 1"), onSelect: vi.fn(), checked: false },
+          { id: "draft", label: hinted("Draft", "Ctrl 2"), onSelect: vi.fn(), checked: true },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    await user.keyboard("{ArrowUp}");
+    const rowOf = (keys: string) => screen.getByText(keys).closest("[role='menuitemradio']")!;
+    expect(screen.getByText("Ctrl 1").className.split(" ")).toContain("text-subtle");
+    expect(document.activeElement).toBe(rowOf("Ctrl 1"));
+    expect(rowOf("Ctrl 1").className.split(" ")).toContain("focus:bg-selected");
+    expect(rowOf("Ctrl 2").className.split(" ")).toContain("bg-selected");
   });
 
   // Opened with the mouse, a menu on its first row showed two active-looking
@@ -339,7 +474,7 @@ describe("Menu", () => {
     const reason = screen.getByText("Only versions made from Main can merge into Main.");
     expect(merge.getAttribute("aria-describedby")).toBe(reason.id);
     expect(merge.contains(reason)).toBe(true);
-    // The row, its focus outline and the reason keep their strength.
+    // The row, its focus fill and the reason keep their strength.
     expect(merge.className).not.toContain("opacity");
     expect(reason.className).not.toContain("opacity");
     expect(screen.getByText("Merge").className.split(" ")).toContain("opacity-50");
@@ -374,6 +509,99 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(first);
     fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
     expect(document.activeElement).toBe(second);
+  });
+
+  // A row shows as active when it has focus and focus draws the fill on it.
+  // A pointer open marks none, as a native menu does.
+  describe("the marked row", () => {
+    const marked = () =>
+      screen
+        .getAllByRole("menuitem")
+        .filter((row) => row === document.activeElement && row.className.split(" ").includes("focus:bg-selected"))
+        .map((row) => row.textContent);
+
+    it("marks no row on a pointer open, and the hover fill follows the pointer", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      await user.click(screen.getByTestId("row-menu"));
+      const first = screen.getByRole("menuitem", { name: "Rename" });
+      const second = screen.getByRole("menuitem", { name: "Duplicate" });
+      expect(document.activeElement).toBe(first);
+      expect(marked()).toEqual([]);
+      expect(first.className.split(" ")).toContain("outline-none");
+
+      fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
+      expect(document.activeElement).toBe(second);
+      expect(second.className.split(" ")).toContain("hover:bg-hover");
+      expect(marked()).toEqual([]);
+    });
+
+    it("marks the first row at once on a keyboard open: Enter, Space or Down on the trigger", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      const trigger = screen.getByTestId("row-menu");
+      for (const key of ["{Enter}", " ", "{ArrowDown}"]) {
+        trigger.focus();
+        await user.keyboard(key);
+        expect(marked()).toEqual(["Rename"]);
+        await user.keyboard("{Escape}");
+        await waitFor(() => expect(document.activeElement).toBe(trigger));
+      }
+      await user.click(trigger);
+      expect(marked()).toEqual([]);
+    });
+
+    it("marks the first row of a context menu at once only when the keyboard opened it", () => {
+      const view = render(<Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={vi.fn()} items={items} />);
+      expect(marked()).toEqual([]);
+      view.unmount();
+      render(<Menu label="Row actions" at={{ x: 0, y: 0 }} fromKeyboard open onOpenChange={vi.fn()} items={items} />);
+      expect(marked()).toEqual(["Rename"]);
+    });
+
+    it("marks the first row on the first Down after a pointer open, and the last row on the first Up", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      const trigger = screen.getByTestId("row-menu");
+      await user.click(trigger);
+      await user.keyboard("{ArrowDown}");
+      expect(marked()).toEqual(["Rename"]);
+      await user.keyboard("{ArrowDown}");
+      expect(marked()).toEqual(["Duplicate"]);
+
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+      await user.click(trigger);
+      await user.keyboard("{ArrowUp}");
+      expect(marked()).toEqual(["Delete"]);
+    });
+
+    it.each([["Enter", "{Enter}"], ["Space", " "]])("marks the first row on the first %s after a pointer open and runs nothing, then runs it on the next", async (_, key) => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      await user.click(screen.getByTestId("row-menu"));
+      // The pointer's fill sits on another row.
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), { movementX: 0, movementY: 3 });
+      await user.keyboard(key);
+      expect(marked()).toEqual(["Rename"]);
+      expect(rename).not.toHaveBeenCalled();
+      expect(items[1]!.onSelect).not.toHaveBeenCalled();
+      expect(screen.getByRole("menu")).toBeTruthy();
+
+      await user.keyboard(key);
+      expect(rename).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("keeps the mark on the row the pointer moves to once a key has marked one", async () => {
+      const user = userEvent.setup();
+      render(<Harness items={items} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.keyboard("{ArrowDown}");
+      expect(marked()).toEqual(["Rename"]);
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), { movementX: 0, movementY: 3 });
+      expect(marked()).toEqual(["Duplicate"]);
+    });
   });
 
   it("opens from the owner's trigger, named apart from its list", async () => {
@@ -424,6 +652,35 @@ describe("Menu", () => {
       expect(menu.className).toContain("dohc-menu-in");
     } finally {
       vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("opens under its anchor when given one, still lined up with the trigger", async () => {
+    const user = userEvent.setup();
+    function Anchored() {
+      const [open, setOpen] = useState(false);
+      const row = useRef<HTMLDivElement | null>(null);
+      return (
+        <div ref={row} data-testid="row">
+          <Menu label="Row actions" testId="row-menu" open={open} onOpenChange={setOpen} items={items} width={200} anchor={row} />
+        </div>
+      );
+    }
+    render(<Anchored />);
+    const trigger = screen.getByTestId("row-menu");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
+      { top: 102, bottom: 126, left: 280, right: 304, width: 24, height: 24, x: 280, y: 102, toJSON: () => ({}) },
+    );
+    vi.spyOn(screen.getByTestId("row"), "getBoundingClientRect").mockReturnValue(
+      { top: 100, bottom: 144, left: 8, right: 308, width: 300, height: 44, x: 8, y: 100, toJSON: () => ({}) },
+    );
+    try {
+      await user.click(trigger);
+      const menu = screen.getByRole("menu");
+      expect(menu.style.top).toBe("148px");
+      expect(menu.style.left).toBe("104px");
+    } finally {
       vi.restoreAllMocks();
     }
   });
@@ -486,10 +743,10 @@ describe("Menu", () => {
 
     it("names its hint as the field's description", async () => {
       const user = userEvent.setup();
-      render(<Naming onSubmit={vi.fn()} hint="Starts as a copy of Main" />);
+      render(<Naming onSubmit={vi.fn()} hint="Starts from Main" />);
       await user.click(screen.getByTestId("row-menu"));
       await user.click(screen.getByTestId("new"));
-      const hint = screen.getByText("Starts as a copy of Main");
+      const hint = screen.getByText("Starts from Main");
       expect(screen.getByTestId("new-input").getAttribute("aria-describedby")).toBe(hint.id);
     });
 

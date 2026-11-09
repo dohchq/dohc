@@ -113,7 +113,7 @@ function dispatchResult(request: Request): JsonValue {
       return pause;
     case "chats.dispatch.requeueFailedTrigger":
       return true;
-    case "chats.dispatch.listAppQuitRecoveries":
+    case "chats.dispatch.listFailedRunRecoveries":
       return {
         recoveries: [{ run: { ...run, endedAtMs: 5 }, attemptCount: 1 }],
         nextCursor: null,
@@ -226,6 +226,7 @@ describe("live agent dispatch store", () => {
     ).resolves.toBe(true);
     await expect(
       store.claimNextPending(WORKSPACE.workspaceId, {
+        agentId: "default",
         command: "codex",
         logPath: "logs/{runId}/{runId}.log",
       }),
@@ -309,7 +310,7 @@ describe("live agent dispatch store", () => {
       }),
     ).resolves.toBe(true);
     await expect(
-      handle.listAppQuitRecoveries(WORKSPACE.workspaceId),
+      handle.listFailedRunRecoveries(WORKSPACE.workspaceId),
     ).resolves.toEqual([
       { run: { ...run, endedAtMs: 5 }, attemptCount: 1 },
     ]);
@@ -321,7 +322,7 @@ describe("live agent dispatch store", () => {
     ).toBe(AGENT_DISPATCH_RPC_DEADLINE_MS);
     expect(
       client.requests.find(
-        ({ method }) => method === "chats.dispatch.listAppQuitRecoveries",
+        ({ method }) => method === "chats.dispatch.listFailedRunRecoveries",
       )?.deadlineMs,
     ).toBe(AGENT_DISPATCH_RPC_DEADLINE_MS);
     expect(
@@ -331,6 +332,7 @@ describe("live agent dispatch store", () => {
     ).toMatchObject({
       params: {
         runId: "run-fixed",
+        agentId: "default",
         command: "codex",
         logPath: "logs/run-fixed/run-fixed.log",
       },
@@ -403,7 +405,7 @@ describe("live agent dispatch store", () => {
         "chats.dispatch.isThreadPaused",
         "chats.dispatch.getThreadPauseState",
         "chats.dispatch.requeueFailedTrigger",
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
       ]),
     );
   });
@@ -442,12 +444,14 @@ describe("live agent dispatch store", () => {
 
     await expect(
       store.claimNextPending(WORKSPACE.workspaceId, {
+        agentId: "default",
         command: "codex",
         logPath: "logs/{runId}.log",
       }),
     ).rejects.toMatchObject({ code: "transport-error" });
     await expect(
       store.claimNextPending(WORKSPACE.workspaceId, {
+        agentId: "default",
         command: "codex",
         logPath: "logs/{runId}.log",
       }),

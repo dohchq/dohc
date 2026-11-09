@@ -4,6 +4,7 @@ import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspac
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
+import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/workspace-contracts/share-link-agents";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
@@ -31,7 +32,10 @@ import {
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
   collectionSetFieldsFieldsSchema,
+  MAX_REPORTED_AGENT_CHARS,
   parseCliResult,
+  reportedAgentPartSchema,
+  type CliReportedAgent,
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliStreamPosition,
@@ -64,6 +68,8 @@ import { basename, join } from "node:path";
 
 export const MCP_TOOL_CAPABILITIES = {
   dohc_read_share_copy: ["share.copy.read"],
+  dohc_list_link_agents: ["share.link.agents.list"],
+  dohc_disconnect_link_agent: ["share.link.agent.disconnect"],
   dohc_list_automations: ["automation.list"],
   dohc_switch_automation: ["automation.switch"],
   dohc_dataset: Object.values(DATASET_CAPABILITIES),
@@ -113,6 +119,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_import_data: ["data.import"],
   dohc_query_database: ["data.query"],
   dohc_list_file_chats: ["file.chats.list"],
+  dohc_wait_for_messages: ["chat.inbox.read"],
   dohc_read_chat: ["chat.read"],
   dohc_list_groups: ["group.list"],
   dohc_start_group_chat: ["chat.post"],
@@ -140,12 +147,18 @@ export interface ToolContext {
   // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
   // The only tools to offer, from repeated --tool flags, within the share
-  // level's. Absent offers all of the level's tools. A dohc agent run offers
-  // only the reply tool.
+  // level's. Absent offers all of the level's tools. The self-test of a dohc
+  // agent run offers only the reply tool.
   tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
+  // The local agent run this server works for, from DOHC_RUN_ID. A chat
+  // write that names no run names this one.
+  runId?: string;
+  // The agent you run that this server speaks for, from --agent-id. Every
+  // request names it, and the desktop refuses an id its settings don't list.
+  agentId?: string;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
-  request?: (request: CliRequestWithoutToken) => Promise<unknown>;
+  request?: (request: CliRequestWithoutToken, options?: { signal?: AbortSignal }) => Promise<unknown>;
 }
 
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
@@ -1378,7 +1391,7 @@ async function detectSiteAt(
   // workspace-core/src/sites.ts) for the identical malformed input — a
   // dohc.json preview.mode that isn't one of the three valid values must
   // surface the same diagnostic here as it does for the desktop detector,
-  // or dohc_test_app can silently pass a config the desktop Apps view flags.
+  // or dohc_test_app can silently pass a config the desktop Explorer flags.
   if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
     diagnostics.push({
       severity: "warning",
@@ -1533,7 +1546,7 @@ async function detectSiteAt(
   // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
   // framework config file (vite.config.ts, ...) is "configured", and
   // either one is a high-confidence signal on its own, same as an actual
-  // index.html file — the desktop Apps view and MCP's dohc_detect_apps must
+  // index.html file — the desktop Explorer's Apps section and MCP's dohc_detect_apps must
   // describe the same project the same way.
   const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
@@ -1916,7 +1929,8 @@ function cliFailureReason(error: unknown, verb: CliVerb): string {
 async function requestCli<Verb extends CliVerb>(
   ctx: ToolContext,
   verb: Verb,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor" | "agentId">,
+  signal?: AbortSignal,
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -1926,11 +1940,13 @@ async function requestCli<Verb extends CliVerb>(
       cwd: ctx.root,
       actor: "agent" as const,
       ...args,
+      // The server's own agent id; no tool input replaces it.
+      ...(ctx.agentId === undefined ? {} : { agentId: ctx.agentId }),
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    if (ctx.request) return parseCliResult(verb, await ctx.request(request));
-    return await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
+    if (ctx.request) return parseCliResult(verb, await (signal ? ctx.request(request, { signal }) : ctx.request(request)));
+    return await sendCliRequest(request, { stateDir: ctx.home, ...(signal ? { signal } : {}), ...(verb === "watch" ? { timeoutMs: 30_000 } : {}), ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
@@ -1982,6 +1998,22 @@ export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
   return requestCli(ctx, "shareCopy", parsed.data);
 }
 
+// The Share dialog's Agents list and Disconnect. The desktop names the
+// workspace; the caller names only the link and the connection.
+export async function listLinkAgents(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list a link's agents." };
+  const parsed = ShareLinkAgentsInput.safeParse(input);
+  if (!parsed.success) return { ok: false as const, reason: "Invalid link agents request." };
+  return requestCli(ctx, "shareAgents", parsed.data);
+}
+
+export async function disconnectLinkAgent(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to disconnect a link's agent." };
+  const parsed = ShareLinkAgentDisconnectInput.safeParse(input);
+  if (!parsed.success) return { ok: false as const, reason: "Invalid disconnect request." };
+  return requestCli(ctx, "shareDisconnect", parsed.data);
+}
+
 /** Publication uses the same owner-local attachment as the CLI. */
 export async function publishApp(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"App publication requires the owning workspace."};
@@ -1998,6 +2030,15 @@ export async function dataset(ctx: ToolContext, input: unknown) {
   if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath) return {ok:false as const,reason:"Collection recovery requires an explicit sourcePath ending in .dohc-recovery."};
   if (parsed.data.action === "export" && !parsed.data.savePath) return {ok:false as const,reason:"Collection export requires an explicit absolute savePath outside the workspace ending in .dohc-recovery."};
   return requestCli(ctx, "dataset", {request:parsed.data});
+}
+
+export async function waitForMessages(
+  ctx: ToolContext,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: "watch" }>["args"], "cwd" | "actor" | "agentId">,
+  signal?: AbortSignal,
+) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Chat waits require the owning workspace." };
+  return requestCli(ctx, "watch", args, signal);
 }
 
 export async function listFileChats(ctx: ToolContext, args: { path: string }) {
@@ -2054,9 +2095,41 @@ interface ChatWriteInput {
   runId?: string;
 }
 
-function chatWriteArgs(input: ChatWriteInput) {
+// What an agent reports about itself. The product and version come from its
+// MCP client's handshake, preferring the client's display title to its name;
+// the model is what the agent states. A part with a control character, or
+// with no text, is unknown, and dohc never fills in a guess.
+export function reportedAgent(
+  client: { name?: unknown; title?: unknown; version?: unknown } | undefined,
+  model: string | undefined,
+): CliReportedAgent | undefined {
+  const part = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || /\p{Cc}/u.test(value)) return undefined;
+    let capped = "";
+    for (const char of value.trim()) {
+      if (capped.length + char.length > MAX_REPORTED_AGENT_CHARS) break;
+      capped += char;
+    }
+    capped = capped.trimEnd();
+    return reportedAgentPartSchema.safeParse(capped).success ? capped : undefined;
+  };
+  const product = part(client?.title) ?? part(client?.name);
+  const version = product === undefined ? undefined : part(client?.version);
+  const stated = part(model);
+  if (product === undefined && stated === undefined) return undefined;
   return {
-    ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    ...(product !== undefined ? { product } : {}),
+    ...(version !== undefined ? { version } : {}),
+    ...(stated !== undefined ? { model: stated } : {}),
+  };
+}
+
+function chatWriteArgs(ctx: ToolContext, input: ChatWriteInput, reported: CliReportedAgent | undefined) {
+  // The run this server works for wins over a run the caller names.
+  const runId = ctx.runId ?? input.runId;
+  return {
+    ...(runId !== undefined ? { runId } : {}),
+    ...(reported !== undefined ? { reported } : {}),
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
     ...(input.options !== undefined ? { options: input.options } : {}),
@@ -2070,11 +2143,14 @@ function chatWriteArgs(input: ChatWriteInput) {
 export async function startGroupChat(
   ctx: ToolContext,
   args: ChatWriteInput & { group: string; title?: string },
+  agent?: string,
+  reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "post", {
     group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(ctx, args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2102,13 +2178,16 @@ export async function replyToChat(
     resolve?: string;
     choose?: string;
   },
+  agent?: string,
+  reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "reply", {
     thread: args.threadId,
     ...(args.to !== undefined ? { to: args.to } : {}),
     ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
     ...(args.choose !== undefined ? { choose: args.choose } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(ctx, args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2409,12 +2488,13 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
 
 export async function editDocument(
   ctx: ToolContext,
-  args: { path: string; find?: string; replacement: string; requestId?: string },
+  args: { path: string; find?: string; replacement: string; requestId?: string; allowLossySourceSha256?: string },
   agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "documentEdit", {
+    ...(args.allowLossySourceSha256 ? { allowLossySourceSha256: args.allowLossySourceSha256 } : {}),
     path: resolved.normalized,
     ...(args.find === undefined ? {} : { find: args.find }),
     replacement: args.replacement,
@@ -2443,13 +2523,17 @@ export async function startFileChat(
   ctx: ToolContext,
   args: { path: string; title: string; body: string; requestId?: string; runId?: string },
   agent: string | undefined,
+  reported?: CliReportedAgent,
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const runId = ctx.runId ?? args.runId;
   return requestCli(ctx, "fileChatStart", {
     ...args,
+    ...(runId !== undefined ? { runId } : {}),
     path: resolved.normalized,
     ...(agent === undefined ? {} : { agent }),
+    ...(reported === undefined ? {} : { reported }),
   });
 }
 

@@ -10,6 +10,7 @@ import { createDatasetJournal, type DatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor, DatasetReopenWaitError, type DatasetInvocation, type DatasetMigration, type DatasetSupervisorOptions } from "./supervisor.ts";
 import { DEFAULT_LIMITS, type AppRuntimeLauncher } from "./protocol.ts";
 import { replayConstraintLauncher } from "./replay-constraint.test-helper.ts";
+import { datasetChangeDigest } from "@dohc/security-contract/dataset-artifacts";
 
 // These waits cover one worker command at the product deadline plus durable journal writes around it.
 const workerWait = { timeout: 2 * DEFAULT_LIMITS.deadlineMs };
@@ -74,8 +75,9 @@ it("previews actual changed values and approves the exact candidate without runn
   await f.invoke({id:"one",value:"original"});
   const input=migration(f,{migrationSql:"ALTER TABLE items ADD COLUMN note TEXT NOT NULL DEFAULT ''; UPDATE items SET value=lower(hex(randomblob(12))),note='previewed';"});
   const candidate=await f.supervisor.prepareMigration({...input,authorityKey:"owner-v1"});
+  expect(candidate.changeSha256).toBe(datasetChangeDigest({revisionSha256:input.approvedRevisionHash,migrationSql:input.migrationSql}));
   expect(reserved).toBeGreaterThan(128*1024*1024);
-  expect(candidate.preview.tables).toEqual([{table:"items",beforeRows:1,afterRows:1,changedRows:1}]);
+  expect(candidate.preview.tables).toEqual([{table:"items",beforeRows:1,afterRows:1,changedRows:1,deletedRows:0,beforeValues:{id:1,value:1},afterValues:{id:1,value:1,note:1},clearedValues:{id:0,value:0}}]);
   const change=candidate.preview.firstPage.changes[0]!;
   expect(change.before).toEqual({id:"one",value:"original"});expect(change.after).toMatchObject({id:"one",note:"previewed"});
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"one",value:"original"}]);

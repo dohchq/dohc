@@ -23,6 +23,10 @@ fn helper_command(role: &str) -> Command {
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+    // The helper starts the reader with the test Node the gate chose.
+    if let Some(node) = std::env::var_os("DOHC_READER_TEST_NODE") {
+        command.env("DOHC_READER_TEST_NODE", node);
+    }
     command
 }
 fn receipt(reader: &mut impl BufRead) -> Value {
@@ -271,6 +275,15 @@ fn exceeding_the_process_memory_limit_reports_crashed() {
     let mut reader = Reader::new(Some(config));
     assert!(run(reader.request(request("ok"))).is_ok());
     fail(run(reader.request(request("memory"))), Failure::Crashed);
+    finish(&mut reader);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_reader_at_its_measured_peak_stays_under_the_process_memory_limit() {
+    let (_dir, config) = fixture("ok");
+    let mut reader = Reader::new(Some(config));
+    assert!(run(reader.request(request("peak"))).is_ok());
     finish(&mut reader);
 }
 

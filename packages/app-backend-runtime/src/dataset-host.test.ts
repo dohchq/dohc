@@ -92,7 +92,7 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   return { host, db, journal, supervisor, activate, invoke, binding, transaction };
 }
 
-it("requires current owner review of both data and affected apps before permanent deletion", async () => {
+it("requires an archived Collection and current owner review of both data and affected apps before permanent deletion", async () => {
   const f = await fixture(); await f.activate();
   const first = f.host.deletePreview("owner",scope);
   expect(() => f.host.deletePreview("helper",scope)).toThrow("You do not have access to this Collection.");
@@ -105,6 +105,9 @@ it("requires current owner review of both data and affected apps before permanen
   expect(next.apps).toMatchObject([{appId:"form"}]);
   await f.invoke("owner",id(6),{value:"changed"});
   await expect(f.host.deleteDataset("owner",{...request,expected:next.cursor,reviewToken:next.reviewToken})).rejects.toThrow("The Collection changed. Try again.");
+  const live = f.host.deletePreview("owner",scope);
+  await expect(f.host.deleteDataset("owner",{...request,expected:live.cursor,reviewToken:live.reviewToken})).rejects.toThrow("This Collection isn't archived. Archive it before you delete it permanently.");
+  expect(f.host.deletionStatus("owner",scope)).toEqual({deleted:false});
   f.host.archiveDataset("owner",scope);
   const current = f.host.deletePreview("owner",scope);
   await expect(f.host.deleteDataset("owner",{...request,expected:current.cursor,reviewToken:current.reviewToken})).resolves.toEqual({deleted:true,datasetId:scope.datasetId});
@@ -118,6 +121,7 @@ it("requires current owner review of both data and affected apps before permanen
 
 it("rolls permanent deletion and its tombstone back if private-resource cleanup fails", async () => {
   const f = await fixture({deleteResources() { throw new Error("cleanup failed"); }}); await f.activate();
+  f.host.archiveDataset("owner",scope);
   const preview = f.host.deletePreview("owner",scope);
   await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("cleanup failed");
   expect(f.host.deletePreview("owner",scope).cursor).toEqual(preview.cursor);
@@ -968,7 +972,7 @@ it("attributes an owner's write to its agent at any depth from 0, through an app
 
 it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {
   type Caller = "owner" | "named" | "link" | "automation";
-  let caller: Caller = "owner", person: string | undefined, agent: { depth: number } | undefined;
+  let caller: Caller = "owner", person: string | undefined, agent: { depth: number; agentId?: string } | undefined;
   const callers = {
     owner: { kind: "owner", userId: "owner-key" },
     named: { kind: "named", userId: "user-ana", grantId: "member", access: "edit", helper: false },
@@ -992,6 +996,9 @@ it("names the person a commit is made for from the host's context, never the own
   expect(await commit("owner")).toEqual({ kind: "owner", userId: "user-ice" });
   agent = { depth: 0 };
   expect(await commit("agent")).toEqual({ kind: "agent", depth: 0, userId: "user-ice" });
+  // An agent the person runs themselves names its id.
+  agent = { depth: 0, agentId: "terminal" };
+  expect(await commit("agent-you-run")).toEqual({ kind: "agent", depth: 0, agentId: "terminal", userId: "user-ice" });
   agent = undefined;
   // An automation's commit names the person whose change started its run.
   caller = "automation";

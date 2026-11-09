@@ -75,6 +75,7 @@ describe("live agent dispatch store real daemon", () => {
           }),
         ).resolves.toBe(true);
         const completeClaim = await store.claimNextPending(workspaceId, {
+          agentId: "default",
           command: "codex exec",
           logPath: join(root, "run-logs", "{runId}", "{runId}.log"),
         });
@@ -113,6 +114,7 @@ describe("live agent dispatch store real daemon", () => {
           }),
         ).resolves.toBe(true);
         const failedClaim = await store.claimNextPending(workspaceId, {
+          agentId: "default",
           command: "codex exec",
         });
         expect(failedClaim?.run.runId).toBe("run-e2e-failed");
@@ -162,12 +164,12 @@ describe("live agent dispatch store real daemon", () => {
         await expect(reopened.store.listPending(workspaceId)).resolves.toMatchObject([
           { triggerMessageId: secondTrigger.id, state: "pending", attemptCount: 1 },
         ]);
-        const replayedClaim = await reopened.store.claimNextPending(workspaceId, { command: "codex exec" });
+        const replayedClaim = await reopened.store.claimNextPending(workspaceId, { agentId: "default", command: "codex exec" });
         expect(replayedClaim?.run).toMatchObject({ runId: "run-e2e-replayed-1", triggerMessageId: secondTrigger.id });
         await reopened.store.completeRun({ runId: "run-e2e-replayed-1", exitCode: 0 });
         await expect(replay(reopened.store, secondTrigger.id)).resolves.toBe(false);
         await expect(reopened.store.listPending(workspaceId)).resolves.toEqual([]);
-        await expect(reopened.store.claimNextPending(workspaceId, { command: "codex exec" })).resolves.toBeNull();
+        await expect(reopened.store.claimNextPending(workspaceId, { agentId: "default", command: "codex exec" })).resolves.toBeNull();
       } finally {
         await sessions?.closeAll();
         await lifecycle.stop();

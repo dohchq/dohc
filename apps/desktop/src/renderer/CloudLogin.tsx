@@ -1,6 +1,6 @@
 import { useRequestSequence } from "./useRequestSequence";
 import { Cloud, ExternalLink, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
 import { bridge } from "./bridge";
@@ -12,7 +12,7 @@ import {
   useConnectionNotices,
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
-import { IconButton, Pill, PrimaryButton } from "./ui/controls";
+import { FieldError, IconButton, Pill, PrimaryButton, RetryRow } from "./ui/controls";
 
 const SETUP_GUIDE_URL =
   "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
@@ -35,17 +35,17 @@ function checkServerAddress(
   value: string,
 ): { origin: string } | { problem: string } {
   const typed = value.trim();
-  if (!typed) return { problem: "Enter the address of your server." };
+  if (!typed) return { problem: "Enter your server address." };
   const origin = canonicalCloudOrigin(typed, bridge().insecureLoopbackServersForTests);
   if (origin) return { origin };
   try {
     if (new URL(typed).protocol === "http:") {
-      return { problem: "dohc connects to servers only over https. Enter an https address." };
+      return { problem: "Enter an HTTPS server address." };
     }
   } catch {
     // Not a URL at all — the example address is the useful correction.
   }
-  return { problem: "Enter the server address like https://dohc.example.com." };
+  return { problem: "Enter a server address like https://dohc.example.com." };
 }
 
 // Connecting a server: one server address, then the device-authorization
@@ -65,9 +65,14 @@ export function CloudLogin(props: {
   // The shell's dialog uses it to hand an existing session to Settings, where
   // its account row and sync switch live.
   handOffSession?: boolean;
+  // Sign in again to the server of the session already here, for a session
+  // the server stopped accepting. The first check starts the same sign-in as
+  // Connect server, with no Disconnect first, and its approval replaces the
+  // session. Every retry stays at that server. Ahead of handOffSession.
+  renew?: boolean;
   // Nested inside another elevated card (join/open-shared/handoff signed-out
-  // gates): drop this panel's own frame so cards never stack elevation, and
-  // drop the standalone explanation the host surface already gives.
+  // gates): drop this panel's own frame so cards never stack elevation, drop
+  // the dohc Drive note, and leave focus to the host.
   embedded?: boolean;
   // The host already titles the step (a step title, a section header): drop
   // this panel's own heading so the name is not said twice.
@@ -90,11 +95,18 @@ export function CloudLogin(props: {
   const [networkAccess, setNetworkAccess] = useState<"private" | "public" | null>(
     null,
   );
+  // The session's server while signing in again there. A failed or refused
+  // attempt offers Sign in again at it, never an address to change.
+  const [renewOrigin, setRenewOrigin] = useState<string | null>(null);
+  // Set once a renewed sign-in completes, so asking again about the new
+  // session doesn't start another.
+  const renewedRef = useRef(false);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Set only by a Try again on a failed status check, read by the check it
   // starts.
   const recheckRef = useRef(false);
   const serverUrlInput = useRef<HTMLInputElement | null>(null);
+  const serverUrlId = useId();
   const sessionRef = useRequestSequence();
   // Used only when nothing above this panel owns connection notices, so a
   // panel rendered on its own still reaches the same toast and Notices row.
@@ -159,6 +171,11 @@ export function CloudLogin(props: {
       .cloudStatus()
       .then((status) => {
         if (!sessionRef.isCurrent(session)) return;
+        if (props.renew && !renewedRef.current && status.connected && status.serverUrl) {
+          setRenewOrigin(status.serverUrl);
+          void connect(status.serverUrl);
+          return;
+        }
         applyStatus(status);
         if (announceSession && status.connected) props.onConnected?.();
       })
@@ -191,6 +208,7 @@ export function CloudLogin(props: {
           if (!sessionRef.isCurrent(session)) return;
           if (result.status === "pending") return pollUntilDone(session, origin);
           if (result.status === "complete") {
+            renewedRef.current = true;
             void bridge()
               .cloudStatus()
               .then((status) => {
@@ -297,6 +315,14 @@ export function CloudLogin(props: {
     }
   }
 
+  const connecting = phase.kind === "connecting";
+
+  // In its own dialog the address is the first field, so it takes focus when
+  // the form appears. A host that embeds the panel decides its own focus.
+  useEffect(() => {
+    if (!props.embedded && phase.kind === "disconnected") serverUrlInput.current?.focus();
+  }, [phase.kind, props.embedded]);
+
   const panel = (
     <div
       data-testid="cloud-sync-panel"
@@ -324,31 +350,43 @@ export function CloudLogin(props: {
         <p className="mb-0 mt-2 text-xs text-subtle">Checking your connection…</p>
       ) : null}
 
-      {phase.kind === "connecting" ? (
-        <p data-testid="cloud-connecting" className="mb-0 mt-2 text-xs text-subtle">
-          Connecting to the server…
-        </p>
-      ) : null}
-
       {/* The check failed, so this panel cannot say what the session is. The
-          notice holds the reason and the way to ask again. */}
+          notice holds the reason; Try again here asks again. */}
       {phase.kind === "unknown" ? (
-        <p
-          data-testid="cloud-connection-unknown"
-          className="mb-0 mt-2 text-xs text-muted"
-        >
-          dohc doesn’t know whether this machine is connected.
-        </p>
+        <div className="-ml-2 mt-2">
+          <RetryRow testId="cloud-connection-unknown" onRetry={recheckStatus} />
+        </div>
       ) : null}
 
-      {phase.kind === "disconnected" || phase.kind === "refused" ? (
-        <>
-          {props.embedded ? null : (
-            <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-              Your workspaces already work on this machine. Connect one server
-              here to sync and share them.
+      {renewOrigin !== null && (phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting") ? (
+        <div data-testid="cloud-renew">
+          {phase.kind === "refused" ? (
+            <p
+              data-testid="cloud-login-refused"
+              role="alert"
+              className="mb-0 mt-2 text-xs text-danger"
+            >
+              {phase.reason}
             </p>
-          )}
+          ) : null}
+          <p className="mb-2 mt-3 text-[12px] text-muted">Server address</p>
+          <p
+            data-testid="cloud-renew-server"
+            className="m-0 break-all font-mono text-[13px] text-ink"
+          >
+            {renewOrigin}
+          </p>
+          <PrimaryButton
+            data-testid="cloud-renew-start"
+            onClick={() => void connect(renewOrigin)}
+            disabled={connecting}
+            className="mt-3"
+          >
+            {connecting ? "Connecting…" : "Sign in again"}
+          </PrimaryButton>
+        </div>
+      ) : phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting" ? (
+        <>
           {/* The browser's own answer, next to the form that starts over. */}
           {phase.kind === "refused" ? (
             <p
@@ -366,40 +404,45 @@ export function CloudLogin(props: {
               submitConnect();
             }}
           >
-            <label className="mt-3 block text-[11px] font-medium text-subtle">
+            <label htmlFor={serverUrlId} className="mb-2 mt-3 block w-fit text-[12px] text-muted">
               Server address
-              <input
-                ref={serverUrlInput}
-                spellCheck={false}
-                aria-invalid={addressProblem !== null}
-                aria-describedby={
-                  addressProblem !== null ? "cloud-connection-error" : undefined
-                }
-                data-testid="cloud-server-url"
-                value={serverUrl}
-                onChange={(event) => {
-                  setServerUrl(event.currentTarget.value);
-                  setAddressProblem(null);
-                }}
-                placeholder="https://dohc.example.com"
-                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-              />
             </label>
+            {/* While it connects, the address stays in view as the one being tried. */}
+            <input
+              ref={serverUrlInput}
+              id={serverUrlId}
+              readOnly={connecting}
+              spellCheck={false}
+              aria-invalid={addressProblem !== null ? true : undefined}
+              aria-describedby={
+                addressProblem !== null ? "cloud-connection-error" : undefined
+              }
+              data-testid="cloud-server-url"
+              value={serverUrl}
+              onChange={(event) => {
+                setServerUrl(event.currentTarget.value);
+                setAddressProblem(null);
+              }}
+              onBlur={() => {
+                if (connecting) return;
+                const address = checkServerAddress(serverUrl);
+                setAddressProblem("problem" in address ? address.problem : null);
+              }}
+              placeholder="https://dohc.example.com"
+              className={`w-full rounded-md border bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle read-only:text-muted ${
+                addressProblem !== null ? "border-danger focus:border-danger!" : "border-line focus:border-ink"
+              }`}
+            />
             {/* The one error that stays inline: the field in front of the user
                 is the thing to fix. */}
             {addressProblem ? (
-              <p
-                id="cloud-connection-error"
-                data-testid="cloud-connection-error"
-                role="alert"
-                className="mb-0 mt-2 text-xs text-danger"
-              >
+              <FieldError id="cloud-connection-error" testId="cloud-connection-error" className="mt-2">
                 {addressProblem}
-              </p>
+              </FieldError>
             ) : null}
             <div className="mt-3 flex flex-wrap items-center gap-3">
-              <PrimaryButton type="submit" data-testid="cloud-connect-start">
-                Connect server
+              <PrimaryButton type="submit" data-testid="cloud-connect-start" disabled={connecting}>
+                {connecting ? "Connecting…" : "Connect server"}
               </PrimaryButton>
               <button
                 type="button"
@@ -432,7 +475,7 @@ export function CloudLogin(props: {
       {phase.kind === "code" ? (
         <div data-testid="cloud-login-pending">
           <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-            Approve this device in your browser with the code:
+            Approve this device in your browser.
           </p>
           <p
             data-testid="cloud-user-code"
@@ -448,8 +491,8 @@ export function CloudLogin(props: {
             <ExternalLink size={12} aria-hidden />
             Open browser
           </PrimaryButton>
-          <p className="mb-0 mt-2 text-[11px] text-subtle">
-            Waiting for approval. This updates by itself.
+          <p role="status" className="mb-0 mt-2 text-[11px] text-subtle">
+            Waiting for approval
           </p>
         </div>
       ) : null}

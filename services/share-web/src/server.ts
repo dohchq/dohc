@@ -5,9 +5,10 @@ import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientChatClient} from "./namedRecipientChat";
+import {createPushClient} from "./pushClient";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -20,12 +21,15 @@ import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type N
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
 import {createLinkLiveClient} from "./linkLiveClient";
 import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
-import {opaqueLinkRefusal as refused} from "./linkRefusal";
+import {linkChatRefusalBody, opaqueLinkRefusal as refused} from "./linkRefusal";
 import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
+import {createAgentChatClient} from "./agentChatClient";
+import {MCP_CORS_HEADERS, MCP_PATH_PREFIX, type SignInPagePolicy, createMcpSignIn, isMcpCorsPath, mcpChallenge, mcpLinkSecret, signInPagePolicy} from "./mcpSignIn";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
 import { viewerPage } from "../viewer/src/pages";
+import { serveWorkLinkPage } from "./workLinkPage";
 import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
@@ -70,11 +74,13 @@ const COLLECTION_WRITE_REFILL_PER_SECOND = 0.5;
 // requests that carry one: one per link, and a few in all, as the relay holds.
 const LARGE_BODIES_IN_FLIGHT = 4;
 const MCP_REQUEST_TIMEOUT_MS = 35_000;
+// Refused MCP bearers per client address: a burst of 30, then one every two seconds.
+export const MCP_FAILED_SIGN_IN_CAPACITY = 30;
+const MCP_FAILED_SIGN_IN_REFILL_PER_SECOND = 0.5;
 
 type RelayFetch = (request: Request) => Promise<Response>;
 
 interface ShareWebSession {
-  agentProfileSecret?: string;
   discriminator: string;
   grantId: string;
   capabilityToken: string;
@@ -91,6 +97,44 @@ interface BrowserSession {
   discriminator: string;
   token: string;
   session: ShareWebSession;
+}
+
+/**
+ * An agent's access on one MCP request: its access token and the MCP address
+ * it called. The relay checks both on every call, so nothing here is cached.
+ */
+interface AgentCaller {
+  accessToken: string;
+  resource: string;
+  /** Counts this token's calls, as a session counts a browser's. */
+  key: string;
+  /** Counts every agent's MCP requests on this address, before the relay names the grant. */
+  addressKey: string;
+  /**
+   * The link's grant, from the relay's share answer for this token. Every
+   * per-link limit after that counts the agent with the link's browsers.
+   */
+  grantId: string | null;
+  /** Set when the relay no longer knows the token for this address. */
+  invalid: boolean;
+}
+
+type LinkCaller = BrowserSession | AgentCaller;
+
+/**
+ * The limits' identity for a caller's link. An agent's MCP request reads the
+ * share first, so its grant is known before any per-link limit applies.
+ */
+function linkKeyOf(caller: LinkCaller): string {
+  return "session" in caller ? caller.session.grantId : caller.grantId ?? caller.addressKey;
+}
+
+/** Keeps an agent's grant from the relay's share answer, and removes it from the answer. */
+function takeAgentGrant(agent: AgentCaller, meta: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!meta) return null;
+  const { grantId, ...rest } = meta;
+  if (typeof grantId === "string" && grantId.length > 0) agent.grantId = grantId;
+  return rest;
 }
 
 /** One relay call made with a browser session's link capability. */
@@ -334,11 +378,6 @@ function largeBodyAdmission(limit = LARGE_BODIES_IN_FLIGHT): (grantId: string) =
   };
 }
 
-function sameSecret(left: string, right: string): boolean {
-  const a = Buffer.from(left), b = Buffer.from(right);
-  return a.byteLength === b.byteLength && timingSafeEqual(a, b);
-}
-
 function linkDiscriminator(grantId: string): string {
   return createHash("sha256").update(grantId).digest("base64url").slice(0, 12);
 }
@@ -351,13 +390,19 @@ function profileCookieName(discriminator: string): string {
   return `dohc_share_profile_${discriminator}`;
 }
 
-// Every response the viewer origin serves carries the security headers.
+// Every response the viewer origin serves carries the security headers. Only
+// the MCP sign-in pages name their own policy, so the consent form can post
+// back here and follow its redirect to the agent.
 function response(
   body: BodyInit | null,
-  init: { status?: number; headers?: HeadersInit } = {},
+  init: { status?: number; headers?: HeadersInit; page?: SignInPagePolicy } = {},
 ): Response {
   const headers = new Headers(init.headers);
   for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) headers.set(key, value);
+  if (init.page) {
+    headers.set("content-security-policy", init.page.contentSecurityPolicy);
+    headers.set("referrer-policy", init.page.referrerPolicy);
+  }
   return new Response(body, { status: init.status ?? 200, headers });
 }
 
@@ -603,25 +648,9 @@ async function linkChatPostInput(request: Request): Promise<string | null> {
   }
 }
 
-// A link post's refusals that the viewer and agents act on, in this server's
-// words. Only the relay's code passes, never its own words.
-const LINK_CHAT_REFUSALS: Readonly<Record<string, { status: number; error: string }>> = {
-  bad_request: { status: 400, error: "dohc could not post this message. Check its thread and text, then try again." },
-  link_discussion_blocked: { status: 403, error: "The owner stopped this link holder from posting. Ask the owner to allow your posts again." },
-  link_discussion_paused: { status: 403, error: "The owner paused posts from share links. Try again later." },
-  conflict: { status: 409, error: "This message's key was already used for a different message. Send it as a new message." },
-  link_name_already_set: { status: 409, error: "This link holder already has a name. Post with that name, or with none." },
-  discussion_limit_reached: { status: 413, error: "This link has reached its message limit. Ask the owner if you need to post more." },
-  quota_exceeded: { status: 413, error: "The owner's workspace is full. Ask the owner to free space, then send this message again." },
-  payload_too_large: { status: 413, error: "This message is too long. Shorten it, then send it again." },
-};
-
 async function linkChatRefusal(relayResponse: Response): Promise<Response | null> {
-  const code = asRecord(await relayResponse.json().catch(() => null))?.code;
-  const refusal = typeof code === "string" && Object.hasOwn(LINK_CHAT_REFUSALS, code) ? LINK_CHAT_REFUSALS[code] : undefined;
-  return refusal?.status === relayResponse.status
-    ? jsonResponse({ ok: false, code, error: refusal.error }, { status: refusal.status })
-    : null;
+  const refusal = linkChatRefusalBody(await relayResponse.json().catch(() => null), relayResponse.status);
+  return refusal ? jsonResponse(refusal, { status: relayResponse.status }) : null;
 }
 
 // A Collection write's answers, as `parseCollectionWriteOutcome` reads them.
@@ -996,6 +1025,9 @@ export function createShareWebApplication({
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChatClient({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
   }) : undefined;
+  const push = namedBrowserSessionLimits ? createPushClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
+  }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
     fetchAuth,
@@ -1019,16 +1051,24 @@ export function createShareWebApplication({
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
   const mcpLimiter = new ShareWebInFlightLimiter(4, 16);
+  // Only a refused bearer spends from its address; a valid one never does.
+  const mcpFailedSignIns = new TokenBucketLimiter(MCP_FAILED_SIGN_IN_CAPACITY, MCP_FAILED_SIGN_IN_REFILL_PER_SECOND, EXCHANGE_MAX_IPS);
   // One pool for every large body, whether it arrives as a Collection write
   // or as an MCP request that carries one. Either spends one of the link's
   // write tokens first. The one write an MCP request makes uses the token
   // and slot that request already took.
   const admitLargeBody = largeBodyAdmission();
   const writesInsideAdmittedRequests = new WeakSet<Request>();
-  // Every browser and agent of a link spends the link's tokens before its body is read, as at the relay.
+  // A link's browsers and agents spend one budget, by its grant, before a
+  // body is read. The relay limits the whole link again.
   const collectionWriteRateLimiter = new TokenBucketLimiter(COLLECTION_WRITE_BUCKET_CAPACITY, COLLECTION_WRITE_REFILL_PER_SECOND, EXCHANGE_MAX_IPS);
   let mcpRequests = 0;
-  if (linkLiveConfig && (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
+  // An MCP request's internal calls to the link handlers carry their agent
+  // here, never in a header or cookie a client could send.
+  const agentCallers = new WeakMap<Request, AgentCaller>();
+  const mcpSignIn = createMcpSignIn({relayUrl, exchangeKey: relayExchangeKey, fetchRelay, nowMs, timeoutMs: relayTimeoutMs,
+    admit: (clientIp) => exchangeAddressProbes.allow(clientIp, nowMs()) && exchangeGlobalRateLimiter.allow("global", nowMs())});
+  if (linkLiveConfig &&(!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
   const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
     limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
 
@@ -1201,13 +1241,20 @@ export function createShareWebApplication({
     }
   }
 
-  async function callRelay(request: Request, browser: BrowserSession, call: RelayCall): Promise<Response> {
-    const refreshed = await refreshSession(browser);
+  // A browser calls with its session's capability; an agent with its own
+  // token and address, which the relay checks again on every call.
+  async function callRelay(request: Request, caller: LinkCaller, call: RelayCall): Promise<Response> {
+    const browser = "session" in caller ? caller : null;
+    const agent = "session" in caller ? null : caller;
+    const refreshed = browser ? await refreshSession(browser) : {ok: true as const, headers: {} as Record<string, string>};
     if (!refreshed.ok) return refreshed.status === 503
       ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
-    const capabilityToken = browser.session.capabilityToken;
+    const capabilityToken = browser?.session.capabilityToken ?? "";
+    const credential: Record<string, string> = agent
+      ? {authorization: `DohcAgent ${agent.accessToken}`, "x-dohc-agent-resource": agent.resource, "x-dohc-relay-exchange-key": relayExchangeKey ?? ""}
+      : {authorization: `LinkCapability ${capabilityToken}`};
     const current = (): boolean =>
-      sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
+      !browser || sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
     // Only an answer for a still-current session renews its cookie. A cookie
     // for a dead session could overwrite a newer one.
     const answer = (result: Response): Response => {
@@ -1220,14 +1267,14 @@ export function createShareWebApplication({
     // retryable call it superseded tries again instead of ending the link.
     // A renewal can overtake any call, so a failed retryable one always checks.
     const superseded = (failed = false): Response | null => {
-      if (!(call.ifSessionChanged || (failed && call.retryable)) || current()) return null;
+      if (!browser || !(call.ifSessionChanged || (failed && call.retryable)) || current()) return null;
       const renewed = call.retryable &&
         sessions.get(browser.discriminator, browser.token, nowMs())?.grantId === browser.session.grantId;
       return renewed ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
     };
-    const release = call.limiter
+    const release = !call.limiter ? () => {} : browser
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
-      : () => {};
+      : call.limiter.acquire(agent?.key ?? "", linkKeyOf(caller));
     // A full limiter is busy, not a refusal: the link still opens.
     if (!release) return answer(call.retryable
       ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
@@ -1243,7 +1290,7 @@ export function createShareWebApplication({
       {
         method: call.method,
         headers: {
-          authorization: `LinkCapability ${capabilityToken}`,
+          ...credential,
           ...(call.exchangeKey && relayExchangeKey
             ? { "x-dohc-relay-exchange-key": relayExchangeKey }
             : {}),
@@ -1258,7 +1305,8 @@ export function createShareWebApplication({
       // Only share metadata identifies the session itself; target refusals do not.
       if (relayResponse.status === 404) {
         if (call.path === "/sync/link/share") {
-          sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
+          if (browser) sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
+          if (agent) agent.invalid = true;
         }
         const stale = superseded(true);
         await relayResponse.body?.cancel().catch(() => undefined);
@@ -1314,7 +1362,7 @@ export function createShareWebApplication({
   const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial, resolveNamedMaterial: resolveNamedAppMaterial}) : undefined;
   const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
   const viewerHost = appLaunchConfig ? new URL(appLaunchConfig.viewerOrigin).host : undefined;
-  const handle = async (request: Request): Promise<Response> => {
+  const route = async (request: Request): Promise<Response> => {
     if (new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
       if (!internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) || request.method !== "POST" || !relayExchangeKey || relayExchangeKey.length < 32 || !presentsAccountDeletionKey(request.headers.get(ACCOUNT_DELETION_KEY_HEADER),accountDeletionKey(relayExchangeKey))) return refused();
       const body: unknown = await request.json().catch(() => null);
@@ -1338,46 +1386,74 @@ export function createShareWebApplication({
     }
     if (appRequest) return appLaunch!.handle(request);
     const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;
+    if (isMcpCorsPath(pathname) && request.method === "OPTIONS") return response(null, {status: 204});
     if (pathname === "/api/mcp" && request.method === "GET" && !search) return jsonResponse({
       api: "share-web", apiVersions, versionHeader: SHARE_WEB_API_VERSION_HEADER, defaultVersion: 1, mcpApiVersions: mcpApiVersions(apiVersions),
-      endpoint: "/mcp", transport: "streamable-http", exchange: {path: "/api/mcp/exchange", method: "POST", body: {secret: "The secret after # in the share link"}},
-      authentication: "Send the returned bearer in the Authorization header as Bearer <bearer>. Each exchange creates a separate agent identity. Keep and reuse the bearer.",
+      endpoint: "/mcp/s/<secret>", transport: "streamable-http", authorizationServer: "/.well-known/oauth-authorization-server",
+      authentication: "Replace <secret> with the text after # in the share link. The endpoint uses the standard MCP sign-in: " +
+        "it answers 401 with its protected resource metadata, and a person allows the agent on the consent page.",
     });
-    if (pathname === "/mcp") {
-      if (search || request.headers.has("origin") && request.headers.get("origin") !== agentOrigin ||
-        request.headers.get("sec-fetch-site") === "cross-site") return refused();
-      const bearer = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{16,256})$/u.exec(request.headers.get("authorization") ?? "");
-      const session = bearer && sessions.get(bearer[1]!, bearer[2]!, nowMs());
-      if (!session?.agentProfileSecret) return refused();
-      const discriminator = session.discriminator;
+    const signIn = await mcpSignIn.handle(request, agentOrigin);
+    if (signIn) {
+      const page = signInPagePolicy(signIn);
+      return response(signIn.body, {status: signIn.status, headers: signIn.headers, ...(page ? {page} : {})});
+    }
+    if (pathname.startsWith("/mcp/s/")) {
+      const secret = mcpLinkSecret(pathname);
+      if (!secret || search || !relayExchangeKey) return refused();
+      // The address names the link; the bearer is the credential. The relay
+      // checks the token against this exact address on every call.
+      const resource = `${agentOrigin}/mcp/s/${secret}`;
+      const challenge = (invalidToken: boolean) => {
+        const result = mcpChallenge(agentOrigin, secret, invalidToken);
+        return response(result.body, {status: result.status, headers: result.headers});
+      };
+      const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
+      const authorization = request.headers.get("authorization");
+      // A request with no token never reaches the relay, so a sign-in can always start.
+      if (authorization !== null && !mcpFailedSignIns.has(clientIp, nowMs())) return jsonResponse(REFUSAL_VALUE, {status: 429});
+      const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/iu.exec(authorization ?? "")?.[1];
+      if (!bearer) {
+        if (authorization !== null) mcpFailedSignIns.allow(clientIp, nowMs());
+        return challenge(authorization !== null);
+      }
       if (mcpRequests >= 64) return refused();
-      const release = mcpLimiter.acquire(sessionKey(discriminator, bearer![2]!), session.grantId);
+      const digest = (value: string) => createHash("sha256").update(value).digest("base64url");
+      const caller: AgentCaller = {accessToken: bearer, resource, key: `agent:${digest(bearer)}`,
+        addressKey: `agent-link:${digest(resource)}`, grantId: null, invalid: false};
+      const release = mcpLimiter.acquire(caller.key, caller.addressKey);
       if (!release) return refused();
       mcpRequests++;
       const deadlineAtMs = Date.now() + MCP_REQUEST_TIMEOUT_MS;
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS)]);
-      // Only server-held agent credentials cross into the shared link handlers.
-      const cookie = `${cookieName(discriminator)}=${bearer![2]}; ${profileCookieName(discriminator)}=${session.agentProfileSecret}`;
       let holdsLargeBody = false;
       try {
         const result = await serveRemoteMcp(request, {
-          signal, deadlineAtMs, discriminator, cookie, linkLive, liveLimits: linkLiveConfig?.editor,
+          signal, deadlineAtMs, liveLimits: linkLiveConfig?.editor,
+          ...(linkLive ? {live: linkLive.agent({accessToken: bearer, resource})} : {}),
+          agentChat: createAgentChatClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay}),
+          // A write follows the request's link probe, which names the grant.
           admitLargeBody: () => {
-            if (!collectionWriteRateLimiter.allow(session.grantId, nowMs())) return null;
-            const lease = admitLargeBody(session.grantId);
+            if (!caller.grantId || !collectionWriteRateLimiter.allow(caller.grantId, nowMs())) return null;
+            const lease = admitLargeBody(caller.grantId);
             holdsLargeBody = lease !== null;
             return lease;
           },
           request: (path, init = {}) => {
             const internal = new Request(new URL(path, agentOrigin), {
               ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
-              headers: {host: new URL(agentOrigin).host, origin: agentOrigin, cookie, [LINK_SESSION_HEADER]: discriminator,
-                "content-type": "application/json", [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION)},
+              headers: {host: new URL(agentOrigin).host, "content-type": "application/json", [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION)},
             });
+            agentCallers.set(internal, caller);
             if (holdsLargeBody) writesInsideAdmittedRequests.add(internal);
-            return handle(internal);
+            return route(internal);
           },
         });
+        // The token expired or was revoked, or names another address: the client refreshes or signs in again.
+        if (caller.invalid) {
+          mcpFailedSignIns.allow(clientIp, nowMs());
+          return challenge(true);
+        }
         return response(result.body, {status: result.status, headers: result.headers});
       } catch {
         return refused();
@@ -1416,6 +1492,12 @@ export function createShareWebApplication({
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
+    if (pathname.startsWith("/api/push/")) {
+      if (!push) return refused();
+      const result = await push(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
+
     if (pathname.startsWith("/api/account/")) {
       if (!accountHandler) return refused();
       const accountResponse = await accountHandler(request);
@@ -1431,9 +1513,9 @@ export function createShareWebApplication({
       return viewer;
     }
 
-    if ((pathname === "/api/exchange" || pathname === "/api/mcp/exchange") && request.method === "POST") {
-      const agent = pathname === "/api/mcp/exchange";
-      if (agent && (search || request.headers.has("origin") && request.headers.get("origin") !== agentOrigin || request.headers.get("sec-fetch-site") === "cross-site")) return refused();
+    if (pathname === "/l" || pathname.startsWith("/l/")) return serveWorkLinkPage(request, pathname, agentOrigin);
+
+    if (pathname === "/api/exchange" && request.method === "POST") {
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
       if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
@@ -1442,13 +1524,7 @@ export function createShareWebApplication({
       exchangesInFlight++;
       try {
         const malformed = () => exchangeRateLimiter.allow(clientIp, nowMs()) ? refused() : jsonResponse(REFUSAL_VALUE, {status: 429});
-        let secret: string | null = null;
-        try {
-          if (agent) {
-            const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])));
-            if (input && Object.keys(input).join() === "secret" && typeof input.secret === "string" && LINK_SECRET_PATTERN.test(input.secret)) secret = input.secret;
-          } else secret = await exchangeInput(request);
-        } catch {return malformed();}
+        const secret = await exchangeInput(request);
         if (!secret) return malformed();
         try {
           const bounded = boundedRelayRequest(request.signal, relayUrl, "/sync/link-exchange", {
@@ -1479,7 +1555,7 @@ export function createShareWebApplication({
           const token = newSessionToken();
           if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
           const cookies = parseCookies(request.headers.get("cookie"));
-          const existingProfile = agent ? undefined : cookies.get(profileCookieName(discriminator));
+          const existingProfile = cookies.get(profileCookieName(discriminator));
           const profile =
             existingProfile && LINK_SECRET_PATTERN.test(existingProfile)
               ? existingProfile
@@ -1493,11 +1569,9 @@ export function createShareWebApplication({
               capabilityToken: exchanged.capabilityToken,
               expiresAtMs: exchanged.expiresAtMs,
               createdAtMs: nowMs(),
-              ...(agent ? {agentProfileSecret: profile} : {}),
             },
             nowMs(),
           );
-          if (agent) return jsonResponse({ok: true, bearer: `${discriminator}.${token}`, endpoint: "/mcp"});
           const responseHeaders = new Headers();
           responseHeaders.append(
             "set-cookie",
@@ -1547,41 +1621,39 @@ export function createShareWebApplication({
     }
 
     if (pathname === COLLECTION_WRITES_PATH) {
-      // Only the viewer page, or this server's own MCP tools, which send the
-      // viewer's headers: never another site, and never a published app,
-      // whose origin differs and which never holds the link's cookies.
+      // Only the viewer page, or this server's own MCP tools: never another
+      // site, and never a published app, whose origin differs and which never
+      // holds the link's cookies.
+      const agent = agentCallers.get(request);
       const fetchSite = request.headers.get("sec-fetch-site");
       if (
-        request.method !== "POST" || search || request.headers.get("origin") !== agentOrigin ||
-        (fetchSite !== null && fetchSite !== "same-origin") || !request.headers.has(LINK_SESSION_HEADER) ||
+        request.method !== "POST" || search ||
+        (!agent && (request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
+          !request.headers.has(LINK_SESSION_HEADER))) ||
         request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
       ) {
         return refused();
       }
-      const authenticated = readSession(request);
-      if (!authenticated) return refused();
-      const profileSecret = parseCookies(request.headers.get("cookie")).get(
-        profileCookieName(authenticated.discriminator),
-      );
-      // An agent's session writes with its server-held profile only.
-      const agentProfile = authenticated.session.agentProfileSecret;
-      if (
-        !profileSecret || !LINK_SECRET_PATTERN.test(profileSecret) ||
-        (agentProfile !== undefined && !sameSecret(profileSecret, agentProfile))
-      ) {
-        return refused();
-      }
+      const browser = agent ? null : readSession(request);
+      const caller = agent ?? browser;
+      if (!caller) return refused();
+      // A browser writes with its profile; an agent's token names its own principal.
+      const profileSecret = browser
+        ? parseCookies(request.headers.get("cookie")).get(profileCookieName(browser.discriminator))
+        : undefined;
+      if (browser && (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret))) return refused();
       // Only a link the relay says can write now spends its tokens and holds a
-      // body slot, shared by every browser and agent of it. The relay decides
-      // again, inside its commit.
+      // body slot, one per link, shared by its browsers and agents. The relay
+      // decides again, inside its commit.
       const admitted = writesInsideAdmittedRequests.has(request);
       let writable = false;
-      const probe = await callRelay(request, authenticated, {
+      const probe = await callRelay(request, caller, {
         path: "/sync/link/share",
         buffered: true,
         retryable: true,
         ok: async (relayResponse) => {
-          const meta = asRecord(await relayResponse.json().catch(() => null));
+          const answer = asRecord(await relayResponse.json().catch(() => null));
+          const meta = agent ? takeAgentGrant(agent, answer) : answer;
           writable = meta?.access === "edit" && asRecord(meta.effectiveSelector)?.versionId === null;
           return response(null);
         },
@@ -1589,17 +1661,17 @@ export function createShareWebApplication({
       if (!writable) return probe.status === 200 ? refused() : probe;
       const renewed = (result: Response): Response => {
         const cookie = probe.headers.get("set-cookie");
-        if (cookie && sessions.isCurrent(authenticated.discriminator, authenticated.token, authenticated.session.capabilityToken, nowMs())) {
+        if (cookie && browser && sessions.isCurrent(browser.discriminator, browser.token, browser.session.capabilityToken, nowMs())) {
           result.headers.set("set-cookie", cookie);
         }
         return result;
       };
-      if (!admitted && !collectionWriteRateLimiter.allow(authenticated.session.grantId, nowMs())) return renewed(writesRateLimited());
-      const release = admitted ? () => {} : admitLargeBody(authenticated.session.grantId);
+      if (!admitted && !collectionWriteRateLimiter.allow(linkKeyOf(caller), nowMs())) return renewed(writesRateLimited());
+      const release = admitted ? () => {} : admitLargeBody(linkKeyOf(caller));
       if (!release) return renewed(writesRateLimited());
       try {
         // Only what a write is. Who writes comes from the capability and the
-        // profile, and no cookie or account reaches the relay.
+        // profile, or the agent's token, and no cookie or account reaches the relay.
         let body: string;
         try {
           const value = asRecord(await readBoundedJson(request, MAX_COLLECTION_WRITE_ENVELOPE_BYTES,
@@ -1609,10 +1681,10 @@ export function createShareWebApplication({
         } catch {
           return renewed(refused());
         }
-        return renewed(await callRelay(request, authenticated, {
+        return renewed(await callRelay(request, caller, {
           path: "/sync/link/collection-writes",
           method: "POST",
-          headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
+          headers: { ...(profileSecret ? { "x-dohc-link-profile-secret": profileSecret } : {}), "content-type": "application/json" },
           body,
           buffered: true,
           retryable: true,
@@ -1626,29 +1698,28 @@ export function createShareWebApplication({
     }
 
     if (pathname === "/api/view/chat/channels" || pathname === "/api/view/chat/messages") {
-      const authenticated = readSession(request);
-      if (!authenticated) return refused();
-      // An agent's session posts with its server-held profile only.
-      const cookieProfile = parseCookies(request.headers.get("cookie")).get(profileCookieName(authenticated.discriminator));
-      const agentProfile = authenticated.session.agentProfileSecret;
-      const profileSecret = cookieProfile && LINK_SECRET_PATTERN.test(cookieProfile) &&
-        (agentProfile === undefined || sameSecret(cookieProfile, agentProfile)) ? cookieProfile : null;
+      const agent = agentCallers.get(request);
+      const browser = agent ? null : readSession(request);
+      const caller = agent ?? browser;
+      if (!caller) return refused();
+      const cookieProfile = browser ? parseCookies(request.headers.get("cookie")).get(profileCookieName(browser.discriminator)) : undefined;
+      const profileSecret = cookieProfile && LINK_SECRET_PATTERN.test(cookieProfile) ? cookieProfile : null;
       if (request.method === "GET") {
         const channels = pathname === "/api/view/chat/channels";
         const read = linkChatReadPath(request, channels);
         if (!read) return refused();
-        return await callRelay(request, authenticated, {
+        return await callRelay(request, caller, {
           path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true, retryable: true,
           // The channel answer names this profile's name, once set.
           ...(channels && profileSecret ? { headers: { "x-dohc-link-profile-secret": profileSecret } } : {}),
           ...(read.holdMs > 0 ? { limiter: activityHoldLimiter } : {}),
         });
       }
-      // Only the viewer page, or this server's own MCP tools, which send the
-      // viewer's headers, as for Collection writes.
+      // Only the viewer page, as for Collection writes. An agent posts
+      // through its own agent chat.
       const fetchSite = request.headers.get("sec-fetch-site");
       if (
-        request.method !== "POST" || pathname !== "/api/view/chat/messages" || search ||
+        !browser || request.method !== "POST" || pathname !== "/api/view/chat/messages" || search ||
         request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
         !request.headers.has(LINK_SESSION_HEADER) || !profileSecret ||
         request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
@@ -1659,7 +1730,7 @@ export function createShareWebApplication({
       if (body === null) return refused();
       // Who posts comes from the capability and the profile alone; the relay
       // checks the link's access again inside its write.
-      return await callRelay(request, authenticated, {
+      return await callRelay(request, browser, {
         path: "/sync/link/chat/messages",
         method: "POST",
         headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
@@ -1682,8 +1753,10 @@ export function createShareWebApplication({
       ) {
         return refused();
       }
-      const authenticated = readSession(request);
-      if (!authenticated) return refused();
+      const agent = agentCallers.get(request);
+      const browser = agent ? null : readSession(request);
+      const caller = agent ?? browser;
+      if (!caller) return refused();
 
       let relayPath: string;
       let holdMs = 0;
@@ -1699,28 +1772,29 @@ export function createShareWebApplication({
       } else {
         if (
           !relayExchangeKey ||
-          !hasOnlySessionQuery(request, authenticated.discriminator)
+          (browser ? !hasOnlySessionQuery(request, browser.discriminator) : search !== "")
         ) {
           return refused();
         }
         relayPath = "/sync/link/discussion";
       }
 
-      const profileSecret = parseCookies(request.headers.get("cookie")).get(
-        profileCookieName(authenticated.discriminator),
-      );
-      if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
+      // A browser reads and posts with its profile; an agent's token names its own principal.
+      const profileSecret = browser
+        ? parseCookies(request.headers.get("cookie")).get(profileCookieName(browser.discriminator))
+        : undefined;
+      if (browser && (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret))) return refused();
       let appendBody: string | null = null;
       if (request.method === "POST") {
         appendBody = await discussionInput(request);
         if (appendBody === null) return refused();
       }
 
-      return await callRelay(request, authenticated, {
+      return await callRelay(request, caller, {
         path: relayPath,
         method: request.method,
         headers: {
-          "x-dohc-link-profile-secret": profileSecret,
+          ...(profileSecret ? { "x-dohc-link-profile-secret": profileSecret } : {}),
           ...(appendBody === null ? {} : { "content-type": "application/json" }),
         },
         ...(appendBody === null ? {} : { body: appendBody, exchangeKey: true }),
@@ -1734,11 +1808,17 @@ export function createShareWebApplication({
     }
 
     if (pathname.startsWith("/api/view/")) {
-      const authenticated = readSession(request);
+      const authenticated = agentCallers.get(request) ?? readSession(request);
       if (!authenticated || request.method !== "GET") return refused();
       if (pathname === "/api/view/meta") {
         // The share's answer says whether the link has a channel, so a lost one is retryable.
-        return await callRelay(request, authenticated, { path: "/sync/link/share", retryable: true });
+        const agent = agentCallers.get(request);
+        return await callRelay(request, authenticated, { path: "/sync/link/share", retryable: true,
+          // An agent's answer names its grant, which share-web keeps.
+          ...(agent ? { buffered: true, ok: async (relayResponse: Response) => {
+            const answer = takeAgentGrant(agent, asRecord(await relayResponse.json().catch(() => null)));
+            return answer ? jsonResponse(answer) : jsonResponse(linkRefusalBody("link_unavailable"), {status: 503});
+          } } : {}) });
       }
       if (pathname === "/api/view/current") {
         const collectionPath = new URL(request.url).searchParams.get("collectionPath");
@@ -1772,8 +1852,25 @@ export function createShareWebApplication({
 
     return refused();
   };
+  // A browser MCP client reads every answer on its paths, refusals and the
+  // 401 challenge included.
+  const handle = async (request: Request): Promise<Response> => {
+    const result = await route(request);
+    if (!isMcpCorsPath(new URL(request.url).pathname)) return result;
+    const headers = new Headers(result.headers);
+    for (const [key, value] of Object.entries(MCP_CORS_HEADERS)) headers.set(key, value);
+    return new Response(result.body, {status: result.status, statusText: result.statusText, headers});
+  };
   return { handle, resolveLinkBrowserMaterial, ...(linkLive ? {linkLive} : {}),
     resolveNamedBrowserSession: (request, discriminator) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null) };
 }
 
 export const shareWebRefusalBody = REFUSAL_BODY;
+
+/**
+ * The routes that authenticate before they read, then bound the body and its
+ * deadline: an agent's MCP request and a Collection write can carry megabytes.
+ */
+export function streamsRequestBody(url: URL): boolean {
+  return url.pathname.startsWith(MCP_PATH_PREFIX) || url.pathname === COLLECTION_WRITES_PATH;
+}

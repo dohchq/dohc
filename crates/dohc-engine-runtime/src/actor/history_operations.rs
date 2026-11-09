@@ -513,6 +513,16 @@ fn check_undo_ownership(
             .ok_or(DomainError::UndoRefused {path:m.path,reason:"linking document removed"})?;
         m.before_path = None;
     }
+    // Moving a page back, or deleting a copy, would leave the page's owner
+    // binding behind and stall the workspace's publication.
+    if duplicate || (m.operation == "rename" && m.before_path.is_some()) {
+        let owned: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+            params![ws, version, m.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+        if owned {
+            return Err(DomainError::LivePageOwned.into());
+        }
+    }
     for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
         if let Err(error) = check_path_ownership(conn, ws, version, &m.object_id, path) {
             if duplicate
@@ -865,6 +875,32 @@ mod tests {
             .unwrap();
         std::fs::remove_file(root.join(path)).unwrap();
     }
+    /// What enrollment leaves for a page this computer owns live.
+    pub(super) fn bind_owner(store: &mut EngineStore, object: &str) {
+        let claim = store.put_binary_blob(b"lineage").unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO ydoc_owner_bindings VALUES(?1,'main',?2,?3,'{}','relay',1,0,0,?3,100,100)", params![WS, object, claim])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+    }
+    /// Moving the page back would leave its owner binding behind.
+    #[tokio::test]
+    async fn undo_of_a_rename_refuses_a_page_this_computer_owns_live() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "old.md", "mover", "Body");
+        rename(&mut store, root.path(), "old.md", "new.md", "move", OP);
+        bind_owner(&mut store, "mover");
+        let before = count(&store);
+        let error = undo(&mut store, root.path(), "undo-owned", Arc::new(NoFaults)).unwrap_err();
+        assert!(
+            matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)),
+            "{error:?}"
+        );
+        assert_eq!(count(&store), before);
+        assert!(root.join("new.md").exists());
+        assert!(!root.join("old.md").exists());
+    }
     fn undo(
         store: &mut EngineStore,
         root: &Path,
@@ -917,6 +953,38 @@ mod tests {
                 .len(),
             1
         );
+    }
+    #[test]
+    fn history_operation_undo_replays_without_the_name_an_agent_gave() {
+        let named = r#"[{"agentId":"dohc-mcp","agentName":"Mover agent","kind":"agent","onBehalfOf":"person"}]"#;
+        let unnamed = r#"[{"agentId":"dohc-mcp","kind":"agent","onBehalfOf":"person"}]"#;
+        let other = r#"[{"agentId":"writer","kind":"agent","onBehalfOf":"person"}]"#;
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "old.md", "seed", "Before.\n");
+        rename(&mut store, root.path(), "old.md", "new.md", "rename", OP);
+        let mut undo_as = |author: &str| {
+            test_undo_in_turns(
+                &mut store,
+                WS,
+                OP,
+                "undo",
+                Some(author),
+                root.path(),
+                Arc::new(NoFaults),
+                10,
+            )
+        };
+        let result = undo_as(named).unwrap();
+        assert!(!result.deduped);
+        let replay = undo_as(unnamed).unwrap();
+        assert!(replay.deduped);
+        assert_eq!(replay.moments, result.moments);
+        assert!(matches!(
+            undo_as(other),
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
     }
     #[test]
     fn history_operation_whole_group_refuses_occupied_or_moved_objects() {
@@ -1192,19 +1260,24 @@ mod tests {
         DELETES.store(0, Ordering::Relaxed);
         fixture_setup(&store, |store| {
             store
-                .read_with(|conn| {
+                .hooks_with(|conn| {
                     conn.trace_v2(
                         rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
                         Some(trace),
-                    );
+                    )
+                    .unwrap();
                     Ok::<_, RuntimeError>(())
                 })
                 .unwrap();
         });
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
-            .read_with(|conn| {
-                conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            .hooks_with(|conn| {
+                conn.trace_v2(
+                    rusqlite::trace::TraceEventCodes::empty(),
+                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+                )
+                .unwrap();
                 Ok::<_, RuntimeError>(())
             })
             .unwrap();
@@ -1251,7 +1324,7 @@ mod tests {
         let observed = Arc::clone(&commits);
         fixture_setup(&store, move |store| {
             store
-                .read_with(|conn| {
+                .hooks_with(|conn| {
                     conn.commit_hook(Some(move || {
                         observed.fetch_add(1, Ordering::Relaxed);
                         false
@@ -1261,7 +1334,7 @@ mod tests {
         });
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
-            .read_with(|conn| conn.commit_hook(None::<fn() -> bool>))
+            .hooks_with(|conn| conn.commit_hook(None::<fn() -> bool>))
             .unwrap();
         assert!(result.unwrap().materialized);
         // Unix also durably retains each displaced original before completing the batch.

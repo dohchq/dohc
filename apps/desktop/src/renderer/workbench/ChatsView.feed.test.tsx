@@ -110,6 +110,17 @@ describe("ChatsView hybrid feed", () => {
     expect(await screen.findByTestId("chats-channel")).toBeTruthy();
   });
 
+  it("centers an empty Home in the height below its header", async () => {
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const empty = (await screen.findByText("No posts in your groups yet.")).parentElement!;
+    // Every box up to the list grows.
+    const list = empty.closest<HTMLElement>('[role="list"]')!;
+    for (let box = empty; box !== list; box = box.parentElement!) {
+      expect(box.className.split(" ")).toContain("flex-1");
+    }
+  });
+
   it.each([
     { access: "read-only", ended: false, locked: true },
     { access: "read-write", ended: true, locked: true },
@@ -172,7 +183,7 @@ describe("ChatsView hybrid feed", () => {
     expect((await screen.findByTestId("chats-thread-eyebrow")).textContent).toBe("Nova · thread");
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Nova");
-    expect(screen.getByTestId("chats-channel-agent-mark").className).toContain("text-agent");
+    expect(screen.getByTestId("chats-channel-agent-mark").firstElementChild!.className).toContain("text-agent");
   });
 
   it("shows a known viewer's Like before the write and its listing answer", async () => {
@@ -837,6 +848,27 @@ describe("ChatsView hybrid feed", () => {
     });
   });
 
+  it("shows what an agent reported on its post card's badge, read from the channel listing", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({
+        openingMessage: openingPreview({ presentation: { group: "fixture", hue: null, self: false },
+          authorKind: "agent",
+          authorDisplayName: "Nova",
+          authorReported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" },
+        }),
+      })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    fireEvent.focus(await screen.findByTestId("chats-post-agent-badge"));
+    expect(screen.getByTestId("chats-post-agent-reported").textContent).toBe(
+      "Claude Code 2.1 · Claude Opus 5.5 (as reported)",
+    );
+  });
+
   it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
     const user = userEvent.setup();
     const reaction = {
@@ -908,8 +940,8 @@ describe("ChatsView hybrid feed", () => {
     expect(commentCount?.getAttribute("aria-label")).toBe("2 comments");
     const poll = screen.getByTestId("chats-post-decision-open");
     expect(poll.textContent).toBe("");
-    expect(poll.getAttribute("aria-label")).toBe("Poll open");
-    expect(poll.getAttribute("title")).toBe("Poll open");
+    expect(poll.getAttribute("aria-label")).toBe("Unanswered");
+    expect(poll.getAttribute("title")).toBe("Unanswered");
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");
@@ -1104,6 +1136,58 @@ describe("ChatsView hybrid feed", () => {
     // Saved is still the reverse path.
     await userEvent.click(saved);
     expect(bridgeMock.archiveChatBookmark).toHaveBeenCalled();
+  });
+
+  it("offers Try again when a saved post's page has live editing on", async () => {
+    const onError = vi.fn();
+    bridgeMock.listChatBookmarks.mockResolvedValue({
+      bookmarks: [{
+        bookmarkId: "bookmark-thread-1", targetKind: "thread", targetId: "thread-1", threadId: "thread-1", mode: "live",
+        destinationPath: "Bookmarks/Chats/Friday--thread-1.md", state: "active", projectionState: "ready", generation: 1,
+        createdAtMs: NOW, updatedAtMs: NOW,
+      }],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()], viewerAuthorId: "author-you" });
+    const refused = Object.assign(new Error([`dohc can't archive "Bookmarks/Chats/Friday--thread-1.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10))), { name: "LivePageOwnedError" });
+    bridgeMock.archiveChatBookmark.mockRejectedValueOnce(refused);
+    const onBookmarkArchived = vi.fn();
+    renderView(vi.fn(), onError, { onBookmarkArchived });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const saved = await screen.findByTestId("chats-post-bookmark");
+    await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
+    await userEvent.click(saved);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.any(String), refused, expect.any(Function),
+      "Bookmarks/Chats/Friday--thread-1.md"));
+    // The bookmark stays saved, and Try again archives it again.
+    expect(saved.getAttribute("aria-pressed")).toBe("true");
+    expect(onBookmarkArchived).not.toHaveBeenCalled();
+    await act(async () => { onError.mock.calls[0]![2](); });
+    await waitFor(() => expect(bridgeMock.archiveChatBookmark).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onBookmarkArchived).toHaveBeenCalledWith("Bookmarks/Chats/Friday--thread-1.md"));
+    expect(saved.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps a post saved when its archive did not move the page, so its own control archives it", async () => {
+    bridgeMock.listChatBookmarks.mockResolvedValue({
+      bookmarks: [{
+        bookmarkId: "bookmark-thread-1", targetKind: "thread", targetId: "thread-1", threadId: "thread-1", mode: "live",
+        destinationPath: "Bookmarks/Chats/Friday--thread-1.md", state: "archived", projectionState: "failed", generation: 2,
+        createdAtMs: NOW, updatedAtMs: NOW,
+      }],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()], viewerAuthorId: "author-you" });
+    const onBookmarkArchived = vi.fn();
+    renderView(vi.fn(), vi.fn(), { onBookmarkArchived });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    const saved = await screen.findByTestId("chats-post-bookmark");
+    await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
+    await userEvent.click(saved);
+    expect(bridgeMock.archiveChatBookmark).toHaveBeenCalledWith({ workspaceId: "workspace-a", bookmarkId: "bookmark-thread-1" });
+    await waitFor(() => expect(onBookmarkArchived).toHaveBeenCalledWith("Bookmarks/Chats/Friday--thread-1.md"));
+    expect(saved.getAttribute("aria-pressed")).toBe("false");
   });
 });
 

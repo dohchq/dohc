@@ -15,7 +15,11 @@ import { getSharedLocalDocument } from "./sharedLocalDocument";
 // A note stays read-only until its lossy-note check answers and the engine
 // open that follows it settles.
 async function waitForEditable(): Promise<void> {
-  await waitFor(() => expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(false));
+  await waitFor(() => {
+    const toggle = screen.getByTestId("markdown-edit-toggle");
+    expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
+  });
 }
 import { documentVersionKey } from "./documentVersionKey";
 import { lineSpanInText } from "./FileInspector.text-fixture";
@@ -1523,7 +1527,7 @@ describe("markdown editor unmount flush", () => {
     // A truncated (read-only) doc never exposes editable inline properties.
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     const editToggle = screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement;
-    expect(editToggle.disabled).toBe(true);
+    expect(editToggle.getAttribute("aria-disabled")).toBe("true");
     await user.click(editToggle);
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     view.unmount();
@@ -5988,7 +5992,7 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="data/empty.csv" />);
 
-    await screen.findByTestId("csv-empty-table");
+    expect((await screen.findByTestId("csv-empty-table")).textContent).toBe("This table is empty.RowColumn");
     await user.click(screen.getByTestId("csv-empty-add-row"));
     view.unmount();
 

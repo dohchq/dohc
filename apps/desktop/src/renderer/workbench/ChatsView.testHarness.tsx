@@ -362,7 +362,7 @@ beforeEach(() => {
     },
   });
   bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-    liveRunId: null,
+    liveRunId: null, liveTriggerMessageId: null,
     pendingCount: 0,
     paused: false,
   });
@@ -466,14 +466,14 @@ export function navigatorView(readRevision: number, extra: ExtraProps = {}) {
     <ChatsView
       workspaceId="workspace-a"
       onOpenFileChat={vi.fn()}
-      onError={vi.fn()}
+      onError={vi.fn<TestChatsViewProps["onError"]>()}
       readRevision={readRevision}
       {...extra}
     />
   );
 }
 
-export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn(), extra: ExtraProps = {}) {
+export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsViewProps["onError"]>(), extra: ExtraProps = {}) {
   render(
     <ChatsView
       workspaceId="workspace-a"

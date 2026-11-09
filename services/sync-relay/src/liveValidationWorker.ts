@@ -4,7 +4,7 @@ import { buildFirstOpenBase } from "./firstOpenBase.js";
 import type {FirstOpenHistoryFailure, LiveValidationWork} from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
 import { readFirstOpenHistoryFile } from "./storage/firstOpenHistory.js";
-import { validateOrdinaryActivation } from "./storage/ordinaryActivationSource.js";
+import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 import { runLiveRestoreWork } from "./liveRestoreValidation.js";
 const send = process.send?.bind(process);
 if (!send) throw new Error("Live validation requires a child process.");

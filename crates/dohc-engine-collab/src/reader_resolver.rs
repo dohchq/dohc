@@ -204,10 +204,24 @@ impl PendingProof {
     }
 }
 
+/// Reader requests a proof may make after its first transient failure. The
+/// first retry runs at once; each later one waits for the caller's backoff.
+/// When they are used up, the lookup answers unavailable and forgets the
+/// proof, so only a later action starts a new count.
+const MAX_TRANSIENT_RETRIES: u8 = 6;
+
+/// Retry state of transiently failed proofs the cache dropped to make room,
+/// so a proof that comes back resumes its count and backoff instead of
+/// starting over. The oldest state goes first when this is full, so the bound
+/// holds for up to `MAX_ENTRIES + MAX_SAVED_RETRIES` proofs failing at once.
+const MAX_SAVED_RETRIES: usize = 4 * MAX_ENTRIES;
+
 struct Entry {
     key: Key,
     pending: Arc<PendingProof>,
     retries: u8,
+    /// This failure was answered retryable; the next lookup asks the reader again.
+    backed_off: bool,
 }
 
 fn constructed_source(checkpoint: &[u8], delta: &[u8], proof: &dohc_engine_reader::Proof) -> bool {
@@ -235,6 +249,10 @@ fn constructed_source(checkpoint: &[u8], delta: &[u8], proof: &dohc_engine_reade
 pub struct ReaderResolver {
     reader: Arc<Reader>,
     entries: Mutex<VecDeque<Entry>>,
+    /// Each evicted failure's key, retry count, and whether its backoff was
+    /// asked for. Locked only while `entries` is held.
+    saved_retries: Mutex<VecDeque<(Key, u8, bool)>>,
+    witness_checks: crate::markdown_write_safety::WitnessChecks,
 }
 impl ReaderResolver {
     /// Outside-fold construction has no snapshot-witness cache or retry policy.
@@ -269,7 +287,13 @@ impl ReaderResolver {
         Self {
             reader,
             entries: Mutex::new(VecDeque::new()),
+            saved_retries: Mutex::new(VecDeque::new()),
+            witness_checks: Default::default(),
         }
+    }
+
+    pub fn check_witness(&self, doc: &Ydoc, key: &DocKey, path: &str) -> Result<bool, CollabError> {
+        self.witness_checks.check(&self.reader, doc, key, path)
     }
 
     pub(crate) fn resolve_snapshot(
@@ -365,6 +389,22 @@ impl ReaderResolver {
         Ok(fresh)
     }
 
+    fn save_retries(&self, key: Key, retries: u8, backed_off: bool) {
+        let mut saved = self.saved_retries.lock().unwrap();
+        if saved.len() >= MAX_SAVED_RETRIES {
+            saved.pop_front();
+        }
+        saved.push_back((key, retries, backed_off));
+    }
+
+    fn take_saved_retries(&self, key: &Key) -> Option<(u8, bool)> {
+        let mut saved = self.saved_retries.lock().unwrap();
+        let index = saved.iter().position(|(saved, _, _)| saved == key)?;
+        saved
+            .remove(index)
+            .map(|(_, retries, backed_off)| (retries, backed_off))
+    }
+
     fn lookup(
         &self,
         key: Key,
@@ -386,6 +426,18 @@ impl ReaderResolver {
                     return Ok(fresh);
                 }
                 Some(Err(failure)) if transient(failure) && entry.retries == 0 => retries = 1,
+                Some(Err(failure))
+                    if transient(failure) && entry.retries < MAX_TRANSIENT_RETRIES =>
+                {
+                    if !entry.backed_off {
+                        entries.push_back(Entry {
+                            backed_off: true,
+                            ..entry
+                        });
+                        return Err(CollabError::MarkdownReaderRetryable);
+                    }
+                    retries = entry.retries + 1;
+                }
                 Some(Err(failure)) => {
                     if !transient(failure) {
                         entries.push_back(entry);
@@ -398,6 +450,16 @@ impl ReaderResolver {
                     return Err(CollabError::MarkdownReaderPending(pending));
                 }
             }
+        } else if let Some((saved, backed_off)) = self.take_saved_retries(&key) {
+            // An evicted failure goes on as it would have in the cache.
+            if saved >= MAX_TRANSIENT_RETRIES {
+                return Err(CollabError::MarkdownReaderUnavailable);
+            }
+            if saved > 0 && !backed_off {
+                self.save_retries(key, saved, true);
+                return Err(CollabError::MarkdownReaderRetryable);
+            }
+            retries = saved + 1;
         }
         while entries.len() >= MAX_ENTRIES {
             let Some(index) = entries
@@ -406,7 +468,10 @@ impl ReaderResolver {
             else {
                 return Err(CollabError::MarkdownReaderUnavailable);
             };
-            entries.remove(index);
+            let evicted = entries.remove(index).unwrap();
+            if matches!(evicted.pending.result.get(), Some(Err(failure)) if transient(failure)) {
+                self.save_retries(evicted.key, evicted.retries, evicted.backed_off);
+            }
         }
         let pending = Arc::new(PendingProof {
             reader: self.reader.clone(),
@@ -422,6 +487,7 @@ impl ReaderResolver {
             key,
             pending: pending.clone(),
             retries,
+            backed_off: false,
         });
         Err(CollabError::MarkdownReaderPending(pending))
     }

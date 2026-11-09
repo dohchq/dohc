@@ -223,7 +223,7 @@ async function withReceivedShare(access: "edit" | "view", run: (received: Receiv
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await new RelayFilePeer({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId }).writeTextFiles([
       { path: NOTE, text: NOTE_TEXT },

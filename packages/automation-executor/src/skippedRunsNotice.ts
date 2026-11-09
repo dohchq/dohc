@@ -4,6 +4,7 @@ import {
   NOTICE_TARGET_FIELD_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
 } from "@dohc/workspace-contracts/relay";
+import { cutText } from "@dohc/workspace-contracts/names";
 import type { SkippedRuns } from "./automationScheduler";
 import type { ScheduledAutomation } from "./collectionAutomations";
 
@@ -57,8 +58,7 @@ export function skippedRunsNotice(input: {
   }
   const suffix = ` skipped ${skipped.count === 1 ? "once" : `${skipped.count.toLocaleString("en-US")} times`}`;
   const room = NOTICE_TITLE_MAX_CHARS - [...suffix].length;
-  const name = [...schedule.name];
-  const title = (name.length > room ? `${name.slice(0, room - 1).join("").trimEnd()}…` : schedule.name) + suffix;
+  const title = cutText(schedule.name, room) + suffix;
   const more = skipped.count - skipped.first.length;
   const lines = skipped.first.map(formatTime);
   if (more > 0) lines.push(`and ${more.toLocaleString("en-US")} more`);

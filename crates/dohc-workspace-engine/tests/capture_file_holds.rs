@@ -46,6 +46,10 @@ impl Fixture {
         Self::with_target(None).await
     }
     async fn with_target(target_path: Option<&str>) -> Self {
+        Self::with_held(HELD, target_path).await
+    }
+    /// `main` holds `held`, and `later` has a head at `target_path` if given.
+    async fn with_held(held: &str, target_path: Option<&str>) -> Self {
         let scratch = ScratchDir::new().unwrap();
         write_root_binding(scratch.path(), TOKEN).unwrap();
         let db = engine_db_path(&scratch).unwrap();
@@ -59,7 +63,7 @@ impl Fixture {
                 &CaptureIngest {
                     workspace_id: WS.into(),
                     version_id: "main".into(),
-                    path: HELD.into(),
+                    path: held.into(),
                     text: SEED.into(),
                     metadata_origin: "capture".into(),
                     metadata_summary: None,
@@ -84,7 +88,7 @@ impl Fixture {
             &doc.encode_full_state(),
             LocalAppend {
                 marker: Some(MarkerCreation {
-                    path: Some(HELD),
+                    path: Some(held),
                     content_kind: ContentKind::Richdoc,
                     regime: Regime::LocalOnly,
                 }),
@@ -121,7 +125,7 @@ impl Fixture {
                 .unwrap();
         }
         drop(store);
-        write_file(scratch.path(), HELD, outside().as_bytes());
+        write_file(scratch.path(), held, outside().as_bytes());
         write_file(scratch.path(), "sibling.txt", b"Sibling.\n");
         let transport = InProcessTransport::new(Arc::new(EngineService::new()));
         let opened = call_with_busy_retry(
@@ -765,6 +769,58 @@ async fn review2_ancestor_release(repair: bool) {
         selected
     );
     f.close().await;
+}
+
+/// `main` holds `plans/trip.md` and `later` has a file at `plans`. The
+/// switch keeps the folder and its held file, and its write of `plans` waits
+/// until capture records the repair or the deletion in `main`.
+async fn held_file_in_a_folder_keeps_the_file_write_waiting(repair: bool) {
+    let held = "plans/trip.md";
+    let mut f = Fixture::with_held(held, Some("plans")).await;
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"later"}),
+    )
+    .await;
+    f.scan().await;
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(held)).unwrap(),
+        outside()
+    );
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let pending: i64 = conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path='plans' AND status='pending'", [WS], |row| row.get(0)).unwrap();
+    assert_eq!(pending, 1, "the file write must wait as a durable job");
+    if repair {
+        std::fs::write(f.scratch.path().join(held), "Source repair.\n").unwrap();
+    } else {
+        std::fs::remove_file(f.scratch.path().join(held)).unwrap();
+    }
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("plans")).unwrap(),
+        "Target version.\n"
+    );
+    f.reopen().await;
+    let selected: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='later' AND s.path='plans'", [WS], |row| row.get(0)).unwrap();
+    assert_eq!(selected, "Target version.\n");
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("plans")).unwrap(),
+        selected
+    );
+    let source: Option<String> = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2", [WS, held], |row| row.get(0)).optional().unwrap();
+    assert_eq!(source.as_deref(), repair.then_some("Source repair.\n"));
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repaired_held_file_lets_its_folder_become_a_file() {
+    held_file_in_a_folder_keeps_the_file_write_waiting(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_held_file_lets_its_folder_become_a_file() {
+    held_file_in_a_folder_keeps_the_file_write_waiting(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

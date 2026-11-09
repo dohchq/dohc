@@ -31,6 +31,11 @@ import {
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { isPrivacyDenial } from "./privacyDenial";
+import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./physicalWorkspaceRemoval";
+import type { RegistryEntry } from "./registryStore";
+import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
+import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
+import { windowShowsWorkspace } from "../window/workspaceWindowReuse";
 
 // A real macOS privacy refusal needs System Settings; a test answers for it.
 vi.mock("./privacyDenial", async (actual) => {
@@ -143,10 +148,14 @@ function rendererSession(
   const generation = generationOf();
   return {
     workspaceId,
+    attachmentId: AUTHORITY_ID,
     generation,
     isCurrent: () => isAvailable() && generationOf() === generation,
   };
 }
+
+// These tests open the workspace once, so a window's attachment is the current one.
+const currentAttachments = { isCurrentAttachment: () => true };
 
 function harness(
   session = providerSession(),
@@ -178,6 +187,7 @@ function harness(
             () => !retired,
             options.rendererWorkspaceId,
           ),
+    authorities: currentAttachments,
     acquireWorkspace: (workspaceId: string) => {
       const authority = workspaceAuthority(workspaceId);
       return options.rootPath === undefined ? authority : { ...authority, workspace: { ...authority.workspace, rootPath: options.rootPath } };
@@ -248,6 +258,50 @@ describe("engine Y.Doc IPC adapter", () => {
       payload: { sessionId: openPayload.sessionId, ...DOCUMENT, typingUnresolved: false, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
         editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
     });
+    await h.ipc.shutdown();
+  });
+
+  it("delivers a head in the same event as the update it was read with, only to the current renderer session", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession());
+    await h.ipc.open(sender, openPayload);
+    const opened = h.capturedOpen()!;
+    const update = new Uint8Array([1, 2, 3]);
+    opened.onRemoteUpdate(update, { sha256: "a".repeat(64) });
+    expect(sender.sent.at(-1)).toEqual({
+      channel: CHANNELS.engineYDocRemoteUpdate,
+      payload: { sessionId: openPayload.sessionId, update, head: { sha256: "a".repeat(64) }, lineageGeneration: 1 },
+    });
+    opened.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ head: { sha256: null } });
+    opened.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: "b".repeat(64), committed: true });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ head: { sha256: "b".repeat(64), committed: true } });
+    // A delta from another editor brings no head.
+    opened.onRemoteUpdate(new Uint8Array([4]));
+    expect(sender.sent.at(-1)?.payload).not.toHaveProperty("head");
+    const sent = sender.sent.length;
+    h.setGeneration(2);
+    opened.onRemoteUpdate(new Uint8Array([5]), { sha256: "b".repeat(64) });
+    expect(sender.sent).toHaveLength(sent);
+    await h.ipc.shutdown();
+  });
+
+  it("does not deliver an old session's state and head into a reopened editor for the same path", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession());
+    await h.ipc.open(sender, openPayload);
+    const old = h.capturedOpen()!;
+    await h.ipc.close(sender, {sessionId: openPayload.sessionId});
+    const reopened = {...openPayload, sessionId: "reopened-session"};
+    await h.ipc.open(sender, reopened);
+    const current = h.capturedOpen()!;
+    sender.sent.length = 0;
+
+    old.onRemoteUpdate(new Uint8Array([1]), { sha256: "a".repeat(64) });
+    old.onRemoteUpdate(new Uint8Array([0, 0]), { sha256: null });
+    expect(sender.sent).toEqual([]);
+    current.onRemoteUpdate(new Uint8Array([2]), { sha256: "b".repeat(64) });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({sessionId: reopened.sessionId, head: {sha256: "b".repeat(64)}});
     await h.ipc.shutdown();
   });
   it("names main's person when each request first arrives and keeps that person for its retries", async () => {
@@ -520,7 +574,7 @@ describe("engine Y.Doc IPC adapter", () => {
   function claimHarness(initialClaim: string | null) {
     let providerClaim = initialClaim;
     const resync = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: () => () => {}, sessionId: "native-existing",
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: () => () => {}, sessionId: "native-existing",
       flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(() => resync.promise)};
     const provider = providerSession({nativeOwner, objectId: "object", versionId: "main"});
     Object.defineProperty(provider, "lineageClaimId", {get: () => providerClaim});
@@ -584,7 +638,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("lets the transport retire a stale owner when a durable change arrives", async () => {
     let notify!: () => void;
-    const nativeOwner = {onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: (handler: () => void) => {notify = handler; return () => {};},
       sessionId: "native-existing", flush: vi.fn(async () => undefined), applyRemoteUpdate: vi.fn(async () => undefined), resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner, objectId: "object", versionId: "main", lineageClaimId: "a".repeat(64)}));
     await h.ipc.open(new FakeSender(7), openPayload);
@@ -599,7 +653,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("hands the existing session to main only after its journal flush and keeps the renderer held until completion", async () => {
     const flush = deferred<void>();
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(() => flush.promise),refresh: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async (_update: Uint8Array) => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7);
     await h.ipc.open(sender,openPayload);
@@ -630,7 +684,7 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("releases a prepared renderer when relay acquisition is cancelled", async () => {
-    const nativeOwner = {onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
+    const nativeOwner = {onSettlementWanted: () => () => {}, onDurableLocalChange: vi.fn(() => () => {}),sessionId: "native-existing",flush: vi.fn(async () => undefined),applyRemoteUpdate: vi.fn(async () => undefined),resyncIfNeeded: vi.fn(async () => undefined)};
     const h = harness(providerSession({nativeOwner,objectId: "object",versionId: "main",lineageClaimId: "a".repeat(64)}));
     const sender = new FakeSender(7); await h.ipc.open(sender,openPayload);
     const owner = await h.ipc.existingOwner({workspaceId: "workspace-1",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "notes/a.md",selectorPaths: ["notes/a.md"],restoreFenceGeneration: 1});
@@ -760,6 +814,32 @@ describe("engine Y.Doc IPC adapter", () => {
     await noSettle.ipc.open(sender, openPayload);
     await expect(noSettle.ipc.retrySave(sender, retry)).rejects.toThrow("could not start a save");
     await noSettle.ipc.shutdown();
+  });
+
+  it("forwards Edit anyway only from the current local editor and does not carry it into a reopened editor", async () => {
+    const settleNow = vi.fn(async () => ({
+      momentId: "moment-1", path: "notes/a.md", content: null, sha256: "a".repeat(64), materialized: true,
+      projection: {contentKind: "richdoc" as const, sourceStateVectorSha256: "b".repeat(64), destructive: false},
+    }));
+    const h = harness(providerSession({settleNow}));
+    const sender = new FakeSender(7);
+    const consent = {...DOCUMENT, allowLossySourceSha256: "c".repeat(64)};
+    await h.ipc.open(sender, openPayload);
+    await expect(h.ipc.retrySave(new FakeSender(8), consent)).resolves.toBe("closed");
+    await expect(h.ipc.retrySave(sender, {...consent, workspaceId: "workspace-2"})).rejects.toThrow("another workspace");
+    expect(settleNow).not.toHaveBeenCalled();
+    await expect(h.ipc.retrySave(sender, consent)).resolves.toBe("settled");
+    expect(settleNow).toHaveBeenLastCalledWith({allowLossySourceSha256: consent.allowLossySourceSha256});
+    h.setGeneration(2);
+    await expect(h.ipc.retrySave(sender, consent)).resolves.toBe("closed");
+    expect(settleNow).toHaveBeenCalledOnce();
+
+    await h.ipc.retireSender(sender, 1);
+    await h.ipc.open(sender, {...openPayload, sessionId: "reopened-session"});
+    await expect(h.ipc.retrySave(sender, DOCUMENT)).resolves.toBe("settled");
+    expect(settleNow).toHaveBeenLastCalledWith(undefined);
+    expect(h.capturedOpen()?.allowLossySourceSha256).toBeUndefined();
+    await h.ipc.shutdown();
   });
 
   it("marks only a settle that failed to write as a save failure, and names a read-only file", async () => {
@@ -1161,6 +1241,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
@@ -1234,6 +1315,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
@@ -1481,6 +1563,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(() => generation),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
@@ -1590,14 +1673,16 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onLineageReplaced?.(
       new Uint8Array([9]),
       ["recovered/losing.md"],
+      { sha256: "c".repeat(64) },
     );
-    h.capturedOpen()?.onRemoteUpdate(new Uint8Array([8]));
+    h.capturedOpen()?.onRemoteUpdate(new Uint8Array([8]), { sha256: "d".repeat(64) });
 
     expect(sender.sent.at(-1)?.payload).toMatchObject({
       sessionId: openPayload.sessionId,
       update: new Uint8Array([9]),
       recoveredPaths: ["recovered/losing.md"],
       artifactAssets: [winner],
+      head: { sha256: "c".repeat(64) },
       lineageGeneration: 2,
     });
     await expect(
@@ -1612,7 +1697,7 @@ describe("engine Y.Doc IPC adapter", () => {
         sessionId: openPayload.sessionId,
         lineageGeneration: 2,
       }),
-    ).toEqual({ accepted: true, updates: [new Uint8Array([8])] });
+    ).toEqual({ accepted: true, updates: [{ update: new Uint8Array([8]), head: { sha256: "d".repeat(64) } }] });
     expect(
       h.ipc.acknowledgeLineageReplacement(sender, {
         sessionId: openPayload.sessionId,
@@ -1715,6 +1800,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
@@ -1812,6 +1898,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const ipc = createEngineYDocSessionIpc({
         localPersonId: () => "person-local",
         sessionFor: () => rendererSession(),
+        authorities: currentAttachments,
         acquireWorkspace: workspaceAuthority,
         captureFor: () => capture,
         ensureCaptureFor: vi.fn(async () => undefined),
@@ -1856,6 +1943,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
@@ -1900,6 +1988,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: () => authority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor: vi.fn(async () => {
@@ -1958,7 +2047,7 @@ describe("engine Y.Doc IPC adapter", () => {
     // way the capture's canonical doc takes a journaled update.
     function editableSession(trace: string[] = [], markdown = "# Plan\n\nBefore.") {
       const doc = markdownToYDoc(markdown);
-      return providerSession({
+      const session = providerSession({
         doc,
         applyDecidedLocalUpdate: vi.fn(async (decide, onArmed) => {
           const update = decide(doc);
@@ -1976,6 +2065,7 @@ describe("engine Y.Doc IPC adapter", () => {
           trace.push("close");
         }),
       });
+      return session;
     }
 
     const pendingDraft = { binding: { workspaceId: "workspace-1", mainVersionId: "main", objectId: "object",
@@ -2253,6 +2343,103 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(session.close).toHaveBeenCalledOnce();
     });
 
+    it("settles consent without an append before retrying one capacity-refused edit", async () => {
+      const trace: string[] = [];
+      const session = editableSession(trace);
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      const h = harness(session);
+      const source = "a".repeat(64);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: source }))
+        .resolves.toEqual({ path: "notes/a.md", changed: true });
+      expect(trace).toEqual(["settle", "apply", "settle", "close"]);
+      const calls = vi.mocked(session.applyDecidedLocalUpdate).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[1]![2]).toEqual(calls[0]![2]);
+      expect(session.settleNow).toHaveBeenNthCalledWith(1, { allowLossySourceSha256: source });
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+    });
+
+    it("keeps a capacity-refused edit unapplied when the consent-only settlement holds", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      const held = new DaemonRefusalError({ code: "CONFLICT", message: "markdown-write-held", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      vi.mocked(session.settleNow).mockRejectedValueOnce(held);
+      const h = harness(session);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(held);
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
+
+    it("leaves the edit unapplied when consent preparation is pending", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      const pending = new DaemonRefusalError({ code: "CONFLICT", message: "markdown-witness-check-pending", retry: "afterBackoff" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      vi.mocked(session.settleNow).mockRejectedValueOnce(pending);
+      const h = harness(session);
+
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) })).rejects.toBe(pending);
+
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(session.close).toHaveBeenCalledOnce();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
+
+    it("does not retry an edit after its lineage changes during consent settlement", async () => {
+      const session = editableSession();
+      const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+      vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(capacity);
+      const settling = deferred<void>();
+      const release = deferred<SettleResult>();
+      vi.mocked(session.settleNow).mockImplementationOnce(() => {
+        settling.resolve();
+        return release.promise;
+      });
+      const h = harness(session);
+      await h.ipc.open(new FakeSender(7), openPayload);
+      const edited = h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) });
+      const refused = expect(edited).rejects.toThrow();
+      await settling.promise;
+      h.capturedOpen()?.onLineageReplaced?.(Y.encodeStateAsUpdate(markdownToYDoc("Winner.")), []);
+      release.resolve({ materialized: true } as SettleResult);
+      await refused;
+
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+      await h.ipc.shutdown();
+    });
+
+    it("does not retry capacity without consent or retry a second capacity refusal", async () => {
+      for (const allowLossySourceSha256 of [undefined, "a".repeat(64)]) {
+        const session = editableSession();
+        const capacity = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" }, undefined);
+        vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValue(capacity);
+        const h = harness(session);
+        await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256 })).rejects.toBe(capacity);
+        expect(session.applyDecidedLocalUpdate).toHaveBeenCalledTimes(allowLossySourceSha256 ? 2 : 1);
+        expect(session.settleNow).toHaveBeenCalledTimes(allowLossySourceSha256 ? 1 : 0);
+        expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      }
+    });
+
+    it("does not append an accepted edit again when consent settlement holds", async () => {
+      const session = editableSession();
+      vi.mocked(session.settleNow).mockRejectedValueOnce(new DaemonRefusalError({
+        code: "CONFLICT", message: "markdown-write-held", retry: "no",
+      }, undefined));
+      const h = harness(session);
+      await expect(h.ipc.editDocument({ ...append, allowLossySourceSha256: "a".repeat(64) }))
+        .rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
+      expect(session.applyDecidedLocalUpdate).toHaveBeenCalledOnce();
+      expect(session.settleNow).toHaveBeenCalledOnce();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.");
+    });
+
     it.each([[false, "active"], [true, "active"], [false, "sealed"], [true, "sealed"]] as const)("reports an admitted pending edit as success, held=%s state=%s", async (held, state) => {
       const session = editableSession();
       const pending = new YdocOwnerDraftPendingError({ ...pendingDraft, state });
@@ -2347,5 +2534,152 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.open(sender, { ...openPayload, sessionId: "second" });
     await h.ipc.shutdown();
     expect(close).toHaveBeenLastCalledWith({ shuttingDown: true });
+  });
+});
+
+// After Forget, Open folder on the same folder opens the workspace again in a
+// new window, and the window from before Forget can stay open.
+describe("a window left from before Forget", () => {
+  function forgottenAndReopened(shareView: RegistryEntry["shareView"] | null) {
+    const workspace: RegistryEntry = {
+      workspaceId: openPayload.workspaceId, rootPath: "C:/workspace", kind: "personal", mode: "local-first",
+      ...(shareView ? { shareView } : {}),
+    };
+    let registered: RegistryEntry | null = null;
+    // The attachment each live-document open or admission wait ran under.
+    const ranUnder: symbol[] = [];
+    const authorities = createWorkspaceAuthorityOwner({
+      findWorkspace: () => registered,
+      canonicalizeRoot: (path) => path,
+      createState: () => ({}),
+      // As main does: the attachment's live documents close with it.
+      disposeState: async (_state, binding) => { await ipc.retireAuthority(binding.attachmentId); },
+    });
+    const register = () => authorities.registerBinding(workspace, {
+      persist: () => { registered = workspace; },
+      rollback: () => { registered = null; },
+    });
+    const forget = createWorkspaceForget({
+      currentBinding: (workspaceId) => authorities.currentBinding(workspaceId),
+      findWorkspace: () => registered,
+      removePhysicalWorkspace: createPhysicalWorkspaceRemoval({
+        retireBinding: (binding, retirement) => authorities.retireBinding(binding, retirement),
+        findWorkspace: () => registered,
+        removeWorkspace: () => { registered = null; },
+        removeDrafts: async () => undefined,
+        onError: (_workspaceId, error) => { throw error; },
+      }),
+      trust: { restrict: async () => undefined },
+      forgottenShareViews: { remember: async () => undefined },
+      clearNotices: () => undefined,
+      notifyRenderer: () => undefined,
+    });
+    const sessions = new RendererWorkspaceSessionOwner<EngineYDocIpcSender>({
+      retirement: {
+        retireSender: () => ({ requiredForAdmission: Promise.resolve(), detachedFromAdmission: Promise.resolve() }),
+        retireWorkspace: async () => undefined,
+      },
+    });
+    // Wired as main.ts wires createEngineYDocSessionIpc.
+    const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
+      sessionFor: (sender) => sessions.current(sender),
+      authorities,
+      acquireWorkspace: (workspaceId) => {
+        const lease = authorities.acquire(workspaceId);
+        return {
+          workspace: { workspaceId, rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId },
+          assertCurrent: () => lease.assertCurrent(),
+          release: () => lease.release(),
+        };
+      },
+      captureFor: (current) => ({
+        openYDocSession: async (input) => {
+          ranUnder.push(current.attachmentId);
+          return providerSession({ path: input.path });
+        },
+      }),
+      ensureCaptureFor: async () => undefined,
+      isSharedView: () => registered?.shareView !== undefined,
+      sharedCaptureFor: async (current) => ({
+        openYDocSession: vi.fn(),
+        waitForAdmission: async () => {
+          ranUnder.push(current.attachmentId);
+          return true;
+        },
+      }),
+      resolveDocumentPath: async (_workspace, path) => path,
+      onError: () => undefined,
+    });
+    const oldWindow = new FakeSender(1);
+    const newWindow = new FakeSender(2);
+    return {
+      ipc, ranUnder, oldWindow, newWindow,
+      shows: (sender: EngineYDocIpcSender) =>
+        windowShowsWorkspace(sessions.current(sender), workspace.workspaceId, authorities),
+      async start() {
+        const before = register();
+        await sessions.open(oldWindow, before, "document-old");
+        return before;
+      },
+      async forgetAndReopen() {
+        await forget(workspace.workspaceId);
+        expect(registered).toBeNull();
+        const after = register();
+        await sessions.open(newWindow, after, "document-new");
+        return after;
+      },
+    };
+  }
+
+  it("can't open a live document of the reopened workspace", async () => {
+    const r = forgottenAndReopened(null);
+    const before = await r.start();
+    expect((await r.ipc.open(r.oldWindow, { ...openPayload, sessionId: "old-before" })).available).toBe(true);
+    expect(r.ranUnder).toEqual([before.attachmentId]);
+
+    const after = await r.forgetAndReopen();
+    const label = (id: symbol) =>
+      id === before.attachmentId ? "before Forget" : id === after.attachmentId ? "after Open folder" : "unknown";
+    expect(r.shows(r.oldWindow)).toBe(false);
+    expect(r.shows(r.newWindow)).toBe(true);
+    r.ranUnder.length = 0;
+
+    // The new window opens its documents under the reopened attachment.
+    expect((await r.ipc.open(r.newWindow, { ...openPayload, sessionId: "new", path: "notes/b.md" })).available).toBe(true);
+    expect(r.ranUnder.map(label)).toEqual(["after Open folder"]);
+    r.ranUnder.length = 0;
+
+    // The old window shows the document as unavailable, not in the plain editor.
+    const opened = await r.ipc.open(r.oldWindow, { ...openPayload, sessionId: "old-after" });
+    expect({ opened, ranUnder: r.ranUnder.map(label) }).toEqual({
+      opened: { available: false, documentUnavailable: true },
+      ranUnder: [],
+    });
+    await r.ipc.shutdown();
+  });
+
+  it("isn't admitted to a live document of the reopened share", async () => {
+    const r = forgottenAndReopened({
+      shareId: "share", granterEmail: null, genericChatWritable: false,
+      grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
+    });
+    const before = await r.start();
+    expect(await r.ipc.waitForAdmission(r.oldWindow, { ...openPayload, sessionId: "old-before" })).toBe(true);
+    expect(r.ranUnder).toEqual([before.attachmentId]);
+
+    const after = await r.forgetAndReopen();
+    const label = (id: symbol) =>
+      id === before.attachmentId ? "before Forget" : id === after.attachmentId ? "after Open folder" : "unknown";
+    expect(r.shows(r.oldWindow)).toBe(false);
+    r.ranUnder.length = 0;
+
+    expect(await r.ipc.waitForAdmission(r.newWindow, { ...openPayload, sessionId: "new" })).toBe(true);
+    expect(r.ranUnder.map(label)).toEqual(["after Open folder"]);
+    r.ranUnder.length = 0;
+
+    const admitted = await r.ipc.waitForAdmission(r.oldWindow, { ...openPayload, sessionId: "old-after" });
+    expect({ admitted, ranUnder: r.ranUnder.map(label) }).toEqual({ admitted: false, ranUnder: [] });
+    await r.ipc.shutdown();
   });
 });

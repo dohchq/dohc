@@ -46,6 +46,74 @@ export const desktopRoot = resolve(helpersDir, "../..");
 const mainEntry = join(desktopRoot, "dist/main/main.js");
 const rendererEntry = join(desktopRoot, "dist/renderer/index.html");
 const electronExecutable = require("electron") as string;
+const launchedApps = new WeakMap<Page, ElectronApplication>();
+
+/** Settles as `work` does, or with null once `ms` pass first. */
+export async function within<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  void work.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms); });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+}
+
+/** Reads state for a failure message, giving up after 2 s. */
+function stateWithin(read: Promise<object>): Promise<string> {
+  return within(read, 2_000).then(
+    state => state ? JSON.stringify(state) : "no answer in 2 s",
+    (error: unknown) => `unreadable (${error instanceof Error ? error.message : String(error)})`,
+  );
+}
+
+/** The renderer's startup marks, in ms since its page started, for a failure message. */
+function describeRenderer(page: Page): Promise<string> {
+  return stateWithin(page.evaluate(() => ({
+    now: Math.round(performance.now()),
+    visibilityState: document.visibilityState,
+    marks: performance.getEntriesByType("mark").filter(mark => mark.name.startsWith("dohc:"))
+      .map(mark => `${mark.name} ${Math.round(mark.startTime)}`),
+  })));
+}
+
+/** What Electron says about the page's window, for a failure message. */
+function describeWindow(page: Page): Promise<string> {
+  const app = launchedApps.get(page);
+  if (!app) return Promise.resolve("unknown, not launched by launchDesktopApp");
+  return stateWithin((async () => {
+    const window = await app.browserWindow(page);
+    try {
+      return await window.evaluate(window => ({
+        visible: window.isVisible(), minimized: window.isMinimized(), focused: window.isFocused(),
+        bounds: window.getBounds(), crashed: window.webContents.isCrashed(), loading: window.webContents.isLoading(),
+      }));
+    } finally {
+      await window.dispose();
+    }
+  })());
+}
+
+/**
+ * Waits for the page to get two animation frames. Playwright clicks only once
+ * the page paints, and without frames a click waits silently until it times
+ * out (#2973).
+ */
+export async function waitForPaintedFrames(page: Page): Promise<void> {
+  let failure: unknown;
+  try {
+    const painted = await within(page.evaluate(() => new Promise<boolean>(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+    })), 5_000);
+    if (painted) return;
+  } catch (error) {
+    failure = error;
+  }
+  const pageState = await stateWithin(page.evaluate(() => ({
+    visibilityState: document.visibilityState, hasFocus: document.hasFocus(),
+  })));
+  const reason = failure ? "couldn't be checked for animation frames" : "didn't get two animation frames within 5 s";
+  const message = `The desktop window ${reason}, so Playwright can't click in it. Page: ${pageState}. Window: ${
+    await describeWindow(page)}.`;
+  throw failure ? new Error(message, { cause: failure }) : new Error(message);
+}
 
 function requireBuiltDesktopApp() {
   const build = assertPrepared();
@@ -107,7 +175,10 @@ function launchEnv(input: {
     // The e2e relay is a local plain-http server; the daemon transport only
     // accepts it when this explicit flag is set (and the URL is loopback).
     DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "1",
+    // dohc keeps its state in the test home. The person's home folder, where
+    // a new workspace goes by default, is the folder that holds it.
     DOHC_TEST_HOME: input.workspace.homeDir,
+    DOHC_TEST_USER_HOME: dirname(input.workspace.homeDir),
     DOHC_TEST_PICK_PATH: input.workspace.rootPath,
     // The app's own home folder, so agent detection and the tools it runs
     // never read the tester's installs or sign-ins.
@@ -182,8 +253,8 @@ export async function launchDesktopApp(input: {
     processHandle.stdout?.setEncoding("utf8").on("data", onStdoutData);
     processHandle.stderr?.setEncoding("utf8").on("data", onStderrData);
 
-    // A loaded gate host can take well over 10 s to start Electron. Two 20 s
-    // boot waits fit inside the shortest 60 s test timeout.
+    // A loaded gate host can take well over 10 s to start Electron, so each
+    // boot wait allows 20 s inside the shortest 60 s test timeout.
     const page = await app.firstWindow({ timeout: 20_000 });
     page.on("console", (message) => {
       record({
@@ -199,6 +270,20 @@ export async function launchDesktopApp(input: {
         text: error.message,
       });
     });
+    launchedApps.set(page, app);
+    // Hand the spec its window only once it shows, which dohc does after the
+    // first paint (#2973). The first screen's 20 s wait needs that paint anyway.
+    const window = await app.browserWindow(page);
+    try {
+      const shown = await within(window.evaluate(window => window.isVisible()
+        || new Promise<boolean>(resolve => window.once("show", () => resolve(true)))), 20_000);
+      if (!shown) {
+        throw new Error(`The desktop window didn't show within 20 s. Window: ${
+          await describeWindow(page)}. Renderer: ${await describeRenderer(page)}.`);
+      }
+    } finally {
+      await window.dispose();
+    }
 
     const launchedApp = app;
     const launchedProcess = processHandle;

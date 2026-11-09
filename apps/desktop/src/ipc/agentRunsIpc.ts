@@ -43,7 +43,7 @@ export function createAgentRunsIpc<
   startAgentRunWithWorkspaceActivity(workspace: Workspace): Promise<AgentRunRecord>;
   agentIntegration: Pick<AgentIntegration, "endAgentRun" | "getAgentRunStatus">;
   mcpShareAccessOf(shareView: unknown): ShareAccess | null;
-  mcpConfigFor(rootPath: string, shareAccess: ShareAccess | null): McpConfigResult;
+  mcpConfigFor(rootPath: string, shareAccess: ShareAccess | null): Promise<McpConfigResult>;
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
   };
@@ -147,7 +147,7 @@ export function createAgentRunsIpc<
       // A shared view hands out the MCP profile for its level, so the user's AI
       // tool is offered only the write tools the grant allows.
       const shareAccess = mcpShareAccessOf(workspace.shareView);
-      return McpConfigResult.parse(mcpConfigFor(normalizeRootPath(workspace.rootPath, process.platform), shareAccess));
+      return McpConfigResult.parse(await mcpConfigFor(normalizeRootPath(workspace.rootPath, process.platform), shareAccess));
     }));
 
     registerHandler(CHANNELS.stopAgentRun, async (event, payload) => {

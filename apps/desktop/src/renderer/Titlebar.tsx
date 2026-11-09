@@ -9,8 +9,10 @@ import { Pill } from "./ui/controls";
 import { useDismiss } from "./ui/useDismiss";
 import { useWindowFullScreen } from "./windowFullScreen";
 
-// Workspace labels use the final folder name on either platform.
-export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath">): string {
+// Workspace labels use the final folder name on either platform. A shared
+// view's folder is named after its share ID, so it goes by what it shares.
+export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "shareView">): string {
+  if (workspace.shareView?.subjectName) return workspace.shareView.subjectName;
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
 }
@@ -52,7 +54,7 @@ function LayoutToggle(props: {
         onClick={props.onClick}
         className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
           props.pressed
-            ? "bg-selected text-ink"
+            ? "bg-selected text-ink font-medium"
             : "text-subtle hover:bg-hover hover:text-ink"
         }`}
       >
@@ -203,7 +205,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onSwitchWorkspace?.(candidate);
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       {candidate.workspaceId === props.workspace?.workspaceId ? (
                         <Check size={12} aria-hidden />
@@ -226,7 +228,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onManageWorkspaces?.();
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       <span className="w-3" aria-hidden />
                       <span className="truncate">Manage workspaces…</span>
@@ -242,7 +244,7 @@ export function Titlebar(props: {
                         setSwitcherOpen(false);
                         props.onOpenShare?.();
                       }}
-                      className="titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row titlebar-no-drag flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                     >
                       <span className="w-3" aria-hidden />
                       <span className="truncate">Open a share…</span>

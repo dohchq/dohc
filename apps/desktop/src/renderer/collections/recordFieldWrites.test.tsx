@@ -37,6 +37,7 @@ import {
 } from "./recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collectionLineageGate";
 import { serializeCollectionSchema } from "./schemaAuthoring";
+import { PROPERTIES_READ_ONLY_REASON } from "../markdown/frontmatter";
 
 const docMock = vi.hoisted(() => ({
   current: null as UseEngineDoc | ((input: unknown) => UseEngineDoc) | null,
@@ -56,7 +57,7 @@ vi.mock("./recordSourceCheck", () => ({
 
 function engineDocState(
   partial: Partial<
-    Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "sharedWaiting" | "readOnlyWhileEditing" | "deletedWhileEditing">
+    Pick<UseEngineDoc, "available" | "opening" | "doc" | "headSha256" | "saveState" | "saveError" | "sharedWaiting" | "readOnlyWhileEditing" | "deletedWhileEditing">
   >,
 ): UseEngineDoc {
   return {
@@ -285,6 +286,33 @@ describe("retained failures", () => {
     } finally { doc.destroy(); }
   });
 
+  it("offers to open a refused record's file externally on its failure row only", () => {
+    const doc = markdownToYDoc("---\n{id: rec-1, status: draft}\n---\n\nBody");
+    try {
+      docMock.current = engineDocState({ available: true, doc });
+      const host = render(<CollectionFieldWriteHost />);
+      enqueue();
+      const row = screen.getByTestId("collection-write-failure");
+      expect(row.textContent).toContain(PROPERTIES_READ_ONLY_REASON);
+      const open = screen.getByTestId("collection-write-open-externally");
+      expect(open.textContent).toBe("Open externally");
+      expect(row.contains(open)).toBe(true);
+      expect(screen.queryByTestId("lossy-note-open-externally")).toBeNull();
+      // The row's own controls keep their names.
+      expect(screen.getByTestId("collection-write-retry").textContent).toBe("Retry");
+      expect(screen.getByLabelText("Unsaved collection value")).toBeTruthy();
+      host.unmount();
+    } finally { doc.destroy(); }
+  });
+
+  it("offers no Open externally on a failure row that is not a refused edit", () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    expect(screen.getByTestId("collection-write-failure")).toBeTruthy();
+    expect(screen.queryByTestId("collection-write-open-externally")).toBeNull();
+  });
+
   const LOSSY_RECORD =
     "dohc did not save this change because it would rewrite parts of this record dohc can't show. Open the record to edit it externally.";
   const sessionsOpened = (enabled: boolean[], state: UseEngineDoc) => (input: unknown) => {
@@ -351,7 +379,7 @@ describe("retained failures", () => {
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     const before = Y.encodeStateAsUpdate(doc);
     try {
-      docMock.current = engineDocState({ available: true, doc });
+      docMock.current = engineDocState({ available: true, doc, headSha256: sha(markdown) });
       const host = render(<CollectionFieldWriteHost />);
       enqueue();
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
@@ -487,7 +515,7 @@ describe("retained failures", () => {
     expect((await screen.findByTestId("collection-write-copy-refused")).textContent).toBe(
       "Could not copy. Select the value above to copy it.",
     );
-    // The button's own "Couldn't copy" lasts COPY_FEEDBACK_MS; the line stays.
+    // The button's own "Could not copy" lasts COPY_FEEDBACK_MS; the line stays.
     await waitFor(() => expect(screen.getByTestId("collection-write-copy").textContent).toBe("Copy value"), {
       timeout: COPY_FEEDBACK_MS * 3,
     });

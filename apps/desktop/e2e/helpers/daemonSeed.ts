@@ -43,8 +43,11 @@ export interface LiveDaemonWorkspace {
   relay: EngineRelayClient;
   sessions: EngineWorkspaceSessions;
   nativeClient(): EngineClient;
-  close(): Promise<void>;
+  // `step` names each awaited close step, so a test can tell which one waits.
+  close(step?: CloseStep): Promise<void>;
 }
+
+export type CloseStep = <T>(name: string, work: Promise<T>) => Promise<T>;
 
 function attachWorkspace(workspace: {
   workspaceId: string;
@@ -88,14 +91,14 @@ export async function openLiveDaemonWorkspace(
       if (!(client instanceof EngineClient)) throw new Error("Native delivery requires the daemon client.");
       return client;
     },
-    close: async () => {
+    close: async (step: CloseStep = (_name, work) => work) => {
       if (closed) return;
       closed = true;
       try {
-        await relay.closeAll();
-        await sessions.closeAll();
+        await step("relay.closeAll", relay.closeAll());
+        await step("sessions.closeAll", sessions.closeAll());
       } finally {
-        await lifecycle.stop();
+        await step("daemon.stop", lifecycle.stop());
       }
     },
   };

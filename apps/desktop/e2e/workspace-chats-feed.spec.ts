@@ -95,6 +95,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // first line becomes the serif card title.
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill(channelName);
+    await page.getByTestId("chats-new-channel-type-posts").click();
     await page.getByTestId("chats-new-channel-name").press("Enter");
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 
@@ -203,7 +204,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       "agent",
     );
     await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
-      "Poll open",
+      "Unanswered",
     );
 
     // The feed summary reflects the same open decision, and reopening keeps
@@ -211,15 +212,16 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveAccessibleName(
-      "Poll open",
+      "Unanswered",
     );
     await decisionCard.click();
     await expect(agentComment).toBeVisible();
 
     await ownBubble(agentComment).getByTestId("chats-comment-decision-resolve").click();
     await expect(view.getByTestId("chats-resolving-mode")).toContainText(
-      "Answering the poll",
+      "Answering Agent's question",
     );
+    await expect(view.getByTestId("chats-replying-mode")).toHaveCount(0);
     await composer.fill(resolutionBody);
     await composer.press("Enter");
     await expect(
@@ -300,9 +302,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
   }
 });
 
-// A comment's toolbar floats 4px over the comment above it. Hidden, it
-// takes no pointer, so a click on the bottom edge of the comment above,
-// right where the hidden Reply sits, starts no reply to the comment below.
+// A comment's toolbar floats over the bottom edge of the comment above it.
+// The hidden Reply sits on that edge, and the hidden toolbar does not take
+// that point. The test hit-tests the point, because a real pointer there
+// also touches the lower row and shows its toolbar.
 test("a comment's hidden toolbar takes no click meant for the comment above", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -335,8 +338,13 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     const point = { x: replyBox.x + replyBox.width / 2, y: replyBox.y + 0.5 };
     expect(point.y).toBeGreaterThan(aboveBox.y);
     expect(point.y).toBeLessThan(aboveBox.y + aboveBox.height);
-    await page.mouse.click(point.x, point.y);
-    await expect(view.getByTestId("chats-replying-mode")).toHaveCount(0);
+    // Rest the pointer on the comment above, clear of the lower row.
+    await page.mouse.move(aboveBox.x + aboveBox.width / 2, aboveBox.y + aboveBox.height / 2);
+    const toolbar = ownBubble(below).getByTestId("chats-message-toolbar");
+    const toolbarTakesPoint = () =>
+      toolbar.evaluate((bar, { x, y }) => bar.contains(document.elementFromPoint(x, y)), point);
+    await expect.poll(toolbarTakesPoint).toBe(false);
+    await expect(toolbar).toHaveCSS("pointer-events", "none");
 
     // The same Reply, shown on hover, still starts a reply.
     await ownBubble(below).hover();

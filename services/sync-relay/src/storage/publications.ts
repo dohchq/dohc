@@ -52,6 +52,9 @@ export interface LinkAppPublicationDescriptor {
 }
 export interface LinkAppPublicationAuthority {
   descriptor: LinkAppPublicationDescriptor;
+  workspaceId: string;
+  /** The Collection the app's backend reads and writes, if it has one. */
+  datasetId: string | null;
   shareId: string;
   grantId: string;
   generation: number;
@@ -302,6 +305,8 @@ function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublic
   const result: LinkAppPublicationAuthority = {
     descriptor: {publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
       files: candidate.files},
+    workspaceId: authorized.share.workspaceId,
+    datasetId: candidate.capabilities.find(value => value.kind === "dataset")?.datasetId ?? null,
     shareId: authorized.share.shareId, grantId: session.grantId, generation: session.generation,
     sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
   };

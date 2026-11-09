@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
+import { GROUP_NAME_TAKEN_ERROR } from "../../ipc/errorWords";
 import {
   ChatsView,
   channel,
@@ -57,12 +58,31 @@ describe("ChatsView channels", () => {
 
     const names = await screen.findAllByTestId("chats-channel-name");
     expect(names.map((el) => el.textContent)).toEqual(["general", "product"]);
-    // Only the channel with unread messages shows a badge.
+    // Only the channel with unread messages is marked: its name goes bold, and
+    // its count is there for a screen reader, not as a visible number.
     const badges = screen.getAllByTestId("chats-channel-unread");
     expect(badges).toHaveLength(1);
-    expect(badges[0].textContent).toBe("2");
+    expect(badges[0].textContent).toBe("2 unread");
+    expect(badges[0].className).toBe("sr-only");
+    expect(names.map((el) => el.className.includes("font-medium"))).toEqual([false, true]);
     const rows = screen.getAllByTestId("chats-channel");
     expect(rows.map((row) => row.dataset.threadCount)).toEqual(["0", "3"]);
+  });
+
+  it("says a group with no posts has none, under the posts picture", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel()], fileThreads: [] });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    renderView();
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    const empty = await screen.findByTestId("chats-channel-empty");
+    // The composer sits above the list, so the line names no action.
+    expect(empty.textContent).toBe("No posts in #general yet.");
+    expect(empty.firstElementChild!.getAttribute("aria-hidden")).toBe("true");
+    // Every box up to the list grows, so it centers below the composer.
+    const list = screen.getByTestId("chats-feed-column");
+    for (let box = empty.parentElement!; box !== list; box = box.parentElement!) {
+      expect(box.className.split(" ")).toContain("flex-1");
+    }
   });
 
   it("creates a channel inline and opens it", async () => {
@@ -86,13 +106,169 @@ describe("ChatsView channels", () => {
       expect(bridgeMock.createChatChannel).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
         name: "launch",
-        type: "posts",
+        type: "chat",
       }),
     );
     // Straight into the new channel — no extra click.
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
       "launch",
     );
+  });
+
+  it("shows a failed create in the dialog, and in Notices once the dialog closes", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const cause = new Error("The workspace engine is not running.");
+    bridgeMock.createChatChannel.mockRejectedValue(cause);
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+
+    await screen.findByTestId("chats-new-channel-error");
+    expect((screen.getByTestId("chats-new-channel-name") as HTMLInputElement).value).toBe("launch");
+    expect(onError).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+    expect(onError).toHaveBeenCalledWith(
+      expect.stringContaining("The workspace engine is not running."),
+      cause,
+      expect.any(Function),
+    );
+  });
+
+  it("creates the group from Try again after the dialog closed", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.createChatChannel
+      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
+      .mockResolvedValueOnce({ channel: channel({ id: "channel-9", name: "launch", slug: "launch", wireId: "channel-9" }) });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    const retry = onError.mock.calls[0]?.[2] as () => void;
+    act(() => retry());
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("launch");
+    expect(bridgeMock.createChatChannel).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", name: "launch", type: "chat" });
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Open when Try again finds the group name taken and opens that group", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn<Parameters<typeof ChatsView>[0]["onError"]>();
+    const taken = new Error("A group with that name already exists.");
+    taken.name = GROUP_NAME_TAKEN_ERROR;
+    const existing = channel({ id: "channel-9", name: "Launch team", slug: "launch-team" });
+    bridgeMock.createChatChannel
+      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
+      .mockRejectedValueOnce(taken);
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "Launch_team");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), existing], fileThreads: [] });
+    act(() => onError.mock.calls[0]?.[2]?.());
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(onError).toHaveBeenLastCalledWith(
+      "A group with that name already exists.",
+      taken,
+      undefined,
+      undefined,
+      {
+        title: "dohc couldn't create #Launch_team",
+        identity: "group-name-taken:launch-team",
+        action: expect.objectContaining({ label: "Open", run: expect.any(Function), ends: true }),
+      },
+    );
+    act(() => onError.mock.calls[1]?.[4]?.action?.run());
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Launch team");
+    expect(bridgeMock.listChannelThreads).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: existing.id });
+    expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Open after closing a taken-name failure and opens the group through the navigator", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn<Parameters<typeof ChatsView>[0]["onError"]>();
+    const onOpenInTab = vi.fn();
+    const existing = channel({ id: "channel-9", name: "launch", slug: "launch" });
+    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
+    bridgeMock.createChatChannel.mockRejectedValue(taken);
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [existing], fileThreads: [] });
+    renderView(vi.fn(), onError, { variant: "panel", onOpenInTab });
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await screen.findByTestId("chats-new-channel-error");
+    expect(onError).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    expect(onError.mock.calls[0]?.[2]).toBeUndefined();
+    expect(onError.mock.calls[0]?.[4]).toMatchObject({ title: "dohc couldn't create #launch", identity: "group-name-taken:launch", action: { label: "Open" } });
+    act(() => onError.mock.calls[0]?.[4]?.action?.run());
+    expect(onOpenInTab).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: existing });
+    expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["My agent", "My agent helper"])("keeps Try again without Open for the reserved name %s", async (name) => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
+    const slug = name.toLowerCase().replaceAll(" ", "-");
+    bridgeMock.createChatChannel.mockRejectedValue(taken);
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name, slug, kind: "agent" })], fileThreads: [] });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), `${name}{Enter}`);
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith(taken.message, taken, expect.any(Function), undefined, {
+      title: `dohc couldn't create #${name}`, identity: `group-name-taken:${slug}`,
+    });
+  });
+
+  it("keeps Try again when only the error words say the name is taken", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const cause = new Error("A group with that name already exists.");
+    bridgeMock.createChatChannel.mockRejectedValue(cause);
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name: "launch", slug: "launch" })], fileThreads: [] });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
+  });
+
+  it("reports nothing when a retry creates the group", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.createChatChannel
+      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
+      .mockResolvedValueOnce({ channel: channel({ id: "channel-9", name: "launch", slug: "launch", wireId: "channel-9" }) });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-submit"));
+
+    await waitFor(() => expect(screen.queryByTestId("chats-new-channel-dialog")).toBeNull());
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("creates a group with the type and purpose the form holds", async () => {
@@ -177,7 +353,7 @@ describe("ChatsView panel navigator unread badges", () => {
       fileThreads: [],
     });
     const view = render(navigator(0));
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The editor read the thread: the durable count is zero now.
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -217,7 +393,7 @@ describe("ChatsView panel navigator unread badges", () => {
       fileThreads: [],
     });
     const view = render(navigator(0));
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The refresh the read triggers fails.
     bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
@@ -226,7 +402,7 @@ describe("ChatsView panel navigator unread badges", () => {
 
     // The channel list is still there — a stale badge beats an error card.
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
-    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2");
+    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2 unread");
 
     // The signal was not spent on that failure: the next read still refetches
     // and the badge catches up.
@@ -316,7 +492,7 @@ describe("ChatsView panel navigator unread badges", () => {
     );
     const view = render(navigator(0));
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The read lands. Channels answer; the optional share lookup does not.
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -357,7 +533,7 @@ describe("ChatsView panel navigator unread badges", () => {
     );
     const view = render(navigator(0));
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // The read lands; the relay is down, so the listing resolves unreachable.
     bridgeMock.listChatChannels.mockResolvedValue({

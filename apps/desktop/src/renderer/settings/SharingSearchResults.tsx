@@ -104,7 +104,7 @@ export function SharingSearchResults(props: { results: readonly SharingResult[];
               data-lane={result.lane}
               data-share-id={result.shareId ?? undefined}
               onClick={() => props.onOpen({ lane: result.lane, shareId: result.shareId })}
-              className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+              className="dohc-focus-row flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
             >
               <ResultGlyph row={result.row} />
               <span className="min-w-0 flex-1 truncate text-ink">{result.label}</span>

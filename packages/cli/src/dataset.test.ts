@@ -3,6 +3,7 @@ import { parseCliArguments } from "./args";
 import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protocol";
 import { DatasetRequest, DatasetResult } from "./dataset";
+import { DohcCliError } from "./errors";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:"equipment/schema.sql",operationsPath:"equipment/actions.ts",
@@ -36,6 +37,9 @@ describe("dataset CLI", () => {
     expect(refused.success).toBe(false);
     expect(refused.error?.issues[0]?.message).toBe("This Collection sits outside the MCP folder. Run the MCP server from the workspace root or a folder containing the Collection.");
     expect(DatasetResult.safeParse({ kind: "description", dataset: { ...dataset, datasetPath: "../equipment/../dataset.json" } }).success).toBe(false);
+    const unreadable = { ...dataset, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["../equipment/dataset.json"] };
+    expect(DatasetResult.parse({ kind: "list", datasets: [unreadable], nextCursor: null })).toEqual({ kind: "list", datasets: [unreadable], nextCursor: null });
+    expect(DatasetResult.safeParse({ kind: "list", datasets: [{ ...unreadable, datasetPaths: ["../equipment/../dataset.json"] }], nextCursor: null }).success).toBe(false);
     const revision = { datasetId: id(1), revision: 1, revisionSha256: "d".repeat(64), definition: { ...definition, schemaPath: "../equipment/schema.sql", operationsPath: "../equipment/actions.ts" }, definitionSha256: "a".repeat(64), schemaSha256: "b".repeat(64), operationsSha256: "c".repeat(64) };
     expect(DatasetResult.parse({ kind: "approved", revision })).toEqual({ kind: "approved", revision });
   });
@@ -57,6 +61,26 @@ describe("dataset CLI", () => {
     expect(JSON.parse(empty.stdout)).toMatchObject({ datasets: [], elsewhere });
     const failed = await list(async () => { throw new Error("dohc could not reach the server."); });
     expect(failed).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc could not reach the server.\n" });
+  });
+  it.each([false, true])("fails a Collections list this computer can't give (JSON: %s)", async json => {
+    const list = (refusal: unknown) => executeCli({ argv: ["dataset", "list", JSON.stringify({ workspaceId: "workspace" }), ...(json ? ["--json"] : [])],
+      env: {}, request: async () => ({ kind: "collections-refused", refusal }) });
+    const words = "Choose which computer keeps this workspace's Collections.";
+    expect(await list({ kind: "unclaimed", words })).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${words}\n` });
+    expect(await list({ kind: "server-unavailable", words: "These Collections are on Laptop.", computer: "Laptop", failure: "TypeError: fetch failed" }))
+      .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: These Collections are on Laptop. TypeError: fetch failed\n" });
+  });
+  it("counts a computer's name in characters, as its record does, and takes a refusal's words at any length", () => {
+    // 64 characters outside the BMP: 128 UTF-16 units.
+    const name = "🐢".repeat(64), longer = `${name}🐢`;
+    const listed = (label: string) => ({ kind: "list", datasets: [], nextCursor: null, elsewhere: { server: "https://relay.example", computer: { label, sameName: false } } });
+    const refused = (computer: string) => ({ kind: "collections-refused", refusal: { kind: "server-unavailable", words: `These Collections are on ${computer}.`, computer, failure: "TypeError: fetch failed" } });
+    expect(DatasetResult.safeParse(listed(name)).success).toBe(true);
+    expect(DatasetResult.safeParse(refused(name)).success).toBe(true);
+    expect(DatasetResult.safeParse(listed(longer)).success).toBe(false);
+    expect(DatasetResult.safeParse(refused(longer)).success).toBe(false);
+    const words = `EACCES: permission denied, realpath '${"C:\\Users\\person\\".repeat(200)}'`;
+    expect(DatasetResult.safeParse({ kind: "collections-refused", refusal: { kind: "unreadable", words } }).success).toBe(true);
   });
   it.each([false, true])("exits nonzero and preserves partial form facts (JSON: %s)", async json => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
@@ -161,6 +185,13 @@ it("requires an exact deletion review and explicit acknowledgment before transpo
   expect(send).not.toHaveBeenCalled();
   expect((await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send})).exitCode).toBe(0);
   expect(() => parseCliResult("dataset",{kind:"deleted",deleted:true,datasetId:id(1),records:[]})).toThrow();
+});
+
+it("tells an agent to archive a Collection before deleting it", async () => {
+  const request = {workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected:cursor,reviewToken:"c".repeat(64),acknowledge:true};
+  const send = vi.fn(async () => { throw new DohcCliError("dohc: This Collection isn't archived. Archive it before you delete it permanently."); });
+  expect(await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send}))
+    .toEqual({exitCode:1,stdout:"",stderr:"dohc: This Collection isn't archived. Archive it before you delete it permanently.\n"});
 });
 
 it("accepts an expected Collection identity and derives migration source from its address", () => {

@@ -2,14 +2,15 @@ import type { ReactNode } from "react";
 
 // The kinds a person can make from the start surface. Files go by their kind
 // registry id.
-export type StartKind = "markdown" | "collection" | "drawing" | "app";
+export type StartKind = "markdown" | "collection" | "drawing";
 
 // A table's cells, row by row: a header row, then text and tag cells.
 const CELLS = ["head", "head", "head", "text", "tag", "text", "text", "tag", "text", "text", "text", "text", "text", "tag", "text"] as const;
 
 // The picture on each start tile: a sketch of what the kind holds once made.
-// Decorative; the tile's label names it.
-export const START_TILE_ART: Record<StartKind, ReactNode> = {
+// Decorative; the tile's label names it. An app has no tile, but the
+// new-workspace folder shows its picture among the others.
+export const START_TILE_ART: Record<StartKind | "app", ReactNode> = {
   markdown: (
     <span className="absolute inset-x-5.5 top-4.5 -bottom-2 flex flex-col gap-1.75 rounded-md border border-line bg-bg p-3">
       <span className="mb-0.75 h-2 w-[55%] rounded-full bg-ink/55" />

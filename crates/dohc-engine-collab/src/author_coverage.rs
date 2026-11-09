@@ -69,7 +69,12 @@ impl Authors {
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no identity"))?;
         let scope = author.get(scope_field).and_then(Value::as_str);
-        let identity = serde_json::json!([kind, scope, id]).to_string();
+        // Two runs by one agent are two authors.
+        let identity = match author.get("agentRunId").and_then(Value::as_str) {
+            Some(run) if kind == "agent" => serde_json::json!([kind, scope, id, run]),
+            _ => serde_json::json!([kind, scope, id]),
+        }
+        .to_string();
         let previous = self.0.get(&identity);
         if previous.is_some_and(|previous| {
             previous.get("relayConfirmed") != Some(&Value::Bool(true))
@@ -149,16 +154,20 @@ fn entry_admission_bytes(author: &Value) -> usize {
     author.to_string().len() + reserved_bytes(author)
 }
 
-/// Whether this lineage belongs to an adopted owner. Its native log also holds
-/// the owner's private edits until the relay accepts them, so its interval
-/// names only authors admitted with accepted content, never a native row's
-/// author ahead of acceptance.
+/// Whether a current activation holds this lineage, or a released one left
+/// carried deliveries in it. Its native log also holds the owner's edits
+/// until the host applies them as accepted, so its interval names only
+/// authors admitted with accepted content, never a native row's author ahead
+/// of acceptance.
 pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_docs d JOIN live_owner_adoptions a \
-         ON a.workspace_id=d.workspace_id AND a.main_version_id=d.version_id \
-         AND a.object_id=d.object_id AND a.lineage_claim_id=d.lineage_claim_id \
-         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs d JOIN {} a \
+             ON a.workspace_id=d.workspace_id AND a.main_version_id=d.version_id \
+             AND a.object_id=d.object_id AND a.lineage_claim_id=d.lineage_claim_id \
+             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
+            crate::live_update_application::owner_activations::RETAINED_ACTIVATIONS
+        ),
         params![key.workspace_id, key.version_id, key.object_id],
         |row| row.get(0),
     )
@@ -186,11 +195,11 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
     // Admission caps the named identities retained above the boundary.
     let mut stmt = conn
         .prepare_cached(
-            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth) FROM ydoc_updates \
+            "SELECT actor_origin_id, actor_kind, on_behalf_of, MAX(chain_depth), agent_run_id FROM ydoc_updates \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
          AND seq>COALESCE(?4,-1) AND seq<=?5 AND is_seed=0 \
          AND actor_kind IN ('human','agent','automation') AND actor_origin_id IS NOT NULL \
-         GROUP BY actor_kind, on_behalf_of, actor_origin_id",
+         GROUP BY actor_kind, on_behalf_of, actor_origin_id, agent_run_id",
         )
         .map_err(sql)?;
     let rows = stmt
@@ -208,12 +217,13 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<u32>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .map_err(sql)?;
     for row in rows {
-        let (actor, kind, on_behalf_of, depth) = row.map_err(sql)?;
+        let (actor, kind, on_behalf_of, depth, agent_run_id) = row.map_err(sql)?;
         let attribution = kind
             .as_deref()
             .and_then(ChangeActorKind::parse)
@@ -222,6 +232,7 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
                 on_behalf_of,
                 depth: depth.unwrap_or(0),
                 run: None,
+                agent_run_id,
             });
         if let Some(json) =
             dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref())

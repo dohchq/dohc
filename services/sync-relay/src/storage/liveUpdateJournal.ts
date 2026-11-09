@@ -2,6 +2,7 @@ import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {parseAutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import {automationPressAdmissionAllowed, automationGrantAdmissionAllowed} from "./automationPresses";
 import {readRestoreAdmission,verifyRestoreCheckpoint, type RestoreAdmission} from "./liveRestoreCheckpoint";
+import {acrossDeclinedRestores} from "./liveRestoreLifecycleStorage";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -21,11 +22,14 @@ import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
 import {LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
+import {LIVE_RESTORE_CANCELLATIONS} from "./liveRestoreCancellationSchema";
+import {parseNativeRestoreCancellationAnswer, type NativeRestoreCancellationReceipt} from "../liveRestoreFence";
 import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
 import { registerLiveDeliveryEvent } from "./liveDeliveryReservations";
+import { recordAgentConnectionActionInTransaction } from "./agentConnections";
 import { baselineRecord, baselineByteBuffer, baselineByteOffset, baselineByteLength, baselineBufferLength, baselineBufferResizable, authorityInteger, authorityIntegrity, currentLiveDocumentMoment, assertCurrentAuthorityHost, snapshotCurrentBindingRequest, decodeLiveDocumentAuthorityStructure, authorizeLiveDocument } from "./liveDocumentAuthority";
 
 function journalAuthorityHistory(storage: StorageContext, document: LiveDocumentKey): StoredLiveDocumentAuthority[] {
@@ -214,9 +218,10 @@ export function assertJournalCheckpointPosition(db: SqliteDb, row: {admitted: {m
   restoreOperationId: string | null; history: {namespace: string}}, budget?:{bytes:number;chargeBytes(value:number):void}): { count: number; bytes: number } {
   const restored = verifyRestoreCheckpoint(db, row,budget?.bytes,budget?value=>budget.chargeBytes(value):undefined);
   const { binding, receipt } = row.admitted.metadata.accepted;
-  const predecessor=db.prepare(`SELECT current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);
+  const predecessor=db.prepare(`SELECT journal_cursor,current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);
   if (predecessor) journalIntegrity(predecessor.current_path===binding.currentPath && (restored
-    ? predecessor.restore_fence_generation===restored.preparation.fence.operation.oldBinding.restoreFenceGeneration
+    ? predecessor.restore_fence_generation===acrossDeclinedRestores(db,row.history.namespace,restored.preparation.fence.operation.oldBinding,
+      authorityInteger(predecessor.journal_cursor,1),budget?value=>budget.chargeBytes(value):undefined)?.restoreFenceGeneration
     : predecessor.restore_fence_generation===binding.restoreFenceGeneration));
   const previous = db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
     AND journal_cursor<? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)
@@ -280,8 +285,21 @@ export interface ReplicaLiveJournalRow {
   readonly authority: ReplicaLiveJournalAuthority | null;
 }
 
+/**
+ * A restore declined after its native fence committed, at the journal cursor
+ * the relay gave its host's receipt. It is no delivery and carries no bytes:
+ * a replica advances the document's generation and nothing else.
+ */
+export interface ReplicaLiveJournalCancellation {
+  readonly relayDatabaseNamespace: string;
+  readonly journalCursor: number;
+  readonly cancellation: NativeRestoreCancellationReceipt;
+  // The document's current authority, as rows carry it, so a replica can skip a lineage it never saw that has since retired.
+  readonly authority: ReplicaLiveJournalAuthority | null;
+}
+
 export interface ReplicaLiveJournalPage {
-  readonly rows: readonly ReplicaLiveJournalRow[];
+  readonly rows: readonly (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[];
   readonly nextCursor: number;
   readonly hasMore: boolean;
 }
@@ -408,6 +426,15 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     const authorities = new Map<string, ReplicaLiveJournalAuthority | null>();
     const currentAuthority = storage.db.prepare(`SELECT lineage_claim_id,baseline_moment_relay_seq,restore_fence_generation
       FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_state='current'`);
+    const authorityOf = (mainVersionId: unknown, objectId: unknown) => {
+      const key = JSON.stringify([mainVersionId, objectId]);
+      let authority = authorities.get(key);
+      if (authority === undefined) {
+        authority = replicaJournalAuthority(currentAuthority.get(workspaceId, mainVersionId, objectId));
+        authorities.set(key, authority);
+      }
+      return authority;
+    };
     // Lengths avoid walking either blob; price stored metadata while capturing full rows.
     const headers = storage.db.prepare(`SELECT journal_cursor,workspace_id,main_version_id,object_id,lineage_claim_id,
       length(update_bytes) AS update_length,length(validation_checkpoint_bytes) AS checkpoint_length
@@ -416,13 +443,7 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     let rowBytes = 0, captureBytes = 0, nextCursor = after, hasMore = false;
     for (const header of headers) {
       if (projectedRows.length === limit) {hasMore = true; break;}
-      const key = JSON.stringify([header.main_version_id, header.object_id]);
-      let authority = authorities.get(key);
-      if (authority === undefined) {
-        authority = replicaJournalAuthority(currentAuthority.get(workspaceId, header.main_version_id, header.object_id));
-        authorities.set(key, authority);
-      }
-      const projected = replicaJournalProjection(header, authority);
+      const projected = replicaJournalProjection(header, authorityOf(header.main_version_id, header.object_id));
       journalIntegrity(projected.document.workspaceId === workspaceId && projected.journalCursor > nextCursor);
       const updateLength = authorityInteger(header.update_length, 1);
       journalIntegrity(updateLength <= 20_971_520);
@@ -441,10 +462,30 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
       nextCursor = projected.journalCursor;
     }
     const captured = captureReplicaJournalRows(storage, workspaceId, after, projectedRows, maxBytes);
-    return {captured, hasMore: hasMore || captured.length < projectedRows.length};
+    // Cancellation control entries take cursors between deliveries; one past the limit shows there are more.
+    const controls = storage.db.prepare(`SELECT relay_database_namespace,journal_cursor,acknowledgment_json FROM ${LIVE_RESTORE_CANCELLATIONS}
+      WHERE workspace_id=? AND journal_cursor IS NOT NULL AND journal_cursor>? ORDER BY journal_cursor LIMIT ?`).all(workspaceId, after, limit + 1).map(row => {
+      const answer = parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
+      journalIntegrity(answer.status === "fenceCancelled" && answer.receipt.binding.workspaceId === workspaceId);
+      const {mainVersionId, objectId} = answer.receipt.binding;
+      return {relayDatabaseNamespace: parseLiveUpdateIdentifier(row.relay_database_namespace), journalCursor: authorityInteger(row.journal_cursor, 1),
+        cancellation: answer.receipt, authority: authorityOf(mainVersionId, objectId)} satisfies ReplicaLiveJournalCancellation;
+    });
+    return {captured, controls, hasMore: hasMore || captured.length < projectedRows.length};
   });
-  const rows: ReplicaLiveJournalRow[] = [];
-  let workBytes = 0, rowBytes = 0, nextCursor = after, hasMore = snapshot.hasMore;
+  const rows: (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[] = [];
+  let workBytes = 0, rowBytes = 0, nextCursor = after, hasMore = snapshot.hasMore, control = 0;
+  // Serves the control entries ordered before `cursor`. False once the page is full.
+  const serveControls = (cursor: number) => {
+    for (; control < snapshot.controls.length && snapshot.controls[control]!.journalCursor < cursor; control++) {
+      const entry = snapshot.controls[control]!, encodedBytes = Buffer.byteLength(JSON.stringify(entry));
+      if (rows.length === limit || (rows.length > 0 && replicaJournalResponseBytes(rowBytes + encodedBytes, rows.length + 1, entry.journalCursor, false) > maxBytes)) return false;
+      rows.push(entry);
+      rowBytes += encodedBytes;
+      nextCursor = entry.journalCursor;
+    }
+    return true;
+  };
   if (replicaJournalResponseBytes(0, 0, after, false) > maxBytes) throw new RangeError("Replica journal response exceeds the byte budget.");
   const yieldWork = async () => {await setImmediate(); check(); workBytes = 0;};
   // Keep intermediate chunks divisible by three, so only the last has base64 padding.
@@ -462,6 +503,7 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     return encoded.join("");
   };
   for (const [index, entry] of snapshot.captured.entries()) {
+    if (!serveControls(entry.projected.journalCursor) || rows.length === limit) {hasMore = true; break;}
     // Verification and encoding do not hold a SQLite transaction or monopolize pushes.
     if (index % 16 === 0) await yieldWork();
     const metadataBytes = replicaMetadataBytes(entry.raw);
@@ -488,6 +530,8 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     rowBytes += encodedBytes;
     nextCursor = row.journalCursor;
   }
+  // Entries after the last served delivery belong to this page only when no delivery was left for the next.
+  if (!hasMore && !serveControls(Number.MAX_SAFE_INTEGER)) hasMore = true;
   check();
   return {rows, nextCursor, hasMore};
 }
@@ -961,6 +1005,8 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           assertWorkspaceQuota(storage,document.workspaceId,storageBytes);
           storage.db.prepare(`INSERT INTO ${LIVE_AUTHOR_CLIENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,author_snapshot_json,storage_bytes) VALUES (?,?,?,?,?,?,?)`).run(...documentParams(document),binding.clientId,binding.snapshot,storageBytes);
         }
+        // An agent's accepted edit is its connection's action; a check, wake, or replay is not.
+        if ("agentConnectionId" in request.actor) recordAgentConnectionActionInTransaction(storage, request.actor.agentConnectionId, receivedAtMs);
         return {reply: {result: {kind: "accepted" as const, receipt: {...admitted.metadata.accepted.receipt}, replayed: false}, admitted}};
       });
     } catch (error) {

@@ -127,7 +127,7 @@ const QUEUE_REFUSALS = new Set(["INVALID_PARAMS", "INTERNAL"]);
  */
 export type OwnerLiveRecovery = "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "unreadable";
 
-/** Kept owner edits on this computer. A restore's earlier queues can only be saved. */
+/** Kept owner edits on this computer. A restore's earlier queues and a retired page's queue can only be saved. */
 export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason: string; saveOnly?: true} & ({
   /** The refused queue. */
   outboxId: string;
@@ -233,7 +233,7 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
           continue;
         }
         if (head.headDeliveryId === null || !sameBinding(head.binding, queue.binding)) continue;
-        found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: "restore-fenced",
+        found.push({objectId: queue.binding.objectId, path: queue.binding.currentPath, reason: head.reason === "retired" ? "retired" : "restore-fenced",
           outboxId: queue.outboxId, binding: head.binding, headDeliveryId: head.headDeliveryId, recovery: "paused", saveOnly: true});
       }
       retainedAfter = page.next ?? undefined;

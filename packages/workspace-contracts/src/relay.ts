@@ -21,6 +21,11 @@ export type MaterializeRelayPullPage = (
   paths: readonly RelayMaterializedPath[],
 ) => Promise<void>;
 
+// Apply, project, reconcile, and commit one fetched batch on the capture chain.
+export type RunRelayPullBatch = <T>(
+  apply: (materializePage: MaterializeRelayPullPage) => Promise<T>,
+) => Promise<T>;
+
 export interface SharingDeclined {
   objectId: string;
   versionId: string;

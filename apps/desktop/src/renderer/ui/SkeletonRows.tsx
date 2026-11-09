@@ -12,8 +12,9 @@ import { createContext, useContext, useLayoutEffect, useRef, useState, type Reac
 // text starts. `document` lines sit in the editor's reading column, where a
 // file's text lands when it opens.
 //
-// The line widths repeat the drawing's four. Their fill is the ink-at-7% step,
-// so the lines read on paper, on a panel and on an inset alike.
+// The line widths repeat the drawing's four. Their fill is the skeleton
+// token, ink at 11%, so the lines read on paper, on a panel and on an inset
+// alike.
 const WIDTHS = ["w-[80%]", "w-[62%]", "w-[90%]", "w-[54%]"] as const;
 
 const LAYOUT = {
@@ -73,7 +74,7 @@ function Frame(props: LinesProps & { children?: ReactNode; role?: "status"; test
     >
       {props.children}
       {Array.from({ length: props.rows ?? WIDTHS.length }, (_, row) => (
-        <span key={row} aria-hidden className={`block h-2 shrink-0 rounded bg-hover ${WIDTHS[row % WIDTHS.length]}`} />
+        <span key={row} aria-hidden className={`block h-2 shrink-0 rounded bg-skeleton ${WIDTHS[row % WIDTHS.length]}`} />
       ))}
     </div>
   );

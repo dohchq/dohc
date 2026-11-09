@@ -148,15 +148,23 @@ test("MCP config copies the canonical workspace path", async () => {
     desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
-    // The config carries the workspace's real path in forward-slash form.
+    // Each agent you run copies its own config, with the workspace's real
+    // path in forward-slash form and the agent's id.
     const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
-    const copy = desktop.page.getByTestId("mcp-config-copy");
+    const yours = desktop.page.getByTestId("agents-yours");
+    await yours.getByRole("button", { name: /^Add an agent you run/ }).click();
+    const added = yours.getByTestId("agent-row");
+    await expect(added).toHaveCount(1);
+    const agentId = await added.getAttribute("data-agent-id");
+    const copy = added.getByTestId("mcp-config-copy");
     await expect(copy).toBeEnabled();
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await copy.click({ timeout: remainingMs() });
       await expect
         .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
         .toContain(canonicalRootPath);
+      const config = JSON.parse(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())) as { mcpServers: { dohc: { args: string[] } } };
+      expect(config.mcpServers.dohc.args.slice(-2)).toEqual(["--agent-id", agentId]);
     });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

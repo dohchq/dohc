@@ -145,7 +145,7 @@ function ShellPage({ f }: { f: Awaited<ReturnType<typeof fixture>> }) {
         try { return await f.host.query({ ...request, signal }); }
         catch (error) { throw new Error(`Error invoking remote method 'dohc:dataset': ${String(ipcWireError(error))}`); }
       }} />
-    {shellErrors.map(error => <WorkspaceErrorToast key={error.id} error={{ ...error, details: error.message, canRetry: error.retry !== null }} onRetry={retryShellError} />)}
+    {shellErrors.map(error => <WorkspaceErrorToast key={error.id} error={{ ...error, copy: { report: error.message }, canRetry: error.retry !== null }} onRetry={retryShellError} />)}
     <ul aria-label="Notices">{shellErrors.map(error => <li key={error.id}>{error.message}</li>)}</ul>
   </>;
 }

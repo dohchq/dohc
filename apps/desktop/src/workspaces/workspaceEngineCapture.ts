@@ -7,6 +7,7 @@ import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryS
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
+import { HistoryStillPausedError, livePageBody, livePageTitle, type LivePageAction } from "../ipc/errorWords";
 import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -84,6 +85,7 @@ import {
   type RetainedCopiesSummary,
   type RetainedCopy,
   type YdocContentKind,
+  type YdocDeliveredHead,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
@@ -149,9 +151,10 @@ function liveDocumentMutationRefusal(
   path: string,
   action: "move" | "delete" | "restore" | "duplicate",
 ): Error | null {
-  if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
-    return null;
-  }
+  if (!(error instanceof DaemonRefusalError)) return null;
+  if (action !== "duplicate" && error.message === "live-page-owned") return livePageRefusal(error, path, action);
+  if (action === "delete" && error.message === "live-folder-page-owned") return liveFolderRefusal(error, path, "delete");
+  if (error.message !== "live-document-binding-active") return null;
   return new LiveDocumentMutationError(
     `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
     { cause: error },
@@ -162,6 +165,52 @@ function liveDocumentMutationRefusal(
 // live document.
 export class LiveDocumentMutationError extends Error {
   override name = "LiveDocumentMutationError";
+}
+
+type LiveFolderAction = "move" | "delete" | "replace";
+
+export function liveFolderBody(action: LiveFolderAction): string {
+  if (action === "replace") return "In Live documents, stop live editing for every page in this folder, then try again.";
+  return `In Live documents, stop live editing for every page in this folder, then ${action} the folder again.`;
+}
+
+export function liveFolderTitle(folder: string, action: LiveFolderAction): string {
+  return `dohc can't ${action} "${folder}" while a page in it has live editing on`;
+}
+
+// A folder move or delete the engine refuses because a page under the folder
+// is live on this computer. The message is the title, a line break, then the body.
+export class LiveFolderError extends LiveDocumentMutationError {
+  override name = "LiveFolderError";
+}
+
+function liveFolderRefusal(error: DaemonRefusalError, folder: string, action: LiveFolderAction): Error {
+  return new LiveFolderError(`${liveFolderTitle(folder, action)}\n${liveFolderBody(action)}`, { cause: error });
+}
+
+// A change the engine refuses because this computer owns the page live. The
+// message is the title, a line break, then the body.
+export class LivePageOwnedError extends LiveDocumentMutationError {
+  override name = "LivePageOwnedError";
+}
+
+function livePageRefusal(error: DaemonRefusalError, path: string, action: LivePageAction): Error {
+  return new LivePageOwnedError(`${livePageTitle(path, action)}\n${livePageBody(action)}`, { cause: error });
+}
+
+function replaceRefusal(error: unknown, destination: string): Error | null {
+  if (!(error instanceof DaemonRefusalError)) return null;
+  if (error.message === "live-page-owned") return livePageRefusal(error, destination, "replace");
+  if (error.message === "live-folder-page-owned") return liveFolderRefusal(error, destination, "replace");
+  return liveDocumentMutationRefusal(error, destination, "move");
+}
+
+function moveRefusal(error: unknown, path: string, folder: boolean): Error | null {
+  // A hosted page and an owned page under a folder read the same.
+  if (folder && error instanceof DaemonRefusalError && ["live-document-binding-active", "live-folder-page-owned"].includes(error.message)) {
+    return liveFolderRefusal(error, path, "move");
+  }
+  return liveDocumentMutationRefusal(error, path, "move");
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
@@ -271,6 +320,9 @@ export interface WorkspaceVersionMergeResult {
   // rows themselves are open conflicts in the engine; readers page them
   // through listOpenConflictsPage instead of carrying them here.
   conflictCount: number;
+  // Protected files whose Main copy this merge replaced with the version's,
+  // in merge order. They never conflict, so the result has to name them.
+  replacedProtectedPaths: string[];
 }
 
 // One page of open conflicts, the engine's own `conflicts.list` page passed
@@ -514,6 +566,10 @@ export interface WorkspaceEngineCapture {
   observeFileEvents(events: readonly WatcherEvent[]): void;
   resyncFileObservation(): Promise<void>;
   observationDrainFailed(): void;
+  // Restarts daemon capture that stopped and publishes a healthy outcome
+  // only once capture runs again. Rejects with HistoryStillPausedError while
+  // History is still paused.
+  retryHistoryCapture(): Promise<void>;
   // Updates the daemon capture owner's live authorship state. Starting a run
   // is ordered before the caller launches agent work; clearing first flushes
   // the daemon so every write observed during the run retains its author.
@@ -586,10 +642,13 @@ export interface WorkspaceEngineCapture {
   // with the version binding, so a switch cannot land between them.
   openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
+    allowLossySourceSha256?: string;
     path: string;
     assertRecordWritable?: () => void;
-    onRemoteUpdate: (update: Uint8Array) => void;
-    onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
+    // `head` is the file head this state was read with, when the engine sent
+    // one. An update with a head may be empty.
+    onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead) => void;
+    onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     // A reopen found another object at this path: this document was moved,
     // or deleted and replaced. The session stops reopening and saves nothing
@@ -763,13 +822,25 @@ export interface WorkspaceEngineCapture {
     recoverExistingText?: WorkspaceGeneratedTextIdentityValidator;
     metadata?: ActorNeutralWriteMetadata;
   }): Promise<WorkspaceGeneratedTextArchiveResult>;
+  // Refuses to archive a page this computer owns live, before anything
+  // changes. archiveGeneratedTextFile checks again.
+  checkGeneratedTextArchive(path: string): Promise<void>;
+  // Whether an archive already moved a generated page in the engine: nothing
+  // heads fromPath, and the page's object heads toPath.
+  generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean>;
   // Engine-coordinated single-file rename (product rename flows call this
   // before moving the file on disk). When both sides are engine-owned text,
   // the engine records a rename moment — preserving the stable object id the
   // linked-chat rail keys on — and registers the expected watcher
   // observations. All other shapes (folders, binary, untracked) return a
   // no-op finisher and are captured as delete+write by the normal path.
-  beginFileRename(fromPath: string, toPath: string): Promise<WorkspaceEngineRenameFinisher>;
+  // `folder`: the source is a folder, so a page this computer owns under it refuses the move too.
+  beginFileRename(fromPath: string, toPath: string, folder?: boolean): Promise<WorkspaceEngineRenameFinisher>;
+  // Refuses as the move of `folder` would, while a page under it is live on
+  // this computer. It changes nothing. A move checks this before it catches up.
+  checkFolderMove(folder: string): Promise<void>;
+  // Refuses as the move of the page at `path` would, while this computer owns it live. It changes nothing.
+  checkPageMove(path: string): Promise<void>;
   // Runs an author's move or delete of `paths` while capture records nothing,
   // so the rows `work` records are the only rows the change leaves. Live
   // documents at or under the paths settle and close first. A move first
@@ -780,13 +851,13 @@ export interface WorkspaceEngineCapture {
   // document writes there are cancelled and the rest are restored.
   changePathsAs<Result>(
     paths: readonly string[],
-    authored: { operation: "move" | "delete" | "duplicate"; author: MomentWriteAuthor; operationId: string },
+    authored: { operation: "move" | "delete" | "duplicate"; author: MomentWriteAuthor; operationId: string; folder?: boolean },
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
-  // A relay pull runs on the same capture chain as local batch capture and
-  // version operations. The task owns the engine pull; pushes run off the
-  // chain because they write no workspace files. Returned
+  // Apply runs on the same capture chain as local batch capture and version
+  // operations. The task owns apply, materialization, and the cursor commit.
+  // Fetch and push run off the chain. Returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
   // Data-safety contract: the task must give every pull page to the supplied
@@ -1196,6 +1267,15 @@ export class RestoreFolderInUseError extends Error {
   }
 }
 
+// A merge failed after some of the version's files were already in Main.
+// Its message is the failure's own, for Copy details.
+export class MergeStoppedPartwayError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause), { cause });
+    this.name = "MergeStoppedPartwayError";
+  }
+}
+
 // History's current rules refused a restore. An unreadable rules file's
 // message leads with the files dohc could not read, so the error map names
 // them after IPC turns the error into one string. The parser's text follows,
@@ -1242,7 +1322,7 @@ export class RestoreHeadChangedError extends Error {
 }
 
 export class RestoreLocalChangesError extends Error {
-  constructor(readonly path: string, detail = "Changed on this device since the last saved version") {
+  constructor(readonly path: string, detail = "Changed on this device since the last saved version.") {
     super(detail);
     this.name = "RestoreLocalChangesError";
   }
@@ -1760,15 +1840,14 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      works on that path. Re-walking the spelling would let an ancestor
   //      alias swapped after the check redirect the mkdir, the checks, and the
   //      write to somewhere no rule was applied.
-  async function assertResolvedArea(absolutePath: string, label: string): Promise<string> {
-    const { resolvedAbsolute } = await assertResolvedWorkspacePath({
+  async function assertResolvedArea(absolutePath: string, label: string) {
+    return await assertResolvedWorkspacePath({
       rootPath,
       absolutePath,
       spelled: absolutePath,
       label,
       access: "entry",
     });
-    return resolvedAbsolute;
   }
   // Text and bytes take the same four checks in the same order, so they take
   // one path through them. writeFile defaults a string to UTF-8 and ignores
@@ -1781,7 +1860,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
-    const target = await assertResolvedArea(absolutePath, "Engine write path");
+    const { resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
@@ -1792,8 +1871,12 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     writeTextFile: writeEngineFile,
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
-      await assertContainedDir(dirname(absolutePath));
-      const target = await assertResolvedArea(absolutePath, "Engine delete path");
+      // The parent may be absent: a device that never had the folder still
+      // receives the delete. The resolver refuses a missing root or a broken
+      // ancestor link. With no parent there is nothing to remove, so the
+      // delete stops before it changes the disk.
+      const { resolvedAbsolute: target, parentPresent } = await assertResolvedArea(absolutePath, "Engine delete path");
+      if (!parentPresent) return;
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(target, { force: true });
@@ -1877,11 +1960,15 @@ export function createWorkspaceEngineCapture(
   const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
+  // Quit cancels capture waits at once. A save dohc accepted before quit waits
+  // on this one instead, which ends when the work queued before quit has run,
+  // so the save still reaches the disk.
+  const admittedCaptureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
-  // editor session is still rejecting the user's edits.
-  const deadYDocSessions = new Set<object>();
+  // editor session is still rejecting the user's edits. Each names its path.
+  const deadYDocSessions = new Map<object, string>();
   // Dead-session failures are an independent penalty, so retain the latest
   // watcher/health result when that penalty is added and later removed.
   let backgroundCaptureHealthy = true;
@@ -2354,6 +2441,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function openRestartSafeRustYDocSession(input: {
+    allowLossySourceSha256?: string;
     versionId: string;
     path: string;
     contentKind?: YdocContentKind;
@@ -2361,8 +2449,8 @@ export function createWorkspaceEngineCapture(
     onAlive: () => void;
     onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
-    onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
-    onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
+    onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead, localAcknowledgement?: boolean) => void;
+    onLineageReplaced: (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
       result: {
@@ -2446,7 +2534,7 @@ export function createWorkspaceEngineCapture(
       retireCheckpointIfDurable();
       notifyDurable(record);
       if (!record.editorVisible) {
-        try { input.onRemoteUpdate(record.update, true); }
+        try { input.onRemoteUpdate(record.update, undefined, true); }
         catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
       }
     };
@@ -2527,9 +2615,9 @@ export function createWorkspaceEngineCapture(
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
     let localGeneration = 0;
-    const announceReplacement = (update: Uint8Array, recoveredPaths: string[]): void => {
+    const announceReplacement = (update: Uint8Array, recoveredPaths: string[], head?: YdocDeliveredHead): void => {
       localGeneration += 1;
-      input.onLineageReplaced(update, recoveredPaths);
+      input.onLineageReplaced(update, recoveredPaths, head);
     };
     // Across IPC, renderer and main need separate ownership. Main retains at
     // most 32 MiB and 4096 originals, including queued IPC calls.
@@ -2609,8 +2697,12 @@ export function createWorkspaceEngineCapture(
     let operationChain: Promise<void> = Promise.resolve();
     const openingRemoteUpdates = new WeakMap<
       EngineYdocProviderSession,
-      { updates: Uint8Array[]; installed: boolean }
+      { updates: { update: Uint8Array; head?: YdocDeliveredHead }[]; installed: boolean }
     >();
+    // The head a generation's state was opened or last installed with, or `{}`
+    // when that head is unknown, so the renderer forgets the head it held.
+    const installedHead = (session: EngineYdocProviderSession): YdocDeliveredHead =>
+      session.headSha256 === undefined ? {} : { sha256: session.headSha256 };
 
     const append = <T>(operation: () => Promise<T>): Promise<T> => {
       const pending = operationChain.then(operation);
@@ -2630,7 +2722,7 @@ export function createWorkspaceEngineCapture(
       input.onDead();
       if (dead) return;
       dead = true;
-      deadYDocSessions.add(deadSessionToken);
+      deadYDocSessions.set(deadSessionToken, input.path);
       publishCaptureOutcome();
     };
 
@@ -2720,8 +2812,11 @@ export function createWorkspaceEngineCapture(
     const openGeneration = async (
       seedAbsentLineage: boolean,
       openOptions?: { retryTransportErrors?: boolean },
-    ): Promise<EngineYdocProviderSession> =>
-      await sessions.run(
+    ): Promise<EngineYdocProviderSession> => {
+      // A stopped capture has closed the workspace's engine session, and
+      // nothing would close one opened now.
+      if (stopped) throw closedError();
+      return await sessions.run(
         workspace,
         async (binding) => {
           const generation = ++generations;
@@ -2732,7 +2827,7 @@ export function createWorkspaceEngineCapture(
           }
           let opened: EngineYdocProviderSession | null = null;
           let refusedEditorVisible: boolean | null = null;
-          const opening = { updates: [] as Uint8Array[], installed: false };
+          const opening = { updates: [] as { update: Uint8Array; head?: YdocDeliveredHead }[], installed: false };
           const requestReconnect = (error: unknown): void => {
             if (
               opened === null ||
@@ -2750,6 +2845,8 @@ export function createWorkspaceEngineCapture(
             });
           };
           const providerOpened = await openProvider({
+            ...(generation === 1 && input.allowLossySourceSha256
+              ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -2770,18 +2867,19 @@ export function createWorkspaceEngineCapture(
             // A note the WYSIWYG editor opens can seed past the in-band cap.
             // A larger one keeps its read preview and edits its file directly.
             largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
-            onRemoteUpdate: (update) => {
+            onRemoteUpdate: (update, head) => {
               if (current !== opened || canonicalDoc === null) {
-                if (!opening.installed) opening.updates.push(update);
+                if (!opening.installed) opening.updates.push({ update, ...(head ? { head } : {}) });
                 return;
               }
               Y.applyUpdate(canonicalDoc, update);
               Y.applyUpdate(recordedDoc, update);
               recordedStateVector = Y.encodeStateVector(recordedDoc);
-              updatesCounted += 1;
-              input.onRemoteUpdate(update);
+              // A head alone changes nothing a settle must carry.
+              if (update.byteLength > 2) updatesCounted += 1;
+              input.onRemoteUpdate(update, head);
             },
-            onLineageReplaced: (replacement, recoveredPaths) => {
+            onLineageReplaced: (replacement, recoveredPaths, head) => {
               const editorVisible = refusedEditorVisible;
               refusedEditorVisible = null;
               if (current !== opened || canonicalDoc === null) return;
@@ -2799,6 +2897,7 @@ export function createWorkspaceEngineCapture(
                 announceReplacement(
                   Y.encodeStateAsUpdate(replacement),
                   recoveredPaths,
+                  head,
                 );
               }
               retired.destroy();
@@ -2869,6 +2968,7 @@ export function createWorkspaceEngineCapture(
           retryInitialCapture: true,
         },
       );
+    };
 
     // Reconcile a freshly opened generation against the canonical doc and
     // install it: daemon-side edits land in the canonical doc first, then every
@@ -2923,6 +3023,7 @@ export function createWorkspaceEngineCapture(
           announceReplacement(
             Y.encodeStateAsUpdate(replacement.doc),
             [],
+            installedHead(replacement),
           );
           doc.destroy();
           markAlive();
@@ -2935,11 +3036,11 @@ export function createWorkspaceEngineCapture(
           replacement.doc,
           Y.encodeStateVector(doc),
         );
-        if (remoteDelta.byteLength > 2) {
-          Y.applyUpdate(doc, remoteDelta);
-          Y.applyUpdate(recordedDoc, remoteDelta);
-          input.onRemoteUpdate(remoteDelta);
-        }
+        // The generation's head, read with its state, goes even when the
+        // state adds nothing.
+        Y.applyUpdate(doc, remoteDelta);
+        Y.applyUpdate(recordedDoc, remoteDelta);
+        input.onRemoteUpdate(remoteDelta, installedHead(replacement));
         if (!claimCoversRecordedHistory(replacement.doc, recordedStateVector)) {
           // The daemon only admits a neutral seed into an absent lineage.
           // Refuse an incomplete existing lineage rather than crediting old
@@ -3020,12 +3121,12 @@ export function createWorkspaceEngineCapture(
         if (opening) {
           opening.installed = true;
           openingRemoteUpdates.delete(replacement);
-          for (const update of opening.updates.slice(
+          for (const { update, head } of opening.updates.slice(
             updatesIncludedInRemoteDelta,
           )) {
             Y.applyUpdate(doc, update);
             Y.applyUpdate(recordedDoc, update);
-            input.onRemoteUpdate(update);
+            input.onRemoteUpdate(update, head);
           }
         }
         canonicalLineageClaimId = replacementClaimId;
@@ -3321,8 +3422,8 @@ export function createWorkspaceEngineCapture(
     if (initialOpening) {
       initialOpening.installed = true;
       openingRemoteUpdates.delete(current);
-      for (const update of initialOpening.updates) {
-        input.onRemoteUpdate(update);
+      for (const { update, head } of initialOpening.updates) {
+        input.onRemoteUpdate(update, head);
       }
     }
     // A daemon update can arrive after the provider has encoded its initial
@@ -3514,6 +3615,10 @@ export function createWorkspaceEngineCapture(
             assertCurrent();
             return owner.onDurableLocalChange(() => {if (current === captured && !closed) handler();});
           },
+          onSettlementWanted: (handler: () => void) => {
+            assertCurrent();
+            return owner.onSettlementWanted(() => {if (current === captured && !closed) handler();});
+          },
           flush: () => append(async () => { assertCurrent(); await owner.flush(); assertCurrent(); }),
           applyRemoteUpdate: (update: Uint8Array) => append(async () => { assertCurrent(); await owner.applyRemoteUpdate(update); assertCurrent(); }),
           resyncIfNeeded: async () => { assertCurrent(); await owner.resyncIfNeeded(); assertCurrent(); },
@@ -3536,6 +3641,7 @@ export function createWorkspaceEngineCapture(
         // operation's next line records it here.
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
+      get headSha256() { return current?.headSha256; },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -3762,19 +3868,31 @@ export function createWorkspaceEngineCapture(
   async function settleAndCloseLiveYDocSessions(
     match: (path: string) => boolean,
     summary: string,
+    // A workspace close tries every session before it reports the first
+    // failure: the engine session closes next, and no session reopens it.
+    { tryEvery = false } = {},
   ): Promise<void> {
+    const failures: unknown[] = [];
     for (const entry of [...liveYDocSessions.values()]) {
       if (!match(entry.path)) continue;
-      // A healthy session flushes the CRDT to disk + projection first. A
-      // failing-close entry skips only the settle — its flush was attempted
-      // and may have been refused — because the release below hands over
-      // anything the engine is still missing whatever `settle` says, and
-      // refuses to release while it is behind (ydocProviderSession `close`).
-      if (entry.status === "live") {
-        await entry.session.settleNow({ summary, ifNeeded: true });
+      try {
+        // A healthy session flushes the CRDT to disk + projection first. A
+        // failing-close entry skips only the settle — its flush was attempted
+        // and may have been refused — because the release below hands over
+        // anything the engine is still missing whatever `settle` says, and
+        // refuses to release while it is behind (ydocProviderSession `close`).
+        // A workspace close also settles a dead generation, which revives it:
+        // nothing after this close can save its text.
+        if (entry.status === "live" || (tryEvery && entry.status === "dead-generation")) {
+          await entry.session.settleNow({ summary, ifNeeded: true });
+        }
+        await entry.close({ settle: false });
+      } catch (error) {
+        if (!tryEvery) throw error;
+        failures.push(error);
       }
-      await entry.close({ settle: false });
     }
+    if (failures.length > 0) throw failures[0];
     // Detached locked-write debts are not touched here. This
     // vacate runs for version operations and content refreshes that remove
     // nothing, and its callers have only attempted their operation at this
@@ -4841,6 +4959,7 @@ export function createWorkspaceEngineCapture(
         };
         let entry: LiveYDocSession | null = null;
         const { session, head, lineage, unsettled } = await openRestartSafeRustYDocSession({
+          ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
@@ -4872,13 +4991,13 @@ export function createWorkspaceEngineCapture(
               // Observer boundary, like the save-state hook.
             }
           },
-          onRemoteUpdate: (update, localAcknowledgement) => {
-            if (!localAcknowledgement) noteUpdate();
-            input.onRemoteUpdate(update);
+          onRemoteUpdate: (update, updateHead, localAcknowledgement) => {
+            if (!localAcknowledgement && update.byteLength > 2) noteUpdate();
+            input.onRemoteUpdate(update, updateHead);
           },
-          onLineageReplaced: (update, recoveredPaths) => {
+          onLineageReplaced: (update, recoveredPaths, replacementHead) => {
             noteUpdate();
-            input.onLineageReplaced?.(update, recoveredPaths);
+            input.onLineageReplaced?.(update, recoveredPaths, replacementHead);
             reportSaveState("settling", 0, "status");
             enqueue(`ydoc replacement settle of ${input.path}`, async () => {
               if (entry !== null && liveYDocSessions.get(input.path) === entry && entry.status === "live") settleOnOpen();
@@ -5235,7 +5354,7 @@ export function createWorkspaceEngineCapture(
                 onDead: () => undefined,
                 onAlive: () => undefined,
                 onObjectChanged: () => undefined,
-                onRemoteUpdate: () => {
+                onRemoteUpdate: (update) => {
                   // An update the settle did not carry is not covered by
                   // it. The close below cancels this update's debounce and
                   // sends settle: false, and a replicated lineage compacts
@@ -5244,7 +5363,8 @@ export function createWorkspaceEngineCapture(
                   // that never reached Markdown. Bumping the sequence is
                   // the whole record: whether it outran a settle is
                   // decided by comparing it to what that settle covers.
-                  updateSeq += 1;
+                  // A head alone carries no change.
+                  if (update.byteLength > 2) updateSeq += 1;
                 },
                 onLineageReplaced: () => {
                   updateSeq += 1;
@@ -5991,6 +6111,7 @@ export function createWorkspaceEngineCapture(
             return session.artifactAssets ?? [];
           },
           path: session.path,
+          get headSha256() { return session.headSha256; },
           async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,
@@ -6041,6 +6162,27 @@ export function createWorkspaceEngineCapture(
         } satisfies RecordEditSession;
         return publicSession;
       }
+  }
+
+  async function checkGeneratedTextArchive(path: string): Promise<void> {
+    const engine = await engineStore();
+    const versionId = await activeVersionIdOf(engine);
+    try {
+      await engine.checkMove({ workspaceId, versionId, path, change: "movePage" });
+    } catch (error) {
+      throw (error instanceof DaemonRefusalError && error.message === "live-page-owned" ? livePageRefusal(error, path, "archive") : null) ?? error;
+    }
+  }
+
+  async function generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean> {
+    const engine = await engineStore();
+    const versionId = await activeVersionIdOf(engine);
+    const read = (path: string) => engine.readTextFile({ workspaceId, versionId, path: assertGeneratedMarkdownPath(path) });
+    // The page's own object at this generation's path: the move committed,
+    // whatever was saved at the old path since.
+    if (input.expectedObjectId !== undefined) return (await read(input.toPath))?.objectId === input.expectedObjectId;
+    const [source, destination] = await Promise.all([read(input.fromPath), read(input.toPath)]);
+    return !source && !!destination;
   }
 
   async function resolveFileForPath(path: string) {
@@ -6137,6 +6279,40 @@ export function createWorkspaceEngineCapture(
 
     observationDrainFailed() { observationDrainUnavailable = true; },
 
+    async retryHistoryCapture() {
+      const engine = await engineStore();
+      if (!engine.retryCapture) throw new Error("This workspace cannot restart History.");
+      // Off the capture chain: the restart scans the whole folder, and
+      // document opens wait on the chain.
+      try {
+        await engine.retryCapture();
+      } catch (error) {
+        // A pass that outlasts the settle budget is still catching up unless
+        // capture stopped again, judged as the daemon judges a stopped driver
+        // (degraded or terminal). A replacement still on its first scan is
+        // neither, and reports not running until that scan ends.
+        if (!(error instanceof EngineCaptureNotSettledError)) throw error;
+        const status = await engine.watcherStatus?.();
+        if (status === undefined || (!status.degraded && !status.terminal)) throw error;
+        throw new HistoryStillPausedError([]);
+      }
+      // On the chain, so a health poll that started before the restart
+      // cannot publish its stale failure after this outcome.
+      await enqueueResult("history capture retry", async () => {
+        let healthy = false;
+        await reportCaptureOutcome(async () => {
+          const status = await engine.watcherStatus?.();
+          healthy = status === undefined || (status.running && !status.degraded && !status.terminal);
+          return healthy;
+        });
+        if (!healthy) throw new HistoryStillPausedError([]);
+        // Closing a page releases its dead session, so name each page once,
+        // in the same order each time.
+        const stopped = [...new Set(deadYDocSessions.values())].sort();
+        if (stopped.length > 0) throw new HistoryStillPausedError(stopped);
+      });
+    },
+
     async saveDeletedFileAgain(path) {
       // On the chain, so no version operation moves the session between the
       // check and the write.
@@ -6210,7 +6386,7 @@ export function createWorkspaceEngineCapture(
           throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
-        await engine.flushCapture?.();
+        await engine.flushCapture?.({ signal: admittedCaptureWaitAbort.signal });
         const versionId = writeOptions.versionId ?? await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: localFileOrApi(author),
@@ -6276,7 +6452,7 @@ export function createWorkspaceEngineCapture(
         // because an owner handoff can finish while its session closes.
         const ensureDeleteAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix });
+            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix, change: "delete" });
           } catch (error) {
             throw liveDocumentMutationRefusal(error, pathOrPrefix, "delete") ?? error;
           }
@@ -6333,10 +6509,24 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureAllowed = async (author?: MomentWriteAuthor) => {
           for (const [index, path] of paths.entries()) {
+            const moving = index === 0 && authored.operation === "move";
+            const folder = moving && authored.folder === true;
+            // The source of a move or delete; a duplicate's source stays where it is.
+            const change = moving ? (folder ? "moveFolder" : "movePage") : index === 0 && authored.operation === "delete" ? "delete" : undefined;
             try {
-              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}) });
+              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}), ...(change ? { change } : {}) });
             } catch (error) {
-              throw liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
+              throw (moving ? moveRefusal(error, path, folder) : liveDocumentMutationRefusal(error, path, authored.operation)) ?? error;
+            }
+          }
+          // A move replaces what its destination records, even a page whose
+          // file is gone from disk, so the destination is checked as a delete.
+          const destination = authored.operation === "move" ? paths[1] : undefined;
+          if (destination !== undefined) {
+            try {
+              await engine.checkMove({ workspaceId, versionId, path: destination, change: "delete" });
+            } catch (error) {
+              throw replaceRefusal(error, destination) ?? error;
             }
           }
         };
@@ -6471,6 +6661,7 @@ export function createWorkspaceEngineCapture(
       shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
+      void chain.then(() => admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason));
     },
 
     settleAndCloseAllLiveSessions() {
@@ -6479,6 +6670,7 @@ export function createWorkspaceEngineCapture(
         settleAndCloseLiveYDocSessions(
           () => true,
           "Saved latest edits before closing the workspace",
+          { tryEvery: true },
         ),
       );
     },
@@ -6685,7 +6877,10 @@ export function createWorkspaceEngineCapture(
     },
 
     mergeVersionIntoMain(sourceVersionId) {
-      return enqueueResult("merge version into Main", async () => {
+      // The version's files already in Main. A failure after the first says
+      // the merge stopped partway.
+      let mergedFileCount = 0;
+      const merge = async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
@@ -6775,7 +6970,6 @@ export function createWorkspaceEngineCapture(
         }
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
-        let mergedFileCount = 0;
         let unchangedFileCount = 0;
         for (const path of mergeOrder) {
           if (openConflictPaths.has(path)) {
@@ -6807,6 +7001,7 @@ export function createWorkspaceEngineCapture(
         // history — restorable, so nothing is lost.
         const secrets = secretStoreFor();
         const secretChanges: SecretFileComparePage["entries"] = [];
+        const replacedProtectedPaths: string[] = [];
         {
           let secretAfterPath: string | undefined;
           do {
@@ -6839,6 +7034,7 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
+          replacedProtectedPaths.push(change.path);
           if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
             const materialized = await secrets.materializeSecretFile({
               workspaceId,
@@ -6862,8 +7058,11 @@ export function createWorkspaceEngineCapture(
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
           await materialize(deletesBeforeWrites(materializations), policy);
         }
-        return { mergedFileCount, unchangedFileCount, conflictCount };
-      });
+        return { mergedFileCount, unchangedFileCount, conflictCount, replacedProtectedPaths };
+      };
+      return enqueueResult("merge version into Main", () => merge().catch((error: unknown) => {
+        throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
+      }));
     },
 
     async listOpenConflictsPage(afterConflictId) {
@@ -7459,7 +7658,7 @@ export function createWorkspaceEngineCapture(
           return {status:"deleted" as const,momentId:result.moment.id};
         } catch(error) {
           const reason=error && typeof error==="object" ? ("code" in error?error.code:"message" in error?error.message:undefined):undefined;
-          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active")return {status:"conflict" as const};
+          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active" || reason==="live-page-owned")return {status:"conflict" as const};
           throw error;
         }
       });
@@ -7594,6 +7793,9 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    checkGeneratedTextArchive,
+    generatedTextArchiveMoved,
+
     archiveGeneratedTextFile(input) {
       return enqueueResult("archive generated text", async () => {
         const fromPath = assertGeneratedMarkdownPath(input.fromPath);
@@ -7606,6 +7808,7 @@ export function createWorkspaceEngineCapture(
             "The document archive request requires exactly one of expectedObjectId or recoverExistingText.",
           );
         }
+        await checkGeneratedTextArchive(fromPath);
         await settleAndCloseLiveYDocSessions(
           (candidate) => candidate === fromPath || candidate === toPath,
           "Saved latest edits before archiving generated content",
@@ -7828,7 +8031,27 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    beginFileRename(fromPath, toPath) {
+    async checkFolderMove(folder) {
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      try {
+        await engine.checkMove({ workspaceId, versionId, path: folder, change: "moveFolder" });
+      } catch (error) {
+        throw moveRefusal(error, folder, true) ?? error;
+      }
+    },
+
+    async checkPageMove(path) {
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      try {
+        await engine.checkMove({ workspaceId, versionId, path, change: "movePage" });
+      } catch (error) {
+        throw moveRefusal(error, path, false) ?? error;
+      }
+    },
+
+    beginFileRename(fromPath, toPath, folder = false) {
       // Held from the vacate until the finisher reports the outcome, so a debt
       // registered inside the window cannot settle an endpoint mid-move.
       // Opened after the drain below, never before: the drain's own
@@ -7839,9 +8062,9 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureMoveAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: fromPath });
+            await engine.checkMove({ workspaceId, versionId, path: fromPath, change: folder ? "moveFolder" : "movePage" });
           } catch (error) {
-            throw liveDocumentMutationRefusal(error, fromPath, "move") ?? error;
+            throw moveRefusal(error, fromPath, folder) ?? error;
           }
         };
         await ensureMoveAllowed();
@@ -8170,6 +8393,7 @@ export function createWorkspaceEngineCapture(
         }
       } finally {
         captureWaitAbort.abort();
+        admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason);
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every

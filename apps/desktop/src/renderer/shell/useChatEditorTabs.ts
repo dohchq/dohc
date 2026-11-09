@@ -5,6 +5,10 @@ import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import type { SettingsAgent } from "../workbench/agentChat";
 import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
+function isAgentNav(nav: ChatsNav | undefined): boolean {
+  return (nav?.level === "channel" || nav?.level === "thread") && nav.channel.kind === "agent";
+}
+
 type ChatEditor = {
   nav: ChatsNav | undefined;
   drafts: ChatsDrafts | undefined;
@@ -99,8 +103,8 @@ export function useChatEditorTabs(input: {
     // A sidebar channel click focuses its tab, including its current thread.
     // A message link still commands a jump inside that tab.
     const focusOnly = entry.nav && entry.nav.level !== "channels" && chatEditorPath(entry.nav) === path &&
-      (nav.level === "channel" || nav.level === "feed" ||
-        (nav.level === "dm" && !nav.focusMessageId));
+      (nav.level === "feed" || (nav.level === "dm" && !nav.focusMessageId) ||
+        (nav.level === "channel" && !nav.focusMessageId && !nav.lane));
     if (focusOnly && nav.level === "dm" && entry.nav?.level === "dm" &&
       JSON.stringify(entry.nav.dm) !== JSON.stringify(nav.dm)) {
       entry.nav = { ...entry.nav, dm: nav.dm };
@@ -159,5 +163,9 @@ export function useChatEditorTabs(input: {
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
       [path, chatEditorTitle(entry.nav!, input.agents)] as const),
   ), [revision, input.agents, input.workspaceId]);
-  return { get, open, titles };
+  // An agent's chat tab draws the agent's sparkle, as the sidebar does.
+  const glyphs = useMemo(() => new Map(
+    [...store.current.entries].filter(([, entry]) => isAgentNav(entry.nav)).map(([path]) => [path, "agent" as const]),
+  ), [revision, input.workspaceId]);
+  return { get, open, titles, glyphs };
 }

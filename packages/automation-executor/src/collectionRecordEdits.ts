@@ -211,7 +211,8 @@ export function actorOriginIdFor(author: ChangeAuthor): string | undefined {
 
 /**
  * The declared attribution recorded beside the actor origin. An agent author
- * writes as an agent for its `onBehalfOf` person at its run's chain depth;
+ * writes as an agent for its `onBehalfOf` person at its run's chain depth,
+ * naming the run it wrote in when it has one;
  * an automation writes for its run's person, when it has one, at the depth
  * its author carries (one greater than its trigger's), naming the run it
  * wrote from; every other author through this seam is a person.
@@ -219,7 +220,12 @@ export function actorOriginIdFor(author: ChangeAuthor): string | undefined {
 export function attributionFor(author: ChangeAuthor): ChangeAttributionWire {
   switch (author.kind) {
     case "agent":
-      return { actorKind: "agent", onBehalfOf: author.onBehalfOf, depth: author.depth };
+      return {
+        actorKind: "agent",
+        onBehalfOf: author.onBehalfOf,
+        depth: author.depth,
+        ...(author.agentRunId !== undefined ? { agentRunId: author.agentRunId } : {}),
+      };
     case "automation":
       return {
         actorKind: "automation",
@@ -345,6 +351,7 @@ export async function setCollectionRecordFields(
   // The session's own document, judged at the first turn that would change
   // it: the file can change between the read above and this open.
   let sessionLossy: boolean | undefined;
+  const headSha256 = current ? createHash("sha256").update(current.text).digest("hex") : null;
   let sharedFileUpdates: Record<string, SharedFileUpdate> | undefined;
   const appendPrefix = input.idempotencyKeyPrefix ?? (input.allowPendingSharedSettlement ? `collection-fields/${randomUUID()}` : undefined);
   try {
@@ -381,7 +388,7 @@ export async function setCollectionRecordFields(
             kept[field] = currentValue;
             return null;
           }
-          sessionLossy ??= isLossyDocument(doc);
+          sessionLossy ??= isLossyDocument(doc, headSha256);
           if (sessionLossy) throw new Error(lossyNoteRefusal(input.recordPath));
           if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
           replaced[field] = currentValue;

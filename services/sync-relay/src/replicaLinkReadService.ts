@@ -24,7 +24,12 @@ type Window = {revision:number;head:number;floor:number;ceiling:number;changes:C
 export function createReplicaLinkReadService(storage:StorageContext, source:DevelopmentReplicaReads,
   watches:Pick<ReplicaWatches,"holdReader">,activity:Pick<DiscussionActivityHub,"wakeLog">,
   newestFilteredOpFreshness:ReturnType<typeof createShareReadQueries>["newestFilteredOpFreshness"],key?:string|Uint8Array) {
-  const windows=new Map<string,Window>(), identity=createReceivedIdentity(key);
+  type Observations = Parameters<StorageContext["indexReceivedWorkTargets"]>[0][number][];
+  let observations: Observations | undefined;
+  const windows=new Map<string,Window>(), identity=createReceivedIdentity(key, (recipient, workspaceId, objectId, objectToken) => {
+    const sourceHandle = identity.source(recipient, workspaceId);
+    if (sourceHandle) observations?.push({recipient, workspaceId, objectId, objectToken, sourceHandle});
+  });
   // Reserve most watch capacity for named readers. Admission never affects output.
   const links=new Map<string,number>(),activations=new Map<string,number>();
   const hold=(authorized:Snapshot["authorized"])=>{
@@ -76,7 +81,10 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
       blobSha256:row.sha256,contentKind:row.contentKind};
   };
   function read<T>(input:LinkReadInput,fresh:()=>LinkReadInput,run:(s:Snapshot)=>T,requestedPath?:string,watch=true) {
-    const result=withReplicaCurrentView(storage,{...input,principal:{kind:"link",requireSession:fresh}},source,s=>{
+    const observed: Observations = [], previous = observations;
+    observations = observed;
+    let result;
+    try { result=withReplicaCurrentView(storage,{...input,principal:{kind:"link",requireSession:fresh}},source,s=>{
       if(s.files.some(f=>f.status!=="ready") || fileSideOf(s.authorized.effectiveSelector)!.access==="edit" && s.view.logCursor<storage.getEpochLogFloor(s.workspace))throw relayError("link_read_rate_limited");
       return run(s);
     },requestedPath,true,{onStanding:authorized=>{
@@ -88,8 +96,9 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
         if(activations.size>64)activations.delete(activations.keys().next().value!);
         queueMicrotask(()=>{void source.activate!(workspace).catch(()=>{});});
       }
-    }});
+    }}); } finally { observations = previous; }
     if(result && typeof result==="object" && "status" in result)throw result.status==="denied" ? notFound() : relayError("link_read_rate_limited");
+    storage.indexReceivedWorkTargets(observed);
     return result as T;
   }
   return {

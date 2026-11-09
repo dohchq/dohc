@@ -1,14 +1,14 @@
-import { AtSign, FileText, Hash, ListChecks, type LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AtSign, FileText, Hash, ListChecks, Plus, type LucideIcon } from "lucide-react";
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
+  formatChatFileReferenceToken,
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentAddressedOffer, type AgentRosterPick } from "../offers/agentAddressed";
 import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
-import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
@@ -16,11 +16,14 @@ import { ComposerSendButton } from "./ComposerSendButton";
 import { ComposerPoll } from "./ComposerPoll";
 import { activeCatalogQuery, NEW_POLL, openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { Menu, type MenuItem } from "../ui/Menu";
 import {
   MENU_ACTIVE_OPTION,
   MENU_DETAIL,
+  MENU_EDGE_PX,
   MENU_ENTER,
   MENU_FRAME,
+  MENU_GAP_PX,
   MENU_ICON,
   MENU_LABEL,
   MENU_ROW,
@@ -32,6 +35,15 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import { isComposingKey, isOptionReturn, isSendKey } from "../ui/keys";
+import { useToastsAbove } from "./toastClearance";
+
+// What a control outside the composer can ask of it. Neither sends.
+export interface MentionComposerHandle {
+  focus(): void;
+  // Adds @handle for a candidate to the end of the draft, as if picked from
+  // the @ menu, and puts the caret after it.
+  mention(candidateId: string): void;
+}
 
 export interface FileMentionCandidate {
   path: string;
@@ -116,6 +128,12 @@ function menuQueryAt(value: string, caret: number): boolean {
 //
 // A / at the start of a word opens the catalog in the same list: a poll, and
 // the @ menu's people and files.
+const BAR_BUTTON =
+  "grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink disabled:opacity-40";
+// A person or agent's role, such as "your agent", reads as words, not a hint.
+const ROLE_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-muted";
+const COMPOSER_INSET = { stream: "mx-5 mb-4 mt-1", thread: "mx-4 mb-4 mt-1", narrow: "mx-3 mb-3 mt-1" } as const;
+
 export function MentionComposer(props: {
   testIdPrefix: string;
   composerId: string;
@@ -136,9 +154,13 @@ export function MentionComposer(props: {
   // What sending to the picked agent does. The parent derives it from the
   // pick it was told about.
   agentOffer?: AgentAddressedOffer | null;
-  // Bars on a stream composer's top edge, such as Replying to. The agent
-  // offer floats above them.
+  // Bars on a stream composer's top edge, such as Replying to.
   above?: ReactNode;
+  // Where a chat's box sits: under a stream, in a thread's panel, or in a
+  // narrow pane. Each keeps its own margins.
+  inset?: "stream" | "thread" | "narrow";
+  // The box sits at the bottom of its view, so toasts stay above it.
+  pinned?: boolean;
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -156,6 +178,7 @@ export function MentionComposer(props: {
   // poll's choices passes onPollChange.
   poll?: ComposerPollDraft | null;
   onPollChange?: (poll: ComposerPollDraft | null) => void;
+  handle?: Ref<MentionComposerHandle>;
 }) {
   const [focused, setFocused] = useState(false);
   const pollDraft = props.onPollChange ? props.poll ?? null : null;
@@ -184,6 +207,7 @@ export function MentionComposer(props: {
   }, [props.composerId, props.rosterScope]);
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
   const [fileStage, setFileStage] = useState<{
     path: string;
@@ -197,6 +221,36 @@ export function MentionComposer(props: {
   // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
+  useImperativeHandle(props.handle, () => ({
+    focus: () => textareaRef.current?.focus(),
+    mention: (candidateId) => {
+      const candidate = props.candidates.find((value) => value.id === candidateId);
+      const pick = rosterPick.current;
+      const node = textareaRef.current;
+      if (!candidate) {
+        node?.focus();
+        return;
+      }
+      // Already mentioned: the caret goes back to the end, as on the first press.
+      if (pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
+        node?.focus();
+        node?.setSelectionRange(props.value.length, props.value.length);
+        setCaret(props.value.length);
+        return;
+      }
+      // A mention glued to a word is not a mention; give it its own word.
+      const draft = props.value.length > 0 && !/\s$/u.test(props.value) ? `${props.value} ` : props.value;
+      const from = draft.length;
+      const value = `${draft}@${candidate.handle} `;
+      pendingCaret.current = value.length;
+      const next = !props.onRosterPick ? null : candidate.kind === "agent"
+        ? { candidate, from, to: from + 1 + candidate.handle.length }
+        : rosterPick.current;
+      rosterPick.current = next;
+      props.onChange(value);
+      props.onRosterPick?.(next);
+    },
+  }), [props.candidates, props.value, props.onChange, props.onRosterPick]);
   const highlightFileOnOpen = useRef(false);
   const pollRef = useRef<HTMLFieldSetElement | null>(null);
   const focusPollOnOpen = useRef(false);
@@ -239,36 +293,62 @@ export function MentionComposer(props: {
   const showMenu = fileStage !== null || ((active !== null || catalogQuery !== null) && menuLength > 0);
 
   const menuRef = useRef<HTMLUListElement | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const stackRef = useRef<HTMLDivElement | null>(null);
   const [menuPosition, setMenuPosition] = useState<{
     left: number;
-    top: number;
+    top?: number;
+    bottom?: number;
     maxHeight: number;
     placement: "above" | "below";
-  }>({ left: 0, top: 0, maxHeight: 192, placement: "below" });
+  }>({ left: 0, bottom: 0, maxHeight: 192, placement: "above" });
+  // The menu floats off the whole composer, above it unless only below has
+  // room, so it never covers the text, the toolbar, or a bar stacked on top.
+  // Measured on open, when the composer or window resizes, and when the
+  // list's rows change, not per key.
+  const placeMenu = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     if (!showMenu) return;
     const menu = menuRef.current;
+    const form = formRef.current;
     menu?.showPopover?.();
+    if (!menu || !form) return;
+    const stack = stackRef.current ?? form;
     const position = () => {
-      const anchor = textareaRef.current?.getBoundingClientRect();
-      if (!anchor || !menu) return;
-      const below = window.innerHeight - anchor.bottom - 12;
-      const above = anchor.top - 12;
+      const frame = form.getBoundingClientRect();
+      // The topmost bar or the box itself: its border, not the stack's empty
+      // margin above it.
+      const top = (stackRef.current?.firstElementChild ?? form).getBoundingClientRect().top;
+      const above = top - MENU_GAP_PX - MENU_EDGE_PX;
+      const below = window.innerHeight - frame.bottom - MENU_GAP_PX - MENU_EDGE_PX;
       const height = Math.min(192, menu.scrollHeight + 2);
-      const down = below >= height || below >= above;
+      const down = height > above && below > above;
+      const width = Math.min(256, window.innerWidth - 16);
+      const left = Math.max(MENU_EDGE_PX, Math.min(frame.left, window.innerWidth - MENU_EDGE_PX - width));
       const maxHeight = Math.max(0, Math.min(192, down ? below : above));
-      setMenuPosition({
-        left: Math.max(8, Math.min(anchor.left, window.innerWidth - Math.min(256, window.innerWidth - 16) - 8)),
-        top: down ? anchor.bottom + 6 : Math.max(8, anchor.top - Math.min(height, maxHeight) - 6),
-        maxHeight,
-        placement: down ? "below" : "above",
-      });
+      setMenuPosition(down
+        ? { left, top: frame.bottom + MENU_GAP_PX, maxHeight, placement: "below" }
+        : { left, bottom: window.innerHeight - top + MENU_GAP_PX, maxHeight, placement: "above" });
     };
+    const scrolled = (event: Event) => { if (event.target !== menu) position(); };
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
+    resized?.observe(stack);
     position();
+    placeMenu.current = position;
     window.addEventListener("resize", position);
-    document.addEventListener("scroll", position, true);
-    return () => { window.removeEventListener("resize", position); document.removeEventListener("scroll", position, true); };
-  }, [showMenu, menuLength, fileStage, props.value]);
+    document.addEventListener("scroll", scrolled, true);
+    return () => {
+      placeMenu.current = null;
+      resized?.disconnect();
+      window.removeEventListener("resize", position);
+      document.removeEventListener("scroll", scrolled, true);
+    };
+  }, [showMenu]);
+  // A filtered or loaded list has a new height, so it may fit the other side.
+  const fileLoading = fileStage?.loading ?? false;
+  useLayoutEffect(() => {
+    placeMenu.current?.();
+  }, [menuLength, fileLoading]);
 
   useLayoutEffect(() => {
     if (!highlightFileOnOpen.current || pendingCaret.current !== null || !active) return;
@@ -527,6 +607,7 @@ export function MentionComposer(props: {
   };
 
   const isPost = props.surface === "post";
+  useToastsAbove(formRef, props.pinned === true);
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
   // A poll sends once it has a question and two choices the engine accepts.
@@ -547,7 +628,31 @@ export function MentionComposer(props: {
       onFocusQuestion={() => textareaRef.current?.focus()}
     />
   ) : null;
-  const pollButton = (shape: "post" | "icon") => offersPoll ? (
+  // A chat's "+": attach a page, or start or remove a poll.
+  const addItems: MenuItem[] = [
+    ...(hasFiles ? [{
+      id: "file",
+      label: "Attach a page",
+      icon: <FileText size={14} aria-hidden />,
+      testId: `${props.testIdPrefix}-attach-page`,
+      onSelect: () => {
+        textareaRef.current?.focus();
+        highlightFileOnOpen.current = true;
+        insertAtCaret("@");
+      },
+    }] : []),
+    ...(offersPoll ? [{
+      id: "poll",
+      label: poll ? "Remove poll" : "Start a poll",
+      icon: <ListChecks size={14} aria-hidden />,
+      testId: `${props.testIdPrefix}-poll-toggle`,
+      onSelect: () => {
+        textareaRef.current?.focus();
+        togglePoll(props.value);
+      },
+    }] : []),
+  ];
+  const pollButton = offersPoll ? (
     <button
       type="button"
       data-testid={`${props.testIdPrefix}-poll-toggle`}
@@ -560,23 +665,23 @@ export function MentionComposer(props: {
         event.preventDefault();
         togglePoll(props.value);
       }}
-      className={shape === "post"
-        ? "flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"
-        : "grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"}
+      className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"
     >
       <ListChecks size={14} strokeWidth={1.9} aria-hidden />
-      {shape === "post" ? <span className="@max-[29rem]/composer:hidden">Poll</span> : null}
+      {/* An open poll keeps its word, so the choices are never unexplained. */}
+      <span className={poll ? undefined : "@max-[29rem]/composer:hidden"}>Poll</span>
     </button>
   ) : null;
   const form = (
     <form
+      ref={formRef}
       data-expanded={isPost ? expanded : undefined}
       className={
         isPost
           ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
               expanded ? "border-line px-4 pb-2 pt-3" : "border-line px-3 py-2 hover:border-muted/50"
             }`
-          : "relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+          : `relative flex shrink-0 flex-col rounded-[10px] border border-line bg-bg transition-colors duration-75 focus-within:border-ink/45 ${COMPOSER_INSET[props.inset ?? "stream"]}`
       }
       onSubmit={(event) => {
         event.preventDefault();
@@ -596,7 +701,7 @@ export function MentionComposer(props: {
               aria-label="Write a post"
               title={props.placeholder}
               onClick={() => textareaRef.current?.focus()}
-              className="flex h-9 min-w-0 flex-1 items-center rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted dohc-focus-visible"
+              className="flex h-9 min-w-0 flex-1 items-center rounded-full border border-line bg-bg px-4 text-left text-[13px] text-subtle hover:border-muted/50 hover:text-muted"
             >
               <span className="min-w-0 truncate">{props.placeholder}</span>
             </button>
@@ -712,7 +817,7 @@ export function MentionComposer(props: {
                   {candidate.handle}
                 </span>
                 {(candidate.description ?? candidate.label).toLocaleLowerCase() === candidate.handle.toLocaleLowerCase() ? null : (
-                  <span className={MENU_DETAIL}>{candidate.description ?? candidate.label}</span>
+                  <span className={ROLE_DETAIL}>{candidate.description ?? candidate.label}</span>
                 )}
               </button>
             </li>
@@ -760,7 +865,7 @@ export function MentionComposer(props: {
         data-testid={`${props.testIdPrefix}-composer`}
         value={props.value}
         disabled={locked}
-        rows={isPost && poll ? 1 : 2}
+        rows={isPost ? (poll ? 1 : 2) : 1}
         // While a poll is open the message is its question.
         placeholder={poll ? "Ask a question" : props.placeholder}
         role="combobox"
@@ -821,10 +926,10 @@ export function MentionComposer(props: {
                     ? "field-sizing-content px-0 py-0"
                     : "min-h-16 px-0 py-0"
               }`
-            : "min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
+            : "field-sizing-content block max-h-60 min-h-[34px] w-full resize-none bg-transparent px-3 pb-0.5 pt-2.5 text-[14px] leading-[22px] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
         }
       />
-      {isPost && expanded ? pollBlock : null}
+      {!isPost || expanded ? pollBlock : null}
       {isPost ? (
         expanded ? (
           <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
@@ -862,9 +967,9 @@ export function MentionComposer(props: {
                 <span className="@max-[29rem]/composer:hidden">File</span>
               </button>
             ) : null}
-            {pollButton("post")}
+            {pollButton}
             {props.agentOffer ? (
-              <AgentOffer offer={props.agentOffer} surface="post" />
+              <AgentOffer offer={props.agentOffer} />
             ) : (
               <span className="flex-1" />
             )}
@@ -890,7 +995,30 @@ export function MentionComposer(props: {
           </button>
         )
       ) : (
-        <>
+        <div className="flex items-center gap-0.5 px-1.5 pb-1.5 pt-1">
+          {addItems.length ? (
+            <Menu
+              label="Add"
+              open={addOpen}
+              onOpenChange={setAddOpen}
+              width={176}
+              align="start"
+              items={addItems}
+              trigger={(trigger) => (
+                <button
+                  {...trigger}
+                  type="button"
+                  data-testid={`${props.testIdPrefix}-add`}
+                  aria-label="Add"
+                  title="Add"
+                  disabled={locked}
+                  className={BAR_BUTTON}
+                >
+                  <Plus size={16} strokeWidth={1.9} aria-hidden />
+                </button>
+              )}
+            />
+          ) : null}
           <button
             type="button"
             aria-label="Mention"
@@ -902,52 +1030,29 @@ export function MentionComposer(props: {
               event.preventDefault();
               insertAtCaret("@");
             }}
-            className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40"
+            className={BAR_BUTTON}
           >
-            <span aria-hidden className="text-[13px] font-semibold">
-              @
-            </span>
+            <AtSign size={16} strokeWidth={1.9} aria-hidden />
           </button>
-          {props.fileCandidates?.length ? (
-            <button
-              type="button"
-              aria-label="Attach a file"
-              title="Attach a file"
-              tabIndex={-1}
-              disabled={locked}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                highlightFileOnOpen.current = true;
-                insertAtCaret("@");
-              }}
-              className="grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40"
-            >
-              <FileText size={14} strokeWidth={1.9} aria-hidden />
-            </button>
-          ) : null}
-          {pollButton("icon")}
+          {props.agentOffer ? <AgentOffer offer={props.agentOffer} /> : <span className="flex-1" />}
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}
             label={props.sendLabel}
             sending={props.sending}
             disabled={sendDisabled}
-            shape="icon"
+            shape="box"
           />
-        </>
+        </div>
       )}
     </form>
   );
   if (isPost) return form;
-  // The bars, the poll, the box and the agent offer are one stack, so the
-  // offer floats above the topmost bar and never covers its ×.
+  // The bars and the box are one stack: a reply bar sits on the box, and the
+  // question comes before its choices inside it.
   return (
-    <div className="@container/composer relative shrink-0">
+    <div ref={stackRef} className="@container/composer relative shrink-0">
       {props.above}
-      {pollBlock}
       {form}
-      {props.agentOffer ? (
-        <AgentOffer offer={props.agentOffer} surface="stream" />
-      ) : null}
     </div>
   );
 }

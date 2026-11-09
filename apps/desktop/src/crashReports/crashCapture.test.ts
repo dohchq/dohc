@@ -58,6 +58,48 @@ describe("crash capture", () => {
       { kind: "process-gone", source: "utility", name: "network.mojom.NetworkService", reason: "oom", exitCode: 1 },
     ]);
   });
+
+  // 0xC000026B: Windows refused to start a process while the session logged off.
+  const LOGOFF = { reason: "crashed", exitCode: -1073741205 };
+  const NETWORK = { type: "Utility", serviceName: "network.mojom.NetworkService", name: "Network Service" };
+
+  it("records nothing once Windows ends the session", () => {
+    const { recorded, emit } = fakeTarget(["window"]);
+    const windowListeners = new Map<string, () => void>();
+    emit("browser-window-created", {}, { on: (event: string, listener: () => void) => windowListeners.set(event, listener) });
+    // Windows can still cancel a query-session-end.
+    windowListeners.get("query-session-end")?.();
+    emit("child-process-gone", {}, { ...NETWORK, reason: "crashed", exitCode: 1 });
+    windowListeners.get("session-end")?.();
+    emit("child-process-gone", {}, { ...NETWORK, reason: "crashed", exitCode: 1 });
+    emit("render-process-gone", {}, "window", { reason: "crashed", exitCode: -1 });
+    expect(recorded).toEqual([
+      { kind: "process-gone", source: "utility", name: "network.mojom.NetworkService", reason: "crashed", exitCode: 1 },
+    ]);
+  });
+
+  it("records nothing once dohc starts quitting", () => {
+    const { recorded, emit } = fakeTarget(["window"]);
+    // A quit's draft check can still stop it at before-quit.
+    emit("before-quit", {});
+    emit("child-process-gone", {}, { type: "GPU", reason: "abnormal-exit", exitCode: 34 });
+    emit("will-quit", {});
+    emit("child-process-gone", {}, { type: "GPU", reason: "abnormal-exit", exitCode: 34 });
+    emit("render-process-gone", {}, "window", { reason: "crashed", exitCode: -1 });
+    expect(recorded).toEqual([
+      { kind: "process-gone", source: "gpu", name: "GPU", reason: "abnormal-exit", exitCode: 34 },
+    ]);
+  });
+
+  it("does not record a logoff exit, even with no window to hear the session end", () => {
+    const { recorded, emit } = fakeTarget(["window"]);
+    emit("child-process-gone", {}, { ...NETWORK, ...LOGOFF });
+    emit("render-process-gone", {}, "window", LOGOFF);
+    emit("child-process-gone", {}, { ...NETWORK, reason: "crashed", exitCode: -1073741819 });
+    expect(recorded).toEqual([
+      { kind: "process-gone", source: "utility", name: "network.mojom.NetworkService", reason: "crashed", exitCode: -1073741819 },
+    ]);
+  });
 });
 
 describe("crash report code", () => {

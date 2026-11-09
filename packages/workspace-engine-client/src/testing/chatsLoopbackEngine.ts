@@ -1,11 +1,12 @@
 import { nameSlug as slug } from "@dohc/workspace-contracts/names";
-import { scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentionTokens, scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import { asObject, optionalString } from "./json";
+import type { ChatReportedAgent } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   type ChatActor,
@@ -35,7 +36,6 @@ import {
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 const MAX_PAGE_LIMIT = 500;
 const DEFAULT_PAGE_LIMIT = 200;
-const APP_QUIT_EXIT_CODE = 143;
 
 interface WorkspaceState {
   channels: Map<string, ChatChannel & { wireId: string | null }>;
@@ -105,20 +105,50 @@ function strictObject(
 }
 
 // The daemon's rule: only an agent's message names its agent, and only a
-// person's message names agents, each by a valid id.
-function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undefined; namedAgentIds: string[] } {
+// person's message wakes agents, each once by a valid id.
+function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undefined; wakeAgentIds: string[] } {
   const authorAgentId = optionalString(params, "authorAgentId");
   if (authorAgentId !== undefined && (params.authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))) {
     throw new Error("invalid-input");
   }
-  const named = params.namedAgentIds ?? [];
-  const namedAgentIds = Array.isArray(named)
-    ? named.filter((agentId): agentId is string => typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId))
+  const listed = params.wakeAgentIds ?? [];
+  const valid = Array.isArray(listed)
+    ? listed.filter((agentId): agentId is string => typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId))
     : [];
-  if (!Array.isArray(named) || namedAgentIds.length !== named.length || (named.length > 0 && params.authorKind !== "human")) {
+  const wakeAgentIds = [...new Set(valid)];
+  if (
+    !Array.isArray(listed) || valid.length !== listed.length ||
+    (listed.length > 0 && params.authorKind !== "human") || wakeAgentIds.length > MAX_WAKE_AGENTS
+  ) {
     throw new Error("invalid-input");
   }
-  return { authorAgentId, namedAgentIds };
+  return { authorAgentId, wakeAgentIds };
+}
+
+const MAX_WAKE_AGENTS = 64;
+
+const MAX_REPORTED_AGENT_CHARS = 64;
+
+// The daemon's rule: only an agent's message carries what it reported. Each
+// part is printable text with no surrounding space, a version needs its
+// product, and a report with no parts is no report.
+function messageReported(params: ChatsJsonObject): ChatReportedAgent | undefined {
+  if (params.authorReported === undefined) return undefined;
+  const reported = strictObject(params.authorReported, "authorReported", ["product", "version", "model"]);
+  const parts: ChatReportedAgent = {};
+  for (const key of ["product", "version", "model"] as const) {
+    const value = optionalString(reported, key);
+    if (value === undefined) continue;
+    if (value === "" || value.length > MAX_REPORTED_AGENT_CHARS || value.trim() !== value || /\p{Cc}/u.test(value)) {
+      throw new Error("invalid-input");
+    }
+    parts[key] = value;
+  }
+  if (Object.keys(parts).length === 0) return undefined;
+  if (params.authorKind !== "agent" || (parts.version !== undefined && parts.product === undefined)) {
+    throw new Error("invalid-input");
+  }
+  return parts;
 }
 
 function requiredString(object: ChatsJsonObject, key: string, code = "invalid-input"): string {
@@ -127,9 +157,96 @@ function requiredString(object: ChatsJsonObject, key: string, code = "invalid-in
   return value;
 }
 
-// The place agents outside a run share. No agent id is empty.
+// The place unnamed agents share. No agent id is empty.
 const OUTSIDE_RUN_READER = "";
 const agentReadKey = (reader: string, threadId: string) => `${reader}\0${threadId}`;
+const MAX_AGENT_REQUESTERS = 64;
+const MAX_AUTHOR_USER_ID_CHARS = 200;
+
+type AgentReader =
+  | { kind: "run"; runId: string }
+  | { kind: "unnamed" }
+  | { kind: "connected"; agentId: string; handle: string; requesters: string[]; unattributedCounts: boolean };
+
+// The engine's handle rule: one mention token, stored as mentions store it.
+function mentionHandle(value: string): string {
+  const input = value.trim();
+  const token = scanMentionTokens("@" + input)[0];
+  if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) {
+    throw new Error("invalid-message-body");
+  }
+  return normalizeHandle(token.handle);
+}
+
+// The engine's reader rules. Each kind takes only its own fields. An agent
+// you run has a valid id, a handle, and at most 64 accounts, each kept once.
+// The binding is the reader as sent, so a cursor works only for that reader.
+function agentReaderParam(params: ChatsJsonObject): { reader: AgentReader; binding: string } {
+  const value = params.reader ?? null;
+  const kind = asObject(value, "reader").kind;
+  if (kind === "run") {
+    const runId = requiredString(strictObject(value, "reader", ["kind", "runId"]), "runId", "invalid-parameters");
+    return { reader: { kind: "run", runId }, binding: `run\0${runId}` };
+  }
+  if (kind === "unnamed") {
+    strictObject(value, "reader", ["kind"]);
+    return { reader: { kind: "unnamed" }, binding: "unnamed" };
+  }
+  if (kind !== "connected") throw new Error("invalid-parameters");
+  const object = strictObject(value, "reader", ["kind", "agentId", "handle", "requesters", "unattributedCounts"]);
+  const agentId = requiredString(object, "agentId", "invalid-parameters");
+  const handle = requiredString(object, "handle", "invalid-parameters");
+  const listed = Array.isArray(object.requesters) ? object.requesters : [];
+  const requesters = listed.filter((account): account is string => typeof account === "string");
+  const unattributedCounts = object.unattributedCounts;
+  if (!Array.isArray(object.requesters) || requesters.length !== listed.length || typeof unattributedCounts !== "boolean") {
+    throw new Error("invalid-parameters");
+  }
+  const binding = ["connected", agentId, handle, unattributedCounts ? "1" : "0", ...requesters].join("\0");
+  if (!AGENT_ID_PATTERN.test(agentId) || requesters.length > MAX_AGENT_REQUESTERS) throw new Error("invalid-input");
+  const accounts: string[] = [];
+  for (const requester of requesters) {
+    const account = normalizeAuthorUserId(requester);
+    if (!accounts.includes(account)) accounts.push(account);
+  }
+  const normalized = { agentId, handle: mentionHandle(handle), requesters: accounts, unattributedCounts };
+  return { reader: { kind: "connected", ...normalized }, binding };
+}
+
+// The engine stores an account id trimmed, and refuses an empty or long one.
+function normalizeAuthorUserId(value: string): string {
+  const account = value.trim();
+  if (account === "" || account.length > MAX_AUTHOR_USER_ID_CHARS) throw new Error("invalid-sender");
+  return account;
+}
+
+function readCoordinate(value: JsonValue): { createdAtMs: number; messageId: string } {
+  const object = strictObject(value, "after", ["createdAtMs", "messageId"]);
+  const createdAtMs = optionalInteger(object, "createdAtMs");
+  const messageId = optionalString(object, "messageId");
+  if (createdAtMs === undefined || messageId === undefined) throw new Error("invalid-parameters");
+  return { createdAtMs, messageId };
+}
+
+// Messages after the first one `posted` matches in each thread, in thread order.
+function messagesAfterFirstPost(state: WorkspaceState, posted: (message: ChatMessage) => boolean): ChatMessage[] {
+  const after: ChatMessage[] = [];
+  for (const ids of state.threadMessages.values()) {
+    let found = false;
+    for (const id of ids) {
+      const message = state.messages.get(id);
+      if (!message) continue;
+      if (found) after.push(message);
+      else found = posted(message);
+    }
+  }
+  return after;
+}
+
+function isAgentChat(state: WorkspaceState, thread: ChatThread | undefined): boolean {
+  const channelId = thread?.channelId;
+  return channelId !== undefined && state.channels.get(channelId)?.kind === "agent";
+}
 
 function optionalBoolean(object: ChatsJsonObject, key: string): boolean | undefined {
   const value = object[key];
@@ -548,7 +665,7 @@ function personalFeedMessages(
 }
 
 function mentionHandles(body: string): string[] {
-  return [...new Set(scanMentionTokens(body, { ignoreCode: true }).map(token => normalizeHandle(token.handle)))];
+  return [...new Set(chatMentionTokens(body).map(token => normalizeHandle(token.handle)))];
 }
 
 const EMOJI_ATOM =
@@ -674,6 +791,24 @@ function compareDispatches(left: ChatDispatch, right: ChatDispatch): number {
     compareText(left.agentId, right.agentId);
 }
 
+// The engine's chat page cut: rows fit 256 KiB serialized, and the first row
+// always ships unless it alone exceeds the 700 KiB frame cap.
+const CHAT_PAGE_BYTE_BUDGET = 256 * 1024;
+const SINGLE_ROW_HARD_CAP_BYTES = 700 * 1024;
+
+function byteBudgetPage<T>(rows: readonly T[]): T[] {
+  let remaining = CHAT_PAGE_BYTE_BUDGET;
+  let included = 0;
+  for (const row of rows) {
+    const size = Buffer.byteLength(JSON.stringify(row), "utf8");
+    if (included === 0 && size > SINGLE_ROW_HARD_CAP_BYTES) throw new Error("row-exceeds-wire-limit");
+    remaining -= size;
+    if (included > 0 && remaining < 0) break;
+    included += 1;
+  }
+  return rows.slice(0, included);
+}
+
 function page<T>(
   rows: readonly T[],
   params: ChatsJsonObject,
@@ -707,7 +842,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "namedAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "wakeAgentIds", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -725,7 +860,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
         "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "namedAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "wakeAgentIds", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -749,16 +884,18 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.attachmentsListFileMentions:
       return ["objectId", "pathHint", "pageLimit", "cursor"];
     case CHATS_METHOD.mentionsListForHandle:
-      return ["handle", "unreadByAgentOnly", "pageLimit", "cursor"];
+      return ["handle", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadListUnreadRequests:
     case CHATS_METHOD.agentReadListUnreadThreads:
-      return ["runId", "pageLimit", "cursor"];
+      return ["reader", "pageLimit", "cursor"];
+    case CHATS_METHOD.agentReadListRequestsPage:
+      return ["reader", "channelId", "threadId", "after", "pageLimit"];
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
       return ["pageLimit", "cursor"];
-    case CHATS_METHOD.dispatchListAppQuitRecoveries: return ["threadId", "pageLimit", "cursor"];
+    case CHATS_METHOD.dispatchListFailedRunRecoveries: return ["threadId", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
-      return ["runId", "threadId", "upTo", "expectedRevision"];
+      return ["reader", "threadId", "upTo", "expectedRevision"];
     case CHATS_METHOD.followsSet:
       return [
         "ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs",
@@ -786,11 +923,13 @@ function allowedKeys(method: string): readonly string[] {
       ];
     case CHATS_METHOD.bookmarkMarkFailed:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
+    case CHATS_METHOD.bookmarkRetryFailed:
+      return ["ownerUserId", "bookmarkId", "generation"];
     case CHATS_METHOD.bookmarkMarkStale:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.dispatchEnqueue:
       return ["triggerMessageId", "agentId", "threadId", "nowMs"];
-    case CHATS_METHOD.dispatchClaimNextPending: return ["runId", "command", "logPath", "nowMs"];
+    case CHATS_METHOD.dispatchClaimNextPending: return ["agentId", "runId", "command", "logPath", "nowMs"];
     case CHATS_METHOD.dispatchListRunMessages: return ["runId", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchRunIdForMessage: return ["messageId"];
     case CHATS_METHOD.dispatchRunRecordsForThread:
@@ -987,6 +1126,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.mentionsList(state, workspace, params);
       case CHATS_METHOD.agentReadListUnreadRequests:
         return this.agentUnreadRequests(state, workspace, params);
+      case CHATS_METHOD.agentReadListRequestsPage:
+        return this.agentRequestsPage(state, params);
       case CHATS_METHOD.agentReadListUnreadThreads:
         return this.agentUnreadThreads(state, workspace, params);
       case CHATS_METHOD.agentReadMarkThreadRead:
@@ -1018,6 +1159,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
           this.bookmarkMarkPending(state, params));
       case CHATS_METHOD.bookmarkMarkFailed:
         return this.bookmarkTransition(state, params, "failed");
+      case CHATS_METHOD.bookmarkRetryFailed:
+        return this.bookmarkRetryFailed(state, params);
       case CHATS_METHOD.bookmarkMarkStale:
         return this.bookmarkTransition(state, params, "stale");
       case CHATS_METHOD.dispatchEnqueue:
@@ -1060,8 +1203,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.markFailureHandled(state, workspace, params);
       case CHATS_METHOD.dispatchRequeueFailedTrigger:
         return this.requeueFailed(state, workspace, params);
-      case CHATS_METHOD.dispatchListAppQuitRecoveries:
-        return this.appQuitRecoveries(state, workspace, params);
+      case CHATS_METHOD.dispatchListFailedRunRecoveries:
+        return this.failedRunRecoveries(state, workspace, params);
       case CHATS_METHOD.dispatchComplete:
         return this.dispatchComplete(state, workspace, params);
       case CHATS_METHOD.dispatchFail:
@@ -1225,10 +1368,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   // Mirrors the daemon's message hash, which it takes after checking the
-  // agents: the author's agent, then each named agent once, in first-named order.
-  private agentsFingerprint(params: ChatsJsonObject): [string, string] {
-    const { authorAgentId, namedAgentIds } = messageAgents(params);
-    return [authorAgentId ?? "", [...new Set(namedAgentIds)].join(",")];
+  // agents: the author's agent, then each agent it wakes once, in first-listed order.
+  private agentsFingerprint(params: ChatsJsonObject): [string, string, string] {
+    const { authorAgentId, wakeAgentIds } = messageAgents(params);
+    const reported = messageReported(params);
+    return [
+      authorAgentId ?? "",
+      wakeAgentIds.join(","),
+      reported === undefined ? "" : JSON.stringify(reported),
+    ];
   }
 
   private normalizedOrigin(params: ChatsJsonObject): string {
@@ -1718,7 +1866,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
     if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
     const automation = messageAutomation(authorKind, params.automation);
-    const { authorAgentId, namedAgentIds } = messageAgents(params);
+    const { authorAgentId, wakeAgentIds } = messageAgents(params);
+    const authorReported = messageReported(params);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1738,6 +1887,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       createdAtMs: atMs,
       ...(automation ? { automation } : {}),
       ...(authorAgentId !== undefined ? { authorAgentId } : {}),
+      ...(authorReported !== undefined ? { authorReported } : {}),
       attachments: [],
     };
     const ownerName = optionalString(params, "authorOwnerDisplayName");
@@ -1749,7 +1899,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (authorActorKey !== undefined) message.authorActorKey = authorActorKey;
     const authorUserId = optionalString(params, "authorUserId");
     const parentMessageId = optionalString(params, "parentMessageId");
-    if (authorUserId !== undefined) message.authorUserId = authorUserId;
+    if (authorUserId !== undefined) message.authorUserId = normalizeAuthorUserId(authorUserId);
     if (
       parentMessageId !== undefined &&
       state.messages.get(parentMessageId)?.threadId !== threadId
@@ -1773,12 +1923,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
     }
     state.messages.set(messageId, message);
-    // The engine's rule: a person's message requests the agent whose chat
-    // holds it and each agent it names, in the message's own write.
+    // The engine's rule: a person's message requests each agent its sender
+    // lists, its DM's agent included, in the message's own write.
     if (authorKind === "human" && origin !== "cli") {
-      const thread = state.threads.get(threadId);
-      const chatAgent = thread?.channelId ? state.channels.get(thread.channelId)?.agentId : undefined;
-      for (const agentId of [...(chatAgent ? [chatAgent] : []), ...namedAgentIds]) {
+      for (const agentId of wakeAgentIds) {
         const key = dispatchKey(messageId, agentId);
         if (state.dispatches.has(key)) continue;
         state.dispatches.set(key, {
@@ -1897,6 +2045,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
           ...(opening
             ? {
                 openingMessage: {
+                  ...(opening.authorActorKey !== undefined ? { authorActorKey: opening.authorActorKey } : {}),
+                  ...(opening.origin ? { origin: opening.origin } : {}),
                   id: opening.id,
                   author: opening.author,
                   ...(opening.authorOwnerDisplayName ? { authorOwnerDisplayName: opening.authorOwnerDisplayName } : {}),
@@ -1907,6 +2057,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
                       ? `${opening.body.slice(0, 500).trimEnd()}…`
                       : opening.body,
                   ...(opening.automation ? { automation: opening.automation } : {}),
+                  ...(opening.authorReported ? { authorReported: opening.authorReported } : {}),
+                  ...(opening.authorAgentId ? { authorAgentId: opening.authorAgentId } : {}),
                   reactions: activeMessageReactions(state, opening.id),
                 },
               }
@@ -1939,10 +2091,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
       ? all.filter((item) => compareStreamPosition(item.position, before) < 0).length
       : all.length;
     const start = Math.max(0, end - limit);
-    const items = all.slice(start, end).map(({ order: _order, ...item }) =>
-      item.position.lane === "posts"
-        ? { ...item, message: withAgentRequests(state, item.message), post: streamPost(state, item.position.id) }
-        : { ...item, message: withAgentRequests(state, item.message) });
+    const items = all.slice(start, end).map(({ order: _order, ...item }) => {
+      const decision = state.decisions.get(item.message.id);
+      return {
+        ...item,
+        message: withAgentRequests(state, item.message),
+        ...(decision ? { decision } : {}),
+        ...(item.position.lane === "posts" ? { post: streamPost(state, item.position.id) } : {}),
+      };
+    });
     const read = all.filter((item) => {
       const cursor = state.humanReads.get(item.message.threadId) ?? 0;
       return item.position.lane === "posts" ? cursor >= 1 : item.order < cursor;
@@ -2184,58 +2341,40 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const input = requiredString(params, "handle", "invalid-message-body").trim();
-    const token = scanMentionTokens("@" + input)[0];
-    if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) throw new Error("invalid-message-body");
-    const handle = normalizeHandle(token.handle);
-    const unreadOnly = optionalBoolean(params, "unreadByAgentOnly") ?? false;
+    const handle = mentionHandle(requiredString(params, "handle", "invalid-message-body"));
     const rows = state.mentions
       .filter((mention) => mention.handle === handle)
       .filter((mention) => state.messages.has(mention.messageId) && state.threads.has(mention.threadId))
       // A message that woke a dohc agent is that agent's work.
       .filter((mention) =>
         ![...state.dispatches.values()].some((dispatch) => dispatch.triggerMessageId === mention.messageId))
-      .filter((mention) => {
-        if (!unreadOnly) return true;
-        const read = state.agentReads.get(agentReadKey(OUTSIDE_RUN_READER, mention.threadId));
-        return !read ||
-          mention.createdAtMs > read.lastReadCreatedAtMs ||
-          (
-            mention.createdAtMs === read.lastReadCreatedAtMs &&
-            compareText(mention.messageId, read.lastReadMessageId) > 0
-          );
-      })
       .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.messageId, right.messageId));
-    const result = page(rows, params, `${workspace}\0mentions\0${handle}\0${unreadOnly}`);
+    const result = page(rows, params, `${workspace}\0mentions\0${handle}`);
     return jsonResult({ mentions: result.values, nextCursor: result.nextCursor });
   }
 
   // The engine's rule: a run names itself and reads as its agent while it
-  // runs. Without a run, the reads are those of agents outside a run.
-  private agentReader(state: WorkspaceState, runId: string | undefined): string {
-    if (runId === undefined) return OUTSIDE_RUN_READER;
-    const run = state.runs.get(runId);
+  // runs, an agent you run reads as itself, and unnamed agents share a place.
+  private agentPlace(state: WorkspaceState, reader: AgentReader): string {
+    if (reader.kind === "unnamed") return OUTSIDE_RUN_READER;
+    if (reader.kind === "connected") return reader.agentId;
+    const run = state.runs.get(reader.runId);
     if (!run || run.endedAtMs !== undefined) throw new Error("run-not-found");
     return run.agentId;
   }
 
-  // The engine's rule: each message with a request for the run's agent,
-  // beyond that agent's place in its thread, oldest first.
-  private agentUnreadRequests(
-    state: WorkspaceState,
-    workspace: string,
-    params: ChatsJsonObject,
-  ): JsonValue {
-    const runId = requiredString(params, "runId", "invalid-input");
-    const agentId = this.agentReader(state, runId);
-    const rows = [...state.dispatches.values()]
-      .filter((dispatch) => dispatch.agentId === agentId)
-      .flatMap((dispatch) => {
-        const message = state.messages.get(dispatch.triggerMessageId);
-        return message && state.threads.has(message.threadId) ? [message] : [];
-      })
+  // One reader's unread requests, oldest first.
+  private agentRequests(state: WorkspaceState, reader: AgentReader): ChatMessage[] {
+    const place = this.agentPlace(state, reader);
+    const candidates = reader.kind === "run"
+      ? this.runRequests(state, place)
+      : reader.kind === "unnamed"
+        ? this.unnamedRequests(state)
+        : this.connectedRequests(state, reader);
+    return [...new Set(candidates)]
       .filter((message) => {
-        const read = state.agentReads.get(agentReadKey(agentId, message.threadId));
+        if (!state.threads.has(message.threadId)) return false;
+        const read = state.agentReads.get(agentReadKey(place, message.threadId));
         return !read ||
           message.createdAtMs > read.lastReadCreatedAtMs ||
           (
@@ -2243,15 +2382,104 @@ export class ChatsLoopbackEngine implements EngineTransport {
             compareText(message.id, read.lastReadMessageId) > 0
           );
       })
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id))
-      .map((message) => ({
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id));
+  }
+
+  // The requests the run's agent was woken for.
+  private runRequests(state: WorkspaceState, agentId: string): ChatMessage[] {
+    return [...state.dispatches.values()]
+      .filter((dispatch) => dispatch.agentId === agentId)
+      .flatMap((dispatch) => state.messages.get(dispatch.triggerMessageId) ?? []);
+  }
+
+  // A plain @agent no agent was woken for, and a person's reply in a thread
+  // an unnamed agent posted in. Agent chats belong to their agents.
+  private unnamedRequests(state: WorkspaceState): ChatMessage[] {
+    const unnamedPost = (message: ChatMessage) => message.author.kind === "agent" && message.authorAgentId === undefined;
+    const dispatched = new Set([...state.dispatches.values()].map((row) => row.triggerMessageId));
+    const mentioned = state.mentions
+      .filter((row) => row.handle === "agent" && !dispatched.has(row.messageId))
+      .flatMap((row) => state.messages.get(row.messageId) ?? []);
+    const replies = messagesAfterFirstPost(state, unnamedPost).filter((message) => message.author.kind === "human");
+    return [...mentioned, ...replies].filter((message) =>
+      !unnamedPost(message) && !isAgentChat(state, state.threads.get(message.threadId)));
+  }
+
+  // Its chat, a mention of its handle, and a reply in a thread it posted in,
+  // each by its person and not from the CLI.
+  private connectedRequests(
+    state: WorkspaceState,
+    reader: Extract<AgentReader, { kind: "connected" }>,
+  ): ChatMessage[] {
+    const chats = new Set(
+      [...state.channels.values()].filter((channel) => channel.agentId === reader.agentId).map((channel) => channel.channelId),
+    );
+    const inChat = [...state.messages.values()].filter((message) => {
+      const channelId = state.threads.get(message.threadId)?.channelId;
+      return channelId !== undefined && chats.has(channelId);
+    });
+    const mentioned = state.mentions
+      .filter((row) => row.handle === reader.handle)
+      .flatMap((row) => state.messages.get(row.messageId) ?? []);
+    const replies = messagesAfterFirstPost(state, (message) => message.authorAgentId === reader.agentId);
+    return [...inChat, ...mentioned, ...replies].filter((message) =>
+      message.author.kind === "human" && message.origin !== "cli" &&
+      (message.authorUserId === undefined
+        ? reader.unattributedCounts
+        : reader.requesters.includes(message.authorUserId)));
+  }
+
+  private agentUnreadRequests(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
+    const { reader, binding } = agentReaderParam(params);
+    const rows = this.agentRequests(state, reader).map((message) => ({
+      threadId: message.threadId,
+      messageId: message.id,
+      authorKind: message.author.kind,
+      createdAtMs: message.createdAtMs,
+    }));
+    const result = page(rows, params, `${workspace}\0agentRequests\0${binding}`);
+    return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
+  }
+
+  // One reader's unread requests after a coordinate, with what a waiting
+  // agent shows. A Group or thread filter narrows them.
+  private agentRequestsPage(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+    const { reader } = agentReaderParam(params);
+    const channelId = optionalString(params, "channelId");
+    const threadId = optionalString(params, "threadId");
+    const after = params.after === undefined ? undefined : readCoordinate(params.after);
+    const limit = pageLimit(params);
+    const rows = this.agentRequests(state, reader).filter((message) =>
+      (after === undefined || message.createdAtMs > after.createdAtMs ||
+        (message.createdAtMs === after.createdAtMs && compareText(message.id, after.messageId) > 0)) &&
+      (channelId === undefined || state.threads.get(message.threadId)?.channelId === channelId) &&
+      (threadId === undefined || message.threadId === threadId));
+    const values = rows.slice(0, limit).map((message) => {
+      const chatId = state.threads.get(message.threadId)?.channelId;
+      const channel = chatId === undefined ? undefined : state.channels.get(chatId);
+      return {
         threadId: message.threadId,
         messageId: message.id,
-        authorKind: message.author.kind,
+        channel: channel === undefined
+          ? null
+          : {
+              id: channel.channelId,
+              kind: channel.kind,
+              name: channel.name,
+              slug: channel.slug,
+              purpose: channel.purpose,
+            },
+        author: { kind: message.author.kind, displayName: message.author.displayName },
+        body: message.body,
         createdAtMs: message.createdAtMs,
-      }));
-    const result = page(rows, params, `${workspace}\0agentRequests\0${runId}`);
-    return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
+      };
+    });
+    const requests = byteBudgetPage(values);
+    return jsonResult({ requests, more: rows.length > requests.length });
   }
 
   private agentUnreadThreads(
@@ -2259,8 +2487,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const runId = optionalString(params, "runId");
-    const reader = this.agentReader(state, runId);
+    const { reader: agentReader, binding } = agentReaderParam(params);
+    const reader = this.agentPlace(state, agentReader);
     const rows = [...state.threads.values()]
       .map((thread) => ({
         thread,
@@ -2268,6 +2496,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }))
       .filter((entry): entry is { thread: ChatThread; latest: ChatMessage } => {
         if (!entry.latest || entry.latest.author.kind !== "human") return false;
+        // An unnamed reader leaves agent chats to their agents.
+        if (agentReader.kind === "unnamed" && isAgentChat(state, entry.thread)) return false;
         const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
         return !read ||
           entry.latest.createdAtMs > read.lastReadCreatedAtMs ||
@@ -2281,8 +2511,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
           right.latest.createdAtMs - left.latest.createdAtMs ||
           compareText(right.latest.id, left.latest.id),
       )
-      .map((entry) => entry.thread);
-    const result = page(rows, params, `${workspace}\0agentUnread\0${runId ?? ""}`);
+      .map((entry) => {
+        const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
+        return { ...entry.thread, lastRead: {
+          createdAtMs: read?.lastReadCreatedAtMs ?? 0,
+          messageId: read?.lastReadMessageId ?? "",
+        } };
+      });
+    const result = page(rows, params, `${workspace}\0agentUnread\0${binding}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
   }
 
@@ -2291,7 +2527,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const reader = this.agentReader(state, optionalString(params, "runId"));
+    const reader = this.agentPlace(state, agentReaderParam(params).reader);
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const upTo = strictObject(params.upTo ?? null, "upTo", ["createdAtMs", "messageId"]);
@@ -2745,7 +2981,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
     );
     const applied =
       bookmark.generation === generation &&
-      bookmark.state === "active" &&
       bookmark.projectionState === "pending";
     const projectionObjectId = optionalString(
       params,
@@ -2830,6 +3065,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(bookmark);
   }
 
+  private bookmarkRetryFailed(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+    const bookmark = this.requireBookmark(state, params);
+    const generation = requiredSafeInteger(params, "generation", "invalid-bookmark-target");
+    const applied = bookmark.generation === generation && bookmark.projectionState === "failed";
+    if (applied) {
+      bookmark.projectionState = "pending";
+      delete bookmark.failureReason;
+      bookmark.updatedAtMs = this.tick();
+    }
+    return jsonResult({ bookmark, applied });
+  }
+
   private bookmarkTransition(
     state: WorkspaceState,
     params: ChatsJsonObject,
@@ -2839,7 +3086,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const generation = requiredSafeInteger(params, "generation", "invalid-bookmark-target");
     const applied =
       bookmark.generation === generation &&
-      bookmark.state === "active" &&
       bookmark.projectionState === "pending";
     if (applied) {
       bookmark.projectionState = projectionState;
@@ -2884,6 +3130,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
+    const agentId = requiredString(params, "agentId", "invalid-input");
+    if (!AGENT_ID_PATTERN.test(agentId)) throw new Error("invalid-input");
     const runId = normalizeNonempty(requiredString(params, "runId"), "invalid-input");
     const existingRun = state.runs.get(runId);
     if (existingRun) {
@@ -2904,7 +3152,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     if ([...state.dispatches.values()].some((row) => row.state === "running")) return null;
     const dispatch = [...state.dispatches.values()]
-      .filter((row) => row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
+      .filter((row) =>
+        row.agentId === agentId && row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
       .sort(compareDispatches)[0];
     if (!dispatch) return null;
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
@@ -2912,8 +3161,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     dispatch.runId = runId;
     dispatch.attemptCount += 1;
     dispatch.updatedAtMs = atMs;
+    // Fold only triggers from the same place: the main stream, or one message's thread.
+    const place = (messageId: string) => state.messages.get(messageId)?.parentMessageId ?? null;
     for (const other of state.dispatches.values()) {
-      if (other.threadId === dispatch.threadId && other.agentId === dispatch.agentId && other.state === "pending") {
+      if (
+        other.threadId === dispatch.threadId && other.agentId === dispatch.agentId && other.state === "pending" &&
+        place(other.triggerMessageId) === place(dispatch.triggerMessageId)
+      ) {
         other.state = "done";
         other.runId = runId;
         other.attemptCount += 1;
@@ -3175,7 +3429,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const applies =
       run?.workspaceId === workspace &&
       run.endedAtMs !== undefined &&
-      dispatch?.state === "failed" &&
+      (dispatch?.state === "failed" || (dispatch?.state === "done" &&
+        triggerMessageId === run.triggerMessageId && this.failedCompletedRun(state, run))) &&
       dispatch.runId === runId &&
       dispatch.attemptCount < 2;
     if (!applies || !dispatch) return jsonResult(false);
@@ -3201,7 +3456,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
   }
 
-  private appQuitRecoveries(
+  private failedCompletedRun(state: WorkspaceState, run: ChatRun): boolean {
+    return ((run.exitCode !== undefined && run.exitCode !== 0) || run.failureHandled) &&
+      ![...state.runLinks.values()].includes(run.runId);
+  }
+
+  private failedRunRecoveries(
     state: WorkspaceState,
     workspace: string,
     params: ChatsJsonObject,
@@ -3210,15 +3470,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const rows = [...state.runs.values()]
       .filter((run) => {
         const dispatch = state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId));
-        const recoverableFailure =
-          (run.exitCode === APP_QUIT_EXIT_CODE && run.failureReason === "app-quit") ||
-          run.failureReason === "app restart during run";
         return (
           run.workspaceId === workspace &&
           (threadId === undefined || run.threadId === threadId) &&
           run.endedAtMs !== undefined &&
-          recoverableFailure &&
-          dispatch?.state === "failed" &&
+          (dispatch?.state === "failed" || (dispatch?.state === "done" && this.failedCompletedRun(state, run))) &&
           dispatch.runId === run.runId
         );
       })
@@ -3227,7 +3483,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run,
         attemptCount: state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId))?.attemptCount ?? 0,
       }));
-    const result = page(rows, params, `${workspace}\0appQuitRecoveries\0${threadId ?? ""}`);
+    const result = page(rows, params, `${workspace}\0failedRunRecoveries\0${threadId ?? ""}`);
     return jsonResult({ recoveries: result.values, nextCursor: result.nextCursor });
   }
 

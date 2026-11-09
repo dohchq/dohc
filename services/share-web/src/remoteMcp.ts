@@ -2,13 +2,14 @@ import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextp
 import * as z from "zod/v4";
 import { createSharedAutomationControls } from "./automationControls";
 import { readBoundedJson } from "@dohc/service-http";
-import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
-import {relayLinkRefusal, unavailableLinkRefusal} from "./linkRefusal";
+import {LINK_REFUSALS, linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+import {linkChatRefusalBody, relayLinkRefusal, unavailableLinkRefusal} from "./linkRefusal";
 import { asRecord } from "@dohc/workspace-core/records";
-import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
+import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import { shareLinkSummary } from "./shareSummary";
-import type { createLinkLiveClient } from "./linkLiveClient";
+import type { LinkLiveAgentAccess } from "./linkLiveClient";
+import type { AgentChatClient } from "./agentChatClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   collectionWriteBody, collectionWriteContentBytes, COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_CONTENT_BYTES,
@@ -17,16 +18,20 @@ import {
 
 type RemoteRequest = (path: string, init?: RequestInit) => Promise<Response>;
 type RemoteOptions = {
-  discriminator: string;
-  cookie: string;
   request: RemoteRequest;
-  linkLive?: ReturnType<typeof createLinkLiveClient>;
+  /** The agent's live documents, when this server edits them live. */
+  live?: LinkLiveAgentAccess;
   liveLimits?: NamedLiveBrowserLimits;
   /** Admits a body larger than an ordinary request, for a Collection write: a release, or null when full. */
   admitLargeBody(): (() => void) | null;
   signal: AbortSignal;
   /** When `signal` aborts on its own, so a tool answers before it does. */
   deadlineAtMs: number;
+  /**
+   * The agent connection's chat. Its posts carry the connection as the
+   * author, and it can wait for messages.
+   */
+  agentChat: AgentChatClient;
 };
 
 // An ordinary request fits this. A Collection write carries up to 4 MiB of
@@ -41,7 +46,6 @@ const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 const discussionPostSchema = z.object({
   body: z.string().describe("Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters.").refine(value => normalizeShareDiscussionBody(value) !== null, "The body must fit 2,000 code points and 8,000 UTF-8 bytes."),
   idempotencyKey: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u),
-  claimedName: z.string().describe("A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes.").refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 }).refine(value => Buffer.byteLength(JSON.stringify(value)) <= MAX_DISCUSSION_ENVELOPE_BYTES, "The discussion request exceeds 16 KiB.");
 // A link on a Group share reads, and with read-write access posts in, the Group's channel.
 const linkChannelSchema = z.object({channelWireId: z.string(), access: z.enum(["read-only", "read-write"])});
@@ -56,9 +60,42 @@ const channelPostSchema = z.object({
   idempotencyKey: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u)
     .describe("Names this post. Send the same key and fields to retry after an unknown outcome; use a new key for a new post."),
   threadId: z.string().min(1).max(256).optional().describe("A threadId from dohc_read_channel, to reply in that thread. Omit it to start a thread."),
-  claimedName: z.string().describe("Your display name. This link sets it once; later posts must send the same name or none.")
-    .refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 });
+
+// The longest hold the relay grants one wait.
+export const MAX_WAIT_TIMEOUT_MS = 25_000;
+const MAX_WAIT_CURSOR_CHARS = 1024 * 1024;
+const WAIT_CURSOR_MISMATCH = "This cursor came from a wait with other filters. Call again with the same filters, or without a cursor.";
+const waitSchema = z.object({
+  cursor: z.string().min(1).max(MAX_WAIT_CURSOR_CHARS).optional()
+    .describe("The cursor the last call returned. Omit it to wait for messages after now."),
+  thread: z.string().min(1).max(256).optional().describe("A threadId, to wait only for replies in that thread."),
+  timeoutMs: z.number().int().min(0).max(MAX_WAIT_TIMEOUT_MS).optional()
+    .describe(`How long to wait, in milliseconds, at most ${String(MAX_WAIT_TIMEOUT_MS)}. The default is ${String(MAX_WAIT_TIMEOUT_MS)}.`),
+});
+const waitAnswerSchema = z.object({
+  ok: z.literal(true),
+  group: z.object({channelWireId: z.string(), name: z.string().nullable()}),
+  mention: z.string(),
+  messages: z.array(z.object({
+    relaySeq: z.number().int().positive(), messageId: z.string(), threadId: z.string(),
+    authorDisplayName: z.string(), authorKind: z.enum(["human", "agent", "automation", "link"]), linkAgent: z.boolean(),
+    createdAtMs: z.number().int(), body: z.string().nullable(),
+  })),
+  cursor: z.number().int().nonnegative(),
+});
+type WaitScope = {thread: string | null};
+// A cursor is opaque to the agent: the relay position and the filters it was returned for.
+const encodeWaitCursor = (seq: number, scope: WaitScope) => Buffer.from(JSON.stringify({v: 1, seq, ...scope})).toString("base64url");
+function decodeWaitCursor(cursor: string, scope: WaitScope): number | null {
+  let value: unknown;
+  try {value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));} catch {return null;}
+  const record = asRecord(value);
+  if (!record || record.v !== 1 || !Number.isSafeInteger(record.seq) || Number(record.seq) < 0 ||
+      (record.thread !== null && typeof record.thread !== "string")) return null;
+  return record.thread === scope.thread ? Number(record.seq) : null;
+}
+
 // Each file names its path and base, and its content as text or as base64: one or the other.
 const writtenFile = {
   path: z.string().min(1).max(1024).describe("The file's path exactly as dohc_list_files lists paths."),
@@ -116,9 +153,10 @@ function linkChange(op: LinkLogOp): Record<string, unknown> | null {
     ...(beforeBlobSha256 ? {beforeBlobSha256} : {})};
 }
 
+const MAX_TOOL_RESULT_BYTES = 1024 * 1024;
 const text = (value: unknown): CallToolResult => {
   const encoded = JSON.stringify(value);
-  if (Buffer.byteLength(encoded) > 1024 * 1024) return error("The result exceeds the 1 MiB response limit.");
+  if (Buffer.byteLength(encoded) > MAX_TOOL_RESULT_BYTES) return error("The result exceeds the 1 MiB response limit.");
   return {content: [{type: "text", text: encoded}], ...(value && typeof value === "object" ? {structuredContent: value as Record<string, unknown>, ...("ok" in value && value.ok === false ? {isError: true} : {})} : {})};
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
@@ -161,7 +199,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   server.registerTool("dohc_share_status", { description: "Read the current share permissions and release state.", inputSchema: z.object({}) }, async () => {
-    const summary = shareLinkSummary(metadata, Boolean(options.linkLive && options.liveLimits));
+    const summary = shareLinkSummary(metadata, Boolean(options.live && options.liveLimits));
     return text({ ...metadata, summary: `${summary.subject}. ${summary.permissions} ${summary.included} ${summary.history}` });
   });
   server.registerTool("dohc_list_files", {
@@ -205,10 +243,10 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
   if (!channel && (metadata.access === "comment" || metadata.access === "edit")) server.registerTool("dohc_post_discussion", {
-    description: "Post a discussion message to this shared link when its permissions allow comments.",
+    description: "Post a discussion message to this shared link when its permissions allow comments. The post shows the name your client reported when you signed in.",
     inputSchema: discussionPostSchema,
-  }, async ({ body, idempotencyKey, claimedName }) => {
-    const response = await sentPost(() => options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey, ...(claimedName ? { claimedName } : {}) }) }));
+  }, async ({ body, idempotencyKey }) => {
+    const response = await sentPost(() => options.request("/api/view/discussion", { method: "POST", body: JSON.stringify({ body, idempotencyKey }) }));
     if (!response) return postUnknown();
     try {
       return text(await jsonResponse(response));
@@ -229,20 +267,58 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
         return text(await jsonResponse(await options.request(`/api/view/chat/messages?${query}`)));
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
     });
+    const {agentChat} = options;
     if (channel.access === "read-write") server.registerTool("dohc_post_channel", {
-      description: "Post in the Group channel this link shares, as this link's holder. The owner sees the post marked as from a link holder.",
+      description: "Post in the Group channel this link shares. The post shows as from you, an agent that joined with this link.",
       inputSchema: channelPostSchema,
-    }, async ({body, idempotencyKey, threadId, claimedName}) => {
-      const response = await sentPost(() => options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
-        ...(threadId === undefined ? {} : {threadId}), ...(claimedName === undefined ? {} : {claimedName})})}));
+    }, async ({body, idempotencyKey, threadId}) => {
+      const response = await sentPost(() => agentChat.post({body, idempotencyKey, ...(threadId === undefined ? {} : {threadId})}, options.signal));
       if (!response) return postUnknown();
       try {
-        // A refusal the agent can act on arrives as a sentence.
         if (!response.ok && response.status !== 404) {
-          const refusal = asRecord(await readBoundedJson(response.clone(), 4096, options.signal).catch(() => null));
-          if (typeof refusal?.code === "string" && typeof refusal.error === "string") return text({ok: false, code: refusal.code, error: refusal.error});
+          // In this server's words, as the viewer shows them; never the relay's own.
+          const value = await readBoundedJson(response.clone(), 4096, options.signal).catch(() => null);
+          const code = parseLinkRefusal(value, response.status);
+          const refusal = linkChatRefusalBody(value, response.status) ?? (code ? linkRefusalBody(code) : null);
+          if (refusal) return text(refusal);
         }
         return text(await jsonResponse(response));
+      } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+    });
+    // Holds until a message arrives or the wait ends, and answers before this request's own deadline.
+    server.registerTool("dohc_wait_for_messages", {
+      description: "Wait for messages for you in the Group channel this link shares: a mention of you, or a reply in a thread you posted in. " +
+        "People mention you as the answer's mention. Call in a loop with the returned cursor and the same filters; " +
+        "without a cursor, it starts from when you signed in. " +
+        "It answers as soon as a message arrives, or with no messages once timeoutMs passes or after skipping a long stretch of other messages. " +
+        "Your own posts are not returned. Nothing is marked read. " +
+        "author.kind link marks a link holder: their name was chosen by them and nobody verified it. linkAgent marks an agent that joined with this link.",
+      inputSchema: waitSchema,
+    }, async ({cursor, thread, timeoutMs}) => {
+      const scope: WaitScope = {thread: thread ?? null};
+      const seq = cursor === undefined ? undefined : decodeWaitCursor(cursor, scope);
+      if (seq === null) return error(WAIT_CURSOR_MISMATCH);
+      const hold = Math.max(0, Math.min(timeoutMs ?? MAX_WAIT_TIMEOUT_MS, options.deadlineAtMs - Date.now() - ANSWER_RESERVE_MS));
+      try {
+        const answer = waitAnswerSchema.parse(await jsonResponse(await agentChat.wait({
+          ...(seq === undefined ? {} : {cursor: seq}), ...(thread === undefined ? {} : {threadId: thread}), timeoutMs: hold,
+        }, options.signal)));
+        const group = {id: answer.group.channelWireId, name: answer.group.name, kind: "group" as const};
+        const messages = answer.messages.map(message => ({
+          threadId: message.threadId, messageId: message.messageId, group,
+          author: {kind: message.authorKind, displayName: message.authorDisplayName, ...(message.linkAgent ? {linkAgent: true} : {})},
+          createdAtMs: message.createdAtMs, text: message.body,
+        }));
+        // The messages that fit the result, and a cursor that ends at the last one, so the next call returns the rest.
+        let bytes = Buffer.byteLength(JSON.stringify({messages: [], mention: answer.mention, cursor: encodeWaitCursor(answer.cursor, scope)}));
+        let kept = 0;
+        for (const message of messages) {
+          bytes += Buffer.byteLength(JSON.stringify(message)) + 1;
+          if (bytes > MAX_TOOL_RESULT_BYTES && kept > 0) break;
+          kept++;
+        }
+        const last = kept === messages.length ? answer.cursor : answer.messages[kept - 1]!.relaySeq;
+        return text({messages: messages.slice(0, kept), mention: answer.mention, cursor: encodeWaitCursor(last, scope)});
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
     });
   }
@@ -265,8 +341,8 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     } catch { return text({ok: false, outcome: "unknown"}); }
   });
   const selector = metadata.effectiveSelector as {versionId?: string | null} | undefined;
-  if (metadata.access === "edit" && selector?.versionId === null && options.linkLive && options.liveLimits) {
-  const liveOptions = {client: options.linkLive, limits: options.liveLimits, discriminator: options.discriminator, cookie: options.cookie, request: options.request, signal: options.signal};
+  if (metadata.access === "edit" && selector?.versionId === null && options.live && options.liveLimits) {
+  const liveOptions = {live: options.live, limits: options.liveLimits, signal: options.signal};
   server.registerTool("dohc_read_document", {
     description: "Read the current live Markdown document before editing. Requires an online document host and an Edit link.",
     inputSchema: z.object({path: z.string().max(1024).regex(/\.md$/i)}),

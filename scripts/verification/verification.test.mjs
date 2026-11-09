@@ -12,6 +12,7 @@ import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 // Native tests include these files from outside crates; the daemon never does.
 const nativeTestFixtures = [
@@ -39,16 +40,15 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("desktop proofs require each restart proof, smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke, onboarding and the agent sign-in everywhere and the pixel baseline on Windows", () => {
   const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
+  const everywhere = ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in"];
   assert.deepEqual(desktopProofTags({platform: "win32"}), {
-    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-page"],
-    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-baselines"],
+    selected: [...everywhere, "@states-page"],
+    required: [...everywhere, "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
-    assert.deepEqual(desktopProofTags({platform}), {
-      selected: ["@verification-smoke", ...restart, "@self-host-onboarding"], required: ["@verification-smoke", ...restart, "@self-host-onboarding"],
-    });
+    assert.deepEqual(desktopProofTags({platform}), { selected: everywhere, required: everywhere });
   }
 });
 
@@ -738,7 +738,7 @@ test("source fingerprints follow the host's environment key casing", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build`, () => {
+for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build and ignores build parallelism`, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-env-kind-"));
   try {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
@@ -752,10 +752,12 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
       const root=process.argv[1];
       const kind=process.argv[2];
       const settings={
-        engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
+        engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_RUSTFLAGS','CARGO_PROFILE_DEV_DEBUG',
           'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
           'CC','CXX','AR','CFLAGS','CXXFLAGS'],
         desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH','DOHC_POSTHOG_KEY','DOHC_POSTHOG_HOST','DOHC_DESKTOP_DIST'],
+        // Build parallelism changes neither build's output.
+        neither:['CARGO_BUILD_JOBS'],
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];
@@ -1035,8 +1037,9 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     "-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", ...args,
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
+    copyFlakyFixture(root);
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "scripts/verification/linux.mjs", "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",

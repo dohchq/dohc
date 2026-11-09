@@ -82,7 +82,8 @@ fn secret_key_is_not_minted_in_a_replacement_root_after_plaintext_read() {
         .expect("read original plaintext");
     std::fs::rename(&root, &moved_root).expect("move original capture root");
     std::fs::create_dir(&root).expect("recreate capture root");
-    let result = sink.ingest_secret_content(".env", true, false, content);
+    let result =
+        sink.ingest_secret_content(".env", true, false, content, CaptureProvenance::default());
     let replacement_key_exists = root.join(".dohc/engine/secret.key").exists();
 
     std::fs::remove_dir_all(&root).expect("remove replacement capture root");

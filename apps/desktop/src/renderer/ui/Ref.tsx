@@ -1,6 +1,6 @@
 import { fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { basenameOf, dirnameOf } from "../path";
-import { KindGlyph } from "./KindGlyph";
+import { KindGlyph, ObjectGlyph, type ObjectKind } from "./KindGlyph";
 
 // One reference to a workspace file, the same chip wherever it appears: chat,
 // Linked mentions, Search, History and the link picker. The kind glyph, the
@@ -10,12 +10,14 @@ import { KindGlyph } from "./KindGlyph";
 //
 // With `onOpen` the chip is a button named for what it opens. Without it the
 // chip is a plain span, so a row that is already a button can hold it and the
-// row stays the one control. Hover and selected lay the ink fills over the
-// inset surface instead of replacing it.
+// row stays the one control. Hover lays the ink fill, and selected the text
+// selection's tint, over the inset surface instead of replacing it. The
+// editor's wikilink pill takes the same tint when it is node-selected.
 const CHIP =
   "inline-flex h-[22px] max-w-full min-w-0 items-center gap-[5px] whitespace-nowrap rounded border bg-panel-2 px-[7px] align-[1px] text-[13px] leading-none text-ink";
 const HOVER = "transition-colors duration-75 hover:bg-[image:linear-gradient(var(--color-hover),var(--color-hover))]";
-const SELECTED = "bg-[image:linear-gradient(var(--color-selected),var(--color-selected))]";
+// Like the bg-selected utility, the selected fill shows subtle text in muted.
+const SELECTED = "bg-[image:linear-gradient(var(--dohc-selection),var(--dohc-selection))] [--dohc-subtle:var(--dohc-muted)]";
 
 export function Ref(props: {
   path: string;
@@ -23,6 +25,9 @@ export function Ref(props: {
   title?: string;
   // The listing's kind, when the caller has it; otherwise the path's.
   kind?: FileKindRecord;
+  // The object the file stands for, such as the Collection a change file
+  // changes. Its glyph replaces the file kind's.
+  objectKind?: ObjectKind;
   // A heading inside the file, shown after the name.
   heading?: string;
   folder?: boolean;
@@ -48,7 +53,9 @@ export function Ref(props: {
   }`;
   const content = (
     <>
-      <KindGlyph kind={props.kind ?? fileKindForPath(props.path)} size={13} className="text-muted" />
+      {props.objectKind
+        ? <ObjectGlyph kind={props.objectKind} size={13} className="text-muted" />
+        : <KindGlyph kind={props.kind ?? fileKindForPath(props.path)} size={13} className="text-muted" />}
       <span className="min-w-0 truncate">
         {name}
         {heading ? <span className="text-muted">{heading}</span> : null}

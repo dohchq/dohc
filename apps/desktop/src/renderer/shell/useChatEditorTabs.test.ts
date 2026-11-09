@@ -167,7 +167,7 @@ describe("chat editor tabs", () => {
     expect(generalEditor.nav).toBe(thread);
     expect(generalEditor.drafts).toBe(draft);
     expect(result.current.get(chatEditorPath(dm)).drafts).toBeUndefined();
-    expect(result.current.titles.get(chatEditorPath(general))).toBe("#General");
+    expect(result.current.titles.get(chatEditorPath(general))).toBe("General");
     expect(result.current.titles.get(chatEditorPath(agent))).toBe("Your agent");
     expect(result.current.titles.get(chatEditorPath(dm))).toBe("Alice");
   });
@@ -183,6 +183,29 @@ describe("chat editor tabs", () => {
     act(() => result.current.open({ ...thread, focusMessageId: "message" }));
     expect(editor.revision).toBe(before + 1);
     expect(editor.drafts).toBe(draft);
+  });
+
+  it("takes a jump to a message in an open agent conversation, keeping its draft", () => {
+    const { result } = renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
+    }));
+    act(() => result.current.open(agent));
+    const editor = result.current.get(chatEditorPath(agent));
+    act(() => editor.onDraftsChange(draft));
+    const before = editor.revision;
+    const jump = { ...agent, focusMessageId: "reply" } as ChatsNav;
+    act(() => result.current.open(jump));
+    expect(editor.nav).toEqual(jump);
+    expect(editor.revision).toBe(before + 1);
+    expect(editor.drafts).toBe(draft);
+
+    // Naming the chat lane with no message is a command too; a plain open is not.
+    const lane = { ...agent, lane: "chat" } as ChatsNav;
+    act(() => result.current.open(lane));
+    expect(editor.nav).toEqual(lane);
+    expect(editor.revision).toBe(before + 2);
+    act(() => result.current.open(agent));
+    expect(editor.revision).toBe(before + 2);
   });
 
   it("refreshes a focused DM's metadata while keeping its draft and message position", () => {
@@ -218,7 +241,7 @@ describe("chat editor tabs", () => {
     expect(result.current.get(path).nav).toBeUndefined();
     expect(result.current.get(path).drafts).toBeUndefined();
     await act(async () => pending.resolve({ channels: [general.channel], fileThreads: [] }));
-    await waitFor(() => expect(result.current.titles.get(path)).toBe("#General"));
+    await waitFor(() => expect(result.current.titles.get(path)).toBe("General"));
     expect(stale.nav).toBeUndefined();
     vi.unstubAllGlobals();
   });

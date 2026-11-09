@@ -15,7 +15,30 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalesce
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
+import { ipcWireError } from "../ipc/errorWords";
+import { sharedViewRefusal, sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+
+function checkRefusalCopy(text: string, cause?: string) {
+  const lines = text.split("\n");
+  expect(lines[0], "Copy starts with the refusal").toBe(`Error: ${sharedViewRefusalWords}`);
+  for (const line of lines) {
+    expect(line, "Each copied line is one fact").toMatch(/^[^:]+: .+$/);
+    expect(line, "Copied facts omit the wire code").not.toContain("[share-collision-record]");
+    expect(line, "Copied facts omit the capture class").not.toContain("CapturePartialFailureError");
+  }
+  for (const line of lines.slice(1)) expect(line, "Copied facts do not repeat the refusal").not.toContain(sharedViewRefusalWords);
+  expect(lines.filter(line => line.startsWith("Cause:")), "Copy keeps only the filesystem cause").toEqual(cause ? [`Cause: ${cause}`] : []);
+}
+
+// Opens a notice's Details unless it is open, then copies its report. A
+// plain click moves no pointer, so copying a row doesn't read it and close
+// its toast.
+async function copyDetails(notice: HTMLElement) {
+  const closed = within(notice).queryByRole("button", { name: "Details" });
+  if (closed) await act(async () => { fireEvent.click(closed); });
+  await act(async () => { fireEvent.click(within(notice).getByRole("button", { name: "Copy details" })); });
+}
 
 // One share's durable skip record, as the registry holds it.
 const SKIPPED_RECORD = {
@@ -1439,7 +1462,9 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    const row = await screen.findByText("a.md");
+    // Until its saved state loads, the Explorer shows Home, which titles
+    // a.md "a".
+    const row = await screen.findByText("a");
     await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
 
     await act(async () => {
@@ -1732,7 +1757,7 @@ describe("ui-state merge-on-load", () => {
       "A file from this machine already uses this path.",
     );
     expect(notice.textContent).toContain(
-      "Move or remove the file, then refresh.",
+      "Move or rename the file, then refresh.",
     );
     expect(notice.textContent).toContain(
       "dohc could not receive docs/Notes.md. This machine treats docs/Notes.md and docs/notes.md as the same name. " +
@@ -1750,7 +1775,8 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
   });
 
-  it("warns when a refresh quarantines the share collision record", async () => {
+  it.each(["view", "edit"] as const)("reports kept files when a %s refresh rebuilds their saved list", async (access) => {
+    const risk = "dohc keeps these files apart.";
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     bridge.refreshSharedView = vi.fn(async () => ({
       ok: true as const,
@@ -1767,15 +1793,232 @@ describe("ui-state merge-on-load", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access,
+      },
+    });
+
+    // A warning the person may need to act on: a warning toast, then a row
+    // in Notices. Nothing is inserted above the workbench.
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(
+      `dohc could not read this share's record of your files with the same path as a shared file. ${risk}`,
+    );
+    // The completed rebuild keeps its dismissible notice.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(risk, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).getByRole("button", { name: "Dismiss notice" })).toBeTruthy();
+  });
+
+  it("warns that a refresh set the share collision record aside when that refresh then fails", async () => {
+    const risk = "dohc keeps these files apart.";
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    bridge.refreshSharedView = vi.fn(async (): Promise<RefreshSharedViewResult> => ({
+      ok: false,
+      changedPaths: 0,
+      errorMessage: "Sign in to your server first.",
+      collisionRecordQuarantined: true,
+    }));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
         access: "view",
       },
     });
 
-    // A warning the person may need to act on: an error toast, then a row
-    // in Notices. Nothing is inserted above the workbench.
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
-    );
+    await screen.findByTestId("workspace-shell-notice");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(
+      within(notices).getByText(
+        `dohc could not read this share's record of your files with the same path as a shared file. ${risk}`,
+        { exact: false },
+      ),
+    ).toBeTruthy();
+  });
+
+  it.each(["no file open", "docs/shared.md open"])("copies one plain Apps listing refusal with %s", async openFile => {
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(openFile === "no file open" ? [] : ["docs/shared.md"])));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
+      files: [{ path: "docs/shared.md", kind: "file" }], folders: ["docs"] });
+    const refusal = await sharedViewRefusal();
+    const received = new Error(`Error invoking remote method 'desktop:list-sites': ${String(ipcWireError(refusal))}`);
+    bridge.listSites.mockRejectedValue(received);
+    const refused: RefreshSharedViewResult = {
+      ok: false, changedPaths: 0, errorKind: "collision-record", errorMessage: sharedViewRefusalWords,
+      errorCause: "EBUSY: resource busy or locked",
+    };
+    const opening = deferred<RefreshSharedViewResult>();
+    const refresh = vi.fn<() => Promise<RefreshSharedViewResult>>()
+      .mockReturnValueOnce(opening.promise).mockResolvedValue(refused);
+    bridge.refreshSharedView = refresh;
+    renderShell(bridge, { ...WORKSPACE, shareView: {
+      shareId: "share-1", granterEmail: "granter@dohc.test", access: "view",
+    } });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")?.textContent,
+      "The Apps listing shows the plain refusal before refresh finishes").toContain(sharedViewRefusalWords));
+    if (openFile !== "no file open") await screen.findByTestId("tab-docs/shared.md");
+    const copyBoth = async (cause?: string) => {
+      const toast = screen.getByTestId("workspace-shell-error");
+      expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(within(toast).getByRole("button", { name: "Dismiss workspace error" })).toBeTruthy();
+      await navigator.clipboard.writeText("");
+      await copyDetails(toast);
+      const toastCopy = await navigator.clipboard.readText();
+      checkRefusalCopy(toastCopy, cause);
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notices = await screen.findByTestId("notice-center");
+      expect(notices.querySelectorAll("[data-notice-row]")).toHaveLength(1);
+      const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+      expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+      await navigator.clipboard.writeText("");
+      await copyDetails(row);
+      const rowCopy = await navigator.clipboard.readText();
+      checkRefusalCopy(rowCopy, cause);
+      expect(rowCopy).toBe(toastCopy);
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    };
+    await copyBoth();
+    await act(async () => { opening.resolve(refused); });
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    await copyBoth(refused.errorCause);
+    const wrapped = new Error(`Error invoking remote method 'desktop:list-sites': CapturePartialFailureError [share-collision-record]: ${sharedViewRefusalWords}`);
+    bridge.listSites.mockRejectedValue(wrapped);
+    const listings = bridge.listSites.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(bridge.listSites.mock.calls.length).toBeGreaterThan(listings));
+    await act(async () => undefined);
+    await copyBoth(refused.errorCause);
+    fireEvent.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect((await screen.findByTestId("notice-center")).querySelectorAll("[data-notice-row]")).toHaveLength(1);
+  });
+
+  it("retries a refused reveal from a mounted share in an ordinary workspace", async () => {
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
+    const path = "shared-with-me/sam/shared.md";
+    const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs([]), expandedFolders: ["shared-with-me", "shared-with-me/sam"] }));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
+      files: [{ path, kind: "file" }], folders: ["shared-with-me", "shared-with-me/sam"] });
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Show in Finder", id: "open-externally" }]);
+    const received = new Error(`Error invoking remote method 'desktop:reveal-explorer-path': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    bridge.revealExplorerPath.mockRejectedValueOnce(received);
+    renderShell(bridge, { ...WORKSPACE, shareMounts: [
+      { shareId: "share-1", label: "sam", granterEmail: "sam@dohc.test", access: "view" },
+    ] });
+    const file = await waitFor(() => {
+      const row = screen.getAllByTestId("tree-row").find(row => row.dataset.path === path);
+      expect(row, "The mounted file is visible in Explorer").toBeTruthy();
+      return row!;
+    });
+    fireEvent.contextMenu(file);
+    fireEvent.click(await screen.findByTestId("explorer-menu-item-open-externally"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    await navigator.clipboard.writeText("");
+    await copyDetails(toast);
+    checkRefusalCopy(await navigator.clipboard.readText());
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).getByRole("button", { name: "Dismiss notice" }), "An ordinary workspace can dismiss the refusal").toBeTruthy();
+    await navigator.clipboard.writeText("");
+    await copyDetails(row);
+    checkRefusalCopy(await navigator.clipboard.readText());
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.revealExplorerPath, "Try again repeats the reveal").toHaveBeenCalledTimes(2));
+    expect(bridge.revealExplorerPath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, path });
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(sharedViewRefusalWords, { exact: false })).toBeNull();
+  });
+
+  it("keeps a refresh that can't read the share collision record in Notices until a refresh completes", async () => {
+    const words =
+      "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +
+      "It keeps a refresh from replacing your own files.";
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const refused: RefreshSharedViewResult = {
+      ok: false,
+      changedPaths: 0,
+      errorKind: "collision-record",
+      errorMessage: words,
+      errorCause: "EBUSY: resource busy or locked",
+    };
+    const refreshed: RefreshSharedViewResult = {
+      ok: true,
+      status: "unchanged",
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      refusedOps: 0,
+      refusedDetail: null,
+    };
+    const retried = deferred<RefreshSharedViewResult>();
+    const retriedAgain = deferred<RefreshSharedViewResult>();
+    const refresh = vi.fn<() => Promise<RefreshSharedViewResult>>()
+      .mockResolvedValueOnce(refused)
+      .mockReturnValueOnce(retried.promise)
+      .mockReturnValueOnce(retriedAgain.promise);
+    bridge.refreshSharedView = refresh;
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
+    });
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(words);
+    expect(toast.textContent).not.toContain("Couldn't refresh the shared view.");
+    await navigator.clipboard.writeText("");
+    await copyDetails(toast);
+    checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
+    // The record still keeps the person's own files apart, so its row has no ×.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+    await navigator.clipboard.writeText("");
+    await copyDetails(row);
+    checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
+
+    // Try again closes Notices and runs the refresh. The row stays while it runs.
+    const refreshButton = () => screen.getByTestId("shared-view-refresh") as HTMLButtonElement;
+    const refusalRow = async () => {
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      return within(await screen.findByTestId("notice-center")).queryByText(words, { exact: false })?.closest<HTMLElement>("[data-notice-row]") ?? null;
+    };
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refreshButton().disabled).toBe(true));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    const pendingRow = await refusalRow();
+    expect(pendingRow).not.toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    // A refresh that fails for another reason has not completed, so the row stays.
+    retried.resolve({ ok: false, changedPaths: 0, errorMessage: "Sign in to your server first." });
+    await waitFor(() => expect(refreshButton().disabled).toBe(false));
+    const keptRow = await refusalRow();
+    expect(keptRow).not.toBeNull();
+
+    // The refresh that completes ends the row.
+    fireEvent.click(within(keptRow!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refreshButton().disabled).toBe(true));
+    expect(refresh).toHaveBeenCalledTimes(3);
+    retriedAgain.resolve(refreshed);
+    await waitFor(() => expect(refreshButton().disabled).toBe(false));
+    expect(screen.queryByTestId("workspace-shell-error")?.textContent ?? "").not.toContain(words);
+    expect(await refusalRow()).toBeNull();
   });
 
   it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {
@@ -2548,7 +2791,7 @@ describe("ui-state merge-on-load", () => {
       await newer.promise;
     });
     expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
-    expect(screen.getAllByText("pulled.md").length).toBeGreaterThan(0);
+    expect(await screen.findByRole("treeitem", { name: "pulled.md" })).toBeTruthy();
   });
 
   // Closing the active tab remounts the keyed inspector on its neighbour —
@@ -3369,7 +3612,7 @@ describe("ui-state merge-on-load", () => {
       listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
       chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
       chatDispatchStateForThread: vi.fn(async () => ({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: 0,
         paused: false,
       })),
@@ -3873,8 +4116,8 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
 
-    // The listing lands first: a.md and b.md, no ghost.md.
-    await screen.findByText("a.md");
+    // The listing lands first: a.md and b.md, no ghost.md. Home titles a.md "a".
+    await screen.findByText("a");
 
     await act(async () => {
       stored.resolve(storedStateWithTabs(["b.md", "ghost.md"], "b.md"));
@@ -3925,7 +4168,8 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    await screen.findByText("a.md");
+    // Home, until the saved state loads, titles a.md "a".
+    await screen.findByText("a");
 
     await act(async () => {
       stored.resolve(STORED_STATE);

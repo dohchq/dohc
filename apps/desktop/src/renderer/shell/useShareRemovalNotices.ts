@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useReducer, useRef } from "react";
 import type { RelayShareUndoReceipt } from "../../ipc/bridgeContract";
 import { withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
@@ -31,11 +31,46 @@ export type ShareRemovalFailure = {
   message: string;
   cause: unknown;
   retry?: () => void;
+  // What failed, such as one agent's Disconnect. A later failure of the same
+  // thing replaces its row.
+  identity?: string;
 };
+
+export type DisconnectedLinkAgent = { workspaceId: string; grantId: string; connectionId: string };
+
+// One agent's Disconnect, as the shell names its failure.
+export function agentDisconnectIdentity(grantId: string, connectionId: string): string {
+  return `share-link-agent-disconnect:${grantId}:${connectionId}`;
+}
+
+// An agent's key in the shell's set of disconnected agents.
+export function disconnectedAgentKey(agent: DisconnectedLinkAgent): string {
+  return `${agent.workspaceId}\n${agentDisconnectIdentity(agent.grantId, agent.connectionId)}`;
+}
+
+function addDisconnectedAgent(current: ReadonlySet<string>, agent: DisconnectedLinkAgent): ReadonlySet<string> {
+  const key = disconnectedAgentKey(agent);
+  return current.has(key) ? current : new Set(current).add(key);
+}
+
+const NO_DISCONNECTED_AGENTS: ReadonlySet<string> = new Set();
+
+/**
+ * The agents the owner disconnected while this workspace stayed open, by disconnectedAgentKey.
+ * The shell holds it so a Disconnect that Try again finishes in Notices
+ * leaves any Share dialog open then, or opened later, without the agent. Only
+ * the Share dialog reads it, so a Disconnect re-renders nothing else.
+ */
+export function useDisconnectedLinkAgents() {
+  return useReducer(addDisconnectedAgent, NO_DISCONNECTED_AGENTS);
+}
 
 export interface ShareRemovalNotices {
   removed: ReportShareRemoval;
   failed: (failure: ShareRemovalFailure) => void;
+  // An agent's Disconnect succeeded, from a Share dialog or from Try again:
+  // its failure's toast and row go, and every Agents list drops it.
+  agentDisconnected: (agent: DisconnectedLinkAgent) => void;
 }
 
 // A removal an owner made: a toast and a Notices row with Undo. The notice is
@@ -48,14 +83,18 @@ export function useShareRemovalNotices(input: {
     message: string;
     cause?: unknown;
     retry?: (() => void) | null;
+    identity?: string;
   }) => void;
+  clearIdentity: (identity: string) => void;
   // A share ended or came back, whichever surface or retry did it, so a list
   // still open reads again.
   onSharesChanged?: () => void;
+  // An agent's Disconnect succeeded: useDisconnectedLinkAgents' dispatch.
+  onAgentDisconnected?: (agent: DisconnectedLinkAgent) => void;
 }): ShareRemovalNotices {
   const workspaceIdRef = useRef(input.workspaceId);
   workspaceIdRef.current = input.workspaceId;
-  const { showSuccessNotice, reportShellFailure, onSharesChanged } = input;
+  const { showSuccessNotice, reportShellFailure, clearIdentity, onSharesChanged, onAgentDisconnected } = input;
   const removed = useCallback<ReportShareRemoval>(
     (removal) => {
       // A switch clears the shell's list, so an answer for the workspace this
@@ -108,9 +147,17 @@ export function useShareRemovalNotices(input: {
         message: withErrorWords(failure.message, failure.cause),
         cause: failure.cause,
         retry: failure.retry ?? null,
+        ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       });
     },
     [reportShellFailure],
   );
-  return useMemo(() => ({ removed, failed }), [removed, failed]);
+  const agentDisconnected = useCallback(
+    (agent: DisconnectedLinkAgent) => {
+      onAgentDisconnected?.(agent);
+      if (workspaceIdRef.current === agent.workspaceId) clearIdentity(agentDisconnectIdentity(agent.grantId, agent.connectionId));
+    },
+    [clearIdentity, onAgentDisconnected],
+  );
+  return useMemo(() => ({ removed, failed, agentDisconnected }), [removed, failed, agentDisconnected]);
 }

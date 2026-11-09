@@ -12,16 +12,13 @@ import { ownAgentPresentation } from "./actorPresentation";
 import { ChatAvatar } from "./ChatAvatar";
 import type { AgentSetupSummary } from "./ChatsView";
 
-// The words for a state, and the width below which the folder chip hides so
-// the words are never cut: a post measures the offer, a stream composer
-// measures the composer. An unknown state says nothing about running.
-const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: { post: string; stream: string } }> = {
-  runs: { words: "Runs when you send", hideFolder: { post: "@max-[15rem]:hidden", stream: "@max-[16rem]/composer:hidden" } },
-  working: { words: "Runs after the current run", hideFolder: { post: "@max-[17rem]:hidden", stream: "@max-[18rem]/composer:hidden" } },
-  paused: {
-    words: "Replies paused · runs after Resume",
-    hideFolder: { post: "@max-[21rem]:hidden", stream: "@max-[22rem]/composer:hidden" },
-  },
+// The words for a state, and the offer's width below which the folder chip
+// hides so the words are never cut. An unknown state says nothing about
+// running.
+const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: string }> = {
+  runs: { words: "Runs when you send", hideFolder: "@max-[15rem]:hidden" },
+  working: { words: "Runs after the current run", hideFolder: "@max-[17rem]:hidden" },
+  paused: { words: "Replies paused · runs after Resume", hideFolder: "@max-[21rem]:hidden" },
   unknown: { words: null },
 };
 
@@ -31,10 +28,7 @@ export function reachName(path: string): string {
 }
 
 /** A conversation that does not exist yet: no run and no pause. */
-export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
-
-/** The room, in pixels, a stream list keeps above its composer for the offer. */
-export const AGENT_OFFER_SPACE = 36;
+export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
 
 // The roster pick a composer reports, held beside that composer's draft, and
 // the offer it makes with facts already read. A pick belongs to the
@@ -71,27 +65,17 @@ export function useAgentOffer(input: {
 }
 
 // Shown after the person picks an agent from the roster: who will see the
-// message, whether sending starts a run, and the folder the run reaches. A
-// post composer draws it in the space before Send. A stream composer floats
-// it above the composer and any bar on it, over Send, into room its list
-// always keeps, so nothing moves.
-export const AgentOffer = memo(function AgentOffer(props: {
-  offer: AgentAddressedOffer;
-  surface: "post" | "stream";
-}) {
+// message, whether sending starts a run, and the folder the run reaches.
+// Every composer draws it in its bar's space before Send, so nothing moves.
+export const AgentOffer = memo(function AgentOffer(props: { offer: AgentAddressedOffer }) {
   const { offer } = props;
-  const { words } = STATES[offer.state];
-  const hideFolder = STATES[offer.state].hideFolder?.[props.surface];
+  const { words, hideFolder } = STATES[offer.state];
   return (
     <div
       role="status"
       data-testid="composer-agent-offer"
       data-state={offer.state}
-      className={`dohc-pop-in flex min-w-0 items-center gap-1.5 text-[11px] tabular-nums text-muted ${
-        props.surface === "post"
-          ? "@container flex-1 px-1.5"
-          : "absolute bottom-full right-2 z-10 mb-1.5 h-7 max-w-[calc(100%-1rem)] rounded-full border border-line bg-panel pl-1 pr-2 shadow-sm"
-      }`}
+      className="dohc-pop-in @container flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-[11px] tabular-nums text-muted"
     >
       <span className="relative inline-grid shrink-0">
         <ChatAvatar name={offer.agent.label} kind="agent" presentation={offer.presentation} size="strip" />

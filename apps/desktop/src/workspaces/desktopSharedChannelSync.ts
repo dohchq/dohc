@@ -1,3 +1,4 @@
+import { signalChatWrite } from "./chatWriteSignals";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
@@ -306,12 +307,14 @@ export function createDesktopSharedChannelSync<
         priorityChannelWireId,
         pull: async (input) => {
           assertRequestCurrent();
+          let signalled = false;
           const pulled = await daemonRelay.pullSharedChannel({
             shareId: input.shareId,
             channelWireId: input.channelWireId,
-            onApplied: input.onApplied,
+            onApplied: () => { input.onApplied(); signalled = true; signalChatWrite(workspaceId); },
           });
           assertRequestCurrent();
+          if (pulled.applied > 0 && !signalled) signalChatWrite(workspaceId);
           return pulled;
         },
         push: async (input) => {

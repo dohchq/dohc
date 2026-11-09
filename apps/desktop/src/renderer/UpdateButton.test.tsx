@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UpdateStateEvent } from "../ipc/bridgeContract";
 import {
   TitlebarUpdateButton,
+  updateFailureTitle,
   updateStatusLine,
   updateStep,
   useUpdateFailureNotices,
@@ -41,11 +42,23 @@ describe("updateStep", () => {
   });
 });
 
+describe("updateFailureTitle", () => {
+  it("names the step that failed, and no version", () => {
+    expect(updateFailureTitle("check")).toBe("dohc could not check for updates");
+    expect(updateFailureTitle("download")).toBe("dohc could not download the update");
+    expect(updateFailureTitle("install")).toBe("dohc could not install the update");
+  });
+});
+
 describe("updateStatusLine", () => {
-  it("leads a failure with the step that failed", () => {
+  it("leads a failure with the step that failed, and names the version the title leaves out", () => {
     expect(updateStatusLine(available)).toBe("dohc 1.2.4 is available.");
     expect(updateStatusLine({ ...available, message: "socket hang up", failure: { step: "download", id: 2 } }))
-      .toBe("dohc could not download update 1.2.4. socket hang up");
+      .toBe("dohc could not download version 1.2.4. socket hang up");
+    expect(updateStatusLine({ ...ready, message: "Run this command in a terminal to install it.", failure: { step: "install", id: 3 } }))
+      .toBe("dohc could not install version 1.2.4. Run this command in a terminal to install it.");
+    expect(updateStatusLine({ ...idle, status: "error", message: "feed returned 500", failure: { step: "check", id: 4 } }))
+      .toBe("dohc could not check for updates. feed returned 500");
   });
 });
 
@@ -87,6 +100,27 @@ describe("useUpdateFailureNotices", () => {
     expect(report.mock.calls.map(([failure]) => failure.quiet)).toEqual([false, true]);
   });
 
+  it("titles every failed step with no version", () => {
+    const report = vi.fn();
+    const failures: UpdateStateEvent[] = [
+      { ...idle, status: "error", message: "feed returned 500", failure: { step: "check", id: 101 } },
+      { ...available, message: "socket hang up", failure: { step: "download", id: 102 } },
+      { ...ready, message: "Run this command in a terminal to install it.", failure: { step: "install", id: 103 } },
+      { ...available, version: "1.2.5", message: "dohc is still on version 1.2.3.", failure: { step: "download", id: 104, notInstalled: "1.2.4" } },
+    ];
+    for (const failed of failures) {
+      renderHook(() => useUpdateFailureNotices(update(failed), "ws-titles", report, () => {})).unmount();
+    }
+    const titles = report.mock.calls.map(([failure]) => failure.title as string);
+    expect(titles).toEqual([
+      "dohc could not check for updates",
+      "dohc could not download the update",
+      "dohc could not install the update",
+      "dohc could not install the update",
+    ]);
+    for (const title of titles) expect(title).not.toMatch(/\d/);
+  });
+
   it("retries the step that failed", () => {
     const run = vi.fn(async () => {});
     const report = vi.fn();
@@ -95,6 +129,32 @@ describe("useUpdateFailureNotices", () => {
 
     report.mock.calls[0]![0].retry();
     expect(run).toHaveBeenCalledWith("download");
+  });
+
+  it("says an update a person chose did not install, and takes it back once Try again starts the download", () => {
+    const run = vi.fn(async () => {});
+    const report = vi.fn();
+    const clear = vi.fn();
+    const notInstalled: UpdateStateEvent = {
+      ...available,
+      version: "1.2.5",
+      message: "dohc is still on version 1.2.3.",
+      failure: { step: "download", id: 70, notInstalled: "1.2.4" },
+    };
+    const { rerender } = renderHook((props: { state: UpdateStateEvent }) =>
+      useUpdateFailureNotices(update(props.state, run), "ws-1", report, clear), { initialProps: { state: notInstalled } });
+
+    expect(report).toHaveBeenCalledWith(expect.objectContaining({
+      title: "dohc could not install the update",
+      message: "dohc is still on version 1.2.3.",
+      details: [],
+    }));
+    expect(updateStatusLine(notInstalled)).toBe("dohc could not install version 1.2.4 and is still on version 1.2.3.");
+    report.mock.calls[0]![0].retry();
+    expect(run).toHaveBeenCalledWith("download");
+    // The title bar shows the download from here on.
+    rerender({ state: { ...downloading, version: "1.2.5" } });
+    expect(clear).toHaveBeenCalledOnce();
   });
 });
 

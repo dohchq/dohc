@@ -17,7 +17,31 @@ it("creates and validates the complete private named-ticket schema", async () =>
   const state = await fixture();
   try {
     expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id=?").get(marker)).toEqual({ migration_id: marker });
-    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(19);
+    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(20);
+  } finally { await state.close(); }
+});
+it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead of copying it", async () => {
+  const state = await fixture();
+  try {
+    state.raw.exec(`DROP TABLE ${table}; CREATE TABLE ${table} (ticket_id TEXT PRIMARY KEY, link_session_id TEXT) STRICT;
+      INSERT INTO ${table} VALUES ('ticket-v1', 'session-1')`);
+    state.raw.prepare("UPDATE sync_relay_migrations SET migration_id='live-session-tickets-v1' WHERE migration_id=?").run(marker);
+    reopenForSchemaCheck(state.path);
+    expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'live-session-tickets-%'").all())
+      .toEqual([{ migration_id: marker }]);
+    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(20);
+    expect(rows(state)).toEqual([]);
+    expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
+  } finally { await state.close(); }
+});
+it("refuses a link ticket that names both a link session and an agent connection, or neither", async () => {
+  const state = await fixture();
+  try {
+    state.storage.mintLiveTicket(mint);
+    expect(() => state.raw.exec(`UPDATE ${table} SET agent_connection_id='connection-1'`)).toThrow(/CHECK/);
+    expect(() => state.raw.exec(`UPDATE ${table} SET principal_kind='link'`)).toThrow(/CHECK/);
+    expect(() => state.raw.exec(`UPDATE ${table} SET principal_kind='link', agent_connection_id='connection-1'`)).not.toThrow();
+    expect(() => state.raw.exec(`UPDATE ${table} SET link_session_id='session-1'`)).toThrow(/CHECK/);
   } finally { await state.close(); }
 });
 it("commits a ticket and consumes the hashed credential once in real storage", async () => {
@@ -155,7 +179,7 @@ it("rolls bounded expiry cleanup back when retained capacity refuses", async () 
     const stale = another(9);
     state.raw.prepare(`INSERT INTO ${table} SELECT ?, ?, audience, workspace_id, main_version_id, object_id, lineage_claim_id,
       current_path, selector_paths_json, restore_fence_generation, principal_kind, principal_id, grant_id, grant_generation,
-      host_epoch, 0, 30000, NULL, NULL FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
+      host_epoch, 0, 30000, NULL, link_session_id, agent_connection_id FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
     state.setTime(31000);
     const before = rows(state);
     expect(state.storage.mintLiveTicket(another(3))).toBeNull();

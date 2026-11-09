@@ -68,6 +68,8 @@ pub fn project_ydoc_updates<'a>(
         && let Some(source) = doc.preserved_markdown_source(&projection.content)
     {
         projection.content = source;
+        projection.markdown_write_safety =
+            dohc_engine_collab::ydoc::MarkdownWriteSafety::SourcePreserving;
     }
     let limit = dohc_engine_collab::limits::MAX_PUBLIC_MARKDOWN_BYTES;
     if projection.content.len() > limit {

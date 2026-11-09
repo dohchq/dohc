@@ -68,7 +68,8 @@ pub enum IngestOutcome {
     WriteDeferred,
     /// The file was gone when the sink read it, and retiring its record waits
     /// for a live document session, as with [`RetireOutcome::Deferred`]. The
-    /// manifest keeps the path's entry, so a later scan retires it.
+    /// manifest keeps the path's entry, or the controller keeps the path as a
+    /// retire candidate when it has none, so a later scan retires it.
     RetireDeferred,
     /// The bytes were durably observed but could not be recorded. A separate
     /// hold protects them; acknowledging this identity must not claim capture.
@@ -197,7 +198,8 @@ pub struct CaptureApplyResult {
     /// they are in [`Self::deferred_retires`].
     pub deferred_paths: Vec<String>,
     /// The deferred paths whose record waits to be retired. Their manifest
-    /// entries stay, so the next scan retires them.
+    /// entries stay, or become retire candidates when there are none, so the
+    /// next scan retires them.
     pub deferred_retires: Vec<String>,
     /// Outside writes waiting for a session, with their prior manifest kept.
     pub deferred_writes: Vec<String>,

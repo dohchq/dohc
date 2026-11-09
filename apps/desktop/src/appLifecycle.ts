@@ -6,6 +6,8 @@ import {
   receiveShareHandoffArguments,
   type ShareHandoffIntentSlot,
 } from "./shareHandoffIngress";
+import { parseWorkLinkHandoffUrl } from "@dohc/workspace-contracts/deep-links";
+import type { WorkLink } from "@dohc/workspace-contracts/work-links";
 
 interface QuitEvent {
   preventDefault(): void;
@@ -60,6 +62,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     slot: ShareHandoffIntentSlot;
     pendingCodeChanged(): void;
   };
+  // Opens a dohc://l/ link's message, or just dohc when no workspace here holds it.
+  workLinks: {
+    open(link: WorkLink): Promise<void>;
+  };
   windows: {
     create(): Window;
     // Resolves true once the window finishes its first load, and false when
@@ -88,7 +94,6 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     startEngine(): Promise<boolean>;
     loadSettings(): Promise<Settings>;
     applySettings(settings: Settings): void;
-    prepareCli(): Promise<void> | undefined;
     registerHandlers(): void;
     markFirstWindow(): void;
     reportFailure(error: unknown): void;
@@ -146,11 +151,13 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     reportQuit(line: string): void;
   };
 }) {
-  const { app, runtime, handoff, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
+  const { app, runtime, handoff, workLinks, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
   let quitting = false;
   let sessionEnded = false;
   let bootstrapComplete = false;
   const pendingOpenPaths: string[] = [];
+  // Only the latest work link opens; it waits until the first window loads.
+  let pendingWorkLink: WorkLink | null = null;
   let cliServer: CliServer | null = null;
   let cliServerStartup: Promise<CliServer | null> | null = null;
   let updatesStarted = false;
@@ -290,12 +297,27 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     return openWorkspacePaths(paths, window, failureWindow);
   }
 
+  function receiveWorkLinks(rawArguments: readonly string[]): boolean {
+    let received = false;
+    for (const rawArgument of rawArguments) {
+      const link = parseWorkLinkHandoffUrl(rawArgument);
+      if (link === null) continue;
+      pendingWorkLink = link;
+      received = true;
+    }
+    return received;
+  }
+
+  function flushPendingWorkLink(): void {
+    const link = pendingWorkLink;
+    pendingWorkLink = null;
+    if (link !== null && !quitting) void workLinks.open(link);
+  }
+
   async function whenReady(): Promise<void> {
     bootstrap.markReady();
     const engineStartup = bootstrap.startEngine();
     const cachedSettingsRead = bootstrap.loadSettings();
-    const cliPreparation = bootstrap.prepareCli();
-    if (cliPreparation) await cliPreparation;
     bootstrap.registerHandlers();
     // Apply persisted zoom before creating the first window; overlap its IO
     // and renderer load with the daemon handshake.
@@ -355,6 +377,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       // Intents received during the last open await still need a drain after
       // activation. They are later intents and must win over launch paths.
       void flushPendingOpenPaths(window);
+      flushPendingWorkLink();
     });
     bootstrapComplete = true;
     void services.warmCredentials().then(() => services.reconcileCloud());
@@ -395,6 +418,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         if (receiveShareHandoffArguments(runtime.argv, handoff.slot)) {
           handoff.pendingCodeChanged();
         }
+        receiveWorkLinks(runtime.argv);
       }
 
       app.on("browser-window-created", (_event, window) => {
@@ -409,8 +433,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         event.preventDefault();
         const accepted = receiveShareHandoffArguments([rawArgument], handoff.slot);
         if (accepted) handoff.pendingCodeChanged();
-        if (!accepted || !bootstrapComplete) return;
-        void windows.showOrCreate();
+        const linked = receiveWorkLinks([rawArgument]);
+        if (!bootstrapComplete) return;
+        if (linked) flushPendingWorkLink();
+        else if (accepted) void windows.showOrCreate();
       });
 
       app.on("open-file", (event, path) => {
@@ -429,12 +455,16 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
         const handoffIntent = classifyShareHandoffArguments(argv);
         const accepted = receiveShareHandoffArguments(argv, handoff.slot);
         if (accepted) handoff.pendingCodeChanged();
+        const linked = receiveWorkLinks(argv);
         const workspacePaths = collectOpenWorkspaceArgs(argv);
         if (!bootstrapComplete) {
           pendingOpenPaths.push(...workspacePaths);
           return;
         }
-        if (handoffIntent === "rejected" && workspacePaths.length === 0) return;
+        if (linked) flushPendingWorkLink();
+        // A work link shows its own window, and a dohc: argument that is not a
+        // link dohc knows opens nothing.
+        if ((linked || handoffIntent === "rejected") && workspacePaths.length === 0) return;
         void windows.showOrCreate().then((window) => openWorkspacePaths(workspacePaths, window));
       });
 

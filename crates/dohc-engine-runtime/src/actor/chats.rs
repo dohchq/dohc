@@ -1,15 +1,15 @@
 use super::ActorHandle;
 use crate::error::RuntimeError;
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary, ChatAgentReadState,
-    ChatAgentRequest, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
-    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFollow,
-    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
-    ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
-    DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
-    ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel,
-    UnreadFileThread,
+    AgentReader, AgentRunRecord, AgentUnreadThreadRow, ChannelGroup, ChannelThreadSummary,
+    ChatAgentReadState, ChatAgentRequest, ChatAgentRequestDetail, ChatAttachment, ChatBookmark,
+    ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
+    ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadLane, ChatThreadProjection,
+    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery, FollowTargetKind,
+    LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, StreamPage,
+    StreamPosition, ThreadDispatchPause, ThreadWithChannel, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -325,13 +325,12 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         handle: String,
-        unread_only: bool,
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
+                .list_mentions_for_handle(&workspace_id, &handle, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await
@@ -521,13 +520,37 @@ impl ActorHandle {
     pub async fn chat_agent_unread_requests(
         &self,
         workspace_id: String,
-        run_id: String,
+        reader: AgentReader,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_requests(&workspace_id, &run_id, after, limit)
+                .list_agent_unread_requests(&workspace_id, &reader, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn chat_agent_requests_page(
+        &self,
+        workspace_id: String,
+        reader: AgentReader,
+        channel_id: Option<String>,
+        thread_id: Option<String>,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequestDetail>, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .list_agent_requests_page(
+                    &workspace_id,
+                    &reader,
+                    channel_id.as_deref(),
+                    thread_id.as_deref(),
+                    after,
+                    limit,
+                )
                 .map_err(RuntimeError::from)
         })
         .await
@@ -536,13 +559,13 @@ impl ActorHandle {
     pub async fn chat_agent_unread_threads(
         &self,
         workspace_id: String,
-        run_id: Option<String>,
+        reader: AgentReader,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_threads(&workspace_id, run_id.as_deref(), after, limit)
+                .list_agent_unread_threads(&workspace_id, &reader, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await
@@ -552,7 +575,7 @@ impl ActorHandle {
     pub async fn chat_agent_mark_thread_read(
         &self,
         workspace_id: String,
-        run_id: Option<String>,
+        reader: AgentReader,
         thread_id: String,
         up_to_created_at_ms: i64,
         up_to_message_id: String,
@@ -567,7 +590,7 @@ impl ActorHandle {
                 chats
                     .mark_thread_read_by_agent(
                         &workspace_id,
-                        run_id.as_deref(),
+                        &reader,
                         &thread_id,
                         up_to_created_at_ms,
                         &up_to_message_id,
@@ -830,6 +853,35 @@ impl ActorHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn chat_bookmark_retry_failed(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        generation: i64,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<ChatBookmarkTransition, RuntimeError> {
+        self.run_chats(move |chats| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                chats
+                    .retry_failed_bookmark(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_bookmark_mark_failed(
         &self,
         workspace_id: String,
@@ -923,6 +975,7 @@ impl ActorHandle {
     pub async fn chat_dispatch_claim_next_pending(
         &self,
         workspace_id: String,
+        agent_id: String,
         run_id: String,
         command: String,
         log_path: Option<String>,
@@ -936,6 +989,7 @@ impl ActorHandle {
                 chats
                     .claim_next_pending(
                         &workspace_id,
+                        &agent_id,
                         &run_id,
                         &command,
                         log_path.as_deref(),
@@ -1209,7 +1263,7 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn chat_dispatch_list_app_quit_recoveries(
+    pub async fn chat_dispatch_list_failed_run_recoveries(
         &self,
         workspace_id: String,
         thread_id: Option<String>,
@@ -1218,7 +1272,7 @@ impl ActorHandle {
     ) -> Result<Vec<DispatchRecovery>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_app_quit_recoveries(&workspace_id, thread_id.as_deref(), after, limit)
+                .list_failed_run_recoveries(&workspace_id, thread_id.as_deref(), after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

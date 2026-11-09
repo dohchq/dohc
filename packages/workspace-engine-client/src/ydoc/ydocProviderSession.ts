@@ -15,6 +15,7 @@ import {
   type EngineTransport,
   type LargeSeedReading,
   type YdocAdapterSession,
+  type YdocDeliveredHead,
 } from "./ydocLiveAdapter";
 import type {
   YdocContentKind,
@@ -64,6 +65,7 @@ export class YdocReleasedWithSettleFailureError extends Error {
 }
 
 export interface EngineYdocProviderSessionOptions {
+  allowLossySourceSha256?: string;
   transport: EngineTransport;
   // Share one adapter across every doc on a given transport so request ids stay
   // unique per session generation (bot #3601684269). When omitted a private
@@ -83,13 +85,14 @@ export interface EngineYdocProviderSessionOptions {
   seedAbsentLineage?: boolean;
   // Forwarded to the adapter: reads a seed past the in-band cap as a blob.
   largeSeed?: LargeSeedReading;
-  onRemoteUpdate: (update: Uint8Array) => void;
+  // `head` comes with a resync's state and with this session's own settle.
+  onRemoteUpdate: (update: Uint8Array, head?: YdocDeliveredHead) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onLocalUpdateAcknowledged?: (idempotencyKey: string, lane: "journal" | "owner-outbox") => void;
   onLocalUpdateRefused?: (idempotencyKey: string, error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
-  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
+  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
   onSessionError?: (error: unknown) => void;
   // Complete a durable set-aside handoff before a terminal release drops unsent state.
   preserveUnsentState?: (doc: Y.Doc) => Promise<void>;
@@ -114,6 +117,7 @@ export interface EngineYdocProviderSession {
     flush(): Promise<void>;
     applyRemoteUpdate(update: Uint8Array): Promise<void>;
     onDurableLocalChange(handler: () => void): () => void;
+    onSettlementWanted(handler: () => void): () => void;
     /** Resolves once a resync the engine requested has landed, and at once if none is pending. */
     resyncIfNeeded(): Promise<void>;
   };
@@ -138,6 +142,7 @@ export interface EngineYdocProviderSession {
   // phantom file on the first keystroke. The consumer owns that decision; the
   // contract is stated on `WorkspaceEngineCapture.openYDocSession`.
   readonly head: "present" | "absent";
+  readonly headSha256?: string | null;
   // Whether the daemon resumed durable CRDT state for this object. Read with
   // `head`: head-absent plus lineage-existing is a crash-orphaned draft the
   // daemon deliberately resurrects, and its CRDT rows are the only copy of
@@ -161,7 +166,7 @@ export interface EngineYdocProviderSession {
   // holds another history, `onLineageReplaced` has announced it by then.
   resync?(): Promise<void>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
-  settleNow(options?: { summary?: string; ifNeeded?: boolean }): Promise<YdocSettleResult | undefined>;
+  settleNow(options?: { summary?: string; ifNeeded?: boolean; allowLossySourceSha256?: string }): Promise<YdocSettleResult | undefined>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
   // pending edits survive a transient failure. A caller that must never
@@ -189,6 +194,7 @@ export async function openEngineYdocProviderSession(
   let session: YdocAdapterSession;
   try {
     session = await adapter.openSession({
+      ...(options.allowLossySourceSha256 ? { allowLossySourceSha256: options.allowLossySourceSha256 } : {}),
       workspace: options.workspace,
       versionId: options.versionId,
       path: options.path,
@@ -280,6 +286,7 @@ export async function openEngineYdocProviderSession(
   async function runSettle(
     summary?: string,
     retrySignal = settleRetryController.signal,
+    allowLossySourceSha256?: string,
   ): Promise<YdocSettleResult> {
     // Each outcome names its settle, including a failure before the native write.
     const token = ++settleTokens;
@@ -296,7 +303,8 @@ export async function openEngineYdocProviderSession(
         if (localEditError !== null) throw localEditError;
         const revision = documentRevision;
         const result = await retryWhileEngineBusy(() =>
-          session.settle(summary !== undefined ? { summary } : undefined),
+          session.settle({ ...(summary !== undefined ? { summary } : {}),
+            ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}) }),
           retrySignal,
         );
         // Artifact verification must finish before close can reuse this settle.
@@ -367,10 +375,11 @@ export async function openEngineYdocProviderSession(
     return journaled;
   }
 
-  const unsubscribeRemote = session.onRemoteUpdate((update) => {
+  const unsubscribeRemote = session.onRemoteUpdate((update, head) => {
     if (closed) return;
-    options.onRemoteUpdate(update);
-    requestSettle();
+    options.onRemoteUpdate(update, head);
+    // A head with no change is nothing to save.
+    if (update.byteLength > 2) requestSettle();
   });
   const unsubscribeRemoteError = session.onRemoteApplyError((error) => {
     noteDocumentChange();
@@ -381,12 +390,12 @@ export async function openEngineYdocProviderSession(
     options.onResyncNeeded?.(error);
   });
   const unsubscribeReplacement = session.onLineageReplaced(
-    (replacement, recoveredPaths) => {
+    (replacement, recoveredPaths, head) => {
       observedDoc.off("update", noteDocumentChange);
       observedDoc = replacement;
       observedDoc.on("update", noteDocumentChange);
       noteDocumentChange();
-      options.onLineageReplaced?.(replacement, recoveredPaths);
+      options.onLineageReplaced?.(replacement, recoveredPaths, head);
     },
   );
   const unsubscribeSessionError = session.onSessionError((error) => {
@@ -427,6 +436,7 @@ export async function openEngineYdocProviderSession(
     nativeOwner: {
       get sessionId() { return session.sessionId; },
       onDurableLocalChange: handler => session.onDurableLocalChange(handler),
+      onSettlementWanted: handler => session.onSettlementWanted(handler),
       async flush() {
         if (closed) throw new Error("Owner session is closed.");
         await journalChain;
@@ -462,6 +472,7 @@ export async function openEngineYdocProviderSession(
     },
     path: session.path,
     head: session.head,
+    get headSha256() { return session.headSha256; },
     lineage: session.lineage,
     unsettled: session.unsettled,
 
@@ -511,10 +522,10 @@ export async function openEngineYdocProviderSession(
     },
 
     async settleNow(settleOptions) {
-      if (settleOptions?.ifNeeded && canSkipSettle()) return;
+      if (!settleOptions?.allowLossySourceSha256 && settleOptions?.ifNeeded && canSkipSettle()) return;
       cancelSettle?.();
       cancelSettle = null;
-      const operation = runSettle(settleOptions?.summary);
+      const operation = runSettle(settleOptions?.summary, undefined, settleOptions?.allowLossySourceSha256);
       // The caller gets the rejection; the retry is armed here too, because
       // an explicit flush that hit the lock leaves the same durably pending
       // write as a debounced one.

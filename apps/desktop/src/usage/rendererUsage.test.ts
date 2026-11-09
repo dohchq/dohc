@@ -78,7 +78,7 @@ describe("renderer usage", () => {
     const workspace = { workspaceId: "PRIVATE WORKSPACE" };
     const versions = { versions: [], activeVersionId: "PRIVATE VERSION" };
     usage.version.createWorkspaceVersion!({ ...workspace, name: "PRIVATE NAME" }, versions, event);
-    usage.version.mergeWorkspaceVersion!({ ...workspace, versionId: "PRIVATE VERSION" }, { mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null }, event);
+    usage.version.mergeWorkspaceVersion!({ ...workspace, versionId: "PRIVATE VERSION" }, { mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null }, event);
     usage.version.resolveWorkspaceVersionConflict!({ ...workspace, conflictId: "PRIVATE CONFLICT", resolution: { kind: "keep-current" } }, { conflicts: [], nextAfterConflictId: null }, event);
     expect(record.mock.calls.map(([row]) => row)).toEqual([
       ...["version.create", "version.merge", "version.conflict.resolve"]

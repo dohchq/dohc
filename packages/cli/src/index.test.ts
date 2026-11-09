@@ -157,6 +157,19 @@ describe("executeCli", () => {
     expect(result.stdout).toBe("replied th_8f2k1c msg_new\n");
   });
 
+  it("names the agent with --agent on a post and a reply, and refuses a name with a slash", async () => {
+    const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async () => ({ threadId: "th_1", messageId: "msg_1" }));
+    await executeCli({ argv: ["chat", "post", "general", "--as-agent", "--agent", "Scout", "done"], cwd: "/workspace", env: {}, request });
+    await executeCli({ argv: ["chat", "reply", "th_8f", "--as-agent", "--agent", "Scout", "done"], cwd: "/workspace", env: {}, request });
+    expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
+      ["post", expect.objectContaining({ actor: "agent", group: "general", body: "done", agent: "Scout" })],
+      ["reply", expect.objectContaining({ actor: "agent", thread: "th_8f", body: "done", agent: "Scout" })],
+    ]);
+    const refused = await executeCli({ argv: ["chat", "reply", "th_8f", "--as-agent", "--agent", "auto/run", "done"], cwd: "/workspace", env: {}, request });
+    expect(refused.exitCode).not.toBe(0);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["post", ["chat", "post", "general", "-"]],
     ["reply", ["chat", "reply", "th_8f", "-"]],

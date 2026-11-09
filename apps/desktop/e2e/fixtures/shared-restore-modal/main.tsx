@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+// The app's font, so toasts wrap as they do in the app.
+import "@fontsource-variable/inter";
 import type { EngineMomentRecord } from "../../../src/ipc/bridgeContract";
 import { OwnerRestoreDialog } from "../../../src/renderer/OwnerRestoreDialog";
 import { EngineHistoryView } from "../../../src/renderer/workbench/EngineHistory";
@@ -61,7 +63,7 @@ let status = { operationId: "restore", document: documentKey, path, phase: "nati
 
 const workspaceError: WorkspaceErrorNotice = {
   id: "share-refresh", message: "dohc could not refresh who can edit notes/launch-plan.md. Check your connection, then try again.",
-  details: "Notice: Sharing refresh failed", atMs: 1_788_922_800_000, canRetry: true, seen: false,
+  copy: { report: "Notice: Sharing refresh failed" }, atMs: 1_788_922_800_000, canRetry: true, seen: false,
 };
 const ignore = () => {};
 // Several days of History, so a day heading sticks at the top of the list.
@@ -149,6 +151,9 @@ function SharedRestoreFixture() {
           onClose={() => setOpen(false)}
           onBeforeRestore={async () => ignore}
           onRestored={() => setRestored(true)}
+          onError={ignore}
+          onSettled={ignore}
+          onChanged={ignore}
         />
       ) : null}
     </main>

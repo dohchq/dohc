@@ -12,6 +12,41 @@ import {
 } from "./chatsWireContract";
 
 describe("chats result decoder rejection", () => {
+  it("decodes each stream item's optional poll decision", () => {
+    const item = {
+      position: { createdAtMs: 1, lane: "posts", id: "post" },
+      message: {
+        id: "root", workspaceId: "workspace", threadId: "post",
+        author: { kind: "human", displayName: "Sam" },
+        body: "Train or bus?", createdAtMs: 1, attachments: [],
+      },
+      reactions: [],
+      post: { replyCount: 0, repliers: [], openDecisionCount: 0 },
+    };
+    const open = {
+      threadId: "post", messageId: "root", state: "open", atMs: 1,
+      options: ["Train", "Bus"],
+    };
+    const resolved = {
+      ...open, state: "resolved", atMs: 2, chosenOption: "Train", resolvedByMessageId: "answer",
+    };
+    for (const decision of [open, resolved]) {
+      const decoded = decodeChatsResult(CHATS_METHOD.streamList, {
+        items: [{ ...item, decision }], nextBefore: null, readPosition: null,
+      });
+      expect(decoded.items[0]?.decision).toEqual(decision);
+    }
+    const plain = decodeChatsResult(CHATS_METHOD.streamList, {
+      items: [item], nextBefore: null, readPosition: null,
+    });
+    expect(plain.items[0]?.decision).toBeUndefined();
+    for (const decision of [null, { ...open, state: "invalid" }, { ...open, options: [1] }]) {
+      expect(() => decodeChatsResult(CHATS_METHOD.streamList, {
+        items: [{ ...item, decision }], nextBefore: null, readPosition: null,
+      })).toThrow(ProtocolShapeError);
+    }
+  });
+
   it("preserves prototype-named message ids in a null-prototype run map", () => {
     const run: JsonValue = {
       workspaceId: "chat-loopback",
@@ -199,6 +234,21 @@ describe("chats result decoder rejection", () => {
     expect(fileMentions?.entries[0]?.message.createdAtMs).toBe(-40);
   });
 
+  it("keeps the agent that wrote a post's opening message", () => {
+    const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
+      threads: [{
+        thread: { id: "t", workspaceId: "w", title: "Done", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
+        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
+        openingMessage: {
+          id: "m", author: { kind: "agent", displayName: "Codex" }, authorAgentId: "codex",
+          createdAtMs: 1, bodySnippet: "Done", reactions: [],
+        },
+      }],
+      nextCursor: null,
+    });
+    expect(summaries.threads[0]?.openingMessage?.authorAgentId).toBe("codex");
+  });
+
   it("reports a wrong-typed nested field path", () => {
     expect(() =>
       decodeChatMessage({
@@ -283,6 +333,18 @@ describe("link messages", () => {
       mentions: [{ threadId: "t", messageId: "m", handle: "ada", authorKind: "link", createdAtMs: 1 }],
       nextCursor: null,
     }).mentions[0]?.authorKind).toBe("link");
+  });
+
+  it("decodes an agent's link message with its connection, and only on a link author", () => {
+    const agent = { ...linkAuthor, displayName: "Helper", agentConnectionId: "connection-1" };
+    expect(decodeChatMessage({ ...linkMessage, author: agent }).author).toEqual(agent);
+    for (const author of [
+      { ...agent, agentConnectionId: "" },
+      { kind: "human", displayName: "Ada", agentConnectionId: "connection-1" },
+      { kind: "agent", displayName: "Helper", agentConnectionId: "connection-1" },
+    ]) {
+      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(ProtocolShapeError);
+    }
   });
 
   it("rejects a link message that names an account or lacks its link", () => {

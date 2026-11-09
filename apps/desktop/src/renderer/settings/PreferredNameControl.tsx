@@ -66,6 +66,9 @@ export function PreferredNameControl(props: {
         type="text"
         aria-label="Your name"
         data-testid={`${prefix}-input`}
+        data-unsaved={draft.trim() !== (props.value ?? "") ? true : undefined}
+        // A changed name takes the first Escape, which puts it back.
+        data-edit-in-place={draft !== (props.value ?? "") ? true : undefined}
         value={draft}
         maxLength={MAX_PREFERRED_NAME_LENGTH}
         disabled={saving}

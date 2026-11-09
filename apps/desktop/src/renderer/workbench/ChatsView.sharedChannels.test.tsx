@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
+import { inputCount } from "../ui/inputCount";
 import {
   ChatsView,
   channel,
@@ -22,19 +23,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
 
-  it("keeps the account email visible beside long invitation labels", async () => {
+  it("shows a long invitation's sender on one line that truncates, with the full label in its title", async () => {
     const subject = "Long group subject ".repeat(8), name = "Long sender name ".repeat(8), email = "account@example.test";
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({received: [{
       shareId: "share-invite", subjectName: subject, sharerName: name,
       channelWireId: "wire-invite", access: "read-write", granterEmail: email,
     }]}));
     renderView();
-    const address = await screen.findByText(`(${email})`);
-    expect(address.classList.contains("shrink-0")).toBe(true);
-    expect(address.classList.contains("break-all")).toBe(true);
-    expect(address.closest(".truncate")).toBeNull();
-    expect(address.parentElement?.title).toBe(`${name.trim()} (${email})`);
-    expect(address.parentElement?.parentElement?.title).toBe(`${subject} · ${name.trim()} (${email})`);
+    const full = `${name.trim()} (${email})`;
+    const sender = await screen.findByTitle(full);
+    expect(sender.textContent).toBe(full);
+    expect(sender.children).toHaveLength(0);
+    expect(sender.classList.contains("truncate")).toBe(true);
+    expect(sender.parentElement?.title).toBe(`${subject} · ${full}`);
   });
 
   it("fails closed when sharing metadata is unavailable", async () => {
@@ -635,7 +636,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
     const undo = alreadyEnded ? undefined : { undoId: "undo-1", expiresAtMs: 600_000 };
     bridgeMock.revokeRelayShare.mockResolvedValue({ undo });
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
     renderView(vi.fn(), vi.fn(), { shareRemovals });
     expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
       "Shared with 1",
@@ -663,7 +664,13 @@ describe("ChatsView shared channels (MU-C4)", () => {
       restoredMessage: "Restored ana@example.com to team.",
     });
 
-    // Sharing to a new address, read-only via the checkbox.
+    // Adding someone as View only. The dialog stays open with the field
+    // cleared and Can post chosen again, ready for the next person, even
+    // while the member list is still reloading.
+    let finishListing = () => {};
+    bridgeMock.listChatChannelShares.mockImplementation(
+      () => new Promise((resolve) => { finishListing = () => resolve(shareListing()); }),
+    );
     await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
     await userEvent.click(screen.getByTestId("chats-share-readonly"));
     await userEvent.click(screen.getByTestId("chats-share-submit"));
@@ -675,6 +682,19 @@ describe("ChatsView shared channels (MU-C4)", () => {
         access: "read-only",
       }),
     );
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe(""),
+    );
+    expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
+    await userEvent.type(screen.getByTestId("chats-share-email"), "cy@example.com");
+    await act(async () => finishListing());
+    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("cy@example.com");
+
+    // Close leaves the members button where it was.
+    await userEvent.click(screen.getByTestId("chats-share-close"));
+    expect(screen.queryByTestId("chats-share-panel")).toBeNull();
+    expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
   });
 
   // A revocation that landed is a local fact. When the confirming refresh
@@ -1001,6 +1021,100 @@ describe("ChatsView shared channels (MU-C4)", () => {
         expect((button as HTMLButtonElement).disabled).toBe(false);
       }
     });
+  });
+
+  it("shows the invitation a notice's Open names, with its Join focused and its row marked until the next input", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: ["share-in", "share-in-2"].map((shareId) => ({
+          shareId,
+          channelWireId: `wire-${shareId}`,
+          access: "read-write" as const,
+          granterEmail: "owner@example.com",
+        })),
+      }),
+    );
+    const onInvitationRevealed = vi.fn();
+    renderView(vi.fn(), vi.fn(), { revealInvitation: { shareId: "share-in-2", inputs: inputCount() }, onInvitationRevealed });
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const joins = screen.getAllByTestId("chats-join-shared");
+    expect(document.activeElement).toBe(joins[1]);
+    expect(joins[1]!.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+    const row = joins[1]!.closest("li")!;
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(row.className).toContain("bg-selected");
+    expect(joins[0]!.closest("li")!.getAttribute("aria-current")).toBeNull();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    });
+    expect(row.getAttribute("aria-current")).toBeNull();
+    expect(row.className).not.toContain("bg-selected");
+  });
+
+  it("reads the shares again for an invitation a notice's Open names that arrived after Chats listed them", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    const received = (shareId: string) => ({
+      shareId,
+      channelWireId: `wire-${shareId}`,
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ received: [received("share-in")] }));
+    const props = {
+      workspaceId: "workspace-a",
+      workspaces: [{ workspaceId: "workspace-a", label: "Work" }],
+      onOpenFileChat: vi.fn(),
+      onError: vi.fn(),
+    };
+    const { rerender } = render(<ChatsView {...props} />);
+    await screen.findByTestId("chats-join-shared");
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ received: [received("share-in"), received("share-new")] }));
+    const onInvitationRevealed = vi.fn();
+    rerender(<ChatsView {...props} revealInvitation={{ shareId: "share-new", inputs: inputCount() }} onInvitationRevealed={onInvitationRevealed} />);
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const join = screen.getAllByTestId("chats-join-shared").find((button) => button.getAttribute("data-invitation") === "share-new")!;
+    expect(document.activeElement).toBe(join);
+    expect(join.closest("li")!.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("waits to show the invitation a notice's Open names until another Join finishes joining", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        received: ["share-in", "share-in-2"].map((shareId) => ({
+          shareId,
+          channelWireId: `wire-${shareId}`,
+          access: "read-write" as const,
+          granterEmail: "owner@example.com",
+        })),
+      }),
+    );
+    let finishJoin = () => {};
+    bridgeMock.joinSharedChannel.mockReturnValueOnce(new Promise((resolve) => {
+      finishJoin = () => resolve({ joined: { shareId: "share-in", channelWireId: "wire-share-in", access: "read-write", granterEmail: "owner@example.com", ended: false } });
+    }));
+    const props = {
+      workspaceId: "workspace-a",
+      workspaces: [{ workspaceId: "workspace-a", label: "Work" }],
+      onOpenFileChat: vi.fn(),
+      onError: vi.fn(),
+    };
+    const { rerender } = render(<ChatsView {...props} />);
+    const joins = await screen.findAllByTestId("chats-join-shared");
+    await userEvent.click(joins[0]!);
+    await waitFor(() => expect((joins[1] as HTMLButtonElement).disabled).toBe(true));
+    const onInvitationRevealed = vi.fn();
+    rerender(<ChatsView {...props} revealInvitation={{ shareId: "share-in-2", inputs: inputCount() }} onInvitationRevealed={onInvitationRevealed} />);
+    // Runs Chats' pending effects, where a reveal would mark the row.
+    await act(async () => undefined);
+    expect(onInvitationRevealed).not.toHaveBeenCalled();
+    expect(joins[1]!.closest("li")!.getAttribute("aria-current")).toBeNull();
+    await act(async () => finishJoin());
+    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
+    const join = screen.getAllByTestId("chats-join-shared").find((button) => button.getAttribute("data-invitation") === "share-in-2")!;
+    expect(document.activeElement).toBe(join);
+    expect(join.closest("li")!.getAttribute("aria-current")).toBe("true");
   });
 
   it("offers an explicit rejoin action for an ended leave tombstone", async () => {

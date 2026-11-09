@@ -46,7 +46,7 @@ test("a sync the server cannot take names the server, offers Try again, and clea
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "sync-failure-e2e";
-  const relayDb = join(temp.baseDir, "relay.sqlite");
+  const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -102,7 +102,7 @@ test("a sync the server cannot take names the server, offers Try again, and clea
     await syncRow.getByRole("button", { name: "Try again" }).click();
     await expect(toast).toContainText("dohc could not reach the server.", { timeout: 60_000 });
     await expect(page.getByTestId("workspace-shell-error-retry")).toBeVisible();
-    await expect(page.getByTestId("workspace-shell-error-copy")).toBeVisible();
+    await expect(page.getByTestId("workspace-shell-error-details")).toBeVisible();
     await expect(titlebar).toHaveText("Server unreachable");
 
     // The server comes back. Nothing else would start a pass for ten

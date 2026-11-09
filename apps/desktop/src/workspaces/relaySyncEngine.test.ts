@@ -6,6 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   RelayIdentityMissingError,
   RelayClaimRefusedError,
+  type MaterializeRelayPullPage,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
@@ -24,14 +25,14 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // exactly like the real capture implementation.
 const claimMock = vi.fn<() => Promise<void>>();
 const pushMock = vi.fn<RelaySyncOperations["push"]>();
-const pullMock = vi.fn<RelaySyncOperations["pull"]>();
+const pullMock = vi.fn<(materializePage: MaterializeRelayPullPage) => Promise<PullWorkspaceFromRelayResult>>();
 const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
   return {
     claim: claimMock,
     push: pushMock,
-    pull: pullMock,
+    pull: (runBatch) => runBatch(pullMock),
     recoverOrigin: recoverMock,
   };
 }
@@ -132,7 +133,7 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<boolean>;
-  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  afterSuccessfulPull?: (pass: { recovered: boolean; applied: boolean }) => Promise<void>;
   afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
@@ -183,6 +184,41 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("admits capture, document opens, and History while a fetch waits", async () => {
+    const {serialCapture, enqueue} = serialCaptureFake();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const operations: RelaySyncOperations = {
+      ...mockOperations(),
+      pull: async runBatch => {
+        entered.resolve();
+        await release.promise;
+        return runBatch(async materialize => {
+          events.push("apply");
+          await materialize([]);
+          events.push("commit");
+          return pullResult();
+        });
+      },
+    };
+    const sync = engine({capture: serialCapture, operations});
+    const syncing = sync.start();
+    await entered.promise;
+    try {
+      await Promise.all(["capture write", "document open", "History"].map(action => enqueue(async () => {
+        events.push(action);
+      })));
+      expect(events).toEqual(["capture write", "document open", "History"]);
+      expect(chainHeld).toBe(0);
+    } finally {
+      release.resolve();
+      await syncing;
+      await sync.stop();
+    }
+    expect(events).toEqual(["capture write", "document open", "History", "apply", "commit"]);
+  });
+
   it("opens documents and writes while a push waits on the relay, and pulls between drain passes", async () => {
     const events: string[] = [];
     const fake = serialCaptureFake();
@@ -342,7 +378,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(pushMock).toHaveBeenCalledTimes(pushes + 1);
     expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
-    expect(afterSuccessfulPull).toHaveBeenLastCalledWith({ recovered: true });
+    expect(afterSuccessfulPull).toHaveBeenLastCalledWith(expect.objectContaining({ recovered: true }));
     await sync.stop();
     errorSpy.mockRestore();
   });
@@ -659,7 +695,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(500);
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
-    expect(afterSuccessfulPull.mock.calls).toEqual([[{ recovered: true }], [{ recovered: false }]]);
+    expect(afterSuccessfulPull.mock.calls).toEqual([[expect.objectContaining({ recovered: true })], [expect.objectContaining({ recovered: false })]]);
 
     errorSpy.mockRestore();
     await sync.stop();
@@ -1429,6 +1465,33 @@ describe("relaySyncEngine", () => {
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
   });
 
+  it("announces a quiet pull that fetched a change it could not apply yet", async () => {
+    const onChange = vi.fn();
+    const cap = capture();
+    const sync = engine({ capture: cap, onChange });
+    await sync.start();
+    onChange.mockClear();
+
+    // Another computer's newer save waits behind an open conflict: the pull
+    // fetches it and applies nothing, and an open review must still hear it.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 1 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledOnce();
+
+    // The echo of this computer's own upload is skipped, and a pull that
+    // fetched nothing changes nothing: both stay quiet.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 2, skipped: 2 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    expect(onChange).toHaveBeenCalledOnce();
+    await sync.stop();
+  });
+
   it("restarts the quiet interval after every pass and leaves a failed pull's retry to the backoff", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const cap = capture();
@@ -1865,4 +1928,219 @@ it("keeps owner admission pending after a successful pull and clears it only aft
   expect(sync.snapshot().ownerAdmissionPending).toEqual([]);
   expect(sync.snapshot().pendingChangeCount).toBe(0);
   await sync.stop();
+});
+
+// #3089: the move guard's relay pass. It never cancels, moves or re-arms
+// ordinary work, and once its move stops waiting it skips its pull.
+describe("relaySyncEngine guard pass", () => {
+  const pushed = (hasMore = false) => ({ pushed: hasMore ? 500 : 0, hasMore, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] });
+  const live = () => new AbortController().signal;
+  const bootstrapEngine = () => createRelaySyncEngine({ rootDir: "/tmp/workspace", relay: { baseUrl: "http://relay.test", token: "token" },
+    operations: mockOperations(), capture: capture(), onChange: vi.fn(), joinBootstrap: true, debounceMs: 100,
+    initialBackoffMs: 500, maxBackoffMs: 2000, nowMs: () => 12345 });
+  // Fake time since the call, at each pull.
+  function pullTimes() {
+    const started = Date.now();
+    const times: number[] = [];
+    pullMock.mockImplementation(async () => { times.push(Date.now() - started); return pullResult(); });
+    return times;
+  }
+  function heldPush() {
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    pushMock.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return pushed(); });
+    return { entered: entered.promise, release: () => release.resolve() };
+  }
+
+  it("sends nothing for a move that stopped waiting while its pass was queued, and keeps the write's debounce", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockClear();
+    pullMock.mockClear();
+    const held = heldPush();
+    const ordinary = sync.retryNow({ countsAsAttempt: true });
+    await held.entered;
+    sync.queueSync();
+    const controller = new AbortController();
+    const guarded = sync.catchUp({ signal: controller.signal });
+    controller.abort();
+    held.release();
+    await ordinary;
+    await guarded;
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    await sync.stop();
+  });
+
+  it("skips the pull of a move that stopped waiting during the push, and keeps the write's debounce", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockClear();
+    pullMock.mockClear();
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(50);
+    const held = heldPush();
+    const controller = new AbortController();
+    const guarded = sync.catchUp({ signal: controller.signal });
+    await held.entered;
+    controller.abort();
+    held.release();
+    await guarded;
+    expect(pullMock).not.toHaveBeenCalled();
+    expect(sync.snapshot()).toMatchObject({ syncing: false, syncFailure: null });
+    await vi.advanceTimersByTimeAsync(49);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    await sync.stop();
+  });
+
+  it("keeps a pull deadline while writes and later guards arrive", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    const times = pullTimes();
+    sync.queueSync();
+    sync.queuePull();
+    for (let guard = 0; guard < 3; guard += 1) {
+      await vi.advanceTimersByTimeAsync(30);
+      sync.queueSync();
+      await sync.catchUp({ signal: live() });
+    }
+    // The pull asked for at 0 runs at 100. Its pass carries the writes, so the
+    // debounce they moved to 190 never fires.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(times).toEqual([30, 60, 90, 100]);
+    await sync.stop();
+  });
+
+  it("runs a backlog a guard pass left one debounce after that pass, whatever writes and later guards arrive", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockClear();
+    const times = pullTimes();
+    pushMock.mockResolvedValue(pushed(true));
+    await sync.catchUp({ signal: live() });
+    for (let guard = 0; guard < 3; guard += 1) {
+      await vi.advanceTimersByTimeAsync(30);
+      sync.queueSync();
+      await sync.catchUp({ signal: live() });
+    }
+    pushMock.mockResolvedValue(pushed());
+    await vi.advanceTimersByTimeAsync(10);
+    expect(times).toEqual([0, 30, 60, 90, 100]);
+    expect(pushMock).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(times).toEqual([0, 30, 60, 90, 100]);
+    await sync.stop();
+  });
+
+  it("finishes a pull already under way when the move stops waiting", async () => {
+    const afterSuccessfulPull = vi.fn(async () => undefined);
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+    await sync.start();
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    pullMock.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return pullResult({ fetched: 1, applied: 1, nextCursor: 3 }); });
+    const controller = new AbortController();
+    const guarded = sync.catchUp({ signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    release.resolve();
+    await guarded;
+    expect(afterSuccessfulPull).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot()).toMatchObject({ syncing: false, syncFailure: null });
+    await sync.stop();
+  });
+
+  it("leaves a bootstrap engine pull-only when the move stopped waiting", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = bootstrapEngine();
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    pullMock.mockImplementationOnce(async () => { entered.resolve(); await release.promise; throw new RelayUnreachableError(); });
+    const started = sync.start().catch(() => undefined);
+    await entered.promise;
+    const controller = new AbortController();
+    const guarded = sync.catchUp({ signal: controller.signal });
+    controller.abort();
+    release.resolve();
+    await started;
+    await guarded;
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    // The next pass still pulls first, and pushes only after that pull succeeds.
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(pushMock).not.toHaveBeenCalled();
+    await vi.runAllTimersAsync();
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pushMock.mock.invocationCallOrder[0]!).toBeGreaterThan(pullMock.mock.invocationCallOrder[1]!);
+    await sync.stop();
+    errorSpy.mockRestore();
+  });
+
+  it("brings a bootstrap engine to a normal pass one debounce after a guard's first pull", async () => {
+    const sync = bootstrapEngine();
+    await sync.catchUp({ signal: live() });
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(99);
+    expect(pushMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    await sync.stop();
+  });
+
+  it.each(["a relay watch notification", "a direct pull request"])("pulls for %s that arrived while a guard's push was held", async (request) => {
+    const waits = relayWaits();
+    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 5 }));
+    const sync = engine({ capture: capture(), waitForChange: waits.wait, idlePullMs: 60_000 });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(0);
+    pushMock.mockClear();
+    pullMock.mockClear();
+    pullMock.mockImplementation(async () => pullResult({ fetched: 1, applied: 1, nextCursor: 6 }));
+    const held = heldPush();
+    const controller = new AbortController();
+    const guarded = sync.catchUp({ signal: controller.signal });
+    await held.entered;
+    if (request === "a relay watch notification") waits.answer(true);
+    else sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    held.release();
+    await guarded;
+    // The ordinary pass queued behind the guard pulls, with no further request.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pullMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledTimes(2);
+    await sync.stop();
+  });
+
+  it("keeps the due time of a pull asked for during a held guard push while writes and later guards arrive", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    const times = pullTimes();
+    const held = heldPush();
+    const controller = new AbortController();
+    const guarded = sync.catchUp({ signal: controller.signal });
+    await held.entered;
+    sync.queueSync();
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(10);
+    controller.abort();
+    held.release();
+    await guarded;
+    for (let guard = 0; guard < 3; guard += 1) {
+      await vi.advanceTimersByTimeAsync(20);
+      sync.queueSync();
+      await sync.catchUp({ signal: live() });
+    }
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(times).toEqual([30, 50, 70, 100]);
+    await sync.stop();
+  });
 });

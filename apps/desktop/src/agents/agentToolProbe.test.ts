@@ -1,15 +1,132 @@
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, posix, win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { deferred, type Deferred } from "../testing/deferred";
 import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentProbeDependencies, type ProbeOutput } from "./agentToolProbe";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 function fixture(overrides: Partial<AgentProbeDependencies> = {}): AgentProbeDependencies {
   return { platform: "win32", home: "C:\\Users\\ice", workspaceRoot: "C:\\Workspace", realPath: (path) => path,
     env: { PATH: 'relative;.;"C:\\Tools"', APPDATA: "C:\\Users\\ice\\AppData\\Roaming" }, isExecutable: () => false,
+    stat: () => { throw new Error("identity unavailable"); },
     signal: new AbortController().signal, run: vi.fn(async () => ({ exitCode: 0, stdout: "1.2.3", stderr: "" })),
     codexMayRunWithoutLogin: () => false, ...overrides };
 }
 
 describe("read-only agent detection", () => {
+  it.for([false, true])("a differently capitalized folder keeps its detection result (resolved: %s)", async (alias, context) => {
+    const disk = mkdtempSync(join(tmpdir(), "dohc-probe-case-"));
+    try {
+      mkdirSync(join(disk, "Work", "bin"), { recursive: true });
+      writeFileSync(join(disk, "Work", "bin", "codex"), "tool");
+      if (!existsSync(join(disk, "work", "bin", "codex"))) context.skip();
+      mkdirSync(join(disk, "outside"));
+      writeFileSync(join(disk, "outside", "codex"), "tool");
+      const lookup = (value: string) => join(disk, value.slice("/disk/".length));
+      const candidate = alias ? "/disk/link/codex" : "/disk/work/bin/codex";
+      const deps = fixture({ platform: "linux", workspaceRoot: "/disk/Work", home: "/home/test",
+        env: { PATH: alias ? "/disk/link" : "/disk/work/bin" },
+        realPath: (value) => value === candidate ? "/disk/work/bin/codex" : value,
+        isExecutable: (value) => value === candidate,
+        stat: (value) => statSync(lookup(value), { bigint: true }),
+      });
+      expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")).toMatchObject({ executable: null, probe: "not-found" });
+      expect(deps.run).not.toHaveBeenCalled();
+      deps.env.PATH += ":/disk/outside";
+      deps.isExecutable = (value) => value === candidate || value === "/disk/outside/codex";
+      expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")).toMatchObject({ executable: "/disk/outside/codex", probe: "detected" });
+      expect(deps.run).toHaveBeenCalledTimes(2);
+    } finally { rmSync(disk, { recursive: true, force: true }); }
+  });
+
+  describe.each(shortNamePairs("/folders", "LongFolderName", posix))("$name", ({ parent, child }) => {
+    describe.each([false, true])("resolved: %s", (resolved) => {
+      it.each(folderIdentities)("keeps the detection result for $name", async ({ identity }) => {
+        const inside = identity !== "different";
+        const target = posix.join(child, "bin", "codex");
+        const candidate = resolved ? "/links/codex" : target;
+        const deps = fixture({ platform: "linux", workspaceRoot: parent, home: "/home/test",
+          env: { PATH: posix.dirname(candidate) }, realPath: (value) => value === candidate ? target : value,
+          isExecutable: (value) => value === candidate,
+          stat: vi.fn(fakeFolderStat(identity, parent, { dev: 2n, ino: 3n }, { dev: 2n, ino: 4n })),
+        });
+        expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")?.probe).toBe(inside ? "not-found" : "detected");
+        expect(deps.stat).toHaveBeenCalled();
+        expect(deps.run).toHaveBeenCalledTimes(inside ? 0 : 2);
+      });
+    });
+  });
+
+  it.each((["win32", "darwin"] as const).flatMap((platform) => [false, true].map((resolved) => ({ platform, resolved }))))("stored spelling decides detection without stat on $platform (resolved: $resolved)", async ({ platform, resolved }) => {
+    const path = platform === "win32" ? win32 : posix;
+    const workspaceRoot = platform === "win32" ? "C:\\Work" : "/Users/me/Work";
+    const candidate = path.join(resolved ? path.join(path.dirname(workspaceRoot), "Links") : workspaceRoot.toLowerCase(), "bin", platform === "win32" ? "codex.EXE" : "codex");
+    const storedCandidate = path.join(workspaceRoot, "bin", path.basename(candidate));
+    const stat = vi.fn(() => ({ dev: 2n, ino: 3n }));
+    const rootLookup = resolved ? workspaceRoot.toLowerCase() : workspaceRoot;
+    const deps = fixture({ platform, workspaceRoot: rootLookup, home: path.dirname(workspaceRoot),
+      env: { PATH: path.dirname(candidate) }, stat, isExecutable: (value) => value === candidate,
+      realPath: (value) => value === rootLookup ? workspaceRoot : value === candidate ? storedCandidate : value,
+    });
+    expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")?.probe).toBe("not-found");
+    expect(stat).not.toHaveBeenCalled();
+    deps.env.PATH = path.join(path.dirname(workspaceRoot), "Tools");
+    const installed = path.join(deps.env.PATH, path.basename(candidate));
+    deps.isExecutable = (value) => value === installed;
+    expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")?.probe).toBe("detected");
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it("lookup spelling and folder identity give consistent Linux detection", async () => {
+    const workspaceRoot = "/mnt/c/Work";
+    const directories = ["/mnt/c/work/bin", "/mnt/c/WORK~1/bin", "/mnt/c/Users/me/AppData/Roaming/npm", "/home/me/.local/bin"];
+    const codex = posix.join(directories[2]!, "codex"), claude = posix.join(directories[3]!, "claude");
+    const deps = fixture({ platform: "linux", workspaceRoot, home: "/home/me", env: { PATH: directories.join(":") },
+      realPath: (value) => value, stat: () => ({ dev: 2n, ino: 3n }),
+      isExecutable: (value) => value === codex || value === claude || directories.slice(0, 2).some((dir) => value === posix.join(dir, "codex")),
+    });
+    const tools = await probeAgentTools(deps);
+    expect(tools.find((tool) => tool.tool === "codex")).toMatchObject({ executable: codex, probe: "detected" });
+    expect(tools.find((tool) => tool.tool === "claude")).toMatchObject({ executable: claude, probe: "detected" });
+    expect(deps.run).toHaveBeenCalledTimes(4);
+  });
+
+  const installs = [
+    { platform: "win32", name: "WinGet", tool: "claude", candidate: "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Links\\claude.exe", target: "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Claude\\claude.exe" },
+    { platform: "win32", name: "npm global", tool: "codex", candidate: "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd", target: "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\codex\\codex.cmd" },
+    { platform: "win32", name: "standalone", tool: "codex", candidate: "C:\\Users\\me\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe", target: "C:\\Users\\me\\.codex\\packages\\current\\codex.exe" },
+    { platform: "win32", name: "user local", tool: "claude", candidate: "C:\\Users\\me\\.local\\bin\\claude.exe", target: "C:\\Users\\me\\.local\\share\\claude\\versions\\current\\claude.exe" },
+    { platform: "win32", name: "subst drive", tool: "codex", candidate: "R:\\Tools\\codex.exe", target: "C:\\Users\\me\\Tools\\codex.exe" },
+    { platform: "win32", name: "mapped drive", tool: "claude", candidate: "X:\\Tools\\claude.exe", target: "\\\\server\\tools\\claude.exe" },
+    { platform: "darwin", name: "Homebrew Caskroom", tool: "claude", candidate: "/opt/homebrew/bin/claude", target: "/opt/homebrew/Caskroom/claude/current/claude" },
+    { platform: "darwin", name: "Homebrew Cellar", tool: "claude", candidate: "/opt/homebrew/bin/claude", target: "/opt/homebrew/Cellar/claude/current/bin/claude" },
+    { platform: "darwin", name: "user local", tool: "claude", candidate: "/Users/me/.local/bin/claude", target: "/Users/me/.local/share/claude/versions/current/claude" },
+    { platform: "darwin", name: "npm global", tool: "codex", candidate: "/Users/me/.npm-global/bin/codex", target: "/Users/me/.npm-global/lib/node_modules/codex/bin/codex" },
+    { platform: "linux", name: "Homebrew", tool: "claude", candidate: "/home/linuxbrew/.linuxbrew/bin/claude", target: "/home/linuxbrew/.linuxbrew/Cellar/claude/current/bin/claude" },
+    { platform: "linux", name: "user local", tool: "claude", candidate: "/home/me/.local/bin/claude", target: "/home/me/.local/share/claude/versions/current/claude" },
+    { platform: "linux", name: "npm global", tool: "codex", candidate: "/home/me/.npm-global/bin/codex", target: "/home/me/.npm-global/lib/node_modules/codex/bin/codex" },
+  ] as const;
+  it.each(installs.flatMap((install) => [false, true].map((resolved) => ({ ...install, resolved }))))(
+    "detects $name on $platform (resolved: $resolved)", async ({ platform, tool, candidate, target, resolved }) => {
+      const path = platform === "win32" ? win32 : posix;
+      const home = platform === "win32" ? "C:\\Users\\me" : platform === "darwin" ? "/Users/me" : "/home/me";
+      const missing = path.join(home, "missing"), unavailable = path.join(home, "unavailable");
+      const unresolved = path.join(unavailable, path.basename(candidate));
+      const windowsApps = path.join(home, "AppData", "Local", "Microsoft", "WindowsApps");
+      const directories = [missing, unavailable, ...(platform === "win32" ? [windowsApps] : []), path.dirname(candidate)];
+      const deps = fixture({ platform, home, workspaceRoot: path.join(home, "Projects", "Work"),
+        env: { PATH: directories.join(platform === "win32" ? ";" : ":"), PATHEXT: ".exe;.cmd" },
+        realPath: (value) => value === unresolved ? null : value === candidate && resolved ? target : value,
+        isExecutable: (value) => value === candidate || value === unresolved,
+        stat: vi.fn(() => { throw new Error("unexpected identity lookup"); }),
+      });
+      expect((await probeAgentTools(deps)).find((result) => result.tool === tool)).toMatchObject({ executable: candidate, probe: "detected" });
+      expect(deps.run).toHaveBeenCalledTimes(2);
+      expect(deps.run).toHaveBeenCalledWith(candidate, ["--version"], deps.signal);
+      expect(deps.stat).not.toHaveBeenCalled();
+    },
+  );
   it("resolves Windows PATHEXT in order and never searches relative PATH or workspace", async () => {
     const deps = fixture({ isExecutable: (path) => path === "C:\\Tools\\claude.CMD" });
     expect(agentExecutableCandidates("claude", deps).slice(0, 4)).toEqual(["C:\\Tools\\claude.COM", "C:\\Tools\\claude.EXE", "C:\\Tools\\claude.BAT", "C:\\Tools\\claude.CMD"]);

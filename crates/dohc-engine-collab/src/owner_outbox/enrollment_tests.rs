@@ -511,6 +511,7 @@ fn first_enrollment_accept_echo_preserves_later_draft_fields_until_refusal() {
             on_behalf_of: Some("person".into()),
             depth: 1,
         }),
+        agent_run_id: None,
         automation_declaration: None,
     };
     let entry = append_draft_cached(
@@ -1979,9 +1980,7 @@ fn successor_input(
         .unwrap()
     {
         OwnerEnrollmentPreparation::Capture { captured } => captured,
-        OwnerEnrollmentPreparation::Observed { .. } => {
-            panic!("a later restore generation captures before it commits")
-        }
+        other => panic!("a later restore generation captures before it commits, not {other:?}"),
     };
     let host = Ydoc::wire();
     host.apply(&checkpoint).unwrap();
@@ -2488,6 +2487,7 @@ fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
         on_behalf_of: Some("person".into()),
         depth: 2,
         run: None,
+        agent_run_id: None,
     };
     store
         .write_with(&NoFaults, |tx| {
@@ -2722,27 +2722,30 @@ fn accepted_collection_replay_storage_error_rolls_back_the_frame() {
     };
     let denied = Arc::new(AtomicBool::new(false));
     let captured = denied.clone();
-    let result = store.write_with(&NoFaults, |tx| {
-        tx.authorizer(Some(move |ctx: AuthContext<'_>| {
-            if matches!(
-                ctx.action,
-                AuthAction::Read {
-                    table_name: "owner_ydoc_outbox_entries",
-                    column_name: "byte_length"
+    store
+        .hooks_with(|conn| {
+            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "owner_ydoc_outbox_entries",
+                        column_name: "byte_length"
+                    }
+                ) && !captured.swap(true, Ordering::SeqCst)
+                {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
                 }
-            ) && !captured.swap(true, Ordering::SeqCst)
-            {
-                Authorization::Deny
-            } else {
-                Authorization::Allow
-            }
-        }))
+            }))
+        })
         .unwrap();
-        let result = apply_frame_in_tx(tx, "workspace", &frame, 20);
-        tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-            .unwrap();
-        result
+    let result = store.write_with(&NoFaults, |tx| {
+        apply_frame_in_tx(tx, "workspace", &frame, 20)
     });
+    store
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
     assert!(denied.load(Ordering::SeqCst));
     assert!(matches!(result, Err(OwnerOutboxError::Storage(_))));
     let after = store

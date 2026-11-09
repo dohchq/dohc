@@ -22,6 +22,7 @@ import { RICH_TEXT_REFUSED } from "./fileInspectorUi";
 import { documentVersionKey } from "./documentVersionKey";
 import { codeEditorText } from "./FileInspector.editor-fixture";
 import { getSharedLocalDocument, resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 // Collect the real lazy modules before hook and renderer assertion timers start.
@@ -41,6 +42,8 @@ import "./SourceCodeEditor";
 // FileInspector.tsx (removalInProgress), which is not the same as null.
 const engineDocState: UseEngineDoc = {
   available: false,
+  lastSave: null,
+  pairedInstalls: 0,
   opening: false,
   doc: null,
   objectId: null,
@@ -58,6 +61,7 @@ const engineDocState: UseEngineDoc = {
   deletedDraftId: null,
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
+  permanentFailureDraftId: null,
   changedOutside: null,
   outsideWriteWaiting: false,
   unsavedEditsPending: () => false,
@@ -136,6 +140,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetOrphanedDrafts();
   });
 
   it("opens a note over the limit in bytes as the read preview, even under it in characters", async () => {
@@ -154,6 +159,29 @@ describe("FileInspector renders markdown through the shared component map", () =
       if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
     }
   });
+
+  it.each(["truncated with engine available", "access ended on a writable share"] as const)(
+    "gives enabled Edit no reason title: %s", async (cause) => {
+      const previous = { available: engineDocState.available, readOnlyCause: engineDocState.readOnlyCause };
+      engineDocState.available = cause === "truncated with engine available";
+      engineDocState.readOnlyCause = cause === "access ended on a writable share" ? "access-ended" : null;
+      bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+        text: TABLE_DOCUMENT,
+        truncated: cause === "truncated with engine available",
+      });
+      try {
+        render(<FileInspector workspaceId="ws-1" path="a.md" />);
+        const toggle = await screen.findByTestId("markdown-edit-toggle");
+        await waitFor(() => {
+          expect(toggle.hasAttribute("disabled")).toBe(false);
+          expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
+        });
+        expect(toggle.getAttribute("title")).toBeNull();
+      } finally {
+        Object.assign(engineDocState, previous);
+      }
+    },
+  );
 
   it("shows a table as a table, inside the wrapper that keeps the page from scrolling sideways", async () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -177,6 +205,26 @@ describe("FileInspector renders markdown through the shared component map", () =
     // table has no wrapper at all, which is what makes this the probe for the
     // map.
     expect(pane.parentElement?.className).toBe("tableWrapper");
+  });
+
+  it("leaves a truncated file's reason to its notice: no strip sentence and no chip tooltip", async () => {
+    // A set-aside edit puts the chip up, which a clean truncated file has not.
+    captureOrphanedDraft("ws-1", "large.md", "Earlier text");
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Large document\n\nThis is the bounded prefix.\n",
+      truncated: true,
+    });
+    render(<FileInspector workspaceId="ws-1" path="large.md" />);
+
+    await screen.findByTestId("markdown-source-view");
+    expect(screen.getByTestId("truncated-notice")).toBeTruthy();
+    // The bounded viewer has no read-only strip, and the chip doesn't repeat the notice.
+    expect(screen.queryByTestId("view-markdown-source")).toBeNull();
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.dataset.state).toBe("recovery");
+    expect(chip.getAttribute("title")).toBe("");
+    // Edit names the size limit, not the set-aside edit, which doesn't stop editing.
+    expect(screen.getByRole("button", { name: "Edit" }).getAttribute("title")).toBe("This file is too large to edit in dohc.");
   });
 
   it("shows truncated markdown in the bounded read-only source viewer", async () => {

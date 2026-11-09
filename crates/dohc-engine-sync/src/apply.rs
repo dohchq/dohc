@@ -7,8 +7,8 @@ use dohc_engine_domain::chats::{
     DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, agent_channel_slug,
     agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
     chat_thread_display_title, free_agent_channel_slug, index_replicated_chat_message_search_rows,
-    is_agent_channel_slug, is_agent_id, replicated_source_origin, truncate_slug_base,
-    upsert_chat_search_index_row,
+    is_agent_channel_slug, is_agent_id, normalize_reported_agent, replicated_source_origin,
+    truncate_slug_base, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
@@ -334,6 +334,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // Whether this op changed the workspace: it applied, or its refusal
         // kept its mutation.
         let mut mutation_committed = true;
+        // Refused audits a held audit waits on, held with it.
+        let mut recovered = Vec::new();
         let server_refusal = crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         let mutation_result = match server_refusal {
             Some(refusal) => Ok(MutationOutcome::RefusedRetainingMutation { reason: refusal.reason.message().to_owned() }),
@@ -359,15 +361,29 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 })
             }
             Err(error) => {
-                let Some(reason) = refusal_reason(&error) else {
-                    return Err(error);
-                };
                 mutation_committed = false;
                 tx.execute_batch(
                     "ROLLBACK TO dohc_replication_mutation; \
                      RELEASE dohc_replication_mutation",
                 )
                 .map_err(SyncError::persist)?;
+                let reason = match refusal_reason(&error) {
+                    Some(reason) => {
+                        recovered = crate::live_audit::refused_before(tx, envelope)?;
+                        reason
+                    }
+                    // An audit that waits on a held audit of its lineage is
+                    // held with it.
+                    None => match crate::live_audit::waits_on_held(tx, envelope, &error)? {
+                        Some(refused) => {
+                            recovered = refused;
+                            RefusalReason::InvalidInput {
+                                reason: crate::live_audit::WAITS_ON_HELD.to_owned(),
+                            }
+                        }
+                        None => return Err(error),
+                    },
+                };
                 Admission::Refused(ReplicationRefusal {
                     workspace_id: envelope.workspace_id.clone(),
                     origin_id: envelope.origin_id.clone(),
@@ -377,7 +393,14 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 })
             }
         };
-        if let Admission::Refused(refusal) = &admission {
+        // A held audit waits in its own table. No refused audit leaves a
+        // pending refusal.
+        let held = matches!(&admission, Admission::Refused(_))
+            && !mutation_committed
+            && crate::live_audit::holds(envelope);
+        if let Admission::Refused(refusal) = &admission
+            && !crate::live_audit::is_audit(envelope)
+        {
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
             if !exists { persist_refusal(tx, refusal)?; }
         }
@@ -402,6 +425,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             ],
         )
         .map_err(SyncError::persist)?;
+        if let Admission::Refused(refusal) = &admission
+            && held
+        {
+            crate::live_audit::hold_in_tx(tx, envelope, refusal.reason.message(), &recovered)?;
+        }
         // Every op another computer made reaches this computer here, once:
         // the coordinate is new, and this computer's own ops echo back
         // against their journal rows above. A parked op counts now, not
@@ -423,7 +451,6 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
-            crate::hosted::hold_unadmitted_in_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         if hosted {
@@ -451,6 +478,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
 
 pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
     match error {
+        SyncError::Shared(original) => refusal_reason(original),
         SyncError::LiveDocumentBindingActive => Some(RefusalReason::InvalidInput {
             reason: "live document binding is still active".to_owned(),
         }),
@@ -471,16 +499,21 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         }),
         SyncError::Storage(_)
         | SyncError::MarkdownReaderPending(_)
+        | SyncError::MarkdownWitnessCheckPending { .. }
+        | SyncError::MarkdownWriteHeld { .. }
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         | SyncError::RetryableState { .. }
+        | SyncError::ReleasedLineageUnsettled(_)
+        | SyncError::ValidationPending(_)
         | SyncError::ProjectionTooLarge { .. }
         | SyncError::ShareBoundaryViolation
         | SyncError::ShareVersionMismatch { .. }
         | SyncError::ShareVersionUnusable { .. }
         | SyncError::BlobInvalid
         | SyncError::BlobTooLarge { .. }
-        | SyncError::FaultCrash => None,
+        | SyncError::FaultCrash
+        | SyncError::Cancelled => None,
     }
 }
 
@@ -623,6 +656,7 @@ fn redelivered<T>(
         return Ok(Admission::Refused(refusal));
     }
     crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
+    crate::ydoc_recovery::record_released_copy_echo_in_tx(tx, envelope)?;
     Ok(Admission::Skipped)
 }
 
@@ -775,9 +809,16 @@ struct MessageAppend {
     link_grant_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     link_principal_id: Option<String>,
+    /// The agent connection of an agent that signed in with the link, on a
+    /// link message, which only the relay writes.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    agent_connection_id: Option<String>,
     /// The agent that wrote an agent message.
     #[serde(default, deserialize_with = "deserialize_present_string")]
     author_agent_id: Option<String>,
+    /// What an agent reported about itself. Absent from older messages.
+    #[serde(default)]
+    author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
 }
 
 #[derive(Deserialize)]
@@ -1599,6 +1640,13 @@ fn apply_message(
             reason: "chat message agent id is invalid",
         });
     }
+    let author_reported = normalize_reported_agent(
+        payload.author_kind == "agent",
+        payload.author_reported.as_ref(),
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "chat message reported agent is invalid",
+    })?;
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
@@ -1623,11 +1671,13 @@ fn apply_message(
         &payload.author_kind,
         payload.link_grant_id.as_deref(),
         payload.link_principal_id.as_deref(),
+        payload.agent_connection_id.as_deref(),
         author_user_id.is_some()
             || owner_name.is_some()
             || payload.origin.is_some()
             || payload.chain_depth.is_some()
-            || payload.author_agent_id.is_some(),
+            || payload.author_agent_id.is_some()
+            || author_reported.is_some(),
         &body,
     )
     .map_err(|error| map_chat_rule(error, "chat message link author is invalid"))?;
@@ -1669,10 +1719,12 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name,
-            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id],
+            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id,
+            author_reported.as_ref().map(|reported| serde_json::to_string(reported).expect("a reported agent serializes")),
+            link_author.as_ref().and_then(|link| link.agent_connection_id.as_ref())],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

@@ -15,6 +15,9 @@
     "threads": [
       "chat.threads.list"
     ],
+    "watch": [
+      "chat.inbox.read"
+    ],
     "inbox": [
       "chat.inbox.read"
     ],
@@ -162,6 +165,7 @@
       "dataset.approve",
       "dataset.discard",
       "dataset.migration.prepare",
+      "dataset.change.ask",
       "dataset.migration.preview",
       "dataset.schema.change.prepare",
       "dataset.migration.approve",
@@ -171,6 +175,7 @@
     "appPublication": [
       "app.link.create",
       "app.local.list",
+      "app.local.check",
       "app.local.prepare",
       "app.local.launch",
       "app.publication.list",
@@ -190,6 +195,12 @@
     ],
     "shareCopy": [
       "share.copy.read"
+    ],
+    "shareAgents": [
+      "share.link.agents.list"
+    ],
+    "shareDisconnect": [
+      "share.link.agent.disconnect"
     ],
     "accountDeletePreview": [
       "account.delete.preview"
@@ -264,6 +275,7 @@
     "document stop-again": "share.live.document.stop",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
+    "chat watch": "chat.inbox.read",
     "chat inbox": "chat.inbox.read",
     "chat show": "chat.show",
     "chat post": "chat.post",
@@ -300,6 +312,7 @@
     "dataset approve": "dataset.approve",
     "dataset discard": "dataset.discard",
     "dataset prepareMigration": "dataset.migration.prepare",
+    "dataset askToApply": "dataset.change.ask",
     "dataset migrationPreviewPage": "dataset.migration.preview",
     "dataset prepareSchemaChange": "dataset.schema.change.prepare",
     "dataset approveMigration": "dataset.migration.approve",
@@ -307,6 +320,7 @@
     "dataset invoke": "dataset.operation.invoke",
     "app createLink": "app.link.create",
     "app listLocal": "app.local.list",
+    "app checkLocal": "app.local.check",
     "app prepareLocal": "app.local.prepare",
     "app launchLocal": "app.local.launch",
     "app list": "app.publication.list",
@@ -336,6 +350,8 @@
     "automation press": "automation.button.press",
     "sync stop": "workspace.sync.stop",
     "share copy": "share.copy.read",
+    "share agents": "share.link.agents.list",
+    "share disconnect": "share.link.agent.disconnect",
     "account deletePreview": "account.delete.preview",
     "account delete": "account.delete",
     "history operation": "history.operation.read",

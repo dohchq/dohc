@@ -203,7 +203,7 @@ export function stubScrollSpy(
 export async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
   return await waitFor(() => {
     const toggle = screen.getByTestId("markdown-edit-toggle");
-    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
+    if ((toggle instanceof HTMLButtonElement && toggle.disabled) || toggle.getAttribute("aria-disabled") === "true") {
       throw new Error(
         "markdown-edit-toggle is still disabled — the document is opening",
       );

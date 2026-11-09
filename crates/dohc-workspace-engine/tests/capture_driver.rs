@@ -145,6 +145,20 @@ async fn wait_for_text(
     }
 }
 
+/// Poll until the driver has started the files layer `count` times. A start
+/// is counted after its settle ends.
+async fn wait_for_layer_starts(probe: &CaptureApplyProbe, count: u64) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while probe.layer_start_count() < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the files layer started {} times, not {count}",
+            probe.layer_start_count()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -667,6 +681,170 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     let (summary, _) = moment_metadata(&db_path, "private/journal.md");
     assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_widening_rebuild_that_never_settles_keeps_its_label() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"private/**\"
+tracked = false
+",
+    );
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    // The open and the narrowing rebuild.
+    wait_for_layer_starts(&probe, 2).await;
+    let starts = probe.layer_start_count();
+
+    // Every apply fails until the widening rebuild has ended, so the rebuild
+    // never records the file.
+    probe.fail_next_applies_before_worker(u32::MAX);
+    write_file(scratch.path(), ".dohc/files.toml", b"");
+    wait_for_layer_starts(&probe, starts + 1).await;
+    probe.fail_next_applies_before_worker(0);
+
+    // After repeated identical failures the file waits for the next change on
+    // disk. An unrelated edit is that change, and a later ordinary pass
+    // records the file under the rebuild's label.
+    write_file(scratch.path(), "notes.md", b"edit");
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, _) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+}
+
+/// A widen saved while a pass scans reaches that pass's capture before the
+/// rebuild. The pass records what it found as a rescan, in its own group,
+/// and an edit it captures records with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_widen_saved_during_a_scan_records_as_a_rescan() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"private/**\"
+tracked = false
+",
+    );
+    write_file(scratch.path(), "private/journal.md", b"personal");
+    write_file(scratch.path(), "notes.md", b"first");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("first")).await;
+
+    // The edit's pass stops after its scan, and the widen lands before its
+    // capture reads the rules.
+    probe.pause_next_apply();
+    write_file(scratch.path(), "notes.md", b"second");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("the edit's pass must reach the pause");
+    write_file(scratch.path(), ".dohc/files.toml", b"");
+    probe.release();
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("second")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, group) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+    assert!(
+        group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile")),
+        "the widened file must record in the pass's own group, got {group:?}"
+    );
+    assert_eq!(
+        moment_metadata(&db_path, "notes.md"),
+        (summary, group),
+        "an edit captured in the same pass records with it"
+    );
+}
+
+/// A comment added to the rules changes no rule, so an edit captured in that
+/// pass records as an ordinary edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_beside_a_comment_added_to_the_rules_records_as_an_edit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let rules = "[[rule]]
+path = \"private/**\"
+tracked = false
+";
+    write_file(scratch.path(), ".dohc/files.toml", rules.as_bytes());
+    write_file(scratch.path(), "notes.md", b"first");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("first")).await;
+
+    probe.pause_next_apply();
+    write_file(scratch.path(), "notes.md", b"second");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("the edit's pass must reach the pause");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        format!(
+            "# Keep the journal private.
+{rules}"
+        )
+        .as_bytes(),
+    );
+    probe.release();
+    wait_for_text(&transport, &handle, "notes.md", Some("second")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let (summary, group) =
+        moment_metadata(&scratch.path().join(".dohc/engine/engine.db"), "notes.md");
+    assert_ne!(summary.as_deref(), Some("Found changes in the folder"));
+    assert!(
+        !group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile")),
+        "an ordinary edit records in no rescan group, got {group:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2369,6 +2547,354 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
         )
         .await
         .expect("final close");
+}
+
+const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
+
+type BulkMoment = (String, Option<String>, Option<String>);
+
+/// Every `bulk/` moment, oldest first: (path, summary, correlation id).
+fn bulk_moments(db: &Path) -> Vec<BulkMoment> {
+    let store = EngineStore::open(db, 100).expect("reopen store");
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT path, metadata_summary, metadata_correlation_id FROM moments \
+                 WHERE workspace_id = ?1 AND path LIKE 'bulk/%' ORDER BY moment_order",
+            )?;
+            let rows = statement.query_map([WORKSPACE_ID], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("bulk moments")
+}
+
+/// The one correlation id that every moment carries under the import label.
+fn single_import_id(moments: &[BulkMoment]) -> String {
+    let ids: std::collections::BTreeSet<_> = moments
+        .iter()
+        .map(|(path, summary, id)| {
+            assert_eq!(
+                summary.as_deref(),
+                Some(FIRST_IMPORT_SUMMARY),
+                "{path} left the first import"
+            );
+            id.clone().expect("import moments carry a correlation id")
+        })
+        .collect();
+    assert_eq!(
+        ids.len(),
+        1,
+        "one first import, one correlation id: {ids:?}"
+    );
+    ids.into_iter().next().expect("one id")
+}
+
+/// Open a new workspace over a fresh import's worth of files and pause the
+/// import after its first committed unit.
+async fn open_paused_import(
+    scratch: &ScratchDir,
+    probe: &CaptureApplyProbe,
+) -> (
+    Arc<InProcessTransport<EngineService>>,
+    WorkspaceHandle,
+    tokio::sync::mpsc::Receiver<EngineEventNotice>,
+) {
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
+    probe.pause_after_next_import_commit();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let events = service.events().subscribe();
+    let transport = Arc::new(InProcessTransport::new(service));
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, scratch, 1))
+        .await
+        .expect("a fresh open must not wait for its import");
+    tokio::time::timeout(WAIT, probe.wait_until_import_commit_paused())
+        .await
+        .expect("the first import unit commits");
+    (transport, handle, events)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timed_out_first_import_keeps_its_import_provenance() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
+
+    // Past the deadline, live ticks record the rest of the import.
+    probe.expire_initial_settle_deadline();
+    wait_for_initial_settled_event(&mut events).await;
+    probe.release_import_commit();
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    write_file(scratch.path(), "live.md", b"after the import");
+    wait_for_text(&transport, &handle, "live.md", Some("after the import")).await;
+    close_workspace(&transport, handle, 9_100).await;
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let moments = bulk_moments(&db);
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    single_import_id(&moments);
+    assert_eq!(
+        moment_metadata(&db, "live.md"),
+        (None, None),
+        "the import finished, so a new file is a live change"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reopen_finishes_an_interrupted_first_import_under_its_id() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    let (transport, handle, _events) = open_paused_import(&scratch, &probe).await;
+
+    // Quit after the first committed unit: close cancels the import, then
+    // waits for its worker.
+    let closing = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { close_workspace(&transport, handle, 2).await }
+    });
+    tokio::time::timeout(WAIT, probe.wait_until_close_gate_waiting())
+        .await
+        .expect("close waits for the paused import");
+    probe.release_import_commit();
+    tokio::time::timeout(WAIT, closing)
+        .await
+        .expect("close ends the import")
+        .expect("close task");
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let prefix = bulk_moments(&db);
+    assert!(
+        !prefix.is_empty() && prefix.len() < EARLY_IMPORT_MIN_ADDED_FILES,
+        "close must leave the import unfinished; it recorded {} files",
+        prefix.len()
+    );
+    let import_id = single_import_id(&prefix);
+
+    let reopened = open_workspace(&transport, &scratch, 3).await;
+    wait_until_capture_ready(&transport, &reopened, 4).await;
+    write_file(scratch.path(), "live.md", b"after the import");
+    wait_for_text(&transport, &reopened, "live.md", Some("after the import")).await;
+    close_workspace(&transport, reopened, 9_100).await;
+
+    let moments = bulk_moments(&db);
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    assert_eq!(single_import_id(&moments), import_id);
+    assert_eq!(
+        moment_metadata(&db, "live.md"),
+        (None, None),
+        "the reopen finished the import, so a new file is a live change"
+    );
+
+    write_file(scratch.path(), "closed.md", b"added while closed");
+    let reopened = open_workspace(&transport, &scratch, 9_200).await;
+    wait_for_text(
+        &transport,
+        &reopened,
+        "closed.md",
+        Some("added while closed"),
+    )
+    .await;
+    close_workspace(&transport, reopened, 9_300).await;
+    let (summary, _) = moment_metadata(&db, "closed.md");
+    assert_eq!(summary.as_deref(), Some("Changed while dohc was closed"));
+}
+
+/// A file that keeps failing to read must not hold the first import open:
+/// once the controller quarantines it, a live tick finishes the import and a
+/// file created afterwards is a live change. The import runs past its
+/// deadline, so startup can't finish it and only the live ticks can. The
+/// unreadable file is a share-locked handle, as in
+/// `a_quarantined_path_keeps_capture_flush_unsettled`, so this test is
+/// Windows-only. It appears once the import is under way: an unreadable file
+/// in the opening scan makes startup wait for its full barrier, with no
+/// deadline to run past.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quarantined_file_lets_the_first_import_finish() {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
+    let mut lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .share_mode(0)
+        .open(scratch.path().join("locked.md"))
+        .expect("share-locked file");
+    lock.write_all(b"unreadable through the import")
+        .expect("locked write");
+    lock.flush().expect("locked flush");
+    probe.expire_initial_settle_deadline();
+    wait_for_initial_settled_event(&mut events).await;
+    probe.release_import_commit();
+
+    // Each flush drives up to MAX_FLUSH_CYCLES passes, so live ticks record
+    // the rest of the import, the controller quarantines the locked file, and
+    // then reports nothing dirty. The quarantined file keeps every flush
+    // unsettled.
+    for id in 2..5 {
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("flush");
+        assert_eq!(flush.result["degraded"], json!(true));
+        assert_eq!(flush.result["settled"], json!(false));
+    }
+
+    write_file(scratch.path(), "live.md", b"after the import");
+    wait_for_text(&transport, &handle, "live.md", Some("after the import")).await;
+    drop(lock);
+    close_workspace(&transport, handle, 9_100).await;
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let moments = bulk_moments(&db);
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    single_import_id(&moments);
+    assert_eq!(
+        moment_metadata(&db, "live.md"),
+        (None, None),
+        "a quarantined file must not keep the import open"
+    );
+}
+
+/// The same, for a file that is already unreadable when the workspace opens.
+/// With one other file, startup takes its full barrier, and its retries
+/// quarantine the locked file. The import then finishes, and a file created
+/// afterwards is a live change.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_unreadable_at_open_lets_the_first_import_finish() {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "healthy.md", b"imported");
+    let mut lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .share_mode(0)
+        .open(scratch.path().join("locked.md"))
+        .expect("share-locked file");
+    lock.write_all(b"unreadable through the import")
+        .expect("locked write");
+    lock.flush().expect("locked flush");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "healthy.md", Some("imported")).await;
+
+    // Each flush drives up to MAX_FLUSH_CYCLES passes, so the controller
+    // quarantines the locked file and then reports nothing dirty. The
+    // quarantined file keeps every flush unsettled.
+    for id in 2..5 {
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("flush");
+        assert_eq!(flush.result["degraded"], json!(true));
+        assert_eq!(flush.result["settled"], json!(false));
+    }
+
+    write_file(scratch.path(), "live.md", b"after the import");
+    wait_for_text(&transport, &handle, "live.md", Some("after the import")).await;
+    drop(lock);
+    close_workspace(&transport, handle, 9_100).await;
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, _) = moment_metadata(&db, "healthy.md");
+    assert_eq!(summary.as_deref(), Some(FIRST_IMPORT_SUMMARY));
+    assert_eq!(
+        moment_metadata(&db, "live.md"),
+        (None, None),
+        "a quarantined file must not keep the import open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_during_an_unfinished_first_import_is_a_live_change() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let probe = CaptureApplyProbe::default();
+    probe.use_manual_initial_settle_deadline();
+    let (transport, handle, mut events) = open_paused_import(&scratch, &probe).await;
+
+    probe.expire_initial_settle_deadline();
+    wait_for_initial_settled_event(&mut events).await;
+    // The first committed unit starts with the first path in sort order.
+    write_file(scratch.path(), "bulk/seed-0000.md", b"edited during import");
+    probe.release_import_commit();
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "bulk/seed-0000.md",
+        Some("edited during import"),
+    )
+    .await;
+    close_workspace(&transport, handle, 9_100).await;
+
+    let mut moments = bulk_moments(&scratch.path().join(".dohc/engine/engine.db"));
+    let edit = moments
+        .iter()
+        .rposition(|(path, ..)| path == "bulk/seed-0000.md")
+        .expect("the edit is recorded");
+    let (_, summary, correlation) = moments.remove(edit);
+    assert_eq!(
+        (summary, correlation),
+        (None, None),
+        "an edit to an imported file keeps the live Edited label"
+    );
+    assert_eq!(moments.len(), EARLY_IMPORT_MIN_ADDED_FILES);
+    single_import_id(&moments);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_from_before_import_tracking_counts_its_import_finished() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let (transport, handle, _events) = open_over_existing_files(&scratch).await;
+    close_workspace(&transport, handle, 9_100).await;
+
+    // Roll the store back to before the import table existed.
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    rusqlite::Connection::open(&db)
+        .expect("open store")
+        .execute_batch(
+            "DROP TABLE capture_first_imports; \
+             DELETE FROM engine_migrations WHERE id = 'v2-capture-first-imports';",
+        )
+        .expect("roll back the import migration");
+
+    write_file(scratch.path(), "added-while-closed.md", b"new offline");
+    let handle = open_workspace(&transport, &scratch, 2_000).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "added-while-closed.md",
+        Some("new offline"),
+    )
+    .await;
+    close_workspace(&transport, handle, 9_101).await;
+
+    let (summary, _) = moment_metadata(&db, "added-while-closed.md");
+    assert_eq!(summary.as_deref(), Some("Changed while dohc was closed"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

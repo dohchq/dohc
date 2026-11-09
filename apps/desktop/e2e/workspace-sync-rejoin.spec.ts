@@ -131,7 +131,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
   const appEdit = "edit from this machine\n";
   const peerEdit = "edit from the other machine\n";
   const sourceRoot = join(temp.baseDir, "conflict-source");
-  const relayDb = join(temp.baseDir, "conflict-relay.sqlite");
+  const relayDb = join(temp.baseDir, "conflict-relay", "relay.sqlite");
   let relay: SyncRelayHandle | null = null;
   let sourceWorkspace: Awaited<
     ReturnType<typeof openLiveDaemonWorkspace>
@@ -243,9 +243,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await capture.runRelaySync((materializePage) =>
-            sourceRelay.pull(materializePage),
-          );
+          await sourceRelay.pull(apply => capture.runRelaySync(apply));
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -264,9 +262,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await capture.runRelaySync((materializePage) =>
-            sourceRelay.pull(materializePage),
-          );
+          await sourceRelay.pull(apply => capture.runRelaySync(apply));
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -319,7 +315,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    const relayDb = join(temp.baseDir, "relay.sqlite");
+    const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId });
     const establishedIdentity: RelayWorkspaceIdentity = {
@@ -536,7 +532,7 @@ test("protected join preserves a failed folder, then restores exact secret and b
   try {
     await mkdir(sourceRoot, { recursive: true });
     relay = await spawnSyncRelay({
-      dbPath: join(temp.baseDir, "protected-relay.sqlite"),
+      dbPath: join(temp.baseDir, "protected-relay", "relay.sqlite"),
     });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
@@ -605,10 +601,9 @@ test("protected join preserves a failed folder, then restores exact secret and b
 
     // The missing passphrase is discovered at the public IPC boundary. The
     // attempt preserves its manifest but releases its registry entry.
-    await expect(page.getByTestId("join-sync-passphrase")).toBeVisible();
-    await expect(page.getByTestId("join-error")).toHaveText(
-      `This workspace has protected files. Enter the protected-file passphrase. Files remain in ${temp.rootPath}. Choose another empty folder to try again.`,
-    );
+    await expect(page.getByTestId("join-sync-passphrase")).toBeFocused();
+    await expect(page.getByTestId("join-used-folder")).toHaveText(`Files stay in ${temp.rootPath}.`);
+    await expect(page.getByTestId("join-error")).toHaveCount(0);
     await expect
       .poll(async () => (await readdir(temp.rootPath)).sort())
       .toContain(".dohc");
@@ -618,7 +613,6 @@ test("protected join preserves a failed folder, then restores exact secret and b
     // Retry through the same public button. Successful materialization proves
     // the envelope key was installed before the pull tried to decrypt .env.
     await page.getByTestId("join-sync-passphrase").fill(passphrase);
-    await expect(page.getByTestId("join-workspace-start")).toBeDisabled();
     await mkdir(retryRoot);
     await desktop.app.evaluate((_electron, path) => { process.env.DOHC_TEST_PICK_PATH = path; }, retryRoot);
     await page.getByTestId("join-choose-folder").click();
@@ -682,7 +676,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
     // A real relay is the only cloud service. The workspace is not pre-claimed:
     // cloudEnableSync must be the first and sole claimant.
-    const relayDb = join(temp.baseDir, "relay.sqlite");
+    const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
 
     // Local-only registry entry (no `remote`): the workspace is not synced yet.
@@ -893,7 +887,7 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     await writeWorkspaceFiles(temp, [
       { path, contents: "# Plan\n\nLocal draft.\n" },
     ]);
-    const relayDb = join(temp.baseDir, "relay.sqlite");
+    const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
@@ -1107,7 +1101,7 @@ test("typing continues after enabling sync claims the open document", async () =
     await writeWorkspaceFiles(temp, [
       { path, contents: "# Plan\n\nLocal draft.\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,

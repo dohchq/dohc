@@ -45,7 +45,8 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
     const sidePanel = page.getByTestId(desktopPins.sidePanel);
     const graph = sidePanel.locator('[data-testid="graph-view"][data-state="ready"]');
     await expect(graph).toBeVisible({ timeout: 180_000 });
-    await expect(sidePanel.getByTestId("graph-node").first()).toBeVisible();
+    const canvas = sidePanel.getByTestId("graph-canvas");
+    await expect(canvas).toHaveAttribute("data-node-count", /^[1-9]/);
     await page.evaluate(
       () =>
         new Promise<void>((resolve) =>
@@ -55,7 +56,7 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
     const graphReady = await page.evaluate(() => performance.now());
     const graphDocCount = await sidePanel.getByTestId("graph-doc-count").textContent();
     const graphLinkCount = await sidePanel.getByTestId("graph-link-count").textContent();
-    const renderedGraphNodeCount = await sidePanel.getByTestId("graph-node").count();
+    const renderedGraphNodeCount = Number(await canvas.getAttribute("data-node-count"));
     const renderedGraphRowCount = await sidePanel.getByTestId("graph-file-row").count();
     const longTasks = await stopLongTaskObserver(page);
 

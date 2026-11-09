@@ -363,6 +363,14 @@ pub fn fresh_successor_base(
 /// a projector can mutate its source, so provenance records the state that
 /// produced the content and whether projection changed that state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkdownWriteSafety {
+    NotMarkdown,
+    SourcePreserving,
+    SafeWitness,
+    UnsafeWitness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     /// The projected artifact content (well-formed UTF-8 by `String`).
     pub content: String,
@@ -377,6 +385,8 @@ pub struct Projection {
     /// (drops PM-invalid elements), which R11b's live adapter journals as an
     /// ordinary update. Recorded so a cross-engine settle can reconcile.
     pub destructive: bool,
+    pub markdown_write_safety: MarkdownWriteSafety,
+    pub witness_source_sha256: Option<String>,
 }
 
 /// Digests for exact Markdown source held in the Y.Doc's reserved engine
@@ -519,6 +529,29 @@ impl Ydoc {
         Ok(())
     }
 
+    /// [`Ydoc::apply`], with what applying it deleted given to `deleted`
+    /// once its transaction commits, whether or not it applied whole: every
+    /// range it marked deleted, the items it integrated into an already
+    /// deleted parent and the pending deletions it could now apply among
+    /// them. Nothing is given when the bytes do not decode.
+    pub(crate) fn apply_seeing_deletions(
+        &self,
+        bytes: &[u8],
+        deleted: impl FnOnce(&IdSet),
+    ) -> Result<(), CollabError> {
+        crate::replay_parity::prevalidate_update_bytes(bytes)?;
+        let update = Update::decode_v1(bytes).map_err(|e| CollabError::MalformedUpdate {
+            reason: e.to_string(),
+        })?;
+        let mut txn = self.doc.transact_mut();
+        let applied = txn.apply_update(update);
+        txn.commit();
+        deleted(txn.delete_set());
+        applied.map_err(|e| CollabError::MalformedUpdate {
+            reason: e.to_string(),
+        })
+    }
+
     /// Apply an update only when a complete scratch replay keeps the epoch tag.
     pub fn apply_preserving_lineage_epoch(
         &self,
@@ -583,6 +616,18 @@ impl Ydoc {
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let txn = self.doc.transact();
         meta.get(&txn, MARKDOWN_SOURCE_READER_META_KEY).is_some()
+    }
+
+    pub fn has_markdown_witness(&self) -> bool {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        ]
+        .iter()
+        .any(|key| meta.get(&txn, key).is_some())
     }
 
     /// Resolve exact Markdown only after its lightweight projection witness
@@ -707,6 +752,18 @@ impl Ydoc {
                 && self.source_reproduces(&source, canonical_projection, false, proceed)?)
             .then_some(source),
         )
+    }
+
+    /// The current witness source, if it rebuilds this canonical projection
+    /// under the settled rule's reading, without a file's body comparison.
+    pub(crate) fn reprojected_markdown_source(&self, canonical_projection: &str) -> Option<String> {
+        let reference = self.markdown_source_reference()?;
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return None;
+        }
+        let source = self.markdown_source(&reference)?;
+        self.source_reproduces(&source, canonical_projection, false)
+            .then_some(source)
     }
 
     /// Whether `source` rebuilds `canonical_projection` under the source or
@@ -1056,6 +1113,16 @@ impl Ydoc {
             content_kind,
             source_state_vector_sha256: crate::hex_sha256(&self.encode_state_vector()),
             destructive: false,
+            markdown_write_safety: if content_kind != ContentKind::Richdoc {
+                MarkdownWriteSafety::NotMarkdown
+            } else if self.has_markdown_witness() {
+                MarkdownWriteSafety::UnsafeWitness
+            } else {
+                MarkdownWriteSafety::SafeWitness
+            },
+            witness_source_sha256: self
+                .markdown_source_reference()
+                .map(|reference| reference.source_sha256),
         })
     }
 
@@ -1337,6 +1404,57 @@ impl Ydoc {
             let el = frag.insert(txn, index, XmlElementPrelim::empty("paragraph"));
             el.insert(txn, 0, XmlTextPrelim::new(text));
         })
+    }
+
+    /// Remove the [`ROOT_BODY`] block at `index` and return the encoded v1
+    /// delta.
+    pub fn richdoc_remove_block(&self, index: u32) -> Vec<u8> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        self.with_delta(|txn| frag.remove_range(txn, index, 1))
+    }
+
+    /// Insert `text` at a UTF-16 `offset` into the text of the [`ROOT_BODY`]
+    /// block at `index` and return the encoded v1 delta. None when that block
+    /// holds no text first.
+    pub fn richdoc_insert_text(&self, index: u32, offset: u32, text: &str) -> Option<Vec<u8>> {
+        let content = self.richdoc_block_text(index)?;
+        Some(self.with_delta(|txn| content.insert(txn, offset, text)))
+    }
+
+    /// Replace `delete` UTF-16 units at `offset` in the text of the
+    /// [`ROOT_BODY`] block at `index` with `text`, as one keystroke, and
+    /// return only what that keystroke's transaction did, v1-encoded: unlike
+    /// [`Ydoc::richdoc_insert_text`], it costs its own size, not the
+    /// document's. None when that block holds no text first.
+    pub fn richdoc_keystroke(
+        &self,
+        index: u32,
+        offset: u32,
+        delete: u32,
+        text: &str,
+    ) -> Option<Vec<u8>> {
+        let content = self.richdoc_block_text(index)?;
+        let mut txn = self.doc.transact_mut();
+        if delete > 0 {
+            content.remove_range(&mut txn, offset, delete);
+        }
+        if !text.is_empty() {
+            content.insert(&mut txn, offset, text);
+        }
+        Some(txn.encode_update_v1())
+    }
+
+    /// The text the [`ROOT_BODY`] block at `index` holds first.
+    fn richdoc_block_text(&self, index: u32) -> Option<yrs::XmlTextRef> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        let txn = self.doc.transact();
+        match frag.get(&txn, index) {
+            Some(XmlOut::Element(element)) => match element.get(&txn, 0) {
+                Some(XmlOut::Text(content)) => Some(content),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Rewrite the document's projected content to `markdown` and return one
@@ -1748,6 +1866,21 @@ impl Ydoc {
     /// already rewritten the body and must append both deltas together.
     pub fn preserve_folded_markdown_source(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
         self.stage_source_preserving_edit(markdown, |_| Ok(()))
+    }
+
+    /// Clear a converted source without changing document content or its private tail.
+    pub fn clear_markdown_source_witness(&self) -> Vec<u8> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        self.with_delta(|txn| {
+            for key in [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
+            ] {
+                meta.remove(txn, key);
+            }
+        })
     }
 
     pub(crate) fn rewrite_richdoc_preserving_source_bounded(
@@ -11675,6 +11808,51 @@ mod projection_tests {
             crate::hex_sha256(canonical.as_bytes()),
         );
         canonical
+    }
+
+    #[test]
+    fn clear_markdown_witness_is_meta_only_with_a_large_source_and_private_tail() {
+        let doc = Ydoc::wire();
+        let source = "source paragraph\n\n".repeat(8_000);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+            .unwrap();
+        witness_source(&doc, &source);
+        doc.doc.get_or_insert_map(ROOT_META).insert(
+            &mut doc.doc.transact_mut(),
+            MARKDOWN_SOURCE_READER_META_KEY,
+            "reader-identity",
+        );
+        let peer = Ydoc::wire();
+        peer.apply(&doc.encode_full_state()).unwrap();
+        let tail = doc.richdoc_append_paragraph("Owner's unsettled tail");
+        let mut before = doc.canonical_content();
+        for key in [
+            MARKDOWN_SOURCE_META_KEY,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+            MARKDOWN_SOURCE_READER_META_KEY,
+        ] {
+            before[ROOT_META]["value"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+        }
+        let update = doc.clear_markdown_source_witness();
+        assert!(!doc.has_markdown_witness());
+        assert!(!doc.has_reader_source());
+        assert_eq!(doc.canonical_content(), before);
+        assert!(doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("Owner's unsettled tail"));
+        // Delivery in either order keeps a tail the clearing peer has not seen.
+        peer.apply(&update).unwrap();
+        peer.apply(&tail).unwrap();
+        assert_eq!(peer.canonical_content(), before);
+        assert!(!peer.has_markdown_witness());
+        peer.apply(&update).unwrap();
+        assert_eq!(peer.canonical_content(), before);
     }
 
     #[test]

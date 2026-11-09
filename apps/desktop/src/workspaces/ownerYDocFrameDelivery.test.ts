@@ -175,6 +175,12 @@ it("disposal aborts a stalled native read and prevents bearer or transport work"
   read.resolve({stateVector: new Uint8Array([0]), journalCursor: 0});
 });
 
+// The runner fails this file on an unhandled rejection, so the test leaves the refused read uncaught.
+it("observes a native read refused after its attempt already stopped", async () => {
+  const f = fixture({state: {readState: () => {f.controller.abort(); return Promise.reject(new Error("native read refused"));}}});
+  expect(await f.delivery.freshOwnerAuthority(binding)).toEqual({kind: "retry"}); expect(f.connect).not.toHaveBeenCalled();
+});
+
 it("rejects mutated envelope binding, digest and a replaced authority", async () => {
   const f = fixture(), first = await f.delivery.freshOwnerAuthority(binding), second = await f.delivery.freshOwnerAuthority(binding);
   if (first.kind !== "authority" || second.kind !== "authority") throw new Error("Missing authority");

@@ -7,9 +7,11 @@ pub(crate) mod configured_live_host;
 pub(super) mod conflicts;
 pub(super) mod dispatch;
 pub(super) mod error;
+pub(super) mod held_documents;
 pub(super) mod history;
 pub(super) mod kept_copies;
 pub(crate) mod live_application;
+pub(super) mod markdown_recovery;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;
 pub(super) mod reads;
@@ -18,14 +20,22 @@ pub(super) mod relay;
 pub(crate) mod replica;
 pub(super) mod request;
 pub(super) mod retained_copies;
+pub(super) mod retained_versions;
 pub(super) mod search;
 pub(super) mod secrets;
 pub(super) mod versioned;
 pub(super) mod versions;
+pub(super) mod work_references;
 pub(super) mod workspace;
 pub(super) mod ydoc;
 
 mod owner_activation;
+
+// The RPC tests in this crate share the integration tests' helpers. Load the
+// file once: a second `#[path]` to it fails clippy's duplicate_mod.
+#[cfg(test)]
+#[path = "../../tests/common/mod.rs"]
+mod test_common;
 
 pub(super) mod files;
 pub(super) mod links;

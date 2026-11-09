@@ -241,7 +241,7 @@ describe("ChatsView live activity refresh", () => {
 
     expect(await screen.findByText(agentReport.body)).toBeTruthy();
     expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
-    expect((await screen.findByTestId("chats-run-chip")).textContent).toBe("run run-liv");
+    expect((await screen.findByTestId("chats-run-chip")).textContent).toBe("Details");
     // The same view stayed mounted; activity caused fresh reads rather than a
     // back/forward navigation or optimistic local append.
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
@@ -306,7 +306,7 @@ describe("ChatsView live activity refresh", () => {
     expect(askedBy[0]!.getAttribute("title")).toBe("for Ice");
     // A person's own request adds nothing beside the run.
     expect(lines[1]!.querySelector("[data-testid='chats-run-asked-by']")).toBeNull();
-    expect(lines[1]!.querySelector("[data-testid='chats-run-chip']")?.textContent).toBe("run run-ask");
+    expect(lines[1]!.querySelector("[data-testid='chats-run-chip']")?.textContent).toBe("Details");
   });
 
   // The write lands in a chat the user does not have open, so the roll-up
@@ -321,13 +321,19 @@ describe("ChatsView live activity refresh", () => {
 
     await screen.findByTestId("chats-channel-name");
     expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    expect(screen.getByTestId("chats-channel-name").className).not.toContain("font-medium");
     expect(workspaceActivityCallbacks.size).toBeGreaterThan(0);
 
     // An agent posts into a thread nobody opened.
     unreadCount = 3;
     act(() => emitWorkspaceActivity());
 
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3");
+    // A group the user only follows shows no count: its name goes bold, and
+    // the count is there for a screen reader.
+    const unread = await screen.findByTestId("chats-channel-unread");
+    expect(unread.textContent).toBe("3 unread");
+    expect(unread.className).toBe("sr-only");
+    expect(screen.getByTestId("chats-channel-name").className).toContain("font-medium");
     // Nothing navigated: the badge appeared on the list itself.
     expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
@@ -353,6 +359,7 @@ describe("ChatsView live activity refresh", () => {
       });
       screen.getByTestId("chats-dm-item");
       expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+      expect(screen.getByTestId("chats-dm-name").className).not.toContain("font-medium");
       const syncsBefore = bridgeMock.syncDms.mock.calls.length;
 
       // An agent's DM write lands while the list is on screen.
@@ -364,6 +371,9 @@ describe("ChatsView live activity refresh", () => {
 
       expect(bridgeMock.syncDms.mock.calls.length, "remove `void refreshDms()` from the channels-level activity branch. With the clock frozen, no other caller exists to sync.").toBeGreaterThan(syncsBefore);
       expect(screen.getByTestId("chats-dm-unread").textContent).toBe("2");
+      // A DM addresses the user: an ink count, and the name goes bold as on every unread row.
+      expect(screen.getByTestId("chats-dm-unread").className).toContain("bg-ink");
+      expect(screen.getByTestId("chats-dm-name").className).toContain("font-medium");
       // Nothing navigated: the badge appeared on the list itself.
       expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
     } finally {
@@ -708,7 +718,7 @@ describe("ChatsView live activity refresh", () => {
     unreadCount = 3;
     act(() => emitWorkspaceActivity());
 
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("3 unread");
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
     // The badge pass asked the local registry, and the relay-backed lookup not
     // at all — its rows are not this reader's to answer.
@@ -741,7 +751,7 @@ describe("ChatsView live activity refresh", () => {
     const navigator = (readRevision: number) =>
       navigatorView(readRevision, { onOpenInTab: vi.fn() });
     const view = render(navigator(0));
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
     // A badge read is in flight when the read lands.
     act(() => emitWorkspaceActivity());
@@ -856,7 +866,7 @@ describe("ChatsView live activity refresh", () => {
 
     // A write lands while the first load still waits on its share lookup.
     act(() => emitWorkspaceActivity());
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5 unread");
 
     // The first load finally answers. Its channels are older; its shares are
     // still the only answer to a question the badge read never asked.
@@ -864,7 +874,7 @@ describe("ChatsView live activity refresh", () => {
       answerFirstShares(shareListing());
       await Promise.resolve();
     });
-    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("5");
+    expect(screen.getByTestId("chats-channel-unread").textContent).toBe("5 unread");
   });
 
   // The badge drain must not be held by a request that may never return. The
@@ -900,13 +910,13 @@ describe("ChatsView live activity refresh", () => {
 
     unreadCount = 1;
     act(() => emitWorkspaceActivity());
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("1");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("1 unread");
 
     // The second write still gets through: no request is holding the drain.
     unreadCount = 4;
     act(() => emitWorkspaceActivity());
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-unread").textContent).toBe("4"),
+      expect(screen.getByTestId("chats-channel-unread").textContent).toBe("4 unread"),
     );
     expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
   });
@@ -1215,7 +1225,7 @@ describe("ChatsView live activity refresh", () => {
       await Promise.resolve();
     });
 
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
     expect(screen.queryByText("Try again")).toBeNull();
   });
 
@@ -1251,7 +1261,7 @@ describe("ChatsView live activity refresh", () => {
     unreadCount = 9;
     act(() => emitWorkspaceActivity());
     expect(reads).toBe(4);
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("9");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("9 unread");
   });
 
   // A failed lookup learned nothing. "Unknown" is a state of the whole share
@@ -1442,7 +1452,7 @@ describe("ChatsView live activity refresh", () => {
       await Promise.resolve();
     });
 
-    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5");
+    expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5 unread");
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3);
   });
 

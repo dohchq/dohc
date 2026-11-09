@@ -64,6 +64,7 @@ async fn append(actor: &ActorHandle, key: &DocKey, bytes: Vec<u8>, id: &str) {
                 on_behalf_of: Some("person".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,
@@ -97,6 +98,7 @@ async fn settle(
             3,
             faults,
             CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -528,6 +530,7 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
                     on_behalf_of: Some("person".into()),
                     depth: 0,
                     run: None,
+                    agent_run_id: None,
                 }),
                 None,
                 false,
@@ -558,6 +561,7 @@ async fn pending_attempt_reserves_capacity_without_requeueing_settlement() {
                 on_behalf_of: Some("person".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,

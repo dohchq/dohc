@@ -1,26 +1,26 @@
-import type { ExplorerMenuCommand } from "../ipc/bridgeContract";
+import type { ExplorerMenuCommand, ExplorerMenuEntry } from "../ipc/bridgeContract";
 import { workspaceCreateOffers, type ShareViewWriteScope } from "./shareWriteGate";
 
 // WHAT THE EXPLORER'S CONTEXT MENU OFFERS — one decision, in one place.
 //
-// main owns this menu, so the renderer cannot add an item back; that is why
-// the reduction below is a security surface and not a convenience. It lives
-// here rather than inside main's IPC closure because a menu built inline in a
-// 9,000-line closure can only be pinned by reading the source, and a source
-// pin proves position, never behaviour.
+// main decides this menu and the renderer draws exactly the entries main
+// returns, so the renderer cannot add an item back; that is why the reduction
+// below is a security surface and not a convenience. It lives here rather than
+// inside main's IPC closure because a menu built inline in a 9,000-line
+// closure can only be pinned by reading the source, and a source pin proves
+// position, never behaviour.
 //
 // The menu mirrors the write gates behind it. It must offer exactly what those
 // handlers accept, because an item that is refused when clicked is the surface
 // lying about what it can do.
 
-export type ExplorerMenuEntry =
-  | { kind: "item"; label: string; id: ExplorerMenuCommand }
-  | { kind: "separator" };
-
 export interface ExplorerMenuScope {
   // What was right-clicked.
   kind: "root" | "folder" | "file";
+  // For a selection, whether every row in it is pinned.
   pinned: boolean;
+  // How many selected rows the menu acts on, when there are two or more.
+  count?: number;
   // A shared-with-me/… path: a read-only projection of someone else's files.
   isMountPath: boolean;
   // That path is a mount ROOT with a matching mount record.
@@ -37,6 +37,13 @@ export function revealInFileManagerLabel(platform: string | undefined): string {
   if (platform === "darwin") return "Show in Finder";
   if (platform === "win32") return "Show in File Explorer";
   return "Show in file manager";
+}
+
+// The file manager's name inside a sentence, such as a failed reveal's.
+export function fileManagerName(platform: string | undefined): string {
+  if (platform === "darwin") return "Finder";
+  if (platform === "win32") return "File Explorer";
+  return "the file manager";
 }
 
 const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
@@ -58,18 +65,27 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     collection: canCreateCollection,
   } = workspaceCreateOffers(scope.shareView);
 
+  // A selection: only what acts on every row, with the count.
+  if (scope.count !== undefined && scope.kind !== "root") {
+    const n = scope.count;
+    return [
+      ...(canWrite && !scope.isMountPath ? [item(`Delete ${n} items`, "delete")] : []),
+      scope.pinned ? item(`Unpin ${n} items`, "unpin") : item(`Pin ${n} items`, "pin"),
+    ];
+  }
+
   if (scope.isMountPath) {
     return [
       ...(scope.hasMountRecord
         ? [
-            item("Refresh Share", "refresh-share-mount"),
-            item("Remove Share from Workspace", "unmount-share"),
+            item("Refresh share", "refresh-share-mount"),
+            item("Remove share from workspace", "unmount-share"),
             separator,
           ]
-        : [item("Refresh Shares", "refresh-share-mount"), separator]),
+        : [item("Refresh shares", "refresh-share-mount"), separator]),
       scope.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
       separator,
-      item("Export as Zip…", "export-zip"),
+      item("Export as zip…", "export-zip"),
       reveal,
     ];
   }
@@ -78,14 +94,14 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     return [
       ...(canWrite
         ? [
-            item("New File", "new-file"),
-            ...(canCreateFolder ? [item("New Folder", "new-folder")] : []),
-            ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
+            item("New file", "new-file"),
+            ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
+            ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
             separator,
-            item("Import Files…", "import-files"),
+            item("Import files…", "import-files"),
           ]
         : []),
-      item("Export Workspace as Zip…", "export-zip"),
+      item("Export workspace as zip…", "export-zip"),
     ];
   }
 
@@ -96,20 +112,20 @@ export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string):
     ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),
     ...(canWrite && scope.kind === "folder"
       ? [
-          item("New File", "new-file"),
-          ...(canCreateFolder ? [item("New Folder", "new-folder")] : []),
-          ...(canCreateCollection ? [item("New Collection…", "new-collection")] : []),
+          item("New file", "new-file"),
+          ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
+          ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer
           // passes the folder as importWorkspaceFiles' targetDir, re-validated
           // main-side before any copy).
-          item("Import Files…", "import-files"),
+          item("Import files…", "import-files"),
           separator,
         ]
       : []),
     ...(canWrite ? [item("Rename", "rename"), item("Delete", "delete")] : []),
     scope.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
     separator,
-    item("Export as Zip…", "export-zip"),
+    item("Export as zip…", "export-zip"),
     reveal,
   ];
 }

@@ -2855,10 +2855,12 @@ impl ChangeActorKind {
 }
 
 /// Declared write provenance beside `author_origin_id`: the actor kind, the
-/// person it acted for, its automation-chain depth, and for an automation
-/// the run that wrote it. The person is an account id, or a signed-out
-/// computer's installation id: the person typing, the person an agent works
-/// for, or the person whose change started an automation. Optional
+/// person it acted for, its automation-chain depth, for an automation the
+/// run that wrote it, and for an agent the run it made the change in. The
+/// owner's devices keep the agent run; a recipient's author never names it.
+/// The person is an account id, or a signed-out computer's installation id:
+/// the person typing, the person an agent works for, or the person whose
+/// change started an automation. Optional
 /// provenance, never a second authority — the storage and permission
 /// boundaries stay identical with or without it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2871,6 +2873,8 @@ pub struct ChangeAttribution {
     pub depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<AutomationRunAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_run_id: Option<String>,
 }
 
 /// A person the owner shared with, or an Edit share link, whose change the
@@ -3044,6 +3048,11 @@ fn author_entry_attribution(author: &Value) -> (Option<String>, Option<ChangeAtt
         },
         depth,
         run: None,
+        agent_run_id: if actor_kind == ChangeActorKind::Agent {
+            text("agentRunId")
+        } else {
+            None
+        },
     };
     (Some(actor), Some(attribution))
 }
@@ -3081,6 +3090,11 @@ pub fn moment_author_json(
     };
     if let Some(on_behalf_of) = &attribution.on_behalf_of {
         author["onBehalfOf"] = serde_json::json!(on_behalf_of);
+    }
+    if let (ChangeActorKind::Agent, Some(agent_run_id)) =
+        (attribution.actor_kind, &attribution.agent_run_id)
+    {
+        author["agentRunId"] = serde_json::json!(agent_run_id);
     }
     Some(Value::Array(vec![author]).to_string())
 }
@@ -3121,6 +3135,17 @@ impl ChangeAttribution {
                 || run.automation_name.chars().any(char::is_control)
             {
                 return Err("attribution run automation name must be non-empty and bounded");
+            }
+        }
+        if let Some(agent_run_id) = &self.agent_run_id {
+            if self.actor_kind != ChangeActorKind::Agent {
+                return Err("only an agent's attribution names an agent run");
+            }
+            if agent_run_id.is_empty()
+                || agent_run_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                || agent_run_id.chars().any(char::is_control)
+            {
+                return Err("attribution agentRunId must be non-empty and bounded");
             }
         }
         Ok(())
@@ -3213,6 +3238,7 @@ impl AgentDeclaration {
             on_behalf_of: self.on_behalf_of.clone(),
             depth: self.depth,
             run: None,
+            agent_run_id: None,
         }
     }
 
@@ -6681,6 +6707,7 @@ mod attribution_tests {
                 claim_id: "claim".into(),
                 automation_name: "Build".into(),
             }),
+            agent_run_id: None,
         };
         assert!(valid.validate().is_ok());
         for field in ["scope", "claim", "name"] {
@@ -6706,6 +6733,7 @@ mod attribution_tests {
                 claim_id: "atc_1".to_owned(),
                 automation_name: "Stamp the finish date".to_owned(),
             }),
+            agent_run_id: None,
         };
         let wire = serde_json::to_value(&named).expect("encode");
         assert_eq!(
@@ -6741,6 +6769,7 @@ mod attribution_tests {
             on_behalf_of: None,
             depth: 1,
             run,
+            agent_run_id: None,
         };
         assert!(
             attribution(ChangeActorKind::Automation, run("atc_1", "Stamp"))
@@ -6762,6 +6791,90 @@ mod attribution_tests {
         ] {
             assert!(refused.validate().is_err(), "{refused:?}");
         }
+    }
+
+    #[test]
+    fn only_a_bounded_agent_attribution_names_an_agent_run() {
+        let attribution = |actor_kind, agent_run_id: &str| ChangeAttribution {
+            actor_kind,
+            on_behalf_of: Some("local".to_owned()),
+            depth: 0,
+            run: None,
+            agent_run_id: Some(agent_run_id.to_owned()),
+        };
+        assert!(
+            attribution(ChangeActorKind::Agent, "run-1")
+                .validate()
+                .is_ok()
+        );
+        for refused in [
+            attribution(ChangeActorKind::Human, "run-1"),
+            attribution(ChangeActorKind::Automation, "run-1"),
+            attribution(ChangeActorKind::Agent, ""),
+            attribution(ChangeActorKind::Agent, "run\n"),
+            attribution(
+                ChangeActorKind::Agent,
+                &"r".repeat(dohc_engine_storage::MAX_IDENTIFIER_BYTES + 1),
+            ),
+        ] {
+            assert!(refused.validate().is_err(), "{refused:?}");
+        }
+    }
+
+    /// The owner's devices replay the run an agent wrote in; a moment's
+    /// author names it, and reading that author back keeps it.
+    #[test]
+    fn an_agent_run_round_trips_on_the_wire_and_through_a_moment_author() {
+        let attribution = ChangeAttribution {
+            actor_kind: ChangeActorKind::Agent,
+            on_behalf_of: Some("local".to_owned()),
+            depth: 2,
+            run: None,
+            agent_run_id: Some("run-1".to_owned()),
+        };
+        let wire = serde_json::to_value(&attribution).expect("encode");
+        assert_eq!(
+            wire,
+            json!({ "actorKind": "agent", "onBehalfOf": "local", "depth": 2, "agentRunId": "run-1" })
+        );
+        assert_eq!(
+            serde_json::from_value::<ChangeAttribution>(wire).expect("decode"),
+            attribution
+        );
+        let author = super::moment_author_json(Some("codex"), Some(&attribution)).expect("author");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&author).expect("json"),
+            json!([{
+                "kind": "agent",
+                "agentId": "codex",
+                "onBehalfOf": "local",
+                "depth": 2,
+                "agentRunId": "run-1",
+            }])
+        );
+        assert_eq!(
+            super::moment_author_attribution(Some(&author)),
+            (Some("codex".to_owned()), Some(attribution.clone()))
+        );
+        // What a queued or delivered change declares names the agent, not its run.
+        let declared =
+            super::AgentDeclaration::from_change(Some("codex"), Some(&attribution)).expect("agent");
+        assert_eq!(
+            serde_json::to_value(&declared).expect("encode"),
+            json!({ "agentId": "codex", "onBehalfOf": "local", "depth": 2 })
+        );
+        assert_eq!(declared.attribution().agent_run_id, None);
+        // An author written before agent runs were recorded names none.
+        let unnamed = ChangeAttribution {
+            agent_run_id: None,
+            ..attribution
+        };
+        let author = super::moment_author_json(Some("codex"), Some(&unnamed)).expect("author");
+        assert!(!author.contains("agentRunId"));
+        assert_eq!(
+            super::moment_author_attribution(Some(&author)).1,
+            Some(unnamed)
+        );
     }
 }
 

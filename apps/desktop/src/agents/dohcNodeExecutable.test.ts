@@ -5,7 +5,7 @@ describe("resolveDohcNodeExecutable", () => {
   it.each([
     ["win32", "x64", "C:\\Ice Test\\Icé\\resources", "C:\\Ice Test\\Icé\\resources\\app-compiler\\node.exe"],
     ["darwin", "arm64", "/Applications/dohc.app/Contents/Resources", "/Applications/dohc.app/Contents/Resources/app-compiler/node"],
-    ["linux", "x64", "/opt/dohc/resources", null],
+    ["linux", "x64", "/opt/dohc/resources", "/opt/dohc/resources/app-compiler/node"],
     ["linux", "arm64", "/opt/dohc/resources", null],
   ] as const)("resolves %s-%s without consulting files or PATH", (platform, arch, resourcesPath, expected) => {
     expect(resolveDohcNodeExecutable({ resourcesPath, platform, arch })).toBe(expected);

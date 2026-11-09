@@ -39,6 +39,9 @@ const LARGE_FILE_PATHS = Array.from(
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
     files: FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
     folders: [],
     editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
@@ -56,7 +59,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),
@@ -68,8 +70,10 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
@@ -96,7 +100,7 @@ describe("Explorer render cost", () => {
     let listing!: ReturnType<typeof useWorkspaceListing>;
     function Host() {
       listing = useWorkspaceListing(props.workspaceId);
-      return <Explorer {...props} files={listing.files} folders={listing.folders} />;
+      return <Explorer {...props} files={listing.files} folders={listing.folders} listingRequest={listing.fileListingCommit?.request ?? 0} />;
     }
     try {
       render(<Host />);

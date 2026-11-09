@@ -1,5 +1,5 @@
 import { useSyncExternalStore, type ReactNode } from "react";
-import { Link2, Sparkles, Zap } from "lucide-react";
+import { Link2, Plug, Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
 import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
 
@@ -10,18 +10,29 @@ export function useAgentInk(token: ActorPresentation | undefined): string {
 
 type ChatAuthorKind = "human" | "agent" | "automation" | "link";
 
-/** An author's name beside their avatar: an agent's in its avatar's hue, anyone else's as it is. */
-export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPresentation; children: ReactNode }) {
-  const ink = useAgentInk(props.kind === "agent" ? props.presentation : undefined);
-  return props.kind === "agent" ? <span className={ink}>{props.children}</span> : <>{props.children}</>;
+/** An agent author: a member's agent, or an agent that signed in with a share link. */
+export function isAgentAuthor(author: { authorKind: ChatAuthorKind; linkAgent?: boolean }): boolean {
+  return author.authorKind === "agent" || (author.authorKind === "link" && author.linkAgent === true);
 }
 
-// One avatar for every chat surface: a person's initials on a tint of their
-// admitted hue, the agent's sparkle in the agent voice, an automation's bare
-// lightning mark, the same mark as the Automations button, or a link holder's
-// initials in a share link's dashed ring. Sized by the caller; 36px in the
-// composer, 32px on a feed row or an opening post, 28px on a comment, 18px in
-// a strip.
+/**
+ * An author's name beside their avatar: an agent's in its avatar's hue, anyone
+ * else's as it is. An agent that joined with a link has no hue, so it is olive.
+ */
+export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPresentation; linkAgent?: boolean; children: ReactNode }) {
+  const ink = useAgentInk(props.kind === "agent" ? props.presentation : undefined);
+  return isAgentAuthor({ authorKind: props.kind, linkAgent: props.linkAgent })
+    ? <span className={ink}>{props.children}</span>
+    : <>{props.children}</>;
+}
+
+// One avatar for every chat surface: a person's initial on a tint of their
+// admitted hue, the agent's sparkle in the agent voice (a connected agent's
+// plug), an automation's bare lightning mark, the same mark as the
+// Automations button, or a link holder's initial in a share link's dashed
+// ring. An agent that joined with a link is the agent's olive square with the
+// same dashed edge. Sized by the caller; 36px in the composer, 32px on a feed
+// row or an opening post, 28px on a comment, 18px in a strip.
 
 const SIZES = {
   post: "size-9 text-[14px]",
@@ -31,9 +42,6 @@ const SIZES = {
 } as const;
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
-
-// A strip shows one initial: two wide letters, such as "WW", overflow 18px.
-const INITIALS = { post: 2, row: 2, comment: 2, strip: 1 } as const;
 
 // An agent is a rounded square and a person is round, whatever their colors.
 // The drawing rounds a 28px square by 8px; an 18px strip takes 4px.
@@ -49,10 +57,9 @@ function firstGrapheme(word: string): string | undefined {
     : Array.from(word)[0];
 }
 
-// The first letter of each of the first `count` words. One word gives one letter.
-function initials(name: string, count: number): string {
-  const letters = name.trim().split(/\s+/, count).flatMap((word) => firstGrapheme(word) ?? []);
-  return letters.length ? letters.join("").toUpperCase() : "?";
+// The first letter of a name.
+function initial(name: string): string {
+  return firstGrapheme(name.trim())?.toUpperCase() ?? "?";
 }
 
 export function ChatAvatar(props: {
@@ -61,11 +68,29 @@ export function ChatAvatar(props: {
   presentation: ActorPresentation;
   size?: keyof typeof SIZES;
   className?: string;
+  // A link author that is an agent: the agent's square, in the default agent color.
+  linkAgent?: boolean;
 }) {
   const size = props.size ?? "post";
   const kind = props.kind;
+  const linkAgent = kind === "link" && props.linkAgent === true;
   const classes = useSyncExternalStore(subscribePresentation, () =>
     presentationClasses(props.presentation, kind === "agent" ? "agent" : "human"));
+  if (linkAgent) {
+    return (
+      <span
+        aria-hidden
+        data-author-kind="link"
+        data-link-agent=""
+        title={props.name}
+        className={`inline-grid shrink-0 place-items-center border border-dashed border-agent bg-bg font-semibold text-agent ${SIZES[size]} ${AGENT_RADIUS[size]} ${
+          props.className ?? ""
+        }`}
+      >
+        <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden />
+      </span>
+    );
+  }
   if (kind === "link") {
     // A link holder has no account, so no identity color: only their name.
     return (
@@ -77,7 +102,7 @@ export function ChatAvatar(props: {
           SIZES[size]
         } ${props.className ?? ""}`}
       >
-        {initials(props.name, INITIALS[size])}
+        {initial(props.name)}
       </span>
     );
   }
@@ -94,9 +119,13 @@ export function ChatAvatar(props: {
     );
   }
   const agent = kind === "agent";
+  // A share's agent post is "unknown": it takes the plug as well.
+  const plug = agent ? props.presentation.connected : undefined;
+  const Mark = plug ? Plug : Sparkles;
   return (
     <span
       aria-hidden
+      data-agent-mark={agent ? (plug === true ? "connected" : plug ?? "agent") : undefined}
       title={props.name}
       className={`inline-grid shrink-0 place-items-center border font-semibold ${
         SIZES[size]
@@ -106,12 +135,13 @@ export function ChatAvatar(props: {
           : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
-      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name, INITIALS[size])}
+      {agent ? <Mark size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initial(props.name)}
     </span>
   );
 }
 
-// Beside a link holder's name: the share link's mark, named for screen readers.
+// Beside a link holder's name, a person's or an agent's: the share link's
+// mark, named for screen readers.
 export function LinkHolderMark(props: { testId?: string }) {
   return (
     <span data-testid={props.testId} title="Link holder" className="inline-flex shrink-0 self-center text-subtle">

@@ -15,7 +15,7 @@
 //!   pending rescan, but the flag is cleared only by a completed apply/ack, so
 //!   evidence of a change is never lost (`plan §Workspace actor model`).
 
-use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
+use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans, gone_untracked};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
 use std::collections::{BTreeMap, BTreeSet};
@@ -497,6 +497,9 @@ pub struct ReconcileController {
     identical_degraded_count: usize,
     quarantined_paths: Vec<String>,
     deferred_paths: Vec<String>,
+    /// Paths whose record may exist, tracked by the manifest or not. A scan
+    /// that finds an untracked one's file gone plans its retire.
+    retire_candidates: BTreeSet<String>,
 }
 
 impl Default for ReconcileController {
@@ -520,6 +523,7 @@ impl ReconcileController {
             identical_degraded_count: 0,
             quarantined_paths: Vec::new(),
             deferred_paths: Vec::new(),
+            retire_candidates: BTreeSet::new(),
         }
     }
 
@@ -559,6 +563,7 @@ impl ReconcileController {
             identical_degraded_count: 0,
             quarantined_paths: Vec::new(),
             deferred_paths: Vec::new(),
+            retire_candidates: BTreeSet::new(),
         }
     }
 
@@ -599,6 +604,28 @@ impl ReconcileController {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.dirty_epoch = self.dirty_epoch.saturating_add(1);
+    }
+
+    /// Offer paths whose record may exist, such as a document a session
+    /// settled before any scan saw its file. A path the manifest tracks stays
+    /// a candidate in case capture later stops tracking it, as for a document
+    /// grown past the size cap. A scan that finds an untracked candidate's file
+    /// gone plans its retire; a file still there keeps its ordinary handling.
+    /// Asks for that scan when an untracked path is new.
+    pub fn offer_retire_candidates(&mut self, paths: impl IntoIterator<Item = String>) {
+        let mut offered = false;
+        for path in paths {
+            if crate::floor::is_excluded_file(&path) {
+                continue;
+            }
+            let untracked = self.manifest.get(&path).is_none();
+            if self.retire_candidates.insert(path) && untracked {
+                offered = true;
+            }
+        }
+        if offered {
+            self.mark_dirty();
+        }
     }
 
     /// Prepare a full reconcile: scan `root` and diff against the last
@@ -675,6 +702,13 @@ impl ReconcileController {
                 confirmed_removed.push(path);
             } else {
                 lstat_unconfirmed.push(path);
+            }
+        }
+        // A record the manifest never tracked retires the same way. One the
+        // probe can't confirm gone waits for a later scan without degrading.
+        for path in gone_untracked(&self.manifest, &listing, &self.retire_candidates) {
+            if absence_probe.confirms_absent(root, &path) {
+                confirmed_removed.push(path);
             }
         }
         diff.removed = confirmed_removed;
@@ -759,6 +793,7 @@ impl ReconcileController {
             .map(|c| (c.path.as_str(), (c.size, c.sha256.as_str())))
             .collect();
         let mut next = self.manifest.clone();
+        let mut retire_candidates = self.retire_candidates.clone();
         let held: std::collections::BTreeMap<_, _> = result
             .held_observations
             .iter()
@@ -802,7 +837,13 @@ impl ReconcileController {
                 // unchanged whenever the bytes match that file, and capture
                 // would never check them. Deferred retires and outside writes
                 // keep their entries, so release retries the original change.
-                if !deferred_retires.contains(op.path()) && !deferred_writes.contains(op.path()) {
+                // A deferred retire with no entry, as for a file deleted
+                // before capture recorded it, waits as a retire candidate.
+                if deferred_retires.contains(op.path()) {
+                    if next.get(op.path()).is_none() {
+                        retire_candidates.insert(op.path().to_owned());
+                    }
+                } else if !deferred_writes.contains(op.path()) {
                     next.remove(op.path());
                 }
                 continue;
@@ -847,7 +888,10 @@ impl ReconcileController {
                         },
                     );
                 }
-                CaptureOp::Retire { path } => next.remove(path),
+                CaptureOp::Retire { path } => {
+                    next.remove(path);
+                    retire_candidates.remove(path);
+                }
             }
         }
         // NotOwned paths are dropped even when they never appeared in
@@ -859,6 +903,7 @@ impl ReconcileController {
         for path in &result.not_owned_paths {
             next.remove(path);
         }
+        self.retire_candidates = retire_candidates;
         self.manifest = next;
         self.generation = plan.to_generation;
         self.outstanding = false;

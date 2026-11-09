@@ -4,7 +4,8 @@ import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, errorResponse, notFound, relayError, RelayError, RELAY_ERRORS } from "./errors";
-import { hashLinkProfileSecret, type ValidatedLinkCapability } from "./linkSecurity";
+import type { LinkAuthorityResolver } from "./linkAuthority";
+import { hashLinkProfileSecret } from "./linkSecurity";
 import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
@@ -166,7 +167,7 @@ export function createLinkCollectionWriteRoute(input: {
   rateLimiter: TokenBucketLimiter;
   admission: LinkCollectionWriteAdmission;
   linkKey: string | Uint8Array;
-  requireLinkCapability(request: Request): { capability: ValidatedLinkCapability };
+  linkAuthority: Pick<LinkAuthorityResolver, "resolve">;
   nowMs: () => number;
   newId: () => string;
   discussionActivity: Pick<DiscussionActivityHub, "wake">;
@@ -174,23 +175,32 @@ export function createLinkCollectionWriteRoute(input: {
   const { storage } = input;
   return async function respondToLinkCollectionWrites(request: Request): Promise<Response> {
     if (request.headers.has("cookie") || new URL(request.url).search !== "") throw notFound();
-    const { capability } = input.requireLinkCapability(request);
-    const secret = request.headers.get("x-dohc-link-profile-secret");
-    if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
+    const capability = input.linkAuthority.resolve(request);
+    const { credential } = capability;
+    // A holder writes as the browser its profile names; an agent as its connection's principal.
+    let writer: { kind: "link"; capabilityHash: string; profileTokenHash: string } |
+      { kind: "agent"; accessTokenHash: string; resourceHash: string };
+    if (credential.kind === "holder") {
+      const secret = request.headers.get("x-dohc-link-profile-secret");
+      if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
+      writer = { kind: "link", capabilityHash: credential.capability.session.capabilityHash,
+        profileTokenHash: hashLinkProfileSecret(secret, input.linkKey) };
+    } else {
+      writer = { kind: "agent", ...credential.check };
+    }
     // An Edit link only. A View or
     // Comment link learns nothing a missing share would not tell it.
     if (capability.access !== "edit") {
       throw notFound();
     }
-    const profileTokenHash = hashLinkProfileSecret(secret, input.linkKey);
-    const requireCurrentWriter = () => storage.authorizeLinkCollectionWrite({
-      shareId: capability.shareId,
-      grantId: capability.grantId,
-      grantGeneration: capability.generation,
-      capabilityHash: capability.session.capabilityHash,
-      profileTokenHash,
-      nowMs: input.nowMs(),
-    });
+    const pinned = { shareId: capability.shareId, grantId: capability.grantId, grantGeneration: capability.generation };
+    // The agent's check reads its token again with the current clock, so a
+    // token that expired or a connection that ended since stops the write.
+    const requireCurrentWriter = () => writer.kind === "link"
+      ? storage.authorizeLinkCollectionWrite({ ...pinned, capabilityHash: writer.capabilityHash,
+        profileTokenHash: writer.profileTokenHash, nowMs: input.nowMs() })
+      : storage.authorizeAgentCollectionWrite({ ...pinned, accessTokenHash: writer.accessTokenHash,
+        resourceHash: writer.resourceHash, nowMs: input.nowMs() });
     const { share } = requireCurrentWriter();
     let release: (() => void) | null = null;
     let body: Record<string, unknown> | undefined;
@@ -236,9 +246,7 @@ export function createLinkCollectionWriteRoute(input: {
         grantId: capability.grantId,
         grantGeneration: capability.generation,
         writer: {
-          kind: "link",
-          capabilityHash: capability.session.capabilityHash,
-          profileTokenHash,
+          ...writer,
           content,
           now: input.nowMs,
         },

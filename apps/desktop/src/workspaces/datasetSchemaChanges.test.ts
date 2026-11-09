@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
-import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { invalidateDatasetAddresses, resolveDatasetAddress } from "./datasetAddress";
-import { generateDatasetSources } from "./datasetGenerator";
+import { CollectionChangeProposal, describeCollectionChangeRow } from "./collectionChange";
+import { generateDatasetSchema, generateDatasetSources } from "./datasetGenerator";
+import { hasGeneratedDatasetSources } from "./datasetFieldMigration";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
@@ -113,6 +115,31 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
   await expect(f.host.query(call(f.revision, id(5)))).rejects.toThrow("The Collection's rules changed. Its owner must approve this access again.");
 });
 
+it("asks to apply an edited dataset.json and migration as a file that lists the change, and keeps no preparation", async () => {
+  const f = await fixture();
+  await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Camera" } }, "first"));
+  const approved = f.host.approvedArtifacts(id(1));
+  const generated = generateDatasetSchemaChange({ revision: approved.revision, schemaSql: approved.schemaSql, operationSource: approved.operationSource,
+    change: { kind: "addField", tableId: id(2), field: { name: "Due date", type: "date", required: false, unique: false } } });
+  for (const [path, source] of Object.entries(generated.files)) if (path !== generated.descriptorPath) f.files.set(path, source);
+  f.files.set("people/dataset.json", generated.files[generated.descriptorPath]!);
+  const discard = vi.spyOn(f.host, "discardMigrationCandidate");
+  const asked = await f.handler("owner", { action: "askToApply", workspaceId: "w", datasetPath: "people/dataset.json", migrationPath: generated.migrationPath, note: "Adds a due date." });
+  if (asked.kind !== "change-asked") throw new Error("Expected a change file");
+  expect(asked.path).toMatch(/^people\/changes\/[0-9a-f-]{36}\.json$/u);
+  const proposal = CollectionChangeProposal.parse(JSON.parse(f.files.get(asked.path)!));
+  expect(proposal).toMatchObject({ datasetId: id(1), name: "People", datasetPath: "people/dataset.json", migrationPath: generated.migrationPath,
+    base: { revision: 1, revisionSha256: approved.revision.revisionSha256 }, changeSha256: asked.changeSha256, note: "Adds a due date." });
+  expect(proposal.changeSha256).toBe(datasetChangeDigest({ revisionSha256: proposal.revisionSha256, migrationSql: generated.migrationSql }));
+  expect(proposal.files).toEqual(expect.arrayContaining(["people/dataset.json", generated.migrationPath]));
+  expect(proposal.rows.map(row => describeCollectionChangeRow(row, "present").text)).toEqual(["Adds the field Due date", "Runs a migration on 1 existing record"]);
+  expect(describeCollectionChangeRow(proposal.rows[0]!, "present").effect).toBe("1 record starts with an empty Due date");
+  expect(discard).toHaveBeenCalledOnce();
+  expect(f.host.approvedArtifacts(id(1)).revision.revisionSha256).toBe(approved.revision.revisionSha256);
+  await expect(f.handler("owner", { action: "askToApply", workspaceId: "w", datasetPath: "people/dataset.json", migrationPath: generated.migrationPath }))
+    .resolves.toMatchObject({ kind: "change-asked", changeSha256: asked.changeSha256 });
+});
+
 it("adds a button through owner approval without SQL, operation changes, or new access", async () => {
   const f = await fixture();
   const created = await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Ada" } }, "first"));
@@ -169,11 +196,39 @@ it("keeps stable field/table IDs across consecutive add and label changes", asyn
   expect(result.rows[0]!.values[noteId]).toBeNull();
 });
 
+it("counts a Collection as generated only when dohc generated both its schema and its operation code", async () => {
+  const f = await fixture();
+  const first = f.host.approvedArtifacts(id(1));
+  expect(hasGeneratedDatasetSources(first.revision, first.schemaSql)).toBe(true);
+  // A field dohc adds changes the schema's text but keeps it generated.
+  await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: false } }));
+  // So does a unique field, which dohc adds as a plain column and a unique index.
+  await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Badge", type: "text", required: false, unique: true } }));
+  const added = f.host.approvedArtifacts(id(1));
+  expect(added.schemaSql).not.toBe(generateDatasetSchema(added.revision.definition));
+  expect(hasGeneratedDatasetSources(added.revision, added.schemaSql)).toBe(true);
+  // A unique key the definition doesn't declare is custom.
+  const email = datasetColumnFields(added.revision.definition.tables[0]!).find(field => field.name === "Email")!.sqlColumn;
+  const keyed = `${added.schemaSql}\nCREATE UNIQUE INDEX "idx_email" ON "people" ("${email}");\n`;
+  expect(hasGeneratedDatasetSources(describeDatasetRevision({ definition: added.revision.definition, revision: 4, schemaSql: keyed, operationSource: added.operationSource }), keyed)).toBe(false);
+  // Beside generated operation code, a trigger that deletes every other record on each insert.
+  const wipe = `${added.schemaSql}\nCREATE TRIGGER wipe AFTER INSERT ON people BEGIN DELETE FROM people WHERE id <> NEW.id; END;\n`;
+  const triggered = describeDatasetRevision({ definition: added.revision.definition, revision: 3, schemaSql: wipe, operationSource: added.operationSource });
+  expect(hasGeneratedDatasetSources(triggered, wipe)).toBe(false);
+  // The schema checked must be the one the revision names.
+  expect(hasGeneratedDatasetSources(triggered, added.schemaSql)).toBe(false);
+  const edited = describeDatasetRevision({ definition: added.revision.definition, revision: 3, schemaSql: added.schemaSql, operationSource: `${added.operationSource}\n// custom` });
+  expect(hasGeneratedDatasetSources(edited, added.schemaSql)).toBe(false);
+});
+
 it("adds a unique field as an index and rejects duplicate values through existing operations", async () => {
   const f = await fixture(), next = await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: true } }));
   const field = next.revision.definition.tables[0]!.fields.at(-1)!;
   await f.host.action(call(next.revision, id(6), { values: { [id(4)]: "One", [field.fieldId]: "one@example.com" } }, "one"));
   await expect(f.host.action(call(next.revision, id(6), { values: { [id(4)]: "Two", [field.fieldId]: "one@example.com" } }, "two"))).rejects.toThrow(/already uses/);
+  // The unique index is dohc's own layout, so a later field change isn't refused as custom.
+  const changed = await approve(f, await f.prepare({ kind: "changeField", tableId: id(2), fieldId: id(4), type: "text", required: false }));
+  await expect(f.host.action(call(changed.revision, id(6), { values: { [id(4)]: "Three", [field.fieldId]: "one@example.com" } }, "three"))).rejects.toThrow(/already uses/);
 });
 
 it("refuses changed capture, stale revision and missing required defaults while preserving authored rules", async () => {

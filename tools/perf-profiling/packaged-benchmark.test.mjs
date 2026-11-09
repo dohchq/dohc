@@ -159,15 +159,24 @@ test('startup observer restarts its frame check when the bound editor is replace
 
 const fixtureWorkspaces = [0, 1].map(index => ({ workspaceId: `perf4-package-${index}`, rootPath: `C:/fixture/workspace-${index}` }));
 
-test('full restart after odd switches opens registry workspace 0 despite workspace 1 recency', async t => {
+test('full restart after odd switches opens workspace 1, the workspace opened last', async t => {
   const p = readinessPage(t);
+  p.document.querySelector('[data-testid="workspace-switcher"]').textContent = 'workspace-1';
+  p.document.querySelector('.tiptap').textContent = 'Workspace 1 small';
   const registry = { version: 1, workspaces: fixtureWorkspaces.map((workspace, index) => ({ ...workspace, lastOpenedAt: 100 + index })) };
-  const result = p.observe(startupTargetFromRegistry(registry, fixtureWorkspaces));
+  const target = startupTargetFromRegistry(registry, fixtureWorkspaces);
+  assert.deepEqual(target, { workspaceName: 'workspace-1', path: 'small.md', content: 'Workspace 1 small' });
+  const result = p.observe(target);
   p.frame(); p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, true);
-  assert.equal(observed.workspaceName, 'workspace-0');
+  assert.equal(observed.workspaceName, 'workspace-1');
   assert.equal(observed.path, 'small.md');
+});
+
+test('startup target keeps the first registry entry when lastOpenedAt ties', () => {
+  const registry = { version: 1, workspaces: fixtureWorkspaces.map(workspace => ({ ...workspace, lastOpenedAt: 100 })) };
+  assert.equal(startupTargetFromRegistry(registry, fixtureWorkspaces).workspaceName, 'workspace-0');
 });
 
 test('restart records a different known workspace only when the persisted registry selects it', async t => {

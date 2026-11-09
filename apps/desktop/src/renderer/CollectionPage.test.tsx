@@ -39,6 +39,7 @@ import {
 } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { publishReopenKey } from "./documentVersionKey";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
 // module evaluates and tracks droppable geometry with IntersectionObserver.
@@ -2119,6 +2120,34 @@ describe("CollectionRecordFieldWrite", () => {
     expect(props.onSettled).toHaveBeenCalledOnce();
     expect(props.onFailed).not.toHaveBeenCalled();
     expect(props.onHeldDurably).not.toHaveBeenCalled();
+  });
+
+  it("opens the record with its open editor's key, so the write joins that editor's session", () => {
+    act(() => publishReopenKey("ws-keyed", 4));
+    docMock.current = engineDocState({ opening: true });
+    render(<CollectionRecordFieldWrite {...writerProps()} workspaceId="ws-keyed" />);
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 4 });
+    // A version switch moves the write with its editor.
+    act(() => publishReopenKey("ws-keyed", 5));
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 5 });
+  });
+
+  it("fails a write whose session a new version key replaced before it saved", () => {
+    const first = new Y.Doc();
+    first.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: first });
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
+    docMock.current = engineDocState({ available: true, doc: first, saveState: { kind: "saving" } });
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    // The key moved. The new session never carried the edit, and it opens saved.
+    const second = new Y.Doc();
+    second.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: second });
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
+    expect(props.onSettled).not.toHaveBeenCalled();
+    expect(second.getMap("frontmatter").get("status")).toBeUndefined();
   });
 
   it("reports a save error as a failure, never a settle", () => {

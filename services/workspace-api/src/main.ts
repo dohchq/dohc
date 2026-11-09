@@ -6,15 +6,13 @@ import {
   type EmailMessage,
   type SendEmail,
 } from "@dohc/workspace-auth/smtp";
-import { toNodeHandler } from "better-auth/node";
-import { createServer } from "node:http";
 import { Pool } from "pg";
 import { accountEmailDelivery } from "./emailDelivery";
-import { sanitizeAuthHeaders } from "./clientAddress";
 import { ConfigError, readConfig, type WorkspaceApiConfig } from "./config";
 import { createCrashReportIntake, createPostgresCrashReportStore } from "./crashReports";
 import { createReadinessProbe } from "./readiness";
 import { createRouter, type AuthGateway } from "./routes";
+import { createWorkspaceServer } from "./server";
 import { createSignUpAdmission } from "./signUpAdmission";
 import { createAccountDeletion } from "./accountDeletion";
 
@@ -45,7 +43,11 @@ const deliverEmail: SendEmail = config.smtp
 
 const email = accountEmailDelivery(deliverEmail);
 const pool = new Pool({ connectionString: config.postgresUrl, connectionTimeoutMillis: 3000, query_timeout: 5000, statement_timeout: 5000 });
-pool.on("error", () => console.error("[workspace-api] An idle database connection failed."));
+// Each connection logs its own failure, idle or in use. A query on a failed
+// connection still fails in its caller. The pool also reports an idle
+// connection's failure, which the connection's own listener logs.
+pool.on("connect", (client) => client.on("error", () => console.error("[workspace-api] A database connection failed.")));
+pool.on("error", () => undefined);
 const accountDeletion = createAccountDeletion({pool, secret: config.secret, serverOrigin: config.baseURL, relayUrl: config.internalRelayUrl});
 const auth = createWorkspaceAuth({
   accountDeletion,
@@ -132,21 +134,7 @@ const router = createRouter({
   },
 });
 
-// The client address is derived from the socket and this server's own trusted
-// proxy list before Better Auth sees a single header, so no caller can choose
-// the address its rate limit is counted against.
-const handler = toNodeHandler(router);
-const server = createServer((request, response) => {
-  try {
-    sanitizeAuthHeaders(request.headers, request.socket.remoteAddress, config.trustedProxies);
-  } catch {
-    // A connection with no address of its own cannot be rate limited; it has
-    // usually already gone away by the time the request parses.
-    response.writeHead(400).end();
-    return;
-  }
-  return handler(request, response);
-});
+const server = createWorkspaceServer(router, config.trustedProxies);
 server.listen(config.port, config.bindHost, () => {
   const resume = () => {void accountDeletion.resume().catch(() => console.error("[workspace-api] Resuming account deletion failed."));};
   resume();

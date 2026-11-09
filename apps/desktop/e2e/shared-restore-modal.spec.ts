@@ -76,6 +76,8 @@ test.describe("shared restore review with a notice toast", () => {
     await page.goto(server.resolvedUrls!.local[0]);
     await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), setup.theme);
     await expect(page.getByTestId("workspace-shell-error")).toBeVisible();
+    // Nothing may move under a measurement when Inter arrives.
+    await page.evaluate(() => document.fonts.ready.then(() => undefined));
     await beforeOpen?.();
     await page.getByRole("button", { name: "Open restore review" }).press("Enter");
     const dialog = page.getByRole("dialog", { name: "Restore shared file" });
@@ -124,7 +126,7 @@ test.describe("shared restore review with a notice toast", () => {
             return [...list.querySelectorAll("[data-testid='engine-history-day-heading']")]
               .find((heading) => Math.abs(heading.closest("li")!.getBoundingClientRect().top - top) < 1)
               ?.textContent;
-          })).toMatch(/Sep 1[0-6]/i);
+          })).toMatch(/September 1[0-6]/);
         } : undefined);
         await waitForVisibleAnimations(page);
 
@@ -248,6 +250,8 @@ test.describe("shared restore review with a notice toast", () => {
     await page.keyboard.press("F6");
     const toasts = page.getByTestId("notice-toasts");
     const retry = toasts.getByRole("button", { name: "Try again" });
+    // F6 lands on the toast's first worded action, even when a cut-off title
+    // puts Show more before it.
     await expect(retry).toBeFocused();
     await page.screenshot({ path: test.info().outputPath("toast-keyboard-focus-dark.png") });
     // Tab cycles the toast's own controls; it does not reach the page behind.

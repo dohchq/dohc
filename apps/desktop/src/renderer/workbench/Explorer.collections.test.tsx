@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExplorerMenuEntry } from "../../ipc/bridgeContract";
 import { editorTitle, Explorer, type ExplorerProps } from "./Explorer";
 import { collectionTabPath, transactionalCollectionTabPath } from "./workbenchState";
 
@@ -10,6 +11,9 @@ afterEach(cleanup);
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
     workspaceId: "workspace-1",
+    mode: "files",
+    onModeChange: vi.fn(),
+    listed: true,
     files: [
       { path: "notes.md", kind: "file" },
       { path: "tasks/one.md", kind: "file" },
@@ -31,7 +35,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onActivateTab: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseAllTabs: vi.fn(),
-    onNewUntitledTextFile: vi.fn(),
     onCollapseFolders: vi.fn(),
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),
@@ -43,11 +46,19 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    listingRequest: 0,
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
+}
+
+// The Explorer's own menu, which a Collection that can't open must never open
+// beside its Show in Files.
+function explorerMenu() {
+  return vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [{ kind: "item", label: "Rename", id: "rename" }]);
 }
 
 function treeRow(path: string): HTMLElement {
@@ -65,11 +76,126 @@ describe("Explorer collection folders", () => {
   });
   it("offers recovery before the workspace has any data Collections", () => {
     const onRestoreCollection = vi.fn();
-    const view = render(<Explorer {...explorerProps({ dataCollections: [], onRestoreCollection })} />);
-    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Restore from recovery file" }));
+    const view = render(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection })} />);
+    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Collections actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restore from recovery file…" }));
     expect(onRestoreCollection).toHaveBeenCalledOnce();
-    view.rerender(<Explorer {...explorerProps({ dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
-    expect(screen.queryByRole("button", { name: "Restore from recovery file" })).toBeNull();
+    view.rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
+  });
+  it("names why a Collection can't open, and shows the files to fix in Files", async () => {
+    const onOpenDataCollection = vi.fn();
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    const tableId = "00000000-0000-4000-8000-000000000002";
+    const props = explorerProps({ mode: "home", onOpenDataCollection, dataCollections: [
+      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
+      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId, name: "Volunteers" },
+    ] });
+    const view = render(<Explorer {...props} />);
+    try {
+      const unreadable = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
+      expect(unreadable.textContent).toContain("Can't read dataset.json");
+      expect(unreadable.hasAttribute("aria-disabled")).toBe(false);
+      fireEvent.click(unreadable);
+      expect(onOpenDataCollection).not.toHaveBeenCalled();
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      expect(props.onSetFolderExpanded).toHaveBeenCalledWith("guests", true);
+
+      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      expect(share.textContent).toContain("Not in this share");
+      expect(share.getAttribute("aria-disabled")).toBe("true");
+      vi.mocked(props.onModeChange).mockClear();
+      fireEvent.click(share);
+      fireEvent.contextMenu(share);
+      await act(async () => {});
+      expect(props.onModeChange).not.toHaveBeenCalled();
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      const ambiguous = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      expect(ambiguous.textContent).toContain("2 dataset.json files");
+      fireEvent.contextMenu(ambiguous);
+      await act(async () => {});
+      expect(screen.getAllByRole("menu")).toHaveLength(1);
+      fireEvent.click(screen.getByRole("menuitem", { name: "Show in Files" }));
+      expect(readExplorerMenu).not.toHaveBeenCalled();
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      view.rerender(<Explorer {...props} mode="files" expandedFolders={["copy", "rooms"]} folders={[...props.folders, "copy", "rooms"]}
+        files={[...props.files, { path: "copy/dataset.json", kind: "file" }, { path: "rooms/dataset.json", kind: "file" }]} />);
+      expect(treeRow("copy/dataset.json").getAttribute("aria-selected")).toBe("true");
+      expect(treeRow("rooms/dataset.json").getAttribute("aria-selected")).toBe("true");
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("gives focus back to the row when its menu closes, so the arrows and Enter still work", () => {
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu: explorerMenu() });
+    const tableId = "00000000-0000-4000-8000-000000000002";
+    const props = explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
+    ] });
+    render(<Explorer {...props} />);
+    try {
+      const guests = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
+      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      rooms.focus();
+      fireEvent.contextMenu(rooms);
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Show in Files" }));
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(rooms);
+      fireEvent.keyDown(rooms, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(guests);
+      fireEvent.keyDown(guests, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(rooms);
+      fireEvent.keyDown(rooms, { key: "Enter" });
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      expect(props.onSetFolderExpanded).toHaveBeenCalledWith("rooms", true);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("opens only a broken Collection's own menu from the Menu key and Shift+F10, with its row marked", async () => {
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId: "00000000-0000-4000-8000-000000000002", name: "Rooms" },
+    ] })} />);
+    try {
+      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
+        rooms.focus();
+        fireEvent.keyDown(rooms, key);
+        const show = screen.getByRole("menuitem", { name: "Show in Files" });
+        expect(document.activeElement).toBe(show);
+        expect(show.className.split(" ")).toContain("focus:bg-selected");
+        // The browser's own contextmenu event for the key opens no second menu.
+        fireEvent.contextMenu(show);
+        await act(async () => {});
+        expect(screen.getAllByRole("menu")).toHaveLength(1);
+        fireEvent.keyDown(show, { key: "Escape" });
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(document.activeElement).toBe(rooms);
+      }
+      expect(readExplorerMenu).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("opens no menu from the Menu key or Shift+F10 on a Collection a share leaves out", async () => {
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId: "00000000-0000-4000-8000-000000000002", name: "Volunteers" },
+    ] })} />);
+    try {
+      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
+        share.focus();
+        fireEvent.keyDown(share, key);
+        fireEvent.contextMenu(share);
+        await act(async () => {});
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(document.activeElement).toBe(share);
+      }
+      expect(readExplorerMenu).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
@@ -153,19 +279,19 @@ describe("Collections this computer cannot use", () => {
   it("says where they are in a few words, and offers to keep Collections no computer keeps here", () => {
     const onKeepCollections = vi.fn(), onRetryCollections = vi.fn();
     const words = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
-    const { rerender } = render(<Explorer {...explorerProps({ collectionsRefusal: { kind: "unclaimed", words }, onKeepCollections, onRetryCollections,
+    const { rerender } = render(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "unclaimed", words }, onKeepCollections, onRetryCollections,
       dataCollections: [], onRestoreCollection: vi.fn() })} />);
     const section = screen.getByRole("region", { name: "Collections" });
     expect(within(section).getByTestId("collections-refusal").textContent).toBe("Which computer keeps these Collections?Use this computer");
-    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    expect(within(section).queryByRole("button", { name: "Collections actions" })).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     expect(within(section).queryByRole("button", { name: "Try again" })).toBeNull();
     const elsewhere = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: "Laptop" }, onKeepCollections, onRetryCollections })} />);
+    rerender(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: "Laptop" }, onKeepCollections, onRetryCollections })} />);
     expectTooltip(screen.getByText("On Laptop"), elsewhere);
     // Main named no computer: the row says the whole sentence, and still offers both steps.
-    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: null }, onKeepCollections, onRetryCollections })} />);
+    rerender(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: null }, onKeepCollections, onRetryCollections })} />);
     expect(screen.getByTestId("collections-refusal").textContent).toBe(`${elsewhere}Use this computerTry again`);
     expect(screen.getByText(elsewhere).tabIndex).toBe(-1);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
@@ -173,7 +299,7 @@ describe("Collections this computer cannot use", () => {
     // Behind main's question, which names the other computer.
     fireEvent.click(screen.getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledTimes(2);
-    rerender(<Explorer {...explorerProps({ collectionsRefusal: { kind: "replaced", words: "Another copy replaced it." }, onKeepCollections, onRetryCollections })} />);
+    rerender(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "replaced", words: "Another copy replaced it." }, onKeepCollections, onRetryCollections })} />);
     expect(screen.getByTestId("collections-refusal").textContent).toContain("Another copy replaced it.");
     expect(screen.queryByRole("button", { name: "Use this computer" })).toBeNull();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
@@ -185,27 +311,29 @@ describe("Collections on this computer's server, where another computer keeps th
     const onKeepCollections = vi.fn();
     const rows = [{ datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "registrations/dataset.json", tableId: "00000000-0000-4000-8000-000000000002", name: "Registrations" }];
     const words = "Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    const { rerender } = render(<Explorer {...explorerProps({ dataCollections: rows, collectionsElsewhere: { computer: "Laptop", others: true, words }, onKeepCollections,
+    const { rerender } = render(<Explorer {...explorerProps({ mode: "home", dataCollections: rows, collectionsElsewhere: { computer: "Laptop", others: true, words }, onKeepCollections,
       onIncludeArchivedCollections: vi.fn(), onRestoreCollection: vi.fn() })} />);
     const section = screen.getByRole("region", { name: "Collections" });
     expect(within(section).getByRole("button", { name: "Registrations" })).toBeTruthy();
     expectTooltip(within(section).getByText("Others on Laptop"), words);
     expect(within(section).getByTestId("collections-elsewhere").textContent).toBe(`Others on Laptop${words}Use this computer`);
     expect(within(section).queryByTestId("collections-refusal")).toBeNull();
-    expect(within(section).getByLabelText("Archived collections")).toBeTruthy();
-    expect(within(section).queryByText("Restore from recovery file")).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "Collections actions" }));
+    expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Restore from recovery file…" })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     // Behind main's question, which names the other computer.
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     // The server didn't answer: no rows, the line, and Keep.
     const offline = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    rerender(<Explorer {...explorerProps({ dataCollections: [], collectionsElsewhere: { computer: "Laptop", others: false, words: offline }, onKeepCollections, onRestoreCollection: vi.fn() })} />);
+    rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], collectionsElsewhere: { computer: "Laptop", others: false, words: offline }, onKeepCollections, onRestoreCollection: vi.fn() })} />);
     expectTooltip(screen.getByText("On Laptop"), offline);
     expect(screen.queryByRole("button", { name: "Registrations" })).toBeNull();
     expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
-    expect(screen.queryByText("Restore from recovery file")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
     // Main named no computer: the row says the whole sentence, with the same step.
-    rerender(<Explorer {...explorerProps({ dataCollections: [], collectionsElsewhere: { computer: null, others: false, words: offline }, onKeepCollections })} />);
+    rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], collectionsElsewhere: { computer: null, others: false, words: offline }, onKeepCollections })} />);
     expect(screen.getByTestId("collections-elsewhere").textContent).toBe(`${offline}Use this computer`);
     expect(screen.queryByRole("tooltip", { hidden: true })).toBeNull();
   });

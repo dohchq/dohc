@@ -8,7 +8,8 @@ pub struct OwnerOutboxRestoreFenced {
     pub pending_bytes: i64,
 }
 
-/// Lists set-aside restore queues, including after Stop removes their binding.
+/// Lists set-aside queues a person can only save: a restore's, including after
+/// Stop removes their binding, and a retired document's.
 pub fn list_restore_fenced_in(
     conn: &Connection,
     workspace_id: &str,
@@ -26,7 +27,7 @@ pub fn list_restore_fenced_in(
         .prepare(
             "SELECT o.outbox_id FROM owner_ydoc_outboxes o \
          WHERE o.workspace_id=?1 AND o.outbox_id>?2 \
-           AND o.state='quarantined' AND o.quarantine_reason='restore-fenced' \
+           AND o.state='quarantined' AND o.quarantine_reason IN ('restore-fenced',?4) \
            AND o.pending_bytes>0 \
            AND o.kept_checkpoint_digest IS NOT NULL \
          ORDER BY o.outbox_id LIMIT ?3",
@@ -34,7 +35,12 @@ pub fn list_restore_fenced_in(
         .map_err(read_sql)?;
     let ids = stmt
         .query_map(
-            params![workspace_id, after.unwrap_or(""), limit as i64],
+            params![
+                workspace_id,
+                after.unwrap_or(""),
+                limit as i64,
+                super::retirement::RETIRED_REASON
+            ],
             |row| row.get::<_, String>(0),
         )
         .map_err(read_sql)?;

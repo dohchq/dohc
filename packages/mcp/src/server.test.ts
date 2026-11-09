@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { getShareCopyDetails, type ToolContext } from "./tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -433,6 +433,48 @@ describe("MCP tool results", () => {
     });
   });
 
+  it("sends what the client reports and the model the agent states with every chat write", async () => {
+    const root = await workspaceRoot();
+    const sent: unknown[] = [];
+    const server = createDohcMcpServer({ root, home: "/home",
+      request: async request => {
+        sent.push(request.args);
+        return request.verb === "fileChatStart"
+          ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
+          : request.verb === "post"
+            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            : { threadId: "th_1", messageId: "msg_2" };
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "claude-code", title: "Claude Code", version: "2.1" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    connections.push({ client, server });
+    for (const [name, args] of [
+      ["dohc_start_file_chat", { path: "tracked.md", title: "Food", model: "Claude Opus 5.5" }],
+      ["dohc_start_group_chat", { group: "general", model: "Claude Opus 5.5" }],
+      ["dohc_reply_to_chat", { threadId: "thread-1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: { ...args, body: "On it." } });
+      expect(result, JSON.stringify(result)).not.toHaveProperty("isError", true);
+    }
+    expect(sent).toMatchObject([
+      { agent: "claude-code", reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+      { reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+      { reported: { product: "Claude Code", version: "2.1" } },
+    ]);
+    expect(sent.every(args => !Object.hasOwn(args as object, "model"))).toBe(true);
+    expect((sent[2] as { reported: object }).reported).not.toHaveProperty("model");
+
+    for (const model of [" Opus\n", "﻿Opus", "\u{1F600}".repeat(40)]) {
+      const refused = await client.callTool({
+        name: "dohc_reply_to_chat", arguments: { threadId: "thread-1", body: "On it.", model },
+      });
+      expect(refused.isError).toBe(true);
+    }
+    expect(sent).toHaveLength(3);
+  });
+
   it("passes bodies at the normalized UTF-8 limit to the server for every chat write", async () => {
     // CRLF becomes LF and trailing JS whitespace is removed before the cap.
     const body = "x".repeat(65_534) + "\r\ny\uFEFF ";
@@ -540,6 +582,41 @@ it("routes owner publication with a bearer warning and a stable link operation i
   expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
 });
 
+it("names the run it works for on every chat write, over a run the caller names", async () => {
+  vi.stubEnv("DOHC_RUN_ID", "run_env");
+  try {
+    expect(parseArgs(["--workspace", "/w", "--home", "/h"])).toMatchObject({ runId: "run_env" });
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  const sent: Array<{ verb: string; runId?: unknown }> = [];
+  const { client } = await connectedToolNames({ root: await workspaceRoot(), home: "/home", runId: "run_env", request: async (request) => {
+    sent.push({ verb: request.verb, runId: (request.args as { runId?: unknown }).runId });
+    return {};
+  } });
+  await client.callTool({ name: "dohc_start_group_chat", arguments: { group: "general", body: "Done." } });
+  await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", body: "Done.", runId: "run_named" } });
+  await client.callTool({ name: "dohc_start_file_chat", arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", runId: "run_named" } });
+  expect(sent).toEqual([{ verb: "post", runId: "run_env" }, { verb: "reply", runId: "run_env" }, { verb: "fileChatStart", runId: "run_env" }]);
+});
+
+it("names the agent you run from --agent-id on every request", async () => {
+  expect(parseArgs(["--workspace", "/w", "--home", "/h", "--agent-id", "terminal"])).toMatchObject({ agentId: "terminal" });
+  expect(parseArgs(["--workspace", "/w", "--home", "/h"])).not.toHaveProperty("agentId");
+  expect(() => parseArgs(["--agent-id", "Terminal"])).toThrow(
+    '--agent-id must be an agent\'s id from Settings › Agents. Received: "Terminal".',
+  );
+  expect(() => parseArgs(["--agent-id"])).toThrow(/Received: no value/u);
+  const sent: Array<{ verb: string; agentId?: unknown }> = [];
+  const { client } = await connectedToolNames({ root: await workspaceRoot(), home: "/home", agentId: "terminal", request: async (request) => {
+    sent.push({ verb: request.verb, agentId: (request.args as { agentId?: unknown }).agentId });
+    return request.verb === "watch" ? { messages: [], cursor: "next" } : {};
+  } });
+  await client.callTool({ name: "dohc_start_group_chat", arguments: { group: "general", body: "Done." } });
+  await client.callTool({ name: "dohc_wait_for_messages", arguments: { timeoutMs: 0 } });
+  expect(sent).toEqual([{ verb: "post", agentId: "terminal" }, { verb: "watch", agentId: "terminal" }]);
+});
+
 
 describe("share copy profile admission", () => {
   const input = { shareId: "share", grantId: "grant" };
@@ -568,6 +645,44 @@ describe("share copy profile admission", () => {
   it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
     const request = vi.fn(async () => details);
     expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("link agent profile admission", () => {
+  const page = { agents: [{ connectionId: "connection", reportedName: "Claude", connectedAtMs: 1, lastActionAtMs: null }], nextCursor: null };
+  const tools = [
+    { name: "dohc_list_link_agents", verb: "shareAgents", input: { shareId: "share", grantId: "grant", cursor: "next" }, reply: page, call: listLinkAgents },
+    { name: "dohc_disconnect_link_agent", verb: "shareDisconnect", input: { shareId: "share", grantId: "grant", connectionId: "connection" }, reply: { connectionId: "connection" }, call: disconnectLinkAgent },
+  ] as const;
+  it.each(tools)("advertises and calls $name only for the owner profile", async ({ name, verb, input, reply }) => {
+    const request = vi.fn(async () => reply);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    expect(names).toContain(name);
+    expect((await client.callTool({ name, arguments: input })).structuredContent).toEqual(reply);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb, door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("offers neither tool to a %s profile", async shareAccess => {
+    const request = vi.fn(async () => page);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    for (const { name, input, call } of tools) {
+      expect(names).not.toContain(name);
+      expect(await client.callTool({ name, arguments: input })).toMatchObject({ isError: true });
+      expect(await call({ root: "/workspace", home: "/state", shareAccess, request }, input))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
+    const request = vi.fn(async () => page);
+    for (const { input, call } of tools) {
+      expect(await call({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("refuses a disconnect without a connection id before transport", async () => {
+    const request = vi.fn(async () => page);
+    expect(await disconnectLinkAgent({ root: "/workspace", home: "/state", request }, { shareId: "share", grantId: "grant" })).toMatchObject({ ok: false });
     expect(request).not.toHaveBeenCalled();
   });
 });

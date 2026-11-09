@@ -24,7 +24,7 @@ export function useKeptCopyNotices(input: {
   workspaceId: string;
   workspaceIsReady: boolean;
   show: (copies: readonly KeptCopyNotice[], more: boolean) => void;
-  showSaved: (message: string, open: (() => void) | null) => void;
+  showSaved: (message: string, saved: { path: string; open: () => void } | null) => void;
   reportShellError: (fallback: string, error: unknown, retry: (() => void) | null) => void;
   reportFailure: (message: string, retry: () => void) => void;
   openFile: (path: string) => void;
@@ -66,7 +66,7 @@ export function useKeptCopyNotices(input: {
             const { path } = saved;
             latest.current.showSaved(
               `Saved the other copy of ${copy.path} as ${path}`,
-              () => latest.current.openFile(path),
+              { path, open: () => latest.current.openFile(path) },
             );
           } else if (saved.status === "gone") {
             // A crash, an agent or another window got there first.

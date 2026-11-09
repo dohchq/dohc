@@ -51,6 +51,18 @@ pub async fn call_with_busy_retry<S: dohc_engine_protocol::transport::EngineServ
     retry_engine_store_busy(|| transport.call(context.clone(), input.clone())).await
 }
 
+pub async fn pull_batch<S: dohc_engine_protocol::transport::EngineService>(
+    transport: &InProcessTransport<S>,
+    context: RequestContext,
+    mut input: Request,
+) -> Result<dohc_engine_protocol::wire::Response, WireError> {
+    input.method = "sync.fetchPull".into();
+    let fetched = call_with_busy_retry(transport, context.clone(), input.clone()).await?;
+    input.method = "sync.applyPull".into();
+    input.params["pageToken"] = fetched.result["pageToken"].clone();
+    transport.call(context, input).await
+}
+
 pub async fn service_call_with_busy_retry(
     service: &EngineService,
     context: RequestContext,

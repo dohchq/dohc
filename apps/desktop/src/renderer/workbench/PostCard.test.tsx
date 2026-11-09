@@ -82,11 +82,11 @@ describe("PostCard as a feed row", () => {
     expect(screen.getByTestId("chats-post-excerpt").className).toContain("text-muted");
   });
 
-  it("shows an open poll and the comment count as glyphs a screen reader names", () => {
+  it("shows an unanswered question and the comment count as glyphs a screen reader names", () => {
     row({ messageCount: 5, openDecisionCount: 1 }, "Launch checklist");
     const meta = screen.getByTestId("chats-post-footer");
-    expect(meta.querySelector('[role="img"][aria-label="Poll open"]')).not.toBeNull();
-    expect(screen.queryByText("Poll open")).toBeNull();
+    expect(meta.querySelector('[role="img"][aria-label="Unanswered"]')).not.toBeNull();
+    expect(screen.queryByText("Unanswered")).toBeNull();
     const comments = screen.getByRole("img", { name: "4 comments" });
     expect(comments.textContent).toBe("4");
   });
@@ -113,8 +113,8 @@ describe("PostCard as a feed row", () => {
     }
     // Inside the row's own box: the list paints each row in its own box.
     expect(classes).toEqual(expect.arrayContaining(["top-1", "right-9"]));
-    // The row's focus ring is drawn inside it, for the same reason.
-    expect(screen.getByTestId("chats-post-card").className).toContain("focus-visible:-outline-offset-2");
+    // The row's keyboard focus is drawn inside it, for the same reason.
+    expect(screen.getByTestId("chats-post-card").className.split(" ")).toContain("dohc-focus-row");
     await user.tab();
     expect(document.activeElement).toBe(screen.getByTestId("chats-post-card"));
     for (const id of ["chats-post-like", "chats-post-comment", "chats-post-bookmark"]) {

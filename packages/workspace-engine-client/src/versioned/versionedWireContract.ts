@@ -65,6 +65,8 @@ export type VersionedOrigin =
 export type AgentAuthor = JsonObject & {
   kind: "agent";
   agentId: string;
+  /** The name a connected agent gave itself, a label for History. */
+  agentName?: string;
   onBehalfOf: string;
   agentRunId?: string;
   /** The run's chain depth when an automation started it. */
@@ -481,7 +483,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
   // Preflight the author of the following rename or delete.
-  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string; author?: WriteAuthor };
+  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string; author?: WriteAuthor; change?: "movePage" | "moveFolder" | "delete" };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;

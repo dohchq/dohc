@@ -89,11 +89,20 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
-  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { runId: "run_1" } },
-  { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { reader: { kind: "run", runId: "run_1" } } },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { reader: { kind: "unnamed" } } },
+  {
+    method: CHATS_METHOD.agentReadListRequestsPage,
+    params: {
+      reader: { kind: "connected", agentId: "terminal", handle: "terminal", requesters: ["u"], unattributedCounts: false },
+      threadId: "t",
+      after: { createdAtMs: 1, messageId: "m" },
+    },
+  },
+  { method: CHATS_METHOD.agentReadListUnreadThreads, params: { reader: { kind: "unnamed" } } },
   {
     method: CHATS_METHOD.agentReadMarkThreadRead,
-    params: { threadId: "t", upTo: { createdAtMs: 1, messageId: "m" } },
+    params: { reader: { kind: "unnamed" }, threadId: "t", upTo: { createdAtMs: 1, messageId: "m" } },
   },
   {
     method: CHATS_METHOD.followsSet,
@@ -142,7 +151,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
     method: CHATS_METHOD.dispatchEnqueue,
     params: { triggerMessageId: "m", threadId: "t", agentId: "default" },
   },
-  { method: CHATS_METHOD.dispatchClaimNextPending, params: { runId: "r" } },
+  { method: CHATS_METHOD.dispatchClaimNextPending, params: { agentId: "default", runId: "r" } },
   { method: CHATS_METHOD.dispatchListPending, params: {} },
   { method: CHATS_METHOD.dispatchOpenRuns, params: {} },
   { method: CHATS_METHOD.dispatchListRunMessages, params: { runId: "r" } },
@@ -170,7 +179,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
     method: CHATS_METHOD.dispatchRequeueFailedTrigger,
     params: { triggerMessageId: "m", runId: "r" },
   },
-  { method: CHATS_METHOD.dispatchListAppQuitRecoveries, params: {} },
+  { method: CHATS_METHOD.dispatchListFailedRunRecoveries, params: {} },
   {
     method: CHATS_METHOD.dispatchComplete,
     params: { runId: "r", exitCode: 0 },
@@ -452,9 +461,233 @@ function loopbackAdapter(): {
   return { adapter, loopback };
 }
 
+// The reader scenarios mirror the engine's tests in chats_agent_state.rs, so
+// the loopback and the engine answer each one the same way.
+const UNNAMED = { kind: "unnamed" as const };
+
+function terminal(requesters: string[], unattributedCounts: boolean) {
+  return { kind: "connected" as const, agentId: "terminal", handle: "terminal", requesters, unattributedCounts };
+}
+
+type PostOptions = { kind?: "human" | "agent"; agentId?: string; userId?: string | null; origin?: "cli" };
+
+// A post whose id is its body. The first post in a thread starts it. A
+// person's post is Ada's unless it names another account or none.
+function readerFixture() {
+  const { adapter, loopback } = loopbackAdapter();
+  const started = new Set<string>();
+  const post = async (channelId: string, threadId: string, messageId: string, options: PostOptions = {}) => {
+    const kind = options.kind ?? "human";
+    const userId = options.userId === undefined ? (kind === "human" ? "ada" : undefined) : options.userId ?? undefined;
+    const input = {
+      workspaceId: "workspace", threadId, messageId, authorActorKey: null, body: messageId,
+      author: { kind, displayName: kind === "human" ? "Ada" : "Terminal" },
+      ...(userId === undefined ? {} : { authorUserId: userId }),
+      ...(options.agentId === undefined ? {} : { authorAgentId: options.agentId }),
+      ...(options.origin === undefined ? {} : { origin: options.origin }),
+    };
+    if (started.has(threadId)) return await adapter.sendMessage(input);
+    started.add(threadId);
+    return (await adapter.startChannelThread({ ...input, channelId })).message;
+  };
+  return { adapter, loopback, post };
+}
+
+async function agentChats(adapter: ChatsLiveAdapter) {
+  const channel = await adapter.createChannel({ workspaceId: "workspace", name: "Channel" });
+  const chat = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "terminal", name: "Terminal" });
+  const research = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "research", name: "Research" });
+  return { channel: channel.channelId, terminal: chat.channelId, research: research.channelId };
+}
+
+async function requestIds(adapter: ChatsLiveAdapter, reader: typeof UNNAMED | ReturnType<typeof terminal>) {
+  return (await adapter.listAgentUnreadRequests("workspace", reader)).map(row => row.messageId);
+}
+
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 62 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(62);
+  it("keeps a posted-thread reply that also requests a dohc agent", async () => {
+    const { adapter } = loopbackAdapter();
+    const channel = await adapter.ensureGeneralChannel({ workspaceId: "workspace" });
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.channelId,
+      author: { kind: "agent", displayName: "Connected agent" }, body: "Joining the thread",
+    });
+    const reply = await adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      author: { kind: "human", displayName: "Sam" }, body: "@Research please also look",
+      wakeAgentIds: ["research"],
+    });
+    expect((await adapter.listAgentUnreadRequests("workspace", UNNAMED)).map(row => row.messageId)).toEqual([reply.id]);
+  });
+
+  it("leaves agent chats to their agents when the reader gave no name", async () => {
+    const { adapter } = loopbackAdapter();
+    const channel = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "default", name: "Nova" });
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.channelId,
+      author: { kind: "human", displayName: "Sam" }, body: "Please look",
+    });
+    const send = (kind: "human" | "agent", body: string) => adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      author: { kind, displayName: kind }, body,
+    });
+    await send("agent", "Answered");
+    const later = await send("human", "@agent one more question");
+    expect(await adapter.listAgentUnreadRequests("workspace", UNNAMED)).toEqual([]);
+    expect(await adapter.listAgentUnreadThreads("workspace", UNNAMED)).toEqual([]);
+    const nova = { kind: "connected" as const, agentId: "default", handle: "nova", requesters: [], unattributedCounts: true };
+    expect((await adapter.listAgentUnreadRequests("workspace", nova)).map(row => row.messageId))
+      .toEqual([started.message.id, later.id]);
+  });
+
+  it("reads an agent you run's chat, mentions, and threads it posted in, for its person only", async () => {
+    const { adapter, post } = readerFixture();
+    const { channel, terminal: chat, research } = await agentChats(adapter);
+    await post(chat, "dm", "dm-ask");
+    await post(channel, "group", "ask @terminal");
+    await post(channel, "posted", "opening");
+    await post(channel, "posted", "terminal-post", { kind: "agent", agentId: "terminal" });
+    await post(channel, "posted", "reply");
+    await post(research, "other", "other-ask");
+    await post(research, "other", "other @terminal");
+    await post(chat, "dm", "terminal-reply", { kind: "agent", agentId: "terminal" });
+    await post(chat, "dm", "from-cli", { origin: "cli" });
+    await post(chat, "dm", "bob-ask", { userId: "bob" });
+    await post(channel, "group", "plain");
+
+    expect(await requestIds(adapter, terminal(["ada"], false)))
+      .toEqual(["dm-ask", "ask @terminal", "reply", "other @terminal"]);
+    expect(await requestIds(adapter, UNNAMED)).toEqual([]);
+  });
+
+  it("keeps each reader's own place in a thread", async () => {
+    const { adapter, post } = readerFixture();
+    const { channel } = await agentChats(adapter);
+    await post(channel, "group", "own", { kind: "agent" });
+    const ask = await post(channel, "group", "ask @terminal");
+    const reader = terminal(["ada"], false);
+    expect(await requestIds(adapter, reader)).toEqual(["ask @terminal"]);
+    expect(await requestIds(adapter, UNNAMED)).toEqual(["ask @terminal"]);
+
+    const upTo = (message: { id: string; createdAtMs: number }) =>
+      ({ createdAtMs: message.createdAtMs, messageId: message.id });
+    await adapter.markThreadReadByAgent({ workspaceId: "workspace", reader, threadId: "group", upTo: upTo(ask) });
+    expect(await requestIds(adapter, reader)).toEqual([]);
+    expect(await requestIds(adapter, UNNAMED)).toEqual(["ask @terminal"]);
+    expect(await adapter.listAgentUnreadThreads("workspace", UNNAMED)).toHaveLength(1);
+    expect(await adapter.listAgentUnreadThreads("workspace", reader)).toEqual([]);
+
+    const again = await post(channel, "group", "again @terminal");
+    await adapter.markThreadReadByAgent({
+      workspaceId: "workspace", reader: UNNAMED, threadId: "group", upTo: upTo(again),
+    });
+    expect(await requestIds(adapter, reader)).toEqual(["again @terminal"]);
+    const state = await adapter.markThreadReadByAgent({
+      workspaceId: "workspace", reader, threadId: "group", upTo: upTo(again), expectedRevision: 1,
+    });
+    expect(state.revision).toBe(2);
+  });
+
+  it("asks an agent you run only with its person's posts", async () => {
+    const { adapter, post } = readerFixture();
+    const { terminal: chat } = await agentChats(adapter);
+    await post(chat, "dm", "mine", { userId: "me" });
+    await post(chat, "dm", "owners", { userId: "owner" });
+    await post(chat, "dm", "no-account", { userId: null });
+
+    expect(await requestIds(adapter, terminal(["me"], false))).toEqual(["mine"]);
+    expect(await requestIds(adapter, terminal(["me"], true))).toEqual(["mine", "no-account"]);
+    expect(await requestIds(adapter, terminal([], false))).toEqual([]);
+    expect(await requestIds(adapter, terminal(["me", "owner", "me"], false))).toEqual(["mine", "owners"]);
+  });
+
+  it("checks a connected reader and binds a cursor to it", async () => {
+    const { adapter, post } = readerFixture();
+    const { terminal: chat } = await agentChats(adapter);
+    await post(chat, "dm", "first");
+    await post(chat, "dm", "second");
+    // Sent as raw params, so a malformed reader reaches the engine's checks.
+    const read = (reader: JsonValue, cursor?: string) => adapter.request(
+      CHATS_METHOD.agentReadListUnreadRequests,
+      { reader, pageLimit: 1, ...(cursor === undefined ? {} : { cursor }) } as never,
+    );
+    const first = await read(terminal(["ada"], false));
+    expect(first.requests.map(row => row.messageId)).toEqual(["first"]);
+    const cursor = first.nextCursor;
+    if (cursor === null) throw new Error("expected a second page");
+    await expect(read(terminal(["bob"], false), cursor)).rejects.toThrow("invalid-cursor");
+    await expect(read({ ...terminal([], true), agentId: "Terminal" })).rejects.toThrow("invalid-input");
+    await expect(read({ ...terminal([], true), handle: "@" })).rejects.toThrow("invalid-message-body");
+    const tooMany = Array.from({ length: 65 }, (_, index) => `account-${index}`);
+    await expect(read(terminal(tooMany, false))).rejects.toThrow("invalid-input");
+    await expect(read({ kind: "unnamed", agentId: "terminal" })).rejects.toThrow("invalid-parameters");
+    await expect(read({ kind: "run", runId: "no-such-run" })).rejects.toThrow("run-not-found");
+  });
+
+  it("pages requests by Group, thread, and coordinate with what a wait shows", async () => {
+    const { adapter, post } = readerFixture();
+    const { channel, terminal: chat } = await agentChats(adapter);
+    await post(chat, "dm", "dm-ask");
+    const ask = await post(channel, "group", "ask @terminal");
+    await post(channel, "group", "more @terminal");
+    const reader = terminal(["ada"], false);
+    const page = async (filter: { channelId?: string; threadId?: string; after?: { createdAtMs: number; messageId: string } }) =>
+      (await adapter.listAgentRequestsPage({ workspaceId: "workspace", reader, ...filter })).requests.map(row => row.messageId);
+
+    expect(await page({})).toEqual(["dm-ask", "ask @terminal", "more @terminal"]);
+    expect(await page({ channelId: channel })).toEqual(["ask @terminal", "more @terminal"]);
+    expect(await page({ threadId: "dm" })).toEqual(["dm-ask"]);
+    expect(await page({ channelId: chat, threadId: "group" })).toEqual([]);
+    expect(await page({ after: { createdAtMs: ask.createdAtMs, messageId: ask.id } })).toEqual(["more @terminal"]);
+    expect(await adapter.listAgentRequestsPage({ workspaceId: "workspace", reader, limit: 1 })).toMatchObject({
+      requests: [{
+        threadId: "dm",
+        messageId: "dm-ask",
+        channel: { id: chat, kind: "agent", name: "Terminal", slug: "my-agent-terminal", purpose: "" },
+        author: { kind: "human", displayName: "Ada" },
+        body: "dm-ask",
+      }],
+      more: true,
+    });
+  });
+
+  it("matches a post's account after trimming it, as the engine stores it", async () => {
+    const { adapter, post } = readerFixture();
+    const { terminal: chat } = await agentChats(adapter);
+    await post(chat, "dm", "spaced", { userId: " ada " });
+    expect(await requestIds(adapter, terminal(["ada"], false))).toEqual(["spaced"]);
+  });
+
+  it("cuts a requests page at the engine's 256 KiB and continues after it", async () => {
+    const { adapter } = readerFixture();
+    const { terminal: chat } = await agentChats(adapter);
+    const body = "x".repeat(64 * 1024);
+    const author = { kind: "human" as const, displayName: "Ada" };
+    const started = await adapter.startChannelThread({
+      workspaceId: "workspace", channelId: chat, threadId: "dm", messageId: "ask-1",
+      authorActorKey: null, authorUserId: "ada", author, body,
+    });
+    for (const messageId of ["ask-2", "ask-3", "ask-4", "ask-5"]) {
+      await adapter.sendMessage({
+        workspaceId: "workspace", threadId: started.thread.id, messageId,
+        authorActorKey: null, authorUserId: "ada", author, body,
+      });
+    }
+    const reader = terminal(["ada"], false);
+    const first = await adapter.listAgentRequestsPage({ workspaceId: "workspace", reader });
+    expect(first.requests.map(row => row.messageId)).toEqual(["ask-1", "ask-2", "ask-3"]);
+    expect(first.more).toBe(true);
+    const last = first.requests[2];
+    if (last === undefined) throw new Error("expected three requests");
+    const rest = await adapter.listAgentRequestsPage({
+      workspaceId: "workspace", reader, after: { createdAtMs: last.createdAtMs, messageId: last.messageId },
+    });
+    expect(rest.requests.map(row => row.messageId)).toEqual(["ask-4", "ask-5"]);
+    expect(rest.more).toBe(false);
+  });
+
+  it("encodes every chats request case with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(64);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),
@@ -852,6 +1085,7 @@ describe("ChatsLiveAdapter", () => {
     // preserve that indirection.
     await expect(
       adapter.claimNextPending("workspace", {
+        agentId: "default",
         command: "codex",
         logPath: "run-logs/{runId}.log",
       }),
@@ -860,6 +1094,7 @@ describe("ChatsLiveAdapter", () => {
       method: CHATS_METHOD.dispatchClaimNextPending,
       params: {
         runId: "run-claim",
+        agentId: "default",
         command: "codex",
         logPath: "run-logs/{runId}.log",
       },
@@ -968,6 +1203,74 @@ describe("ChatsLiveAdapter", () => {
     for (const emoji of ["😀😀", "1", "1\uFE0F", "😀‍x", "🏴\u{E0067}\u{E0062}"]) {
       await expect(adapter.setReaction({ ...reaction, emoji })).rejects.toThrow("invalid-message-body");
     }
+  });
+
+  it("claims only the listed agent when another agent has an older request", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      messageId: "other-first", author, body: "First", wakeAgentIds: ["other"],
+    });
+    await adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      messageId: "listed", author, body: "Second", wakeAgentIds: ["default"],
+    });
+    expect((await adapter.listPending("workspace"))[0]?.agentId).toBe("other");
+
+    const claim = await adapter.claimNextPending("workspace", {
+      agentId: "default", command: "listed-command",
+    });
+    expect(claim?.dispatch).toMatchObject({ triggerMessageId: "listed", agentId: "default" });
+    expect(claim?.run).toMatchObject({ agentId: "default", command: "listed-command" });
+    if (!claim) throw new Error("Expected the listed agent's run.");
+    await adapter.completeRun({ runId: claim.run.runId, exitCode: 0 });
+
+    await expect(adapter.claimNextPending("workspace", { agentId: "default" })).resolves.toBeNull();
+    expect(await adapter.listPending("workspace")).toEqual([
+      expect.objectContaining({ triggerMessageId: "other-first", agentId: "other", attemptCount: 0 }),
+    ]);
+  });
+
+  it("folds pending requests only from the same place: the stream, or one message's thread", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      messageId: "main-1", author, body: "First", wakeAgentIds: ["codex"],
+    });
+    for (const [messageId, parentMessageId] of [
+      ["main-2", undefined], ["a-1", "main-1"], ["a-2", "main-1"], ["b-1", "main-2"],
+    ] as const) {
+      await adapter.sendMessage({
+        authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+        messageId, author, body: messageId, wakeAgentIds: ["codex"],
+        ...(parentMessageId ? { parentMessageId } : {}),
+      });
+    }
+    const claimed: string[] = [];
+    for (let run = 0; run < 3; run += 1) {
+      const claim = await adapter.claimNextPending("workspace", { agentId: "codex" });
+      claimed.push(claim!.dispatch.triggerMessageId);
+      await adapter.completeRun({ runId: claim!.run.runId, exitCode: 0 });
+    }
+    expect(claimed).toEqual(["main-1", "a-1", "b-1"]);
+    const runOf = (trigger: string) => loopback.readDispatch(WORKSPACE, trigger, "codex")?.runId;
+    expect(runOf("main-2")).toBe(runOf("main-1"));
+    expect(runOf("a-2")).toBe(runOf("a-1"));
+    expect(new Set(["main-1", "a-1", "b-1"].map(runOf)).size).toBe(3);
   });
 
   it("uses a fresh idempotency key for added, removed, then added reaction transitions", async () => {
@@ -1359,6 +1662,35 @@ describe("loopback poll validation", () => {
   });
 });
 
+describe("loopback reported agent validation", () => {
+  it.each([
+    { name: "40 emoji, 80 UTF-16 units", model: "\u{1F600}".repeat(40) },
+    { name: "a leading byte order mark", model: "﻿Claude Opus 5.5" },
+  ])("refuses a model of $name, as the daemon does", async ({ model }) => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "bad-report", authorKind: "agent", authorDisplayName: "Nova", body: "Done",
+      authorReported: { model },
+    } })).rejects.toThrow("invalid-input");
+    expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
+  });
+
+  it("accepts a model of 32 emoji, 64 UTF-16 units", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    const model = "\u{1F600}".repeat(32);
+    await loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "good-report", authorKind: "agent", authorDisplayName: "Nova", body: "Done",
+      authorReported: { model },
+    } });
+    const messages = await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id });
+    expect(messages.find(message => message.id === "good-report")?.authorReported).toEqual({ model });
+  });
+});
+
 
 it("decodes agent owner display metadata without changing its verified author", () => {
   const message = decodeChatsResult(CHATS_METHOD.messageSend, {
@@ -1436,28 +1768,51 @@ describe("automation authors", () => {
 });
 
 describe("loopback idempotency", () => {
-  it("refuses a reused key whose message names other agents or another author agent", async () => {
+  it("refuses a reused key whose message wakes other agents or names another author agent", async () => {
     const { adapter, loopback } = loopbackAdapter();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
     const human = { kind: "human" as const, displayName: "Sam" };
     const agent = { kind: "agent" as const, displayName: "Nova" };
     const start = { authorActorKey: null, workspaceId: "workspace", channelId: "channel", threadId: "thread", messageId: "first", idempotencyKey: "start", author: human, body: "Hello" };
-    await adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova", "codex"] });
-    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova"] })).resolves.toMatchObject({ message: { id: "first" } });
-    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["nova"] })).rejects.toThrow("idempotency-key-reuse-mismatch");
+    await adapter.startChannelThread({ ...start, wakeAgentIds: ["codex", "nova", "codex"] });
+    await expect(adapter.startChannelThread({ ...start, wakeAgentIds: ["codex", "nova"] })).resolves.toMatchObject({ message: { id: "first" } });
+    await expect(adapter.startChannelThread({ ...start, wakeAgentIds: ["nova"] })).rejects.toThrow("idempotency-key-reuse-mismatch");
     // The engine checks the ids before it looks up a retry, so one id can't stand for two.
-    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex,nova"] })).rejects.toThrow("invalid-input");
+    await expect(adapter.startChannelThread({ ...start, wakeAgentIds: ["codex,nova"] })).rejects.toThrow("invalid-input");
+    // A message wakes at most 64 agents.
+    const crowd = Array.from({ length: 65 }, (_, index) => `agent-${index}`);
+    await expect(adapter.startChannelThread({ ...start, threadId: "crowd", messageId: "crowd", idempotencyKey: "crowd", wakeAgentIds: crowd }))
+      .rejects.toThrow("invalid-input");
     const agentStart = { ...start, threadId: "agent-thread", messageId: "opened", idempotencyKey: "opened", author: agent, authorAgentId: "nova" };
     await adapter.startChannelThread(agentStart);
     await expect(adapter.startChannelThread({ ...agentStart, authorAgentId: "codex" })).rejects.toThrow("idempotency-key-reuse-mismatch");
 
     const send = { authorActorKey: null, workspaceId: "workspace", threadId: "thread", body: "Done" };
-    await adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["nova"] });
-    await expect(adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["codex"] }))
+    await adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, wakeAgentIds: ["nova"] });
+    await expect(adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, wakeAgentIds: ["codex"] }))
       .rejects.toThrow("idempotency-key-reuse-mismatch");
     await adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "nova" });
     await expect(adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "codex" }))
       .rejects.toThrow("idempotency-key-reuse-mismatch");
+  });
+});
+
+describe("loopback channel previews", () => {
+  it("keeps the opening message's stored key, origin and agent, and leaves out those it lacks", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const key = '{"kind":"agent","ownerKey":{"kind":"installation","installationId":"device"},"claimedName":"Codex"}';
+    await adapter.startChannelThread({ authorActorKey: key, origin: "cli", workspaceId: "workspace", channelId: "channel",
+      threadId: "run", author: { kind: "agent", displayName: "Codex" }, authorAgentId: "codex", body: "Done" });
+    await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      threadId: "plain", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    const threads = await adapter.listChannelThreads({ workspaceId: "workspace", channelId: "channel" });
+    expect(threads.find((summary) => summary.thread.id === "run")?.openingMessage)
+      .toMatchObject({ authorActorKey: key, origin: "cli", authorAgentId: "codex" });
+    const plain = threads.find((summary) => summary.thread.id === "plain")?.openingMessage;
+    expect(plain).toBeDefined();
+    expect(plain).not.toHaveProperty("authorActorKey");
+    expect(plain).not.toHaveProperty("origin");
   });
 });
 
@@ -1496,6 +1851,18 @@ describe("local chat actor key transport", () => {
     const rows = await adapter.listMessages({ workspaceId: "workspace", threadId: "thread" });
     expect(rows[0]!.authorActorKey).toBe(key);
     expect(rows[1]!.authorActorKey).toBeUndefined();
+  });
+});
+
+it("preserves the agent read position on unread threads", async () => {
+  const requests: Request[] = [];
+  const thread = { id: "thread", workspaceId: "workspace", title: "Thread", createdAtMs: 1, updatedAtMs: 3,
+    lastRead: { createdAtMs: 2, messageId: "read-message" } };
+  const adapter = new ChatsLiveAdapter(mockDaemon(requests, () => ({ threads: [thread], nextCursor: null })), WORKSPACE, { workspaceId: "workspace" });
+  expect(await adapter.listAgentUnreadThreads("workspace", { kind: "run", runId: "run" })).toEqual([thread]);
+  expect(requests[0]).toMatchObject({
+    method: CHATS_METHOD.agentReadListUnreadThreads,
+    params: { reader: { kind: "run", runId: "run" } },
   });
 });
 

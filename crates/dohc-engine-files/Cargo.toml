@@ -93,6 +93,7 @@ sha2 = "0.11"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
 
 [lints]
 workspace = true

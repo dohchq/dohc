@@ -296,7 +296,7 @@ describe("RelayFilePeer receiver contract", () => {
       const token = "test:relay-file-conflict";
       const baseDir = await createTestScratch("relay-file-conflict-");
       const rootPath = join(baseDir, "receiver");
-      const relayDb = join(baseDir, "relay.sqlite");
+      const relayDb = join(baseDir, "relay", "relay.sqlite");
       let relay: SyncRelayHandle | null = null;
       let lifecycle: EngineDaemonLifecycle | null = null;
       let sessions: EngineWorkspaceSessions | null = null;
@@ -345,7 +345,7 @@ describe("RelayFilePeer receiver contract", () => {
         });
 
         await receiver.bootstrapJoinIdentity(identity);
-        const pulled = await receiver.pull(async () => undefined);
+        const pulled = await receiver.pull(async (apply) => apply(async () => undefined));
         expect(
           pulled.conflictsOpened,
           "accepting a false beforeLatestMomentId would silently overwrite the receiver head",

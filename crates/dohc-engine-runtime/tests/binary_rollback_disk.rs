@@ -2245,6 +2245,27 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
             .iter()
             .any(|op| matches!(op, CaptureOp::Retire { path } if path == "captured.bin"))
     );
+    let retired = dohc_engine_testkit::capture::retire_captured_path(
+        &actor,
+        CaptureRetire {
+            workspace_id: WORKSPACE.to_owned(),
+            version_id: "main".to_owned(),
+            path: "captured.bin".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 20,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("the inactive version's write does not hold the retire");
+    assert!(retired.retired.is_some(), "the deleted main file retires");
     supervisor.close(&db).expect("close actor");
 }
 

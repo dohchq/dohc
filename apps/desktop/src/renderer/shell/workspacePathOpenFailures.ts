@@ -59,7 +59,7 @@ type ReportFailure = (failure: {
 
 /**
  * A notice owner's side: each held failure becomes a toast and a Notices
- * row with Copy, and with Try again unless only a newer dohc can open it.
+ * row with Details, and with Try again unless only a newer dohc can open it.
  * `workspaceId` is the workspace this owner shows, or null for none.
  */
 export function useWorkspacePathOpenFailures(workspaceId: string | null, report: ReportFailure): void {

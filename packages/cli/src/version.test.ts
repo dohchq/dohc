@@ -25,6 +25,23 @@ it("marks binary files and conflicts, and exits 1 with a refusal's reason", asyn
     stderr: "dohc: Versions belong to the owning workspace. Open it to continue.\n" });
 });
 
+it("says what each version was made from, by its id when the list doesn't have it", async () => {
+  const row = (id: string, name: string, madeFromVersionId?: string) => ({ id, name, kind: madeFromVersionId ? "named" : "main",
+    createdAtMs: 10, canMergeIntoMain: madeFromVersionId === "main", ...(madeFromVersionId ? { madeFromVersionId } : {}) });
+  const listed = { ok: true, activeVersionId: "draft",
+    versions: [row("main", "Main"), row("draft", "Draft", "main"), row("nested", "Nested", "draft"), row("orphan", "Orphan", "gone")] };
+  const request = vi.fn(async () => listed as never);
+  expect(await executeCli({ argv: ["version", "list"], request })).toEqual({ exitCode: 0, stderr: "", stdout: [
+    "  Main · main",
+    "* Draft · draft · made from Main",
+    "  Nested · nested · made from Draft",
+    "  Orphan · orphan · made from gone",
+    "",
+  ].join("\n") });
+  const json = JSON.parse((await executeCli({ argv: ["version", "list", "--json"], request })).stdout) as { versions: unknown[] };
+  expect(json.versions).toEqual(listed.versions);
+});
+
 it("parses the version changes and refuses a bad name or resolution before transport", async () => {
   expect(parseCliArguments(["version", "create", " Ideas "], {})).toMatchObject({ verb: "versionCreate", name: "Ideas" });
   expect(parseCliArguments(["version", "switch", "Draft"], {})).toMatchObject({ verb: "versionSwitch", version: "Draft" });
@@ -53,4 +70,22 @@ it("says what a version change did", async () => {
       contentKind: "text", currentText: "a", incomingText: "b", baseText: null }] } as never);
   expect((await executeCli({ argv: ["version", "merge", "Draft"], request })).stdout)
     .toBe("Merged Draft into Main · 2 files merged · 1 conflict\nc1 · merge · notes.md\n");
+});
+
+it("says under a conflict that a newer version waits behind it, and only there", async () => {
+  const listed = { conflictId: "c1", path: "notes.md", sourceVersionId: "main", targetVersionId: "main", origin: "sync",
+    contentKind: "text", currentText: "mine", incomingText: "theirs", baseText: "base" };
+  const waiting = { code: "resolve-existing-conflict", objectId: "notes-object", originId: "computer-d", originSeq: 4,
+    message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved." };
+  const request = vi.fn(async () => ({ ok: true, nextAfterConflictId: null,
+    conflicts: [{ ...listed, waiting }, { ...listed, conflictId: "c2", path: "plan.md" }] }) as never);
+  expect((await executeCli({ argv: ["version", "conflicts"], request })).stdout).toBe([
+    "c1 · sync · notes.md",
+    "  A newer version from another machine is waiting. It comes in after you resolve this conflict.",
+    "c2 · sync · plan.md",
+    "",
+  ].join("\n"));
+  const json = JSON.parse((await executeCli({ argv: ["version", "conflicts", "--json"], request })).stdout) as { conflicts: unknown[] };
+  expect(json.conflicts[0]).toMatchObject({ waiting });
+  expect(json.conflicts[1]).not.toHaveProperty("waiting");
 });

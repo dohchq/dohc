@@ -85,7 +85,9 @@ fn reoffer(state: &RewriteState, request: &str) {
         pass.offered = true;
     }
 }
-pub(super) struct RewriteStop(Arc<RewriteState>, String);
+/// Keeps an operation's link publisher from publishing until the last stop drops.
+#[must_use]
+pub struct RewriteStop(Arc<RewriteState>, String);
 impl Drop for RewriteStop {
     fn drop(&mut self) {
         let mut stops = self.0.stops.lock().unwrap();
@@ -258,7 +260,7 @@ fn save(
 }
 
 impl ActorHandle {
-    pub(super) fn stop_link_rewrites(&self, operation: &str) -> RewriteStop {
+    pub fn stop_link_rewrites(&self, operation: &str) -> RewriteStop {
         *self
             .link_rewrites
             .stops
@@ -685,10 +687,11 @@ impl ActorHandle {
             let read_leases = leases.clone();
             let targeted = retry.is_some();
             let (remaining, sources, skipped, admitted, locked) = self
-                .run(move |store, cache| {
+                .run_with_reader_retry(move |store, cache| {
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&ws, "read");
-                    let _admission = serial;
+                    let _admission = &serial;
+                    let mut pending = pending.clone();
                     let started = Instant::now();
                     let mut sources = Vec::new();
                     let mut skipped = Vec::new();

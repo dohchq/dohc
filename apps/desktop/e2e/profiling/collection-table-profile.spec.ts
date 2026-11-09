@@ -7,7 +7,7 @@ import { cpus, freemem, platform, totalmem } from "node:os";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { generateDatasetSources } from "../../src/workspaces/datasetGenerator";
 import { launchDesktopApp } from "../helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, waitForWorkspaceFile } from "../helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, openExplorerHome, openWorkspaceFromFirstRun, waitForWorkspaceFile } from "../helpers/workspace";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const rowCount = 100_000, samples = 30, title = "Performance participants";
@@ -129,6 +129,7 @@ globalThis.operations.count=(ctx)=>{if(ctx.caller.kind!=='owner')ctx.refuse('for
     if (migrated.kind !== "migrated") throw Error("Expected a fixture checkpoint.");
     await desktop.close(); desktop = await launchDesktopApp({ workspace }); page = desktop.page;
     await openWorkspaceFromFirstRun(page, workspace);
+    await openExplorerHome(page);
     await expect(page.getByRole("region", { name: "Collections", exact: true }).getByRole("button", { name: title, exact: true })).toBeVisible();
     const coldMs = await tableSample(page, true);
     const warm: number[] = [], input: number[] = [];

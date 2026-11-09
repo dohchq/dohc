@@ -11,10 +11,10 @@ describe("owner Y.Doc draft descriptor", () => {
     outboxId: null, pendingBytes: 0, state: null,
   };
   function open(ownerDraft: JsonValue, extra: Record<string, JsonValue> = {}) {
-    return { sessionId: "session", objectId: "object", path: "a.md", contentKind: "richdoc", head: "present", lineage: "existing", unsettled: true, lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft, ...extra };
+    return { sessionId: "session", objectId: "object", path: "a.md", contentKind: "richdoc", head: "present", headSha256: "a".repeat(64), lineage: "existing", unsettled: true, lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft, ...extra };
   }
   function resync(ownerDraft: JsonValue) {
-    return { lineageClaimId: "lineage", lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [], ownerDraft };
+    return { headSha256: "a".repeat(64), lineageClaimId: "lineage", lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [], ownerDraft };
   }
   function refuse(value: JsonValue) {
     expect(() => decodeOwnerYDocDraftDescriptor(value)).toThrow(TypeError);
@@ -279,6 +279,7 @@ describe("ydoc.settle result", () => {
 // the refusal off, or throw those edits away, without a word. Both required.
 function openResult(overrides: Record<string, unknown> = {}) {
   return {
+    headSha256: "a".repeat(64),
     sessionId: "ydoc-1",
     objectId: "object-1",
     path: "notes/solo.md",

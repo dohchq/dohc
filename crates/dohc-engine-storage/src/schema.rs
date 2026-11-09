@@ -25,7 +25,7 @@ use crate::limits::{
 };
 use crate::migration::{
     BASELINE_MIGRATION_ID, BASELINE_MIGRATIONS, MigrationContext, MigrationOutcome,
-    newer_build_refusal, run_migrations,
+    RELEASED_TAIL_TRIGGERS, newer_build_refusal, run_migrations,
 };
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
@@ -41,7 +41,7 @@ pub(crate) const OPEN_WORK_STEP_OPS: std::ffi::c_int = 1_000;
 /// Count the SQLite work of this open into `work` until [`stop_counting`], and
 /// interrupt it once `cancelled` is set.
 fn count_open_work(
-    conn: &Connection,
+    conn: &mut Connection,
     work: Option<Arc<AtomicU64>>,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<(), StorageError> {
@@ -63,7 +63,7 @@ fn count_open_work(
 }
 
 /// The open is done: later statements on this connection count nothing.
-fn stop_counting(conn: &Connection) -> Result<(), StorageError> {
+fn stop_counting(conn: &mut Connection) -> Result<(), StorageError> {
     conn.progress_handler(0, None::<fn() -> bool>)
         .map_err(StorageError::corrupt)
 }
@@ -82,6 +82,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "replica_frontiers",
     "replica_documents",
     "replica_first_seen",
+    "replica_restore_cancellations",
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",
@@ -96,10 +97,14 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_projection_contributions",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
+    "live_audit_held_records",
+    "live_audit_held_blobs",
+    "live_audit_held_exports",
     "live_accepted_updates",
     "live_accepted_checkpoints",
     "live_accepted_reader_history",
     "live_restore_fences",
+    "live_restore_cancellations",
     "ydoc_owner_applied_frames",
     "ydoc_owner_bindings",
     "owner_pending_settlements",
@@ -107,8 +112,13 @@ const REQUIRED_TABLES: &[&str] = &[
     "relay_deferred_ops",
     "relay_deferred_blobs",
     "live_owner_adoptions",
+    "live_owner_activations",
+    "live_owner_retirements",
+    "released_tail_generations",
+    "released_hold_revisions",
     "live_device_bootstraps",
     "live_device_settlements",
+    "live_empty_settlements",
     "live_settlement_publication_states",
     "live_settlement_publication_admissions",
     "live_settlement_attribution_unavailable",
@@ -125,6 +135,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "versions",
     "active_versions",
     "capture_file_holds",
+    "capture_first_imports",
+    "work_references",
+    "work_reference_outbox",
     "file_objects",
     "blobs",
     "path_aliases",
@@ -165,12 +178,16 @@ const REQUIRED_TABLES: &[&str] = &[
     "secret_moments",
     // R11a durable Y.Doc tables.
     "ydoc_docs",
+    "markdown_write_obligations",
+    "markdown_write_obligation_notice_dismissals",
     "ydoc_updates",
     "ydoc_snapshots",
     "ydoc_deferred_updates",
+    "ydoc_drain_reports",
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
+    "released_hold_copy_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
     "owner_ydoc_outbox_refusals",
@@ -246,6 +263,10 @@ const REQUIRED_TABLES: &[&str] = &[
     "automation_schedule_marks",
     "remote_changes",
 ];
+
+/// Columns a migration added to an existing table, which the table's presence
+/// does not prove.
+const REQUIRED_COLUMNS: &[(&str, &str)] = &[("live_audit_events", "restore_generation")];
 
 /// How an existing file was classified by the fingerprint fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +386,7 @@ fn open_engine_db_configured(
     // must not fold them into engine.db.
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work, cancelled)?;
+    count_open_work(&mut conn, work, cancelled)?;
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
@@ -439,8 +460,8 @@ fn open_engine_db_configured(
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;
-    stop_counting(&conn)?;
-    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
+    stop_counting(&mut conn)?;
+    crate::search_generation::install(&mut conn).map_err(StorageError::corrupt)?;
     if let Some(checkpoints) = &checkpoints {
         if disposition == Disposition::Fresh {
             checkpoints.checkpoint_fresh_schema(&conn);
@@ -466,12 +487,12 @@ pub(crate) fn open_engine_db_read_only(
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
-    let conn =
+    let mut conn =
         crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work, cancelled)?;
+    count_open_work(&mut conn, work, cancelled)?;
     apply_session_pragmas(&conn)?;
-    validate_current(&conn)?;
-    stop_counting(&conn)?;
+    validate_current(&mut conn)?;
+    stop_counting(&mut conn)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
@@ -493,7 +514,7 @@ pub(crate) fn classify_existing(
 }
 
 /// Refuse a store this build cannot read as it is, then check it.
-fn validate_current(conn: &Connection) -> Result<(), StorageError> {
+fn validate_current(conn: &mut Connection) -> Result<(), StorageError> {
     if classify_existing(conn)? == crate::migration::LedgerState::Pending {
         return Err(StorageError::MigrationPending);
     }
@@ -501,7 +522,7 @@ fn validate_current(conn: &Connection) -> Result<(), StorageError> {
 }
 
 /// Check a current store's schema and pages once and ready its queries.
-pub(crate) fn check_current(conn: &Connection) -> Result<(), StorageError> {
+pub(crate) fn check_current(conn: &mut Connection) -> Result<(), StorageError> {
     validate_v2(conn)?;
     integrity_check(conn)?;
     crate::search_generation::install(conn).map_err(StorageError::corrupt)
@@ -671,6 +692,31 @@ fn validate_v2(conn: &Connection) -> Result<(), StorageError> {
             return Err(StorageError::StateCorrupt { source: None });
         }
     }
+    for (table, column) in REQUIRED_COLUMNS {
+        let present: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt)?;
+        if !present {
+            return Err(StorageError::StateCorrupt { source: None });
+        }
+    }
+    let triggers = conn
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger'")
+        .map_err(StorageError::corrupt)?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(StorageError::corrupt)?
+        .collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(StorageError::corrupt)?;
+    if !RELEASED_TAIL_TRIGGERS
+        .iter()
+        .all(|trigger| triggers.contains(*trigger))
+    {
+        return Err(StorageError::StateCorrupt { source: None });
+    }
     // The baseline ledger row is our own-store fingerprint beyond table names.
     let baseline_present: bool = conn
         .query_row(
@@ -803,6 +849,11 @@ mod tests {
     #[test]
     fn current_schema_rejects_each_missing_live_application_table() {
         for table in [
+            "markdown_write_obligations",
+            "markdown_write_obligation_notice_dismissals",
+            "live_audit_held_records",
+            "live_audit_held_blobs",
+            "live_audit_held_exports",
             "live_audit_base_publications",
             "live_audit_bases",
             "live_audit_base_conflicts",
@@ -810,7 +861,12 @@ mod tests {
             "live_accepted_checkpoints",
             "live_accepted_reader_history",
             "live_restore_fences",
+            "live_restore_cancellations",
             "live_owner_adoptions",
+            "live_owner_activations",
+            "live_owner_retirements",
+            "released_tail_generations",
+            "released_hold_revisions",
             "live_device_bootstraps",
             "live_device_application_bindings",
             "live_device_update_applications",
@@ -833,6 +889,28 @@ mod tests {
                     Err(crate::StorageError::StateCorrupt { .. })
                 ),
                 "missing {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_schema_rejects_each_missing_added_column() {
+        for (table, column) in super::REQUIRED_COLUMNS {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("added-column-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "missing {table}.{column}"
             );
         }
     }
@@ -866,6 +944,50 @@ mod tests {
     }
 
     #[test]
+    fn current_schema_rejects_missing_work_reference_tables() {
+        for table in ["work_references", "work_reference_outbox"] {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("work-reference-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "open must reject a store missing {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_schema_rejects_each_missing_released_tail_trigger() {
+        for trigger in super::RELEASED_TAIL_TRIGGERS {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("released-tail-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("DROP TRIGGER {trigger}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "open must reject a store missing {trigger}"
+            );
+        }
+    }
+
+    #[test]
     fn current_schema_requires_pending_conflict_bundle_tables() {
         for table in [
             "replication_pending_conflict_bundles",
@@ -883,7 +1005,12 @@ mod tests {
 
     #[test]
     fn current_schema_requires_ydoc_arbitration_tables() {
-        for table in ["ydoc_base_relay_candidates", "ydoc_recovery_decisions"] {
+        for table in [
+            "ydoc_base_relay_candidates",
+            "ydoc_recovery_decisions",
+            "ydoc_drain_reports",
+            "released_hold_copy_decisions",
+        ] {
             assert!(
                 REQUIRED_TABLES.contains(&table),
                 "open must reject a store missing {table}"

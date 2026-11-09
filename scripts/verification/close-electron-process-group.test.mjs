@@ -16,8 +16,8 @@ async function bounded(promise, message, timeoutMs = 20_000) {
   } finally { clearTimeout(timer); }
 }
 
-for (const close of ["rejected", "hung"]) {
-  test(`POSIX ${close} Electron close stops a TERM-ignoring descendant`, {
+for (const [close, group] of [["rejected", "shared"], ["hung", "shared"], ["rejected", "own"], ["hung", "own"]]) {
+  test(`POSIX ${close} Electron close stops a TERM-ignoring descendant${group === "own" ? " that leads its own group" : ""}`, {
     skip: process.platform === "win32" ? "Native POSIX process-group signals" : false,
     timeout: 30_000,
   }, async (t) => {
@@ -59,7 +59,7 @@ for (const close of ["rejected", "hung"]) {
       `);
       leader = spawn(process.execPath, ["--input-type=module", "-e", `
         import { spawn } from 'node:child_process';
-        spawn(process.execPath, [process.argv[1]], { stdio: ['ignore', 'inherit', 'inherit'] });
+        spawn(process.execPath, [process.argv[1]], { stdio: ['ignore', 'inherit', 'inherit'], detached: ${group === "own"} });
         setInterval(() => {}, 1000);
       `, join(root, "descendant.mjs")], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
       leader.stdout.resume();

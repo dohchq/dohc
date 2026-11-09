@@ -1,4 +1,5 @@
 import type { relayShareOperations } from "./shareOperations";
+import { readLiveStopRefusal, liveStopHostCopy, liveStopError, liveStopRefusalForRow, liveStopWaitingError, type LiveStopRefusal } from "./liveEditingStop";
 import type { OperationHandlers } from "./operationTable";
 import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
@@ -52,11 +53,12 @@ import {
 import { z } from "zod";
 import {OwnerRestoreActionResponse} from "./ownerRestoreContract";
 import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import { createShareLinkAgentActions } from "./shareLinkAgentActions";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { pathShareLanes } from "../workspaces/relayShareLanes";
+import { isReadableChatChannelRow, pathShareLanes } from "../workspaces/relayShareLanes";
 import { buildShareCode } from "../workspaces/syncCode";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
@@ -153,6 +155,12 @@ async function pushRecordedFirst(push: () => Promise<void>): Promise<void> {
 /** The kept edits a Stop again was asked for: its document, and whether its Stop waits or its release could not write the file. */
 export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "stopping"};
 
+function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
+  return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
+    document.reason === "live-edit-unadmitted" || document.reason === "live-first-open-refused" ||
+    (!document.reason && (document.status === "retired" || document.status === "paused"));
+}
+
 /**
  * Stop and Resume of one owner live document, with the owner's credentials
  * and this workspace's own record of its kept edits. A window closes its own
@@ -171,15 +179,27 @@ export function createOwnerLiveDocumentActions<
   const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
     released?.materialized === true && !released.deferred ? "recovered" : "kept";
   // The server's live document list, as one owner request.
-  const liveHost = async (operation: Operation, method: "DELETE" | "POST", body: object) => {
+  const liveHost = async (operation: Operation, method: "DELETE" | "POST" | "GET", body?: object) => {
     const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
     if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
     const result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
-      method,body:JSON.stringify(body),
+      method,...(body === undefined ? {} : {body:JSON.stringify(body)}),
     });
     operation.assertCurrent();
     if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
     return result;
+  };
+  const pendingStopError = async (operation: Operation, objectId: string): Promise<Error> => {
+    let refusal: LiveStopRefusal = {code: "edits-pending"};
+    try {
+      const page = activeLiveDocuments.parse(await liveHost(operation, "GET"));
+      const row = page.documents.find(row => row.objectId === objectId);
+      refusal = liveStopRefusalForRow(refusal, row && {...row, canResume: ownerLiveDocumentCanResume(row)});
+    } catch {
+      // An unproven list adds no explanation of why edits could not reach the server.
+    }
+    operation.assertCurrent();
+    return liveStopError(refusal);
   };
   // The server's document that this computer no longer has: only the server
   // stops live editing for it. Edits kept here stay for Save recovery copy.
@@ -189,7 +209,17 @@ export function createOwnerLiveDocumentActions<
       operation.assertCurrent();
       let result: unknown;
       try {result=await liveHost(operation,"DELETE",{path:input.path,objectId:input.objectId,retire:true});}
-      catch (error) {operation.assertCurrent();throw error;}
+      catch (error) {
+        operation.assertCurrent();
+        const refusal = readLiveStopRefusal(error);
+        if (refusal) {
+          if (refusal.code === "edits-pending") throw liveStopError({code: "edits-pending"});
+          const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
+          console.warn(`[desktop] ${copy}`);
+          throw liveStopError(refusal);
+        }
+        throw error;
+      }
       // The server names its document's current path, which a rename there may have changed.
       z.object({ok:z.literal(true),objectId:z.literal(input.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
@@ -243,7 +273,16 @@ export function createOwnerLiveDocumentActions<
           ...(local.binding ? {restoreFenceGeneration:local.binding.restoreFenceGeneration} : {})});
       } catch (error) {
         operation.assertCurrent();
-        throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
+        const refusal = readLiveStopRefusal(error);
+        if (refusal) {
+          await dependencies.ownerLiveStop(operation.workspace, "clear", local.document.currentPath, local.document);
+          operation.assertCurrent();
+          if (refusal.code === "edits-pending") throw liveStopError({code: "edits-pending"});
+          const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
+          console.warn(`[desktop] ${copy}`);
+          throw liveStopError(refusal);
+        }
+        throw liveStopWaitingError(error);
       }
       const response=z.object({ok:z.literal(true),objectId:z.literal(local.document.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
@@ -291,6 +330,16 @@ export function createOwnerLiveDocumentActions<
   return {
     /** A Stop, or with `again` a Stop again of that row's document only, for the window and agents alike. */
     stop,
+    async stopForAgent(input: Parameters<typeof stop>[0], operation: Operation): Promise<StopOwnerLiveDocumentResult> {
+      try { return await stop(input, operation); }
+      catch (error) {
+        if (readLiveStopRefusal(error)?.code !== "edits-pending") throw error;
+        operation.assertCurrent();
+        const objectId = input.again?.objectId ?? input.objectId;
+        if (objectId === undefined) throw error;
+        throw await pendingStopError(operation, objectId);
+      }
+    },
     resume,
   };
 }
@@ -316,6 +365,7 @@ export function createRelaySharesIpcHandlers<
   saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
+  sendRendererActivity(scope: {workspaceId: string; liveDocumentStopped: string}): void;
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
   reconcileReceivedShares(listing: unknown): Promise<void>;
@@ -365,20 +415,19 @@ export function createRelaySharesIpcHandlers<
       // Concurrent list reads may see a document in both sets. The current
       // enrollment wins; all bindings and server-only credentials stay in main.
       // Resume is also how the owner tries again a document the server refused,
-      // one whose first open it refused, or one it could not start until the owner opened it.
+      // one whose first open it refused, one it could not start until the owner
+      // opened it, or one whose server copy is missing an owner edit: Resume
+      // retires the held session so the edit can apply.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
-        ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-          document.reason === "live-first-open-refused" ||
-          (!document.reason && (document.status === "retired" || document.status === "paused")),
+        ...document, canResume: ownerLiveDocumentCanResume(document),
       }]));
-      // A deferred Stop finishes through Resume, unless the server's copy diverged or misses an
-      // edit made while live editing was off: then Resume cannot work.
+      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
       const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
       for (const row of documents.values()) {
         // Each row speaks for the server's document, never for another that had or has its path.
         const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
         if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted" && row.reason !== "conflict-parent-withheld"});
+          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld"});
         // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
         const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
         const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
@@ -387,7 +436,8 @@ export function createRelaySharesIpcHandlers<
       }
       const retained = quarantines.filter(row => row.saveOnly).map(row => ({path: row.path, objectId: row.objectId,
         status: "paused",
-        canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true}));
+        canResume: false, quarantine: row.recovery, storedOn: row.storedOn, incident: row.incident, saveOnly: true,
+        ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...retained], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
   };
@@ -435,6 +485,8 @@ export function createRelaySharesIpcHandlers<
       } else if (input.action === "begin") {
         if (input.intent.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
         path = prefix; body = {intent: input.intent};
+      } else if (input.action === "unfinished") {
+        path = `${prefix}/unfinished${input.after === undefined ? "" : `?after=${encodeURIComponent(input.after)}`}`; body = undefined;
       } else {
         path = `${prefix}/${encodeURIComponent(input.operationId)}${input.action === "status" ? "" : `/${input.action}`}`;
         body = input.action === "status" ? undefined : input.action === "confirm" ? {proposalDigest: input.proposalDigest} : {};
@@ -574,18 +626,23 @@ export function createRelaySharesIpcHandlers<
       });
     }
     const body = result.body;
+    const row: Record<string, unknown> =
+      body !== null && typeof body === "object" && !Array.isArray(body)
+        ? { ...body }
+        : {};
+    if (row.shareId !== input.shareId) {
+      throw new Error("Invalid exact received share response.");
+    }
+    if (isReadableChatChannelRow(row)) {
+      return GetRelayReceivedShareResult.parse({ found: true, chats: true });
+    }
     const received = RelayShareReceivedRow.parse({
-      ...(body !== null && typeof body === "object" && !Array.isArray(body)
-        ? body
-        : {}),
+      ...row,
       shareCode: buildShareCode({
         shareId: input.shareId,
         relayUrl: credentials.relayUrl!,
       }),
     });
-    if (received.shareId !== input.shareId) {
-      throw new Error("Invalid exact received share response.");
-    }
     return GetRelayReceivedShareResult.parse({ found: true, share: received });
   };
 
@@ -849,6 +906,19 @@ export function createRelaySharesIpcHandlers<
       { allowPaused: true },
     );
   };
+
+  // The active-workspace guard has matched the payload's workspace to this
+  // window. The actions name the workspace the operation holds.
+  const linkAgents = createShareLinkAgentActions<Workspace>({
+    remoteForWorkspace,
+    currentCredentialGeneration,
+    relayJson: relayShareJsonWithCredentials,
+    relayShareErrorCopy,
+  });
+  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+    linkAgents.list(operation, input);
+  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+    linkAgents.disconnect(operation, input);
 
   const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
@@ -1195,7 +1265,14 @@ export function createRelaySharesIpcHandlers<
     listOwnerLiveDocuments,
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
-    stopOwnerLiveDocument: (input, { operation }) => ownerLiveDocuments.stop(input, operation),
+    stopOwnerLiveDocument: async (input, { operation }) => {
+      const objectId = input.again?.objectId ?? input.objectId ??
+        (await dependencies.liveDocument(operation.workspace, {path: input.path}))?.objectId;
+      operation.assertCurrent();
+      const result = await ownerLiveDocuments.stop({...input, ...(objectId !== undefined ? {objectId} : {})}, operation);
+      if (objectId !== undefined) dependencies.sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: objectId});
+      return result;
+    },
     resumeOwnerLiveDocument: (input, { operation }) => ownerLiveDocuments.resume(input, operation),
     retryOwnerLiveQuarantine: async (input, { operation }) => {
       operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
@@ -1222,6 +1299,8 @@ export function createRelaySharesIpcHandlers<
     retuneRelayShareLink,
     rotateRelayShareLink,
     revokeRelayShareLink,
+    listRelayShareLinkAgents,
+    disconnectRelayShareLinkAgent,
     listRelayShareDiscussion,
     pollRelayShareDiscussionActivity,
     cancelRelayShareDiscussionActivity,

@@ -1,3 +1,4 @@
+import { decodeOrdinarySyncResult } from "@dohc/workspace-engine-client/relay-wire";
 import {decodeReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -8,7 +9,7 @@ import { release } from "node:os";
 import { Duplex } from "node:stream";
 import { parseCanonicalAdmittedLiveUpdateMetadata } from "@dohc/live-session-contract";
 import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
-import { replicaFrontiers, type ReplicaJournalRow, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
+import { replicaFrontiers, type ReplicaJournalEntry, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import { ReplicaBudgetError, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { serveReplicaRelay } from "./replicaRelaySocket";
 
@@ -89,15 +90,19 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
       const pullOrdinary = async () => {
         let page: Record<string, unknown>;
         let previous: number | undefined;
-        do {
-          page = await request("sync.pull", { workspaceId: lease.workspaceId });
+        for (;;) {
+          const fetched = decodeOrdinarySyncResult("sync.fetchPull",
+            await request("sync.fetchPull", { workspaceId: lease.workspaceId }));
+          page = await request("sync.applyPull", { workspaceId: lease.workspaceId, pageToken: fetched.pageToken });
+          if (page.status === "retry") continue;
           if (page.status !== "complete" || !Number.isSafeInteger(page.nextCursor) || typeof page.nextCursor !== "number" ||
               !page.pendingCursor || (previous !== undefined && (page.nextCursor < previous || (page.hasMore && page.nextCursor === previous)))) {
             throw new Error("Replica pull did not produce a progressing cursor.");
           }
           await request("sync.commitCursor", { workspaceId: lease.workspaceId, pendingCursor: page.pendingCursor });
           previous = page.nextCursor;
-        } while (page.hasMore);
+          if (!page.hasMore) break;
+        }
       };
       return { pid: child.pid, exited: termination, close,
         async currentView(selectors,knownTextShas,position,cursor,since) {
@@ -111,7 +116,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
           if (response.status !== 200) throw new Error(`Replica journal read failed (${response.status}).`);
           return await response.json() as ReplicaLiveJournalPage;
         }, async (after, page) => {
-          const rows: ReplicaJournalRow[] = page.rows.map(r => ({...r,
+          // A cancellation control entry carries no bytes; the engine validates it at its exact generation and endpoint.
+          const rows: ReplicaJournalEntry[] = page.rows.map(r => "cancellation" in r ? r : ({...r,
             admitted: {metadata: parseCanonicalAdmittedLiveUpdateMetadata(r.admitted.metadata), updateBytes: decodeJournalBytes(r.admitted.updateBytes)},
             restore: r.restore ? {operationId: r.restore.operationId, checkpointDigest: r.restore.checkpoint.digest,
               checkpointBytes: decodeJournalBytes(r.restore.checkpoint.bytes), proof: r.restore.proof} : null}));

@@ -4,6 +4,7 @@ import {
   mediaTypeForPath,
   defaultWorkspaceRoot,
   isReservedPath,
+  stateFolderOverlap,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
   normalizeRootPath,
@@ -416,6 +417,29 @@ describe("workspace root choice", () => {
   it("rejects relative paths, and drive paths outside Windows", () => {
     expect(validateWorkspaceRootChoice("notes", "/home/sam", "linux").ok).toBe(false);
     expect(validateWorkspaceRootChoice("C:\\notes", "/home/sam", "linux").ok).toBe(false);
+  });
+});
+
+describe("a workspace root that overlaps dohc's state folder", () => {
+  // Where each system keeps an app's settings, the folders above it a person
+  // could pick, and folders inside it.
+  const cases = [
+    { platform: "win32", state: "C:/Users/sam/AppData/Roaming/dohc", holders: ["C:/Users/sam/AppData", "C:\\Users\\sam\\AppData\\Roaming", "c:/users/sam/appdata/roaming/DOHC"], inside: ["C:\\Users\\sam\\AppData\\Roaming\\dohc\\cli-bin", "c:/users/sam/appdata/roaming/DOHC/live-draft-recovery/notes"] },
+    { platform: "darwin", state: "/Users/sam/Library/Application Support/dohc", holders: ["/Users/sam/Library", "/Users/sam/Library/Application Support", "/users/sam/library/"], inside: ["/Users/sam/Library/Application Support/dohc/cli-bin", "/users/sam/library/application support/DOHC/notes/"] },
+    { platform: "linux", state: "/home/sam/.config/dohc", holders: ["/home/sam/.config", "/home/sam/.config/dohc", "/home/sam/.config/./"], inside: ["/home/sam/.config/dohc/cli-bin", "/home/sam/.config/dohc/live-draft-recovery/notes/"] },
+  ];
+
+  it.each(cases)("refuses the state folder and every folder above it on $platform", ({ platform, state, holders }) => {
+    for (const root of holders) expect(stateFolderOverlap(root, state, platform), root).toBe("holds");
+  });
+
+  it.each(cases)("refuses every folder inside the state folder on $platform", ({ platform, state, inside }) => {
+    for (const root of inside) expect(stateFolderOverlap(root, state, platform), root).toBe("inside");
+  });
+
+  it.each(cases)("allows a folder beside the state folder on $platform", ({ platform, state }) => {
+    expect(stateFolderOverlap(`${state}-notes`, state, platform)).toBeNull();
+    expect(stateFolderOverlap(`${state.slice(0, state.lastIndexOf("/"))}/notes`, state, platform)).toBeNull();
   });
 });
 

@@ -158,6 +158,7 @@ export function createInMemoryWorkspaceActivity(
       workspaceId: string,
       run: ActiveAgentRun,
       expectedRootPath?: string,
+      secret?: string,
     ): Promise<boolean> => {
       const authority = requireAuthority(workspaceId);
       return service.claimAgentRun(
@@ -165,6 +166,7 @@ export function createInMemoryWorkspaceActivity(
         authority.state,
         run,
         expectedRootPath,
+        secret,
       );
     },
     clearAgentRun: (
@@ -197,6 +199,14 @@ export function createInMemoryWorkspaceActivity(
     dispatchedRunId: (workspaceId: string): string | null => {
       const authority = authorities.get(workspaceId);
       return authority ? service.dispatchedRunId(authority.state) : null;
+    },
+    agentWriteRunId: (workspaceId: string): string | null => {
+      const authority = authorities.get(workspaceId);
+      return authority ? service.agentWriteRunId(authority.state) : null;
+    },
+    dispatchedRunSecret: (workspaceId: string): string | null => {
+      const authority = authorities.get(workspaceId);
+      return authority ? service.dispatchedRunSecret(authority.state) : null;
     },
     engineCaptureFor: (
       workspaceId: string,

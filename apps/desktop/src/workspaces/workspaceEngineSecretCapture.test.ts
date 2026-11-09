@@ -284,6 +284,8 @@ describe("secret version operations through the desktop daemon path", () => {
     expect(await readText(root, ".env")).toBe(ENV_A);
     const result = await engine.mergeVersionIntoMain(created.activeVersionId);
     expect(result.mergedFileCount).toBeGreaterThanOrEqual(1);
+    // The dialog names the protected files a merge replaced, since they never conflict.
+    expect(result.replacedProtectedPaths).toEqual([".env"]);
     expect(await readText(root, ".env")).toBe(ENV_B);
 
     const methods = requests.map((request) => request.method);

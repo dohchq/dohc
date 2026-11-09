@@ -32,7 +32,7 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "test --workspace=PASS doctests=PASS build daemon=PASS " +
+  "test --workspace=PASS reader tests=PASS doctests=PASS build daemon=PASS " +
   "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
 test("CI verdict helper can be imported from Node eval without a script path", () => {
@@ -98,6 +98,14 @@ test("canonical CI verdict requires every mandatory gate step to report PASS", (
       ),
     /cargo-audit/,
   );
+  // The workspace run skips the ignored reader regressions, so a verdict
+  // without this row says nothing about them.
+  for (const replacement of ["", "reader tests=SKIP ", "reader tests=FAIL "]) {
+    assert.throws(
+      () => check(passVerdict.replace("reader tests=PASS ", replacement)),
+      /reader tests/,
+    );
+  }
 });
 
 test("a PASS verdict requires scratch cleanup to have passed", () => {
@@ -408,26 +416,31 @@ function workflowContext({ enabled = "", event = "pull_request", draft = false, 
   };
 }
 
-test("disabled Blacksmith never allocates a PR runner, while manual runs use GitHub Ubuntu", () => {
+test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksmith is on", () => {
   const document = load(workflow);
   assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
   assert.deepEqual(document.on.pull_request.types, ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"]);
+  for (const name of ["javascript", "rust", "confinement"]) assert.equal(document.jobs[name].needs, "changes", `${name} cannot bypass selection`);
   for (const enabled of ["", "false", "0", "disabled"]) {
-    for (const draft of [false, true]) {
-      const context = workflowContext({enabled, draft});
-      assert.equal(workflowExpression(document.jobs.changes.if, context), false);
-      for (const name of ["javascript", "rust"]) assert.equal(document.jobs[name].needs, "changes", `${name} cannot bypass selection`);
-      assert.equal(workflowExpression(document.jobs.verification.if, {...context, needs: {changes: {result: "skipped"}}}), false);
+    for (const draft of [false, true]) for (const fork of [false, true]) {
+      const context = workflowContext({enabled, draft, fork});
+      assert.equal(workflowExpression(document.jobs.changes.if, context), !draft && !fork);
+      for (const [name, job] of Object.entries(document.jobs)) {
+        if (name === "confinement") assert.equal(job["runs-on"], "ubuntu-24.04");
+        else assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"]);
+      }
     }
+    assert.equal(workflowExpression(document.jobs.verification.if, {...workflowContext({enabled}), needs: {changes: {result: "skipped"}}}), false);
     const manual = workflowContext({enabled, event: "workflow_dispatch", size: "8"});
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
-    for (const job of Object.values(document.jobs)) {
-      assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
+    for (const [name, job] of Object.entries(document.jobs)) {
+      if (name === "confinement") assert.equal(job["runs-on"], "ubuntu-24.04");
+      else assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
     }
   }
 });
 
-test("enabled cloud CI excludes drafts and forks and bounds manual runner sizes", () => {
+test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () => {
   const {jobs, concurrency} = load(workflow);
   for (const draft of [false, true]) for (const fork of [false, true]) {
     assert.equal(workflowExpression(jobs.changes.if, workflowContext({enabled: "true", draft, fork})), !draft && !fork);
@@ -446,15 +459,21 @@ test("enabled cloud CI excludes drafts and forks and bounds manual runner sizes"
       assert.deepEqual(workflowExpression(jobs[name]["runs-on"], context), ["blacksmith-2vcpu-ubuntu-2404"]);
     }
   }
+  // Blacksmith's kernel has no Landlock, so the sandbox suites always run on GitHub's image.
+  assert.equal(jobs.confinement["runs-on"], "ubuntu-24.04");
+  assert.equal(jobs.javascript.env.DOHC_CONFINEMENT_SUITES, "exclude");
+  assert.equal(jobs.rust.env.NEXTEST_PROFILE, "without-confinement");
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const context = {...workflowContext({enabled: "true"}), needs: {changes: {outputs: {js, rust}}}};
     assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
     assert.equal(workflowExpression(jobs.rust.if, context), rust === "true");
+    assert.equal(workflowExpression(jobs.confinement.if, context), js === "true" || rust === "true");
   }
   for (const gate of ["all", "js", "rust"]) {
     const context = {...workflowContext({event: "workflow_dispatch", gate}), needs: {changes: {outputs: {}}}};
     assert.equal(workflowExpression(jobs.javascript.if, context), gate !== "rust");
     assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
+    assert.equal(workflowExpression(jobs.confinement.if, context), true);
   }
 });
 
@@ -479,7 +498,7 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
 
 test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", () => {
   const job = load(workflow).jobs.verification;
-  assert.deepEqual(job.needs, ["changes", "javascript", "rust"]);
+  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "confinement"]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
   const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
@@ -491,14 +510,15 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   const run = (jobs, event = "pull_request", gate = "all") => spawnSync(process.execPath, ["--input-type=module", "-e", source], {
     env: {...process.env, JOBS: JSON.stringify(jobs), EVENT_NAME: event, REQUESTED_GATE: gate}, encoding: "utf8", timeout: 10_000,
   });
-  const jobs = (js, rust, jsResult, rustResult) => ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}});
+  const jobs = (js, rust, jsResult, rustResult, confinementResult = jsResult === "success" || rustResult === "success" ? "success" : "skipped") =>
+    ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, confinement: {result: confinementResult}});
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const valid = jobs(js, rust, js === "true" ? "success" : "skipped", rust === "true" ? "success" : "skipped");
     assert.equal(run(valid).status, 0);
-    for (const name of ["javascript", "rust"]) for (const result of ["failure", "cancelled", undefined]) {
+    for (const name of ["javascript", "rust", "confinement"]) for (const result of ["failure", "cancelled", undefined]) {
       assert.equal(run({...valid, [name]: {result}}).status, 1);
     }
-    for (const name of ["javascript", "rust"]) {
+    for (const name of ["javascript", "rust", "confinement"]) {
       const opposite = valid[name].result === "success" ? "skipped" : "success";
       assert.equal(run({...valid, [name]: {result: opposite}}).status, 1);
     }
@@ -508,7 +528,9 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   }
   assert.equal(run(jobs(undefined, "false", "skipped", "skipped")).status, 1);
   for (const gate of ["all", "js", "rust"]) {
-    assert.equal(run(jobs(undefined, undefined, gate === "rust" ? "skipped" : "success", gate === "js" ? "skipped" : "success"), "workflow_dispatch", gate).status, 0);
+    const manual = jobs(undefined, undefined, gate === "rust" ? "skipped" : "success", gate === "js" ? "skipped" : "success", "success");
+    assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
+    assert.equal(run({...manual, confinement: {result: "skipped"}}, "workflow_dispatch", gate).status, 1);
   }
 });
 

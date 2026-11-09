@@ -115,7 +115,7 @@ function NewRecordRow(props: { disabled: boolean; openColumn: boolean; onClick: 
           type="button"
           disabled={props.disabled}
           onClick={props.onClick}
-          className="flex h-8 w-full items-center gap-1.5 px-2 text-left text-[13px] text-subtle transition-colors hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-8 w-full items-center gap-1.5 px-2 text-left text-[13px] text-subtle transition-colors hover:text-ink dohc-focus-row disabled:cursor-not-allowed disabled:opacity-50"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
             <path d="M5 12h14M12 5v14" />

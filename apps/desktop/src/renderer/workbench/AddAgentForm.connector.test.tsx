@@ -11,7 +11,7 @@ import { AddAgentForm } from "./AddAgentForm";
 const detected: AgentToolsResult = {
   workingDirectory: "C:\\Work",
   tools: [
-    { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.278", auth: "signed-in", probe: "detected" },
+    { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-in", probe: "detected" },
     { tool: "codex", executable: "C:\\Tools\\codex.cmd", version: "0.155.1", auth: "unknown", probe: "detected" },
     { tool: "opencode", executable: "C:\\Tools\\opencode.cmd", version: "1.18.31", auth: "unknown", probe: "detected" },
     { tool: "cursor", executable: null, version: null, auth: "unknown", probe: "not-found" },
@@ -33,6 +33,12 @@ it("requires an agent name and saves it alongside the selected tool and owner", 
   const f = fixture();
   render(<AddAgentForm {...f.props} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  const codex = screen.getByRole("button", { name: "Codex" });
+  expect(codex.getAttribute("aria-pressed")).toBe("true");
+  // The accent check marks the chosen tool; a signed-in tool's green check is its readiness.
+  expect(codex.querySelector("svg.lucide-check.text-accent")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Claude Code" }).getAttribute("aria-pressed")).toBe("false");
+  expect(document.querySelectorAll("svg.lucide-check.text-accent")).toHaveLength(1);
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
@@ -79,9 +85,9 @@ it("keeps the form open while saving and checking", async () => {
 });
 
 it("requires an update before selecting an older Claude profile", async () => {
-  const f = fixture(vi.fn(async () => ({ ...detected, tools: detected.tools.map((tool) => tool.tool === "claude" ? { ...tool, version: "2.1.258" } : tool) })));
+  const f = fixture(vi.fn(async () => ({ ...detected, tools: detected.tools.map((tool) => tool.tool === "claude" ? { ...tool, version: "2.1.315" } : tool) })));
   render(<AddAgentForm {...f.props} />);
-  await screen.findByText("Update Claude Code to 2.1.259 or later to use this profile.");
+  await screen.findByText("Update Claude Code to 2.1.316 or later to use this profile.");
   expect(screen.getByRole("button", { name: "Claude Code" }).hasAttribute("disabled")).toBe(true);
 });
 
@@ -90,7 +96,11 @@ it.each(["Claude Code", "Codex"])("saves %s as a profile and checks through the 
   render(<AddAgentForm {...f.props} />);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   await userEvent.click(await screen.findByRole("button", { name }));
-  expect(screen.getByText("Conversation through stdin")).toBeTruthy();
+  // The card names the tool and its sign-in; its path waits under Advanced
+  // with how the tool starts, and its permissions stay in view.
+  expect(screen.getByRole("button", { name }).textContent).not.toMatch(/Tools/u);
+  expect(screen.getByTestId("agent-tool-permissions").closest("details")).toBeNull();
+  expect(screen.getByText("Conversation through stdin").closest("details")?.querySelector("summary")?.textContent).toBe("Advanced");
   expect(screen.getByText("dohc adds its own server for replies.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "OpenCode" }).hasAttribute("disabled")).toBe(true);
   expect(screen.queryByTestId("chats-add-agent-check-result")).toBeNull();
@@ -114,6 +124,73 @@ it("editing the Advanced command removes the profile and its permission claim", 
   await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({ launch: { command: "node custom.mjs" } }) } }), f.props.settings));
 });
 
+it("says the runner command is in use until a tool is chosen", async () => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await screen.findByRole("button", { name: "Codex" });
+  expect(screen.queryByText("Using your runner command.")).toBeNull();
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: "node custom.mjs" } });
+  expect(screen.getByText("Using your runner command.")).toBeTruthy();
+  for (const name of ["Claude Code", "Codex"]) expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("false");
+  await userEvent.click(screen.getByRole("button", { name: "Codex" }));
+  expect(screen.queryByText("Using your runner command.")).toBeNull();
+  expect(screen.getByText("Conversation through stdin")).toBeTruthy();
+});
+
+it.each([
+  ["Claude Code", "claude", "C:\\Tools\\claude.exe", "dohc adds its reply tool. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds."],
+  ["Codex", "codex", "C:\\Tools\\codex.cmd", "dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds."],
+] as const)("keeps the %s profile when its Advanced command changes and changes back", async (name, tool, executable, hint) => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name }));
+  await userEvent.click(screen.getByText("Advanced"));
+  const input = screen.getByLabelText("Runner command") as HTMLInputElement;
+  expect(input.value).toBe(executable);
+  expect(screen.getByText(hint)).toBeTruthy();
+  fireEvent.change(input, { target: { value: `${executable}x` } });
+  expect(screen.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  fireEvent.change(input, { target: { value: executable } });
+  expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("true");
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({ launch: { tool, executable } }) } }), f.props.settings));
+});
+
+it.each([
+  ["Claude Code", "claude", "C:\\Tools\\claude.exe"],
+  ["Codex", "codex", "C:\\Tools\\codex.cmd"],
+] as const)("adds your own flags to the %s profile", async (name, tool, executable) => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name }));
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: `${executable} --model "my model"` } });
+  expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByText("dohc adds its own server for replies.")).toBeTruthy();
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
+    launch: { tool, executable, arguments: ["--model", "my model"] },
+  }) } }), f.props.settings));
+});
+
+it("saves a command that starts another program as typed, even when it has the tool's name", async () => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: "C:\\work\\codex.cmd --model o3" } });
+  expect(screen.getByRole("button", { name: "Codex" }).getAttribute("aria-pressed")).toBe("false");
+  expect(screen.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
+    launch: { command: "C:\\work\\codex.cmd --model o3" },
+  }) } }), f.props.settings));
+});
+
 it("ignores detection and checks that finish after a workspace switch", async () => {
   const pending = deferred<AgentToolsResult>();
   const f = fixture(vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue({ workingDirectory: "/workspace-b", tools: [] }));
@@ -130,7 +207,7 @@ it("reports detection failures to the shell and can refresh", async () => {
   render(<AddAgentForm {...f.props} />);
   await waitFor(() => expect(f.props.onError).toHaveBeenCalled());
   await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  await screen.findByText("Detected · 2.1.278");
+  await screen.findByText("Detected · 2.1.317");
 });
 
 it("keeps a cleared Advanced command open and preserves drafts across equivalent settings broadcasts", async () => {

@@ -7,9 +7,9 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Under **You run on this computer**, add an agent you run or pick one, and copy its **MCP config** into your agent's MCP settings. The server works on one workspace. The config ends with `--agent-id <id>`, so your agent posts under that agent's name and waits for its own messages.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
-- **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
+- **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. Its address is `/mcp/s/<secret>` on the share's server, where `<secret>` is the text after `#` in the link. Add that address to an MCP client that supports MCP sign-in. The client opens a consent page, and a person selects **Allow**. Anyone who has the address can do this and get the link's full access, so share it only as you share the link. The [share-web README](../../services/share-web/README.md) describes each step.
 
 ## Versions and changes
 
@@ -36,6 +36,30 @@ The code and invite link belong to the owner's sharing. Shared profiles do not o
 
 Returns `{ status: "active", shareCode, browserInvitationUrl? } | { status: "ended" }`.
 
+### `dohc_list_link_agents`
+
+List the agents signed in through one share link, 50 a page. Requires the original workspace and its signed-in owner account. Find the link's shareId and grantId with `dohc access sharing granted`. reportedName is the name the agent's client reported; dohc cannot check it. Pass nextCursor as cursor until it is null.
+
+A link's agents belong to the owner's sharing. Shared profiles do not offer this read.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ agents: { connectionId, reportedName, connectedAtMs, lastActionAtMs }[], nextCursor }`.
+
+### `dohc_disconnect_link_agent`
+
+End one agent's connection through a share link. The link and its other agents keep working. Requires the original workspace and its signed-in owner account. Find connectionId with dohc_list_link_agents.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+- `connectionId`: `string`. Required.
+
+Returns `{ connectionId }`.
+
 ### `dohc_list_automations`
 
 Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.
@@ -50,7 +74,7 @@ Create a share link, prepare an immutable app revision, and approve publication 
 
 Changes the workspace, so a shared view does not offer it.
 
-- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "checkLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
 Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
@@ -110,7 +134,7 @@ Returns `{ versionId, subject: { objectId, path } | null, entries: { attachment,
 
 ### `dohc_links_edges`
 
-Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
+Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.
 
 - `cursor`: `string`
 
@@ -163,17 +187,17 @@ Changes the workspace, so a shared view does not offer it.
 
 - `operationId`: `string`. Required.
 
-Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
+Returns `{ ok: false, reason, refusal: { code: "old-path-occupied", path } | { code: "live-page-owned", path } | { code: "unexplained" } } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 
 ### `dohc_list_versions`
 
-List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.
+List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.
 
 A shared view keeps no versions of its own, so it does not offer this tool.
 
 No arguments.
 
-Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId } | { ok: false, reason }`.
+Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId } | { ok: false, reason }`.
 
 ### `dohc_compare_version`
 
@@ -188,13 +212,13 @@ Returns `{ ok: true, version: { id, name }, files: { path, status, currentText?,
 
 ### `dohc_list_version_conflicts`
 
-Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
+Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
 
 A shared view keeps no versions of its own, so it does not offer this tool.
 
 - `afterConflictId`: `string`
 
-Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_create_version`
 
@@ -224,7 +248,7 @@ Changes the workspace, so a shared view does not offer it.
 
 - `version`: `string`. Required.
 
-Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_resolve_version_conflict`
 
@@ -235,7 +259,7 @@ Changes the workspace, so a shared view does not offer it.
 - `conflictId`: `string`. Required.
 - `resolution`: `{ keep: "current" | "incoming" } | { keep: "combined", text: string }`. Required.
 
-Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_changes`
 
@@ -398,6 +422,7 @@ Edit a Markdown document through dohc. A person editing it at the same time keep
 
 Changes the workspace, so a shared view does not offer it.
 
+- `allowLossySourceSha256`: `string`
 - `path`: `string`. Required.
 - `find`: `string`
 - `replacement`: `string`. Required.
@@ -523,16 +548,29 @@ List the dohc Chats linked to a workspace file. Chats follow the file's stable d
 
 Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] } | { ok: false, reason }`.
 
+### `dohc_wait_for_messages`
+
+Wait for this agent's unread requests without marking them read. With --agent-id, they are that agent's: its direct messages, messages that @ its name, and replies in threads it posted in. Without it, they are @agent mentions and replies in threads an agent with no id posted in. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.
+
+The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.
+
+- `cursor`: `string`
+- `group`: `string`
+- `thread`: `string`
+- `timeoutMs`: `integer`
+
+Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
+
 ### `dohc_read_chat`
 
-Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
+Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
 
 - `threadId`: `string`
 - `group`: `string`
 - `before`: `{ createdAtMs: integer, lane: "posts" | "chat", id: string }`
 - `limit`: `integer`
 
-Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
+Returns `{ ok: true, thread: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }, dispatch: { paused, lastRun }, messages: { id, threadId, authorKind, authorDisplayName, authorOwnerDisplayName?, body, createdAtMs, parentMessageId?, attachments, needsDecision, decisionState?, options?, chosenOption?, resolvedByMessageId?, agentRequests?, authorReported? }[], projection: { path, readOnly: true, text } } | { ok: true, stream: { group, items, nextBefore, readPosition } } | { ok: false, reason }`.
 
 ### `dohc_list_groups`
 
@@ -544,7 +582,7 @@ Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, t
 
 ### `dohc_start_group_chat`
 
-Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.
+Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. Returns engine ids usable with dohc_read_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -555,12 +593,13 @@ Changes the workspace, so a shared view does not offer it.
 - `needsDecision`: `boolean`
 - `options`: `string[]`
 - `runId`: `string`
+- `model`: `string`
 
 Returns `{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`.
 
 ### `dohc_start_file_chat`
 
-Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.
+Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -569,12 +608,13 @@ Changes the workspace, so a shared view does not offer it.
 - `body`: `string`. Required.
 - `requestId`: `string`
 - `runId`: `string`
+- `model`: `string`
 
 Returns `{ ok: true, path, threadId, messageId, warning? } | { ok: false, reason }`.
 
 ### `dohc_reply_to_chat`
 
-Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.
+Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, and `model` behave as in dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -587,6 +627,7 @@ Changes the workspace, so a shared view does not offer it.
 - `needsDecision`: `boolean`
 - `options`: `string[]`
 - `runId`: `string`
+- `model`: `string`
 
 Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
@@ -724,6 +765,7 @@ dohc <command> <verb> [arguments] [options]
 `dohc --help`, `dohc <command> --help`, and `dohc <command> <verb> --help` print the same summaries, flags, and fields as this section. These options work with every verb:
 
 - `--as-agent`: Post and read chat as an agent.
+- `--agent-id <id>`: Work as this agent you run, by its id in Settings › Agents. Implies --as-agent.
 - `--json`: Print the result as JSON.
 - `--help`: Show help. -h does the same.
 
@@ -848,7 +890,7 @@ With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } |
 
 ### `dohc share`
 
-Read copy details for an owned share grant.
+Read copy details, and list and disconnect a link's agents.
 
 Requires the original workspace and its signed-in owner account.
 
@@ -861,6 +903,32 @@ dohc share copy <shareId> <grantId> [options]
 Read a grant's share code and named-account invite link.
 
 With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvitationUrl? }` or `{ schemaVersion, status: "ended" }`.
+
+#### `dohc share agents`
+
+```sh
+dohc share agents <shareId> <grantId> [options]
+```
+
+List the agents connected through a share link.
+
+Find a link's share id and grant id with dohc access sharing granted. Each name is the one the agent reported. dohc cannot check it.
+
+- `--cursor <cursor>`: Continue the previous page.
+
+With `--json`, prints `{ schemaVersion, agents: { connectionId, reportedName, connectedAtMs, lastActionAtMs }[], nextCursor }`.
+
+#### `dohc share disconnect`
+
+```sh
+dohc share disconnect <shareId> <grantId> <connectionId> [options]
+```
+
+Disconnect one agent from a share link.
+
+Find the connection id with dohc share agents.
+
+With `--json`, prints `{ schemaVersion, connectionId }`.
 
 ### `dohc document`
 
@@ -1036,13 +1104,29 @@ List the threads in a Group.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threads: { lane?, id, title, commentCount, openDecisionCount, unread, updatedAtMs }[] }`.
 
+#### `dohc chat watch`
+
+```sh
+dohc chat watch [options]
+```
+
+Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.
+
+- `--cursor <cursor>`: Continue from the cursor returned by watch.
+- `--group <group>`: Wait only for messages in this Group.
+- `--thread <thread>`: Wait only for messages in this thread.
+- `--timeout <seconds>`: Wait up to this many seconds per batch. The default and maximum are 25.
+- `--once`: Return after one batch, including an empty batch at the timeout.
+
+With `--json`, prints `{ schemaVersion, messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
+
 #### `dohc chat inbox`
 
 ```sh
 dohc chat inbox [options]
 ```
 
-List unread threads. For an agent, also list its unread mentions.
+List unread threads. For an agent, also list its unread requests: mentions of it, its DMs, and replies in threads it posted in.
 
 With `--json`, prints `{ schemaVersion, threads: { lane?, id, title, commentCount, openDecisionCount, unread, updatedAtMs, group }[], mentions: { threadId, messageId, group, author, createdAtMs, text }[] }`.
 
@@ -1058,7 +1142,7 @@ Show a thread or message and mark the thread read, or show a group's posts and c
 - `--before <position>`: For a group, show the page older than this position, as printed after older:.
 - `--limit <count>`: For a group, show at most this many items. The default is 50, the most 100.
 
-With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
+With `--json`, prints `{ schemaVersion, thread: { id, title, group, commentCount, openDecisionCount }, dispatch: { paused, lastRun }, messages: { id, author, body, createdAtMs, parentMessageId?, decisionState?, decisionOptions?, decisionChosenOption?, attachments, runId?, agentRequests?, authorReported? }[] }` or `{ schemaVersion, stream: { group, items, nextBefore, readPosition } }`.
 
 #### `dohc chat post`
 
@@ -1074,6 +1158,7 @@ Use - as the body to read it from stdin. In a direct message, use reply instead.
 - `--attach <path>`: Attach a workspace file. Repeat for more files.
 - `--needs-decision`: Ask readers for a decision.
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
+- `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threadId, messageId, title, warning? }`.
 
@@ -1093,6 +1178,7 @@ Use - as the body to read it from stdin. Put options first, then --, then text t
 - `--option <choice>`: Offer a choice. Repeat for more choices. Implies --needs-decision.
 - `--resolve <message>`: Resolve this open decision with the reply.
 - `--choose <choice>`: Pick this choice of the decision. Needs --resolve.
+- `--agent <name>`: Record this agent name when --as-agent is set.
 
 With `--json`, prints `{ schemaVersion, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
 
@@ -1191,7 +1277,7 @@ On a computer that doesn't keep the workspace's Collections, list returns the Co
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }`.
+Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }` or `{ kind: "collections-refused", refusal: { kind, words } | { kind: "elsewhere", words, computer } | { kind: "server-unavailable", words, computer, failure } }`.
 
 #### `dohc dataset describe`
 
@@ -1204,7 +1290,7 @@ Use describe to find approved operation IDs.
 - `expectedDatasetId`: `UUID`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }`.
+Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }`.
 
 #### `dohc dataset history`
 
@@ -1243,7 +1329,7 @@ Set `targetRevisionSha256` to `entries[].schema.previousRevisionHash` from `hist
 - `targetRevisionSha256`: `SHA-256 hex`. Required.
 - `changedRevisionSha256`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset permissions`
 
@@ -1255,19 +1341,20 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor }`.
+Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here", server } | { kind: "server", host } }`.
 
 #### `dohc dataset setGrant`
 
 Add or change an explicit data grant.
 
-grant names revision, revisionSha256, operationIds, and discover.
+grant names revision, revisionSha256, operationIds, and discover. A Collection only on this computer moves to the workspace's server first, for good. permissions shows its place. Send moveToServer: true to agree.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
 - `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
+- `moveToServer`: `true`
 
 Returns `{ kind: "grant-updated" }`.
 
@@ -1334,7 +1421,7 @@ Returns `{ kind: "delete-preview", archived, generation, reason, apps: { appId, 
 
 Permanently delete a Collection and all its data.
 
-Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
+Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. Archive the Collection first with dohc dataset archive. Then run deletePreview, since archiving makes an earlier preview stale. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
@@ -1501,7 +1588,7 @@ Review the result, then approve it with approveMigration.
 - `fieldId`: `UUID`. Required.
 - `labelFieldId`: `UUID`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset create`
 
@@ -1554,7 +1641,21 @@ Read more changed records with migrationPreviewPage. Review the result, then app
 - `expectedDatasetId`: `UUID`
 - `migrationPath`: `string`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+
+#### `dohc dataset askToApply`
+
+Write a prepared change to a file a person can apply from a chat.
+
+Edit the Collection's source files and write the migration SQL first. askToApply prepares that change, records what it does in a new file beside dataset.json, and discards the preparation. Post the returned path in a chat reply with --attach and --needs-decision. The Collection's owner applies the change from that message. note is one sentence the person reads beside the change to the code.
+
+- `workspaceId`: `string`. Required.
+- `datasetPath`: `string`. Required.
+- `expectedDatasetId`: `UUID`
+- `migrationPath`: `string`. Required.
+- `note`: `string`
+
+Returns `{ kind: "change-asked", path, changeSha256 }`.
 
 #### `dohc dataset migrationPreviewPage`
 
@@ -1580,7 +1681,7 @@ change.kind is one of renameCollection, renameTable, renameField, changeField, a
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `change`: `{ kind: "renameCollection", name: string } | { kind: "renameTable", tableId: UUID, name: string } | { kind: "renameField", tableId: UUID, fieldId: UUID, name: string } | { kind: "changeField", tableId: UUID, fieldId: UUID, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation", required: boolean } | { kind: "addButton", tableId: UUID, name: string } | { kind: "addField", tableId: UUID, field: { name: string, type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment", required: boolean, unique: boolean, default?: any JSON, options?: string[] } }`. Required.
 
-Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
+Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision, expected: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest }, candidate: { candidateId, expected, approvedRevisionHash, checkpointSha256, changeSha256, expiresAtMs, preview }, sourceDigest, approvalDigest, schemaSql, operationSource, migrationSql, expiresAtMs }`.
 
 #### `dohc dataset approveMigration`
 
@@ -1593,6 +1694,7 @@ Take revisionSha256 and approvalDigest from the preparation. Approval applies th
 - `preparationId`: `UUID`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `approvalDigest`: `SHA-256 hex`. Required.
+- `changeSha256`: `SHA-256 hex`
 
 Returns `{ kind: "migrated", revision, cursor: { workspaceId, datasetId, hostEpoch, approvedRevisionHash, revision, digest } }`.
 
@@ -1620,7 +1722,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 - `input`: `any JSON`. Required.
 - `idempotencyKey`: `string`. Required.
 
-Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages" } }` or `{ kind: "refused", code, message }`.
+Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }` or `{ kind: "refused", code, message }`.
 
 ### `dohc app`
 
@@ -1654,13 +1756,24 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
+
+#### `dohc app checkLocal`
+
+Read an app's current source revision on this computer.
+
+Compare sourceRevision with the one listLocal returns. They differ once the app's source changed since its approval.
+
+- `workspaceId`: `string`. Required.
+- `appRoot`: `string`. Required.
+
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
 
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
 
-Review the source and the Collection access it asks for, then approve.
+Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
@@ -1682,11 +1795,13 @@ Returns `{ kind: "localLaunched", publicationId, url }`.
 
 List an app's shared publications.
 
+listUnavailable means the server does not publish apps for this workspace.
+
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }` or `{ kind: "listUnavailable" }`.
 
 #### `dohc app prepare`
 
@@ -1874,7 +1989,9 @@ dohc version list [options]
 
 List the versions and which one is active.
 
-With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId }`.
+A version's madeFromVersionId is the id of the version it was made from.
+
+With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId }`.
 
 #### `dohc version compare`
 
@@ -1902,7 +2019,7 @@ With --json, print each conflict's sides.
 
 - `--after <conflict>`: Continue after this conflict ID from the previous page.
 
-With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 #### `dohc version create`
 
@@ -1936,7 +2053,7 @@ Merge a version into Main.
 
 Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves.
 
-With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 #### `dohc version resolve`
 
@@ -1951,7 +2068,7 @@ Use - to read the combined text from stdin. Give exactly one of --keep, --text o
 - `--keep <side>`: Keep current or incoming, as version conflicts names the sides.
 - `--text <text>`: Replace both sides with this combined text.
 
-With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 ### `dohc automation`
 

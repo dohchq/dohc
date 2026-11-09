@@ -93,7 +93,6 @@ describe("text kept in History", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     await waitFor(()=>expect(restore).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,momentId:RECOVERY.momentId}));
     await waitFor(()=>expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull());
     expect(await noticeRows(user)).toEqual([]);
@@ -110,7 +109,7 @@ describe("text kept in History", () => {
     expect(toast.textContent).toContain(
       'The file "notes/plan.md" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.',
     );
-    expect(within(toast).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
     expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
 
@@ -125,6 +124,19 @@ describe("text kept in History", () => {
     expect(await navigator.clipboard.readText()).toBe("Typing kept here.\n");
   });
 
+  it("opens History with the recovery change from its Notices row, as its Open History does", async () => {
+    const { bridge } = recoveryBridge();
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId(NOTICE_TOAST);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(screen.getByTestId("notice-center")).getByText(CAPTURE_RECOVERY_TITLE).closest("li")!;
+    await user.click(row.querySelector<HTMLElement>("[data-notice-open]")!);
+    await screen.findByTestId("engine-moment-diff-page");
+    expect(screen.getByTestId("activity-history").getAttribute("aria-current")).toBe("page");
+    expect(screen.getByTestId(`tab-dohc://moment-diff/${RECOVERY.momentId}`)).toBeTruthy();
+  });
+
   it("drops the notice once its Restore clears the recovery in the engine", async () => {
     const { bridge, clear } = recoveryBridge();
     Object.assign(bridge, {
@@ -137,7 +149,6 @@ describe("text kept in History", () => {
     renderShell(bridge);
     await openRecoveryFromToast(user);
     await user.click(screen.getByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
       "Restored the earlier state. Undo restore is available here.",
     );
@@ -153,7 +164,7 @@ describe("text kept in History", () => {
     await screen.findByTestId(NOTICE_TOAST);
     const [row] = await noticeRows(user);
     expect(row!.textContent).toContain(CAPTURE_RECOVERY_TITLE);
-    expect(within(row!).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+    expect(within(row!).getByRole("button", { name: "Details" })).toBeTruthy();
     await user.click(within(row!).getByRole("button", { name: "Dismiss notice" }));
     await waitFor(() => expect(bridge.clearCaptureRecovery).toHaveBeenCalledExactlyOnceWith({
       workspaceId: WORKSPACE.workspaceId, momentId: RECOVERY.momentId,
@@ -176,27 +187,12 @@ describe("text kept in History", () => {
   });
 
   // A shared live document's lineage is replicated, so History Restore
-  // refuses it. Restore shared file returns only accepted changes, and kept
-  // typing is in none of them, so the notice says to replace the file's text
-  // with the kept version, and a shared restore leaves the recovery.
-  it("tells a replicated lineage's owner to put the kept version in, on every refusal, and a shared restore keeps it", async () => {
+  // refuses it. Kept typing is in none of the host's accepted changes, so
+  // the notice says to replace the file's text with the kept version.
+  it("tells a replicated lineage's owner to put the kept version in, on every refusal", async () => {
     const { bridge } = recoveryBridge();
-    const documentKey = { workspaceId: WORKSPACE.workspaceId, mainVersionId: "main", objectId: RECOVERY.objectId, lineageClaimId: "lineage" };
-    const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
-    const intent = { deliveryKind: "owner" as const, operationId: "restore", document: documentKey, shareId: "share", grantId: "grant",
-      expectedGrantGeneration: 1, expectedDependentGrantIds: [], expectedFence: 1, restorePointCursor: 2, restorePointReceiptDigest: digest };
-    let phase = "native-applied";
-    const status = () => ({ operationId: "restore", document: documentKey, path: PATH, phase, intent, proposalDigest });
     const ownerRestore = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
-      if (input.action === "options") {
-        return { document: documentKey, path: PATH, grants: [], authors: [], points: [], nextBeforeCursor: null, nextGrantCursor: null,
-          pendingOperation: { operationId: "restore", phase, proposalDigest } };
-      }
-      if (input.action === "status") return status();
-      if (input.action === "confirm") {
-        phase = "resumed";
-        return { status: status(), result: { kind: "resumed", proposalDigest, receipt: {} } };
-      }
+      if (input.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
       throw new Error(`Unexpected owner restore action ${input.action}.`);
     });
     const restoreEngineMomentFile = vi.fn(async (): Promise<never> => { throw SHARED_REFUSAL; });
@@ -208,7 +204,6 @@ describe("text kept in History", () => {
 
     const refuse = async () => {
       await user.click(screen.getByTestId("engine-diff-restore-file"));
-      await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     };
     await refuse();
     const toast = await screen.findByTestId(NOTICE_TOAST);
@@ -239,21 +234,10 @@ describe("text kept in History", () => {
     expect(await noticeRows(user)).toHaveLength(1);
     await user.click(screen.getByTestId("notice-center-toggle"));
 
-    // A finished Restore shared file leaves the kept typing and its notice.
-    await user.click(screen.getByTestId("engine-diff-shared-restore"));
-    const dialog = await screen.findByTestId("owner-restore-dialog");
-    expect(ownerRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, action: "options", path: PATH });
-    await user.click(await within(dialog).findByRole("button", { name: "Retry" }));
-    expect(await within(dialog).findByText("File restored")).toBeTruthy();
-    await user.click(within(dialog).getByRole("button", { name: "Close" }));
-    const reads = bridge.getCaptureRecoveryStatus.mock.calls.length;
-    act(() => bridge.emitWorkspaceActivity());
-    await waitFor(() => expect(bridge.getCaptureRecoveryStatus.mock.calls.length).toBeGreaterThan(reads));
-    await act(async () => {});
+    // More offers no Restore shared file (#3090), so the notice's route is the way back.
+    await user.click(screen.getByTestId("engine-diff-more"));
+    expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
     expect(bridge.clearCaptureRecovery).not.toHaveBeenCalled();
-    const kept = await noticeRows(user);
-    expect(kept).toHaveLength(1);
-    expect(kept[0]!.textContent).toContain(captureRecoveryMessage(PATH, true));
   });
 
   it("raises nothing for a status that answers after the window changed workspaces", async () => {
@@ -283,5 +267,102 @@ describe("text kept in History", () => {
     expect(screen.queryByText(CAPTURE_RECOVERY_TITLE)).toBeNull();
     await act(async () => answers[1]!.resolve({ captureRecoveries: [] }));
     expect(screen.queryByTestId(NOTICE_TOAST)).toBeNull();
+  });
+});
+
+describe("History Restore on a shared live file", () => {
+  // With no kept typing to take it, the refusal gets its own row. It says
+  // where the text is and offers no Try again, since asking again gets the
+  // same answer. What to do is the body, so a long path's title clamp never
+  // hides it. A second press replaces the row.
+  it.each([PATH, "Projects/Lisbon trip/itinerary.md"])("says where the text is in %s, offers no Try again, and keeps one row per file", async (path) => {
+    const { bridge, clear } = recoveryBridge();
+    clear();
+    const change: EngineMomentRecord = { ...RECOVERY_MOMENT, id: "moment-plan", origin: "local-file", path };
+    bridge.listHistory = vi.fn(async ({ workspaceId }: ListHistoryPayload) => page(workspaceId, [change]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...change, beforeText: "Earlier plan.\n", afterText: "Shared plan.\n" } }));
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => { throw SHARED_REFUSAL; });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    const title = `dohc can't restore "${path}" because it has been shared live`;
+    const body = "Copy the text you want from History into the file.";
+    // The title and body as shown, with no Show more.
+    const expectWords = (notice: HTMLElement) => {
+      expect(notice.querySelector("[id$='-title']")?.textContent).toBe(title);
+      expect(notice.querySelector("[id$='-body']")?.textContent).toBe(body);
+      expect(notice.querySelector("[data-testid$='-more']")).toBeNull();
+    };
+    for (const press of [1, 2]) {
+      await user.click(await screen.findByTestId("engine-diff-restore-file"));
+      await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(press));
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expectWords(toast);
+      expect(toast.textContent).not.toContain("Continue editing at the current location");
+      expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
+      const rows = await noticeRows(user);
+      expect(rows).toHaveLength(1);
+      expectWords(rows[0]!);
+      expect(within(rows[0]!).queryByRole("button", { name: "Try again" })).toBeNull();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+    }
+  });
+});
+
+describe("Unfinished shared restores", () => {
+  // Retry on an unfinished shared restore says "File restored" but never
+  // reaches the file, and Decline doesn't bring live editing back, so the
+  // shell lists none and files no row (#3090).
+  it("lists no unfinished shared restore and files no Notices row for one", async () => {
+    const { bridge, clear } = recoveryBridge();
+    clear();
+    const ownerRestore = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
+      if (input.action === "unfinished") {
+        return { restores: [{ operationId: "restore-old", path: PATH, phase: "native-fenced", proposalDigest: null }], unreadable: 0, nextCursor: null };
+      }
+      throw new Error(`Unexpected owner restore action ${input.action}.`);
+    });
+    Object.assign(bridge, { ownerRestore });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalled());
+    await act(async () => {});
+    expect(ownerRestore).not.toHaveBeenCalled();
+    expect(screen.queryByText("Restore waiting")).toBeNull();
+    expect(await noticeRows(user)).toEqual([]);
+  });
+});
+
+describe("History Restore on a page this computer owns live", () => {
+  // The owner stops live editing in Live documents, then restores again.
+  it("says to stop live editing, offers Try again and Live documents at the page's row", async () => {
+    const { bridge, clear } = recoveryBridge();
+    clear();
+    const change: EngineMomentRecord = { ...RECOVERY_MOMENT, id: "moment-owned", origin: "local-file", path: PATH };
+    bridge.listHistory = vi.fn(async ({ workspaceId }: ListHistoryPayload) => page(workspaceId, [change]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...change, beforeText: "Earlier plan.\n", afterText: "Owned plan.\n" } }));
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => {
+      throw new Error(`Error invoking remote method 'desktop:restore-engine-moment-file': LivePageOwnedError: dohc can't restore "${PATH}" while it has live editing on\nIn Live documents, stop live editing for this page, then restore it again.`);
+    });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: PATH, objectId: "object-plan", status: "ready" as const, canResume: false }] }));
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(`dohc can't restore "${PATH}" while it has live editing on`);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe("In Live documents, stop live editing for this page, then restore it again.");
+    expect(within(toast).queryByRole("button", { name: /Stop/u })).toBeNull();
+    const rows = await noticeRows(user);
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(rows[0]!).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId(`live-document-row-${PATH}`).getAttribute("aria-current")).toBe("true"));
   });
 });

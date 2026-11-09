@@ -82,8 +82,7 @@ type RootChoiceValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: string };
 
-export const FILESYSTEM_ROOT_REFUSAL = "workspace root cannot be the filesystem root";
-export const HOME_FOLDER_REFUSAL = "workspace root cannot be the home directory itself";
+export const HOME_FOLDER_REFUSAL = "Your home folder cannot be a workspace. Choose a folder inside it.";
 export const DISK_ROOT_REFUSAL = "The top folder of a disk cannot be a workspace. Open a folder inside it.";
 
 // Registry policy: a workspace root must be a real folder choice — never the
@@ -110,7 +109,7 @@ export function validateWorkspaceRootChoice(
     /^[A-Za-z]:$/.test(normalized) ||
     /^\/\/[^/]*(\/[^/]*)?$/.test(normalized)
   ) {
-    return { ok: false, reason: FILESYSTEM_ROOT_REFUSAL };
+    return { ok: false, reason: DISK_ROOT_REFUSAL };
   }
   // Case-insensitive compare: on macOS/Windows "/Home/Sam" aliases the home
   // directory, so a case variant must not slip past this guard.
@@ -118,6 +117,33 @@ export function validateWorkspaceRootChoice(
     return { ok: false, reason: HOME_FOLDER_REFUSAL };
   }
   return { ok: true, normalized };
+}
+
+// A folder that can never be a workspace, whatever changes in it: only
+// another folder works. Its name crosses IPC, so the screen that shows the
+// refusal offers that folder's way out, not Try again. The message says why
+// and leaves the next step to that screen.
+export class WorkspaceFolderRefusalError extends Error {
+  override name = "WorkspaceFolderRefusalError";
+}
+
+export type StateFolderOverlap = "holds" | "inside";
+
+export function stateFolderRefusal(overlap: StateFolderOverlap): string {
+  const where = overlap === "holds" ? "holds dohc's own settings" : "is inside the folder that holds dohc's own settings";
+  return `This folder ${where}, so it cannot be a workspace.`;
+}
+
+// How a workspace root overlaps the folder where dohc keeps its own settings
+// and records: it is or holds that folder, or sits inside it. Callers pass
+// both as real paths, so a link to either is judged by where it leads.
+// Case-insensitive, as the home check is.
+export function stateFolderOverlap(rootPath: string, stateDir: string, platform: string): StateFolderOverlap | null {
+  const root = normalizeRootPath(rootPath, platform).toLowerCase();
+  const state = normalizeRootPath(stateDir, platform).toLowerCase();
+  const within = (path: string, folder: string) => path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
+  if (state === root || within(state, root)) return "holds";
+  return within(root, state) ? "inside" : null;
 }
 
 export type PathClassification =

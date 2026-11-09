@@ -1,25 +1,29 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, LoaderCircle, MessageSquare, Reply, RotateCw, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
   ChatDecisionRecord,
-  ChatDispatchStoppedRun,
+  ChatDispatchFailedRun,
   ChatMessageRecord,
   ChatReactionRecord,
+  ChatReportedAgentRecord,
   ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { bridge } from "../bridge";
+import { COLLECTION_CHANGE_FILE, readCollectionChangeProposal } from "../collections/collectionChangeFlow";
 import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { EmptyState, SecondaryButton } from "../ui/controls";
+import { EMPTY_ART } from "./EmptyArt";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { SecondaryButton } from "../ui/controls";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
@@ -31,8 +35,11 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
-import { runnerProgram, type ChatsNav } from "./ChatsView";
+import type { ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
+import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
+import { AS_REPORTED, reportedProduct } from "./reportedAgent";
+import { CopyMessageLink } from "./messageLinks";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -55,17 +62,16 @@ function automationAsking(
   return trigger?.authorKind === "automation" ? trigger : undefined;
 }
 
-// What the agent ran, under its reply: the program and how it ended, then
-// the chip that opens the details.
-function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+// Under an agent's reply: how its run went, then Details, which holds the
+// command, the run's id and its log.
+function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   const { endedAtMs, exitCode } = props.run;
   const failed = endedAtMs !== undefined && exitCode !== 0;
-  const program = runnerProgram(props.run.command);
   const label = endedAtMs === undefined
-    ? `Running ${program}`
+    ? "Running"
     : failed
-      ? `Failed ${program}${exitCode === undefined ? "" : ` · exit ${exitCode}`}`
-      : `Ran ${program} · ${formatRunDuration(endedAtMs - props.run.startedAtMs)}`;
+      ? "Failed"
+      : `Finished in ${formatRunDuration(endedAtMs - props.run.startedAtMs)}`;
   return (
     <div
       data-testid="chats-run-line"
@@ -79,63 +85,11 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
           endedAtMs === undefined ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
         }`}
       />
-      <span>{label}</span>
+      <span className="text-muted">{label}</span>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      <RunChip run={props.run} />
+      <RunChip run={props.run} reported={props.reported} />
     </div>
   );
-}
-
-// How a run dohc's restart or quit stopped ended, under each of its posts.
-// Try again shows where the run ended, while its request can run once more.
-function StoppedRunLine(props: {
-  stopped: ChatDispatchStoppedRun;
-  run?: ChatRunRecord;
-  askedBy?: ChatMessageRecord;
-  busy: boolean;
-  onRetry?: () => void;
-  className: string;
-}) {
-  return (
-    <div
-      data-testid="chats-run-stopped"
-      data-ending={props.stopped.ending}
-      className={`flex items-center gap-2 text-[11px] text-subtle ${props.className}`}
-    >
-      <span aria-hidden className="size-1.5 rounded-full bg-warning" />
-      <span role="status">{props.stopped.ending === "quit" ? "Stopped when dohc quit" : "Stopped when dohc restarted"}</span>
-      {props.onRetry ? (
-        <SecondaryButton
-          size="row"
-          data-testid="chats-run-try-again"
-          aria-disabled={props.busy || undefined}
-          aria-busy={props.busy || undefined}
-          onClick={props.busy ? undefined : props.onRetry}
-        >
-          {props.busy
-            ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
-            : <RotateCw size={12} aria-hidden />}
-          Try again
-        </SecondaryButton>
-      ) : null}
-      {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      {props.run ? <RunChip run={props.run} /> : null}
-    </div>
-  );
-}
-
-// The run's last post in the conversation, by when it was posted. Of two
-// posted at once, the later in the conversation wins.
-function lastPostOfRun(
-  runId: string,
-  runRecords: Record<string, ChatRunRecord>,
-  messages: readonly ChatMessageRecord[],
-): string | undefined {
-  let last: ChatMessageRecord | undefined;
-  for (const message of messages) {
-    if (runRecords[message.id]?.runId === runId && (!last || message.createdAtMs >= last.createdAtMs)) last = message;
-  }
-  return last?.id;
 }
 
 // A poll's choices, stacked. Picking one is the answer. An answered poll
@@ -151,7 +105,7 @@ export function PollOptions(props: {
   return (
     <ol
       data-testid={`${props.testIdPrefix}-poll-options`}
-      className="m-0 mt-2 flex list-none flex-col gap-1 p-0"
+      className="m-0 mt-2 flex max-w-sm list-none flex-col gap-1 p-0"
     >
       {options.map((option) => {
         const taken = chosen === option;
@@ -164,7 +118,7 @@ export function PollOptions(props: {
               disabled={!props.onChoose}
               aria-pressed={taken}
               onClick={() => props.onChoose?.(option)}
-              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors dohc-focus-visible ${
+              className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors ${
                 taken
                   ? "border-success/50 bg-success/10 text-ink"
                   : "border-line text-ink enabled:hover:bg-hover disabled:opacity-70"
@@ -173,7 +127,7 @@ export function PollOptions(props: {
               <span
                 aria-hidden
                 className={`grid size-3.5 shrink-0 place-items-center rounded-full border ${
-                  taken ? "border-success bg-success text-bg" : "border-line"
+                  taken ? "border-success bg-success text-bg" : "border-subtle"
                 }`}
               >
                 {taken ? <CircleCheck size={10} strokeWidth={3} /> : null}
@@ -198,9 +152,9 @@ export function DecisionStatus(props: {
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           data-testid={`${props.testIdPrefix}-decision-resolved`}
-          className="inline-flex w-fit items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
+          className="inline-flex items-center gap-1 text-[12px] text-success"
         >
-          <CircleCheck size={11} strokeWidth={2} aria-hidden />
+          <CircleCheck size={12} strokeWidth={2} aria-hidden />
           Answered
         </span>
         <PollOptions decision={props.decision} testIdPrefix={props.testIdPrefix} />
@@ -212,20 +166,19 @@ export function DecisionStatus(props: {
       <span className="inline-flex flex-wrap items-center gap-1.5">
         <span
           data-testid={`${props.testIdPrefix}-decision-open`}
-          className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
+          className="inline-flex items-center gap-1 text-[12px] text-warning"
         >
-          <CircleHelp size={11} strokeWidth={2} aria-hidden />
-          Poll open
+          <CircleHelp size={12} strokeWidth={2} aria-hidden />
+          Unanswered
         </span>
         {props.onResolve && !hasOptions ? (
-          <button
-            type="button"
+          <SecondaryButton
+            size="compact"
             data-testid={`${props.testIdPrefix}-decision-resolve`}
             onClick={() => props.onResolve?.()}
-            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink dohc-focus-visible"
           >
             Answer
-          </button>
+          </SecondaryButton>
         ) : null}
       </span>
       <PollOptions
@@ -237,23 +190,56 @@ export function DecisionStatus(props: {
   );
 }
 
+// How a chip names a Collection change file: "Collection change" while it
+// loads, then "Change to <the Collection's current name>". Null for any other
+// file, and for a change file dohc can't read.
+function useCollectionChangeLabel(workspaceId: string, path: string | undefined): string | null {
+  const key = path !== undefined && COLLECTION_CHANGE_FILE.test(path) ? `${workspaceId}\n${path}` : null;
+  const [named, setNamed] = useState<{ key: string; name: string | null } | null>(null);
+  useEffect(() => {
+    if (key === null || path === undefined) return;
+    let current = true;
+    const api = bridge();
+    void (async () => {
+      const proposal = await readCollectionChangeProposal(api, workspaceId, path);
+      if (!proposal) {
+        if (current) setNamed({ key, name: null });
+        return;
+      }
+      const described = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "describe" })
+        .catch(() => null);
+      if (current) setNamed({ key, name: described?.kind === "description" ? described.dataset.name : proposal.name });
+    })();
+    return () => { current = false; };
+  }, [key, workspaceId, path]);
+  if (key === null) return null;
+  if (named?.key !== key) return "Collection change";
+  return named.name === null ? null : `Change to ${named.name}`;
+}
+
 function AttachmentChip(props: {
+  workspaceId: string;
   attachment: ChatAttachmentRecord;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
   const { pathHint, headingAnchor, headingText } = props.attachment;
   const onOpenPath = props.onOpenPath;
+  const changeLabel = useCollectionChangeLabel(props.workspaceId, pathHint);
   // A shared view can hold an attachment whose path it may not read: the
   // chip names it only as an attachment and opens nothing.
   if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
+  // An attachment is named by what it shows: the file and its heading, or
+  // the Collection a change file changes, with the Collection's glyph. The
+  // tooltip keeps the path.
+  const label = changeLabel
+    ?? `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
+      title={changeLabel !== null ? label : undefined}
+      objectKind={changeLabel !== null ? "collection" : undefined}
       heading={headingText}
-      // An attachment is named by what it shows, the file and its heading.
-      label={`${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${
-        headingText ? `#${headingText}` : ""
-      }`}
+      label={label}
       testId="chats-attachment-chip"
       onOpen={onOpenPath
         ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))
@@ -273,23 +259,23 @@ function RunAskedBy(props: { message: ChatMessageRecord }) {
       className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
     >
       <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-      <span className="truncate">Asked by {props.message.authorDisplayName}</span>
+      <span className="truncate text-muted">Asked by {props.message.authorDisplayName}</span>
       {person ? <span className="sr-only"> for {person}</span> : null}
     </span>
   );
 }
 
 // A post an agent opened during a run: who asked for the run, then its chip.
-function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   return (
     <>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      <RunChip run={props.run} />
+      <RunChip run={props.run} reported={props.reported} />
     </>
   );
 }
 
-function RunChip(props: { run: ChatRunRecord }) {
+function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -313,7 +299,6 @@ function RunChip(props: { run: ChatRunRecord }) {
     };
   }, [open]);
 
-  const started = formatChatTime(props.run.startedAtMs);
   return (
     <span
       ref={containerRef}
@@ -324,12 +309,13 @@ function RunChip(props: { run: ChatRunRecord }) {
         ref={triggerRef}
         type="button"
         data-testid="chats-run-chip"
+        aria-label={`Details of run ${props.run.runId}`}
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded px-1 text-[11px] text-muted underline decoration-line underline-offset-2 hover:text-ink hover:decoration-ink"
       >
-        run {props.run.runId.slice(0, 7)}
+        Details
       </button>
       {open ? (
         <span
@@ -338,50 +324,88 @@ function RunChip(props: { run: ChatRunRecord }) {
           data-testid="chats-run-popover"
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Command</span>
-            <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
-              {props.run.command}
-            </code>
-          </span>
-          <span className="grid grid-cols-2 gap-2">
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Started</span>
-              <time
-                data-testid="chats-run-started"
-                dateTime={started.iso}
-                className="text-[11px] tabular-nums text-ink"
-              >
-                {started.label}
-              </time>
-            </span>
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
-                {props.run.exitCode ?? "—"}
-              </span>
-            </span>
-          </span>
-          <span className="grid gap-0.5">
-            <span className="text-[11px] text-muted">Log</span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
-                {props.run.logPath ?? "No log path"}
-              </code>
-              {props.run.logPath ? (
-                <CopyButton
-                  iconOnly
-                  testId="chats-run-copy-log"
-                  label="Copy log path"
-                  pinName
-                  getText={() => props.run.logPath ?? null}
-                />
-              ) : null}
-            </span>
-          </span>
+          <RunDetails run={props.run} reported={props.reported} />
         </span>
       ) : null}
     </span>
+  );
+}
+
+// What ran for an agent's reply: its command and id, the product and model
+// the agent reported, when it started, how it ended, and its log.
+export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
+  const started = formatChatTime(props.run.startedAtMs);
+  const product = reportedProduct(props.reported);
+  const model = props.reported?.model;
+  return (
+    <>
+      <span className="grid gap-1">
+        <span className="text-[11px] text-muted">Command</span>
+        <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
+          {props.run.command}
+        </code>
+      </span>
+      <span className="grid gap-1">
+        <span className="text-[11px] text-muted">Run</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code data-testid="chats-run-id" className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {props.run.runId}
+          </code>
+          <CopyButton iconOnly testId="chats-run-copy-id" label="Copy run ID" pinName getText={() => props.run.runId} />
+        </span>
+      </span>
+      {product ? (
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Product</span>
+          <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
+            {product} <span className="text-muted">{AS_REPORTED}</span>
+          </span>
+        </span>
+      ) : null}
+      {model ? (
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Model</span>
+          <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
+            {model} <span className="text-muted">{AS_REPORTED}</span>
+          </span>
+        </span>
+      ) : null}
+      <span className="grid grid-cols-2 gap-2">
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Started</span>
+          <time
+            data-testid="chats-run-started"
+            dateTime={started.iso}
+            className="text-[11px] tabular-nums text-ink"
+          >
+            {started.label}
+          </time>
+        </span>
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Exit code</span>
+          <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
+            {props.run.exitCode ?? "—"}
+          </span>
+        </span>
+      </span>
+      <span className="grid gap-1">
+        <span className="text-[11px] text-muted">Log</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
+            {props.run.logPath ?? "No log path"}
+          </code>
+          {props.run.logPath ? (
+            <CopyButton
+              iconOnly
+              testId="chats-run-copy-log"
+              label="Copy log path"
+              pinName
+              getText={() => props.run.logPath ?? null}
+            />
+          ) : null}
+        </span>
+      </span>
+    </>
   );
 }
 
@@ -405,7 +429,7 @@ export function BookmarkAction(props: {
             event.stopPropagation();
             props.onOpen?.();
           }}
-          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink dohc-focus-visible"
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink"
         >
           <FileText size={12} aria-hidden />
         </button>
@@ -427,7 +451,7 @@ export function BookmarkAction(props: {
               event.stopPropagation();
               props.onToggle?.("live");
             }}
-            className={`grid size-6 place-items-center rounded dohc-focus-visible disabled:opacity-50 ${
+            className={`grid size-6 place-items-center rounded disabled:opacity-50 ${
               props.active
                 ? "text-accent hover:bg-hover"
                 : "text-subtle hover:bg-hover hover:text-ink"
@@ -449,6 +473,7 @@ export function BookmarkAction(props: {
 // keeps each prop referentially stable across draft and typing renders; the
 // transcript re-renders only when the conversation data itself changes.
 export const ThreadMessages = memo(function ThreadMessages(props: {
+  workspaceId: string;
   nav: Extract<ChatsNav, { level: "thread" }>;
   // The thread's chat as its header names it: an agent's name, or #group.
   channelLabel: string;
@@ -457,10 +482,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   threadLocked: boolean;
   flashMessageId: string | null;
   runRecords: Record<string, ChatRunRecord>;
-  // The conversation's latest run, when dohc's restart or quit stopped it.
-  stoppedRun: ChatDispatchStoppedRun | null;
-  stoppedRunBusy: boolean;
-  onRetryStoppedRun?: () => void;
+  // The conversation's run that didn't reply, and Try again for it.
+  failedRun: ChatDispatchFailedRun | null;
+  retryBusy: boolean;
+  onRetryFailedRun?: () => void;
+  onOpenAgentSettings?: () => void;
+  onAskAgain?: (agentId: string, mention: boolean) => void;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -494,9 +521,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     threadLocked,
     flashMessageId,
     runRecords,
-    stoppedRun,
-    stoppedRunBusy,
-    onRetryStoppedRun,
+    failedRun,
+    retryBusy,
+    onRetryFailedRun,
+    onOpenAgentSettings,
+    onAskAgain,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -516,9 +545,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingMessage = messages[0] ?? null;
   if (openingMessage === null) {
     return (
-      <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-        No messages yet.
-      </p>
+      <div className="flex py-12">
+        <EmptyState picture={EMPTY_ART.posts} title="No messages yet." />
+      </div>
     );
   }
   const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
@@ -527,30 +556,30 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS;
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
-  const openingIsAgent = openingMessage.authorKind === "agent";
+  const openingIsAgent = isAgentAuthor(openingMessage);
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
-  // A stopped run ends under its last post, or under its request when it
-  // posted nothing.
-  const stoppedRunEnd = stoppedRun
-    ? lastPostOfRun(stoppedRun.runId, runRecords, messages) ?? stoppedRun.triggerMessageId
-    : null;
-  const ofStoppedRun = (messageId: string) =>
-    stoppedRun !== null && runRecords[messageId]?.runId === stoppedRun.runId;
-  // The opening post shows its run's chip in its own row, so its line leaves
-  // the run out.
-  const stoppedLine = (messageId: string, className: string, showRun: boolean) => {
-    if (!stoppedRun || !(ofStoppedRun(messageId) || messageId === stoppedRunEnd)) return null;
-    const run = showRun && ofStoppedRun(messageId) ? runRecords[messageId] : undefined;
+  const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
+  // Under the failed run's last post, its line takes the run's chip in. The
+  // opening post shows its chip in its own row, so its line leaves it out.
+  const failedLine = (messageId: string, className: string, showRun: boolean) => {
+    if (!failedRun || messageId !== failedEnd) return null;
+    const run = showRun && runRecords[messageId]?.runId === failedRun.runId ? runRecords[messageId] : undefined;
+    const askedBy = run ? automationAsking(run, messagesById) : undefined;
     return (
-      <StoppedRunLine
-        stopped={stoppedRun}
-        run={run}
-        askedBy={run ? automationAsking(run, messagesById) : undefined}
-        busy={stoppedRunBusy}
-        onRetry={messageId === stoppedRunEnd && stoppedRun.retryable ? onRetryStoppedRun : undefined}
+      <FailedRunLine
+        testIdPrefix="chats"
+        failed={failedRun}
+        busy={retryBusy}
+        onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
+        onOpenAgentSettings={onOpenAgentSettings}
+        onAskAgain={onAskAgain}
+        chatAgentId={nav.channel.kind === "agent" ? nav.channel.agentId : undefined}
         className={className}
-      />
+      >
+        {askedBy ? <RunAskedBy message={askedBy} /> : null}
+        {run ? <RunChip run={run} reported={messagesById.get(messageId)?.authorReported} /> : null}
+      </FailedRunLine>
     );
   };
 
@@ -570,7 +599,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentTime = formatChatTime(comment.createdAtMs);
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? NO_ATTACHMENTS;
-    const isAgent = comment.authorKind === "agent";
+    const isAgent = isAgentAuthor(comment);
     const continues = previous !== undefined && previous.replies.length === 0 &&
       continuesRun(previous.message, comment);
     const replyCount = node.replies.length;
@@ -590,7 +619,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           continues ? "" : "mt-4 first:mt-0"
         } ${
           flashMessageId === comment.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "dohc-target-flash"
             : ""
         }`}
       >
@@ -607,7 +636,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               props.onNavCommand?.(nav);
               scrollToMessage(parent.id);
             }}
-            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink dohc-focus-visible"
+            className="mb-1 w-fit rounded px-1 text-left text-[11px] text-subtle hover:text-ink"
           >
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
@@ -637,7 +666,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               <AgentColorAvatar>
                 <ChatAvatar presentation={comment.presentation}
                   name={comment.authorDisplayName}
-                  kind={comment.authorKind}
+                  kind={comment.authorKind} linkAgent={comment.linkAgent === true}
                   size="comment"
                 />
               </AgentColorAvatar>
@@ -651,11 +680,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-author-kind={comment.authorKind}
               className="text-[13px] font-semibold text-ink"
             >
-              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+              <AgentName kind={comment.authorKind} presentation={comment.presentation} linkAgent={comment.linkAgent === true}>
                 <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
+            {/* A continued comment has no badge, so a link agent's hidden line still says agent before the link mark. */}
+            {isAgent && continues && comment.authorKind === "link" ? (
+              <span data-testid="chats-comment-link-agent" className="sr-only"> agent </span>
+            ) : null}
             {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
@@ -687,6 +720,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {commentAttachments.map((attachment) => (
                 <AttachmentChip
                   key={attachment.attachmentId}
+                  workspaceId={props.workspaceId}
                   attachment={attachment}
                   onOpenPath={props.onOpenPath}
                 />
@@ -731,6 +765,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                     <Reply size={14} strokeWidth={1.9} aria-hidden />
                   </button>
                 ) : null}
+                <CopyMessageLink messageId={comment.id} testId="chats-comment-copy-link" />
                 <BookmarkAction
                   active={Boolean(commentBookmark)}
                   busy={bookmarkBusy.has(commentBookmarkKey)}
@@ -760,13 +795,14 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           />
         </div>
         </AgentColorScope>
-        {runRecords[comment.id] && !ofStoppedRun(comment.id) ? (
+        {runRecords[comment.id] && comment.id !== failedEnd ? (
           <RunLine
             run={runRecords[comment.id]}
             askedBy={automationAsking(runRecords[comment.id], messagesById)}
+            reported={comment.authorReported}
           />
         ) : null}
-        {stoppedLine(comment.id, "mt-1 px-2", true)}
+        {failedLine(comment.id, "mt-1 px-2", true)}
         {replyCount > 0 ? (
           <ol
             data-testid="chats-replies"
@@ -793,7 +829,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-author-kind={openingMessage.authorKind}
         className={`group relative flex gap-2.5 px-2 transition-shadow ${
           flashMessageId === openingMessage.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "dohc-target-flash"
             : ""
         }`}
       >
@@ -806,7 +842,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         <AgentColorAvatar>
           <ChatAvatar presentation={openingMessage.presentation}
             name={openingMessage.authorDisplayName}
-            kind={openingMessage.authorKind}
+            kind={openingMessage.authorKind} linkAgent={openingMessage.linkAgent === true}
             size="row"
           />
         </AgentColorAvatar>
@@ -817,7 +853,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-author-kind={openingMessage.authorKind}
               className="truncate text-[13px] font-semibold text-ink"
             >
-              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation} linkAgent={openingMessage.linkAgent === true}>
                 <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
               </AgentName>
             </span>
@@ -867,6 +903,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {openingAttachments.map((attachment) => (
                 <AttachmentChip
                   key={attachment.attachmentId}
+                  workspaceId={props.workspaceId}
                   attachment={attachment}
                   onOpenPath={props.onOpenPath}
                 />
@@ -890,11 +927,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <RunOpening
                   run={runRecords[openingMessage.id]}
                   askedBy={automationAsking(runRecords[openingMessage.id], messagesById)}
+                  reported={openingMessage.authorReported}
                 />
               ) : null}
             </div>
           ) : null}
-          {stoppedLine(openingMessage.id, "mt-2", false)}
+          {failedLine(openingMessage.id, "mt-2", false)}
           <MessageReactions
             testIdPrefix="chats"
             messageId={openingMessage.id}
@@ -902,45 +940,50 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             controls={reactionControls}
             hoverToolbar
             toolbarActions={
-              <SaveAsFileActions
-                testIdPrefix="chats-message-bookmark"
-                bookmark={openingBookmark}
-                busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-                onToggle={
-                  threadLocked
-                    ? undefined
-                    : (mode) =>
-                        void toggleBookmark({
-                          target: {
-                            kind: "message",
-                            threadId: nav.thread.id,
-                            messageId: openingMessage.id,
-                          },
-                          mode,
-                        })
-                }
-                onOpen={
-                  openingBookmark && props.onOpenPath
-                    ? () => props.onOpenPath?.(openingBookmark.destinationPath)
-                    : undefined
-                }
-              />
+              <>
+                <CopyMessageLink messageId={openingMessage.id} testId="chats-message-copy-link" />
+                <SaveAsFileActions
+                  testIdPrefix="chats-message-bookmark"
+                  bookmark={openingBookmark}
+                  busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+                  onToggle={
+                    threadLocked
+                      ? undefined
+                      : (mode) =>
+                          void toggleBookmark({
+                            target: {
+                              kind: "message",
+                              threadId: nav.thread.id,
+                              messageId: openingMessage.id,
+                            },
+                            mode,
+                          })
+                  }
+                  onOpen={
+                    openingBookmark && props.onOpenPath
+                      ? () => props.onOpenPath?.(openingBookmark.destinationPath)
+                      : undefined
+                  }
+                />
+              </>
             }
           />
         </div>
       </article>
       </AgentColorScope>
 
-      <div
-        data-testid="chats-comments-divider"
-        className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
-      >
-        <span className="inline-flex items-center gap-1">
-          <MessageSquare size={12} strokeWidth={1.9} aria-hidden />
-          <span aria-hidden>{commentCount}</span>
-          <span className="sr-only">{`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}</span>
-        </span>
-      </div>
+      {commentCount > 0 ? (
+        <div
+          data-testid="chats-comments-divider"
+          className="mb-3.5 mt-[18px] flex items-center gap-2 px-2 text-[11px] tabular-nums text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+        >
+          <span className="inline-flex items-center gap-1">
+            <MessageSquare size={12} strokeWidth={1.9} aria-hidden />
+            <span aria-hidden>{commentCount}</span>
+            <span className="sr-only">{`${commentCount} ${commentCount === 1 ? "comment" : "comments"}`}</span>
+          </span>
+        </div>
+      ) : null}
 
       <ol data-testid="chats-comments" className="m-0 list-none px-2 py-0">
         {commentTree.map((node, index) => renderThreadComment(node, 0, null, commentTree[index - 1]))}

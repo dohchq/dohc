@@ -8,6 +8,7 @@ export * from "./engineWorkspaceSessions";
 export * from "./fileObservation";
 export * from "./fileResolution";
 export * from "./replicaJournal";
+export * from "./workReferences";
 
 export type { ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector } from "../workspace/workspaceWireContract";
 

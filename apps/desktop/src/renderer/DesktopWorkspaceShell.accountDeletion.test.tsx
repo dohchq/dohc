@@ -67,8 +67,14 @@ async function openSyncSettings() {
   return screen.findByTestId("settings-row-account");
 }
 
+// Delete account… sits in the account row's More actions menu.
+function chooseDeleteAccount(row: HTMLElement) {
+  fireEvent.click(within(row).getByTestId("cloud-account-more"));
+  fireEvent.click(screen.getByTestId("cloud-delete-account"));
+}
+
 async function sendDelete(bridge: ReturnType<typeof deletionBridge>["bridge"]) {
-  fireEvent.click(within(await openSyncSettings()).getByTestId("cloud-delete-account"));
+  chooseDeleteAccount(await openSyncSettings());
   await screen.findByTestId("server-account-delete-scope");
   fireEvent.change(screen.getByTestId("server-account-delete-password"), { target: { value: "correct horse" } });
   fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
@@ -139,7 +145,7 @@ describe("deleting the server account from Settings", () => {
     await screen.findByTestId("workspace-shell-error");
     await waitFor(() => expect((screen.getByTestId("cloud-disconnect") as HTMLButtonElement).disabled).toBe(false));
 
-    fireEvent.click(screen.getByTestId("cloud-delete-account"));
+    chooseDeleteAccount(screen.getByTestId("settings-row-account"));
     await screen.findByTestId("server-account-delete-scope");
     fireEvent.change(screen.getByTestId("server-account-delete-password"), { target: { value: "correct horse" } });
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
@@ -172,7 +178,7 @@ describe("deleting the server account from Settings", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Sync this workspace" }));
     await screen.findByTestId("workspace-shell-error");
 
-    fireEvent.click(screen.getByTestId("cloud-delete-account"));
+    chooseDeleteAccount(screen.getByTestId("settings-row-account"));
     await screen.findByTestId("server-account-delete-scope");
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await act(async () => {});
@@ -187,7 +193,7 @@ describe("deleting the server account from Settings", () => {
   it("reads the status again when the review is cancelled", async () => {
     const { bridge } = deletionBridge(async () => ({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
     renderShell(bridge);
-    fireEvent.click(within(await openSyncSettings()).getByTestId("cloud-delete-account"));
+    chooseDeleteAccount(await openSyncSettings());
     await screen.findByTestId("server-account-delete-scope");
     const reads = vi.mocked(bridge.cloudStatus).mock.calls.length;
 
@@ -249,6 +255,8 @@ describe("a workspace switch while a delete is pending", () => {
       onNoticesChanged: vi.fn(() => () => undefined),
       onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
       takeWorkspacePathOpenFailures: vi.fn(async () => []),
+      readOldWindowState: vi.fn(async () => null),
+      onOldWindowStateChanged: vi.fn(() => () => undefined),
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
       onWorkspaceActivated: vi.fn((callback: (workspace: Workspace) => void) => {

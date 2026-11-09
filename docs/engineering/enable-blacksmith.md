@@ -1,13 +1,13 @@
 # Enable Blacksmith CI
 
 This procedure is for the maintainer enabling paid CI at launch.
+Blacksmith is optional and off. Without it, PR checks run on GitHub-hosted `ubuntu-24.04` runners.
 Track the remaining public-contributor setup in [issue #1193](https://github.com/dohchq/dohc/issues/1193).
 
-## Keep automatic PR checks off
+## Keep Blacksmith off
 
-The repository variable `BLACKSMITH_ENABLED` controls runner allocation in `PR checks`.
-An absent variable or `false` skips every PR job before a runner starts.
-While Blacksmith is off, manual dispatch uses GitHub-hosted `ubuntu-24.04` runners.
+The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
+An absent variable or `false` runs PR checks and manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
 
 Inspect the switch:
 
@@ -15,7 +15,7 @@ Inspect the switch:
 gh variable list --repo dohchq/dohc
 ```
 
-Keep it off until launch:
+Keep it off:
 
 ```sh
 gh variable set BLACKSMITH_ENABLED --repo dohchq/dohc --body false
@@ -90,7 +90,7 @@ Review spending, runs per PR, and cancelled runner minutes each week.
 Cancellation stops future work; Blacksmith still bills time already used.
 At the $50 alert, compare the month's projected spend with the $100 budget.
 If projected spending exceeds the budget, reduce unnecessary reruns or follow the shutdown procedure below.
-Continue required verification locally while cloud execution is off.
+PR checks continue on GitHub-hosted runners after Blacksmith is off.
 
 At $0.008 per minute, 950 PRs averaging ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
 Count both test jobs across every run on each PR, including cancelled runs.
@@ -98,6 +98,17 @@ The 2-vCPU selection and verdict jobs add cost beyond those test-job minutes.
 Use ten minutes per PR as a planning target, not a measured runtime or permission to remove required tests.
 The free allowance is shared across the organization; check its remaining balance before including it in the budget.
 An 8-vCPU runner costs twice as much per minute. Choose it only after comparing cost per passing run.
+
+## Sandbox suites run on GitHub's image
+
+Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
+The `confinement` job runs those suites on GitHub's `ubuntu-24.04` image whenever either gate runs.
+It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
+It fails if an app compiler or replica test skips.
+The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
+The local gate runs no Linux JavaScript, so the replica suites run only in this job.
+
+Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript job moves that file aside, so the login shell tests read the profile in their own `HOME`.
 
 ## Read the result
 
@@ -124,8 +135,7 @@ Record the run URL and verification scope in the PR before artifacts expire.
 
 ## Turn it off
 
-Remove `PR verification` from required checks before turning Blacksmith off.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
-Resume local verification. Manual dispatch uses GitHub-hosted `ubuntu-24.04` runners.
+New PR checks and manual dispatch use GitHub-hosted `ubuntu-24.04` runners.

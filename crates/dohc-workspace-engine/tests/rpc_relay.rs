@@ -1,5 +1,8 @@
 mod common;
 
+#[path = "rpc_relay/artifact_recovery.rs"]
+mod artifact_recovery;
+
 use common::*;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -462,6 +465,16 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
+    if method == "sync.applyPull" && params.get("pageToken").is_none() {
+        return pull_batch(
+            transport,
+            RequestContext::unbounded(),
+            request(*id, "sync.fetchPull", Some(handle.clone()), params),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("pull batch failed: {error:?}"))
+        .result;
+    }
     call_with_busy_retry(
         transport,
         RequestContext::unbounded(),
@@ -470,6 +483,222 @@ async fn call(
     .await
     .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
     .result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetched_pull_tokens_reject_replacement_reuse_foreign_handles_and_cursor_changes() {
+    let workspace_id = "rpc-relay-fetched-token";
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().unwrap();
+    let foreign_scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id = 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
+    let foreign = open_workspace(&transport, &foreign_scratch, &relay, 2, "foreign").await;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    assert_ne!(first["pageToken"], second["pageToken"]);
+    let apply = |handle: &WorkspaceHandle, token: Value, workspace: &str| {
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                10_000,
+                "sync.applyPull",
+                Some(handle.clone()),
+                json!({"workspaceId": workspace, "pageToken": token}),
+            ),
+        )
+    };
+    assert_eq!(
+        apply(&handle, first["pageToken"].clone(), workspace_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(
+        apply(&foreign, second["pageToken"].clone(), "foreign")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
+    let applied = apply(&handle, second["pageToken"].clone(), workspace_id)
+        .await
+        .unwrap()
+        .result;
+    assert_eq!(applied["applied"], 1);
+    assert_eq!(
+        apply(&handle, second["pageToken"].clone(), workspace_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
+
+    let before_commit = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({"workspaceId": workspace_id, "pendingCursor": applied["pendingCursor"]}),
+    )
+    .await;
+    let moved = apply(&handle, before_commit["pageToken"].clone(), workspace_id).await;
+    assert_eq!(moved.unwrap_err().code, ErrorCode::RelayInvalidResponse);
+
+    let before_close = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    close(&transport, &handle, &mut id).await;
+    let reopened = open_workspace(&transport, &scratch, &relay, id + 1, workspace_id).await;
+    assert_eq!(
+        apply(&reopened, before_close["pageToken"].clone(), workspace_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
+    close(&transport, &reopened, &mut id).await;
+    close(&transport, &foreign, &mut id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetched_pull_restarts_without_applying_and_fetches_the_same_batch_again() {
+    let workspace_id = "rpc-relay-fetch-restart";
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let mut id = 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    let assert_unapplied =
+        |has_token: bool| {
+            let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
+            let applied: i64 = db.query_row(
+            "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND origin_id='remote'",
+            [workspace_id], |row| row.get(0)).unwrap();
+            let cursor: Option<String> = db
+                .query_row(
+                    "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            let token: Option<String> = db
+                .query_row(
+                    "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(applied, 0);
+            assert_eq!(cursor, None);
+            assert_eq!(token.is_some(), has_token);
+        };
+    assert_unapplied(true);
+    close(&transport, &handle, &mut id).await;
+    drop(transport);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, id + 1, workspace_id).await;
+    assert_unapplied(false);
+    let stale = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10_000,
+                "sync.applyPull",
+                Some(handle.clone()),
+                json!({"workspaceId": workspace_id, "pageToken": first["pageToken"]}),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::InvalidParams);
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    assert_ne!(first["pageToken"], second["pageToken"]);
+    assert_unapplied(true);
+    let applied = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.applyPull",
+        json!({"workspaceId": workspace_id, "pageToken": second["pageToken"]}),
+    )
+    .await;
+    assert_eq!(applied["fetched"], 1);
+    assert_eq!(applied["applied"], 1);
+    assert_eq!(applied["skipped"], 0);
+    assert_eq!(applied["nextCursor"], 1);
+    assert_eq!(relay.state.lock().unwrap().requests.iter().filter(|(method, path)|
+        method == "GET" && path == &format!("/sync/{workspace_id}/log")).count(), 2);
+    close(&transport, &handle, &mut id).await;
 }
 
 async fn close(
@@ -977,7 +1206,7 @@ async fn pull_and_commit(
         transport,
         handle,
         id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -1030,7 +1259,7 @@ async fn pull_materialize_and_commit(
         transport,
         handle,
         id,
-        "sync.pull",
+        "sync.applyPull",
         json!({"workspaceId":workspace}),
     )
     .await;
@@ -2424,7 +2653,7 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2761,7 +2990,7 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2788,7 +3017,7 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2823,7 +3052,7 @@ async fn slow_relay_pull_does_not_block_a_concurrent_workspace_write() {
                 RequestContext::unbounded(),
                 request(
                     10_000,
-                    "sync.pull",
+                    "sync.fetchPull",
                     Some(pulling_handle),
                     json!({ "workspaceId": workspace_id }),
                 ),
@@ -2884,7 +3113,7 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2909,7 +3138,7 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2968,7 +3197,7 @@ async fn commit_stopped_after_its_cursor_lands(expire: bool) {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3171,7 +3400,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3194,7 +3423,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3356,7 +3585,7 @@ async fn commit_cursor_accepts_only_the_server_issued_pending_token() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3461,7 +3690,7 @@ async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3469,7 +3698,7 @@ async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3514,7 +3743,11 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
     let handle = open_workspace(&transport, &scratch, &relay, 1, "bound-workspace").await;
     let methods = [
         ("sync.push", json!({ "workspaceId": "other" })),
-        ("sync.pull", json!({ "workspaceId": "other" })),
+        ("sync.fetchPull", json!({ "workspaceId": "other" })),
+        (
+            "sync.applyPull",
+            json!({ "workspaceId": "other", "pageToken": "foreign" }),
+        ),
         ("sync.refusalNotices", json!({ "workspaceId": "other" })),
         (
             "sync.dismissRefusal",

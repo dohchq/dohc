@@ -22,8 +22,8 @@ For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of openi
 
 Read [AGENTS.md](AGENTS.md) for product boundaries and development rules. Follow the [setup and verification guide](docs/engineering/verify-agent-work.md).
 
-Cloud CI is disabled by default. A maintainer verifies fork PRs locally before merging.
-Enabling Blacksmith adds automatic checks for ready branches in this repository; it does not enable checks for forks.
+PR checks run automatically for ready branches in this repository, on GitHub's runners.
+They don't run automatically for forks. A maintainer verifies fork PRs locally before merging.
 
 - Keep each pull request focused on one change. Explain the problem and the fix.
 - Add a test for any behavior change. Tests must wait for the expected condition, not a fixed delay.
@@ -40,6 +40,6 @@ Agent-written contributions follow the same rules. Name the model or agent used.
 
 Each contributor must accept the [CLA](CLA.md) before merging. You keep ownership and allow the project owner to relicense your contributions, including commercially. Existing license grants remain valid under their terms.
 
-CLA Assistant setup is deferred until the repository is public. Until then, the maintainer links the agreement at a specific commit in your pull request. Reply from your GitHub account to explicitly accept that version. If accepting for a legal entity, name it and confirm your authority in that comment. The maintainer records your account, agreement commit, and acceptance comment before merging. You only need to accept each version once.
+CLA Assistant handles signing. When you open your first pull request, it comments with a link to the agreement. Open the link and sign with your GitHub account. If you sign for a legal entity, name the entity in the form before you sign. Signing for an entity confirms that you're authorized to sign for it. The pull request's CLA check passes once you've signed. You sign each version of the agreement once. If the agreement changes, CLA Assistant asks you to sign again on your next pull request.
 
 If your employer has rights to your contribution, check section 4 of the agreement before submitting it.

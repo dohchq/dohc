@@ -40,6 +40,7 @@ interface CliEndpoint {
 }
 
 export interface CliClientOptions {
+  signal?: AbortSignal;
   stateDir?: string;
   timeoutMs?: number;
   env?: Readonly<Record<string, string | undefined>>;
@@ -175,6 +176,13 @@ async function locateCliEndpoint(options: CliClientOptions = {}): Promise<CliEnd
   };
 }
 
+// A process dohc started for an agent run proves it with the run's secret. A
+// malformed one is left out, so the request is no run's.
+function runSecretOf(options: CliClientOptions): { runSecret?: string } {
+  const secret = (options.env ?? process.env).DOHC_RUN_SECRET;
+  return secret !== undefined && /^[a-f0-9]{64}$/u.test(secret) ? { runSecret: secret } : {};
+}
+
 async function readToken(path: string): Promise<string> {
   let text: string;
   try {
@@ -195,17 +203,22 @@ function readResponseLine(
   socketPath: string,
   requestLine: string,
   timeoutMs: number | undefined,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   return new Promise((resolveResponse, rejectResponse) => {
+    if (signal?.aborted) { rejectResponse(new DohcCliError("Chat wait cancelled.")); return; }
     const socket = createConnection(socketPath);
     let settled = false;
     let buffer = "";
     const rejectOnce = (error: DohcCliError): void => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", abort);
       socket.destroy();
       rejectResponse(error);
     };
+    const abort = () => rejectOnce(new DohcCliError("Chat wait cancelled."));
+    signal?.addEventListener("abort", abort, { once: true });
     socket.setEncoding("utf8");
     if (timeoutMs !== undefined) socket.setTimeout(timeoutMs);
     socket.once("connect", () => {
@@ -220,6 +233,7 @@ function readResponseLine(
       try {
         const parsed: unknown = JSON.parse(line);
         settled = true;
+        signal?.removeEventListener("abort", abort);
         socket.end();
         resolveResponse(parsed);
       } catch {
@@ -262,8 +276,8 @@ export async function sendCliRequest<Verb extends CliVerb>(
     const endpoint = endpoints[index]!;
     try {
       const token = await readToken(endpoint.tokenPath);
-      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token });
-      const rawResponse = await (options.transport ?? readResponseLine.bind(null, request.verb))(
+      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token, ...runSecretOf(options) });
+      const rawResponse = await (options.transport ?? ((path: string, line: string, timeout: number | undefined) => readResponseLine(request.verb, path, line, timeout, options.signal)))(
         endpoint.socketPath,
         JSON.stringify(request),
         options.timeoutMs,

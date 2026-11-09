@@ -4,7 +4,7 @@ import type {
   CliResultByVerb,
 } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
-import { formatStreamPosition, messageMetadata, renderThreadMarkdown } from "./threadMarkdown";
+import { formatStreamPosition, messageMetadata, renderDecisionOptions, renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
 import { formatStoredBytes } from "./account";
 
@@ -26,7 +26,10 @@ function counted(count: number, one: string, many: string): string {
 }
 
 function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
-  return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
+  return [...page.conflicts.flatMap(conflict => [
+    `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
+    ...(conflict.waiting ? ["  A newer version from another machine is waiting. It comes in after you resolve this conflict."] : []),
+  ]),
     ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
 }
 
@@ -78,6 +81,7 @@ function renderStream(stream: StreamResult): string {
   const read = stream.readPosition && formatStreamPosition(stream.readPosition);
   for (const item of stream.items) {
     const metadata = messageMetadata(item.message, item.post ? item.threadId : item.message.id);
+    if (item.message.decisionState) metadata.push(`needs-decision(${item.message.decisionState})`);
     const { post } = item;
     if (post) {
       metadata.push(countLabel(post.replyCount, "reply", "replies"));
@@ -88,6 +92,7 @@ function renderStream(stream: StreamResult): string {
       if (post.openDecisionCount > 0) metadata.push(`open decisions: ${post.openDecisionCount}`);
     }
     lines.push("", metadata.join(" · "), item.message.body);
+    lines.push(...renderDecisionOptions(item.message));
     if (post?.latestAgentReply) {
       const reply = post.latestAgentReply;
       lines.push(`> **${renderAuthorDisplayName(reply.author)}** · ${dateTime(reply.createdAtMs)} · ${reply.id}: ${lineSafe(reply.bodyExcerpt)}`);
@@ -314,6 +319,26 @@ function renderAutomationPress(result: Extract<CliResultByVerb["automationPress"
   ].join("\n");
 }
 
+// An agent reports its own name. Print it quoted, as reported, with each
+// character that could move, recolor, or reorder the terminal as its code point.
+function reportedText(name: string): string {
+  return `"${name.replace(/[\\"\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, (char) =>
+    char === "\\" || char === "\"" ? `\\${char}` : `\\u{${char.codePointAt(0)!.toString(16)}}`)}"`;
+}
+
+function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
+  if (page.agents.length === 0 && page.nextCursor === null) return "No agent is connected through this link.";
+  return [
+    ...page.agents.map((agent) => [
+      agent.connectionId,
+      agent.reportedName === null ? "no reported name" : `reported name ${reportedText(agent.reportedName)}`,
+      `signed in ${dateTime(agent.connectedAtMs)}`,
+      agent.lastActionAtMs === null ? "no action yet" : `last action ${dateTime(agent.lastActionAtMs)}`,
+    ].join(" · ")),
+    ...(page.nextCursor === null ? [] : [`More agents; use --cursor ${page.nextCursor}`]),
+  ].join("\n");
+}
+
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
@@ -347,6 +372,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "accessObject":
     case "accessSharing":
       return JSON.stringify(result, null, 2);
+    case "shareAgents":
+      return renderLinkAgents(result as CliResultByVerb["shareAgents"]);
+    case "shareDisconnect":
+      return `Disconnected ${(result as CliResultByVerb["shareDisconnect"]).connectionId}`;
     case "automationList":
     case "automationSwitch":
       return JSON.stringify(result, null, 2);
@@ -397,6 +426,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":
       return renderThreads(result as CliResultByVerb["threads"]);
+    case "watch": {
+      const batch = result as CliResultByVerb["watch"];
+      return [...batch.messages.map(message => `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${lineSafe(message.text)}`), `cursor: ${batch.cursor}`].join("\n");
+    }
     case "inbox":
       return renderInbox(result as CliResultByVerb["inbox"]);
     case "show":
@@ -434,7 +467,13 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "versionList": {
       const list = result as CliResultByVerb["versionList"];
       if (!list.ok) return list.reason;
-      return list.versions.map(version => `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}`).join("\n");
+      // A parent that isn't in the list shows by its id.
+      const names = new Map(list.versions.map(version => [version.id, version.name]));
+      return list.versions.map(version => {
+        const parent = version.madeFromVersionId;
+        const madeFrom = parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
+        return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
+      }).join("\n");
     }
     case "versionCompare": {
       const compare = result as CliResultByVerb["versionCompare"];

@@ -102,7 +102,7 @@ export async function startDocumentSocketProbe(options, storage, native, pool, p
     ...(kind === 'named'
       ? { cookie: 'benchmark-account=reader' }
       : {
-          authorization: 'Bearer ' + credentials.capability,
+          authorization: 'LinkCapability ' + credentials.capability,
           'x-dohc-link-profile-secret': credentials.profile,
         }),
   });

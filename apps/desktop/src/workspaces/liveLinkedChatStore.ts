@@ -224,20 +224,24 @@ export function createLiveLinkedChatStore(
       await invoke(
         async (adapter) => await adapter.markThreadReadByAgent(input),
       ),
-    listAgentUnreadThreads: async (workspaceId, runId) =>
+    listAgentUnreadThreads: async (workspaceId, reader) =>
       await invokeRead(
         async (adapter) =>
-          await adapter.listAgentUnreadThreads(workspaceId, runId),
+          await adapter.listAgentUnreadThreads(workspaceId, reader),
       ),
-    listAgentUnreadRequests: async (workspaceId, runId) =>
+    listAgentUnreadRequests: async (workspaceId, reader) =>
       await invokeRead(
         async (adapter) =>
-          await adapter.listAgentUnreadRequests(workspaceId, runId),
+          await adapter.listAgentUnreadRequests(workspaceId, reader),
       ),
-    listMentionsForHandle: async (workspaceId, handle, options) =>
+    listAgentRequestsPage: async (input) =>
+      await invokeRead(
+        async (adapter) => await adapter.listAgentRequestsPage(input),
+      ),
+    listMentionsForHandle: async (workspaceId, handle) =>
       await invokeRead(
         async (adapter) =>
-          await adapter.listMentionsForHandle(workspaceId, handle, options),
+          await adapter.listMentionsForHandle(workspaceId, handle),
       ),
     setReaction: async (input) =>
       await invoke(
@@ -292,6 +296,8 @@ export function createLiveLinkedChatStore(
       await invoke(
         async (adapter) => await adapter.markBookmarkFailed(input),
       ),
+    retryFailedBookmark: async (input) =>
+      await invoke(async (adapter) => await adapter.retryFailedBookmark(input)),
     markBookmarkStale: async (input) =>
       await invoke(async (adapter) => await adapter.markBookmarkStale(input)),
     getThreadProjection: async (input) =>

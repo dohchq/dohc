@@ -118,13 +118,13 @@ fn assert_refusal<T: std::fmt::Debug>(
     assert_eq!(refusal.reason, expected);
 }
 
-fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
+fn watch_fence_writes(f: &mut Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let writes = Arc::new(AtomicUsize::new(0));
     let seen = writes.clone();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -141,10 +141,10 @@ fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
     writes
 }
 
-fn stop_watching_fence_writes(f: &Fixture, writes: &std::sync::atomic::AtomicUsize) {
+fn stop_watching_fence_writes(f: &mut Fixture, writes: &std::sync::atomic::AtomicUsize) {
     use rusqlite::hooks::{AuthContext, Authorization};
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(
         writes.load(std::sync::atomic::Ordering::SeqCst),
@@ -167,7 +167,7 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
         }
         let before = binding_state(&f);
         let bytes = f.canonical().encode_full_state();
-        let writes = watch_fence_writes(&f);
+        let writes = watch_fence_writes(&mut f);
         let result = f.owner.fence_restore(
             &mut f.store,
             None,
@@ -176,7 +176,7 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
             90,
             &NoFaults,
         );
-        stop_watching_fence_writes(&f, &writes);
+        stop_watching_fence_writes(&mut f, &writes);
         if let Some(saved) = saved {
             assert_eq!(result.unwrap(), saved);
         } else {
@@ -639,7 +639,7 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
         );
         let resume = NativeRestoreResume {
             application: input,
-            settlement_id: settled.settlement_id,
+            settlement_id: settled.settlement_id.unwrap(),
         };
         // A fresh resolver has no persisted verdict, including after settlement.
         let config =
@@ -702,7 +702,8 @@ fn reader_restore_application_settlement_and_resume_recheck_authority() {
                     )
                 })
                 .unwrap()
-                .settlement_id;
+                .settlement_id
+                .unwrap();
             }
             match case {
                 "binding" => damage(&f,"UPDATE live_device_application_bindings SET host_id='replacement'"),
@@ -1299,6 +1300,7 @@ fn native_resume_generation_preserves_historical_selector_scope() {
         namespace: held.namespace.clone(),
         coordinate: held.coordinate.clone(),
         binding: held.binding.clone(),
+        activation_id: held.activation_id.clone(),
         live: held.live,
     };
     current.binding.selector_paths.push("z.md".into());
@@ -1467,10 +1469,9 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
         },
         update_bytes: bytes,
     };
-    let result = f
-        .store
-        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
-            tx.authorizer(Some(|context: AuthContext<'_>| match context.action {
+    f.store
+        .hooks_with(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
                 AuthAction::Read {
                     table_name: "live_restore_fences",
                     column_name: "proposal_json" | "application_json",
@@ -1481,12 +1482,16 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
                 } => Authorization::Deny,
                 _ => Authorization::Allow,
             }))
-            .map_err(read_sql)?;
-            let appended = accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024);
-            tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-                .map_err(read_sql)?;
-            appended
         })
+        .unwrap();
+    let result = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+            accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024)
+        })
+        .unwrap();
+    f.store
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(matches!(result, TxnOutcome::Committed(())));
     f.store
@@ -1602,7 +1607,7 @@ pub(in crate::live_update_application) fn record_test_projection(
         if audit.accepted_prefix().is_some() {
             crate::author_coverage::advance_accepted_prefix_in(tx,&key,false)?;
         }
-        Ok(audit.result(id,moment.into(),written.snapshot.blob_sha256,false))
+        Ok(audit.result(Some(id),moment.into(),written.snapshot.blob_sha256,false))
     })?;
     let TxnOutcome::Committed(result) = result else {
         return Err(ApplicationError::Interrupted);
@@ -1956,6 +1961,7 @@ fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
             update: update.clone(),
             now_ms: 10,
             agent_declaration: None,
+            agent_run_id: None,
             automation_declaration: None,
         },
         &NoFaults,
@@ -3161,6 +3167,7 @@ fn restore_predecessor_refuses_before_reading_the_restore_candidate() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     f.store
@@ -3219,6 +3226,7 @@ fn fence_replay_charges_first_seen_children_before_reading_them() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let (json, children): (String, i64) = f
@@ -3279,6 +3287,7 @@ fn bootstrap_origin_stamp_is_bounded_before_reading_and_keeps_its_bytes() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let stamp = |remaining: usize| {
@@ -3345,6 +3354,7 @@ fn bootstrap_origin_stamp_consumes_raw_whitespace_padded_json() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let stamp = |remaining: &mut usize| {
@@ -3407,6 +3417,7 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
         namespace: "namespace".into(),
         coordinate: f.host.clone(),
         binding: f.binding.clone(),
+        activation_id: None,
         live: false,
     };
     let b = &f.binding;
@@ -3443,6 +3454,10 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
                 "INSERT INTO live_owner_adoptions (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES ('namespace','adoption','workspace','main','object',?1,?2,'adopted-source',?3,?4,0,1,?3,?3,0,0,0,'null','{}',1,1)",
                 params![b.lineage_claim_id, binding, digest, text.len() as i64],
             )?;
+            conn.execute(
+                crate::live_update_application::owner_activations::ACTIVATE_ADOPTION,
+                params!["namespace", "adoption", None::<String>],
+            )?;
             conn.execute_batch("PRAGMA foreign_keys=ON")
         })
         .unwrap();
@@ -3469,10 +3484,26 @@ fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
         origin(cost(&binding) - 1).0,
         Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
+    // The activation's other metadata is never read. Padded to a megabyte,
+    // and unreadable as text, it changes neither the origin nor its cost.
     f.store
         .read_with(|conn| {
             conn.execute(
-                "UPDATE live_owner_adoptions SET binding_json=?1",
+                "UPDATE live_owner_activations SET
+                   host_coordinate_json='{}'||replace(hex(zeroblob(500000)),'00',' '),
+                   evidence_digest=replace(hex(zeroblob(500000)),'00','e')||CAST(x'ff' AS TEXT),
+                   coverage_digest=replace(hex(zeroblob(500000)),'00','c')||CAST(x'ff' AS TEXT)",
+                [],
+            )
+        })
+        .unwrap();
+    let (padded, left) = origin(cost(&binding));
+    assert!(matches!(padded, Ok(Some(_))), "{:?}", padded.err());
+    assert_eq!(left, 0);
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_activations SET binding_json=?1",
                 [&redirected],
             )
         })
@@ -3498,6 +3529,7 @@ fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializi
             object_id: object.into(),
             ..f.binding.clone()
         },
+        activation_id: None,
         live: false,
     };
     let stamp = |held: &Registration, remaining: usize| {
@@ -3907,7 +3939,7 @@ fn prove(f: &Fixture, reader: ProofReader, remaining: &mut usize) -> Result<(), 
 /// smaller budget refuses before reading it; enough budget reaches the damage.
 #[test]
 fn publication_proof_charges_each_raw_row_before_reading_it() {
-    use ProofReader::{Accepted, Predecessor};
+    use self::ProofReader::{Accepted, Predecessor};
     let pad = "replace(hex(zeroblob(1000000)),'00','x')";
     let cases = [
         // Registration, before anything else is read.
@@ -4028,7 +4060,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
             f.resolver.as_ref(),
             NativeRestoreResume {
                 application: input,
-                settlement_id: restored.settlement_id.clone(),
+                settlement_id: restored.settlement_id.clone().unwrap(),
             },
             f.host.clone(),
             2_000_000,
@@ -4108,7 +4140,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .unwrap();
     let resume = NativeRestoreResume {
         application: input.clone(),
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     assert!(f
         .owner
@@ -4280,7 +4312,7 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
         .unwrap();
     let second_resume = NativeRestoreResume {
         application: second,
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     let result = f
         .owner
@@ -4379,7 +4411,7 @@ fn resume_commit_boundaries_leave_a_stop_or_one_historical_receipt() {
             .unwrap();
         let resume = NativeRestoreResume {
             application: input,
-            settlement_id: settlement.settlement_id,
+            settlement_id: settlement.settlement_id.unwrap(),
         };
         assert!(matches!(
             f.owner.resume_restore(
@@ -5276,7 +5308,7 @@ fn recheck_selected_terminal(unknown_history: bool) {
     let replacement = f.terminal.as_ref().unwrap().update_digest.clone();
     let begins = Arc::new(AtomicUsize::new(0));
     let seen = begins.clone();
-    f.store.read_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
+    f.store.hooks_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
         if matches!(context.action, AuthAction::Transaction { operation: TransactionOperation::Begin })
             && seen.fetch_add(1, Ordering::SeqCst) == usize::from(unknown_history) {
             assert_eq!(other.execute("UPDATE live_accepted_updates SET update_sha256=?1 WHERE journal_cursor=3", [&replacement]).unwrap(), 1);
@@ -5287,7 +5319,7 @@ fn recheck_selected_terminal(unknown_history: bool) {
         f.owner
             .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults);
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(
         begins.load(Ordering::SeqCst),
@@ -5316,7 +5348,7 @@ fn native_fence_does_not_rebuild_the_selected_point() {
     let reads = Arc::new(AtomicUsize::new(0));
     let seen = reads.clone();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -5336,7 +5368,7 @@ fn native_fence_does_not_rebuild_the_selected_point() {
         .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
         .unwrap();
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 }
@@ -5349,7 +5381,7 @@ fn fence_rechecks_reader_history_signal_before_writing() {
     let before = binding_state(&f);
     let other = Connection::open(f.dir.join("engine.db")).unwrap();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -5377,7 +5409,7 @@ fn fence_rechecks_reader_history_signal_before_writing() {
         &NoFaults,
     );
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(
         matches!(result, Err(ApplicationError::Interrupted)),
@@ -5589,7 +5621,7 @@ fn native_accepted_append_avoids_reader_signal_sql() {
         "a new native bootstrap must establish the shortcut"
     );
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
                 AuthAction::Read {
                     table_name: "live_accepted_reader_history",
@@ -5608,7 +5640,7 @@ fn native_accepted_append_avoids_reader_signal_sql() {
         .unwrap();
     f.edit("native edit\n", 3);
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     let signal: bool = f
         .store
@@ -5699,7 +5731,7 @@ fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
     let reads = Arc::new(AtomicUsize::new(0));
     let seen = reads.clone();
     f.store
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |context: AuthContext<'_>| {
                 if matches!(
                     context.action,
@@ -5719,7 +5751,7 @@ fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
         .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
         .unwrap();
     f.store
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(reads.load(Ordering::SeqCst) > 0);
 }

@@ -46,6 +46,7 @@
 pub const MAX_YDOC_UPDATE_BYTES: usize = 20 * 1024 * 1024;
 
 /// Existing public Markdown output bound, shared with live-session-contract.
+/// packages/live-session-contract/src/limits.test.ts checks they agree.
 pub const MAX_PUBLIC_MARKDOWN_BYTES: usize = 2 * 1024 * 1024;
 
 /// Fold the append-only update log into a full-state snapshot (and prune the

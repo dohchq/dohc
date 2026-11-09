@@ -7,6 +7,8 @@
 @source "../../../../packages/collection-views/src";
 
 @custom-variant dark ([data-theme='dark'] &);
+/* While the person moves with the keyboard (keyboardNavigation.ts). */
+@custom-variant keyboard ([data-keyboard-nav] &);
 
 /* Warm paper + graphite palette (brand bible / packages/brand, supersedes the
  * zinc D-E5 draft). Every pair is contrast-solved — see tokens.test.ts.
@@ -36,16 +38,22 @@
   --dohc-line: #e4e1d8;
   --dohc-ink: #1c1b18;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
+  /* The fill of loading bars. */
+  --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.40);
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
   --dohc-accent: #2d342e;
+  --dohc-focus: color-mix(in srgb, var(--dohc-accent) 60%, transparent);
   --dohc-agent: #666d2e;
   --dohc-match: #326fce;
   --dohc-success: #38684e;
-  --dohc-warning: #8a6420;
-  --dohc-danger: #a43e2a;
+  --dohc-warning: #855f1e;
+  --dohc-danger: #9d3c28;
+  --dohc-danger-fill: #9d3c28;
+  --dohc-on-danger: #faf9f5;
+  --dohc-danger-tint: #eadcd3;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
   /* Identity hues: olive belongs to the agent default.
@@ -68,16 +76,21 @@
   --dohc-line: #2a2925;
   --dohc-ink: #f6f4ee;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
-  --dohc-scrim: rgba(0, 0, 0, 0.40);
-  --dohc-muted: #a9a599;
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
+  --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-scrim: rgba(0, 0, 0, 0.65);
+  --dohc-muted: #aba79b;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
+  --dohc-focus: color-mix(in srgb, var(--dohc-accent) 50%, transparent);
   --dohc-agent: #c0c585;
-  --dohc-match: #377afa;
+  --dohc-match: #4382fa;
   --dohc-success: #82c29b;
   --dohc-warning: #d9a94e;
-  --dohc-danger: #e08065;
+  --dohc-danger: #e1866c;
+  --dohc-danger-fill: #b04530;
+  --dohc-on-danger: #f6f4ee;
+  --dohc-danger-tint: #30241f;
   --dohc-selection: rgba(102, 148, 245, 0.30);
   --dohc-hue-rust: #dc9378;
   --dohc-hue-amber: #d9b05a;
@@ -97,16 +110,21 @@
   --color-ink: var(--dohc-ink);
   --color-hover: var(--dohc-hover);
   --color-selected: var(--dohc-selected);
+  --color-skeleton: var(--dohc-skeleton);
   --color-scrim: var(--dohc-scrim);
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);
   --color-accent: var(--dohc-accent);
+  --color-focus: var(--dohc-focus);
   --color-agent: var(--dohc-agent);
   --color-match: var(--dohc-match);
   --color-line: var(--dohc-line);
   --color-success: var(--dohc-success);
   --color-warning: var(--dohc-warning);
   --color-danger: var(--dohc-danger);
+  --color-danger-fill: var(--dohc-danger-fill);
+  --color-on-danger: var(--dohc-on-danger);
+  --color-danger-tint: var(--dohc-danger-tint);
   --color-hue-rust: var(--dohc-hue-rust);
   --color-hue-amber: var(--dohc-hue-amber);
   --color-hue-teal: var(--dohc-hue-teal);
@@ -116,7 +134,15 @@
   --color-hue-rose: var(--dohc-hue-rose);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
-  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', serif;
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Noto Serif', 'Times New Roman', serif;
+}
+
+/* Subtle text misses AA on the selected fill, so inside it subtle shows in
+ * muted. Every variant and @apply of bg-selected carries this, and a hover or
+ * focus color on a control inside still wins. */
+@utility bg-selected {
+  background-color: var(--dohc-selected);
+  --dohc-subtle: var(--dohc-muted);
 }
 
 html,
@@ -144,20 +170,89 @@ body {
   background: var(--dohc-selection);
 }
 
-/* a11y: keyboard focus is a 2px ink ring with offset, both modes. Layered so
- * Tailwind utilities (outline-none on inputs that carry their own focus
- * treatment) can override it — unlayered, this rule would beat every
- * utility and clip into stray bars inside overflow-hidden popovers. */
+/* Focus shows only while the person moves with the keyboard
+ * (keyboardNavigation.ts), never after a click, a shortcut, or focus dohc
+ * moves itself. A control wears a soft halo that follows its radius. It is an
+ * outline, not a shadow, so the control keeps its own shadow and forced
+ * colors still draw it. Layered so a utility can place it inset inside a
+ * scroller, or remove it where the part shows focus another way. */
 @layer base {
   :focus-visible {
-    outline: 2px solid var(--dohc-accent);
-    outline-offset: 1px;
+    outline: none;
+  }
+
+  /* A row-open control's focus marks its whole row instead, below. */
+  [data-keyboard-nav] :focus-visible:not(.dohc-row-open-target) {
+    outline: 2px solid var(--dohc-focus);
+    outline-offset: 0;
   }
 
   /* A checked checkbox or radio fills with the accent, not Chromium's blue. */
   input {
     accent-color: var(--dohc-accent);
   }
+}
+
+/* A row in a list, tree or menu takes the hover fill and a 1px accent line
+ * inside its edge, where a scroller cannot clip it. A selected row keeps its
+ * fill, because utilities outrank this layer. */
+@layer components {
+  [data-keyboard-nav] .dohc-focus-row:focus-visible,
+  [data-keyboard-nav] .dohc-row-open:has(.dohc-row-open-target:focus-visible) {
+    outline: 1px solid var(--dohc-accent);
+    outline-offset: -1px;
+    background-color: var(--dohc-hover);
+  }
+
+  /* A row a press opens as a whole. Its one focus stop is the control that
+   * names where it goes; that control's ::after covers the row, and the
+   * row's own controls, and text opened to select, sit above it. Keyboard
+   * focus on the control rings the whole row, as a focus row's does. */
+  .dohc-row-open {
+    position: relative;
+  }
+  .dohc-row-open:hover {
+    background-color: var(--dohc-hover);
+  }
+  .dohc-row-open-target::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+  }
+  .dohc-row-open :is(button, a, code, [data-row-above]):not(.dohc-row-open-target) {
+    position: relative;
+    z-index: 1;
+  }
+}
+
+/* Landing on what a person asked to see — a heading from the outline, a
+ * message from Notices — washes it once. With reduced motion the wash holds
+ * without fading, and clears when its owner removes the class at 900ms. */
+@keyframes dohc-target-flash {
+  from {
+    background-color: var(--dohc-selection);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.dohc-target-flash {
+  border-radius: 4px;
+  animation: dohc-target-flash 900ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(:root:not([data-system-reduced-motion='false']) .dohc-target-flash) {
+    animation: none !important;
+    background-color: var(--dohc-selection);
+  }
+}
+
+:where(:root[data-system-reduced-motion='true'] .dohc-target-flash) {
+  animation: none !important;
+  background-color: var(--dohc-selection);
 }
 
 /* Text fields use their border and a thin underline, including borderless
@@ -177,7 +272,7 @@ body {
       animation-duration: 0.001ms !important;
       animation-iteration-count: 1 !important;
       scroll-behavior: auto !important;
-      transition-duration: 0.001ms !important;
+      transition-duration: 0s !important;
     }
   }
 }
@@ -187,7 +282,7 @@ body {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
-    transition-duration: 0.001ms !important;
+    transition-duration: 0s !important;
   }
 }
 
@@ -254,6 +349,34 @@ table {
 
 .dohc-reveal-if-slow {
   animation: dohc-reveal-if-slow 120ms ease-out 150ms backwards;
+}
+
+/* An indeterminate progress line: a segment that crosses its track. Reduced
+ * motion holds it still across the whole track. */
+@keyframes dohc-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.dohc-progress-slide {
+  width: 40%;
+  animation: dohc-progress-slide 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(:root:not([data-system-reduced-motion='false']) .dohc-progress-slide) {
+    width: 100% !important;
+    animation: none !important;
+  }
+}
+
+:where(:root[data-system-reduced-motion='true'] .dohc-progress-slide) {
+  width: 100% !important;
+  animation: none !important;
 }
 
 /* A menu enters from its trigger's side: 4px and a fade, no scale. The Menu
@@ -375,7 +498,7 @@ body {
   display: none;
 }
 
-/* An edge the strip can still scroll past fades its last 24px, so a name
+/* An edge the strip can still scroll past fades its last 40px, so a name
  * cut there reads as continuing. EditorTabs sets the attributes and draws
  * the fades (STRIP_FADE) after the strip. They are the chrome's fill drawn
  * over the tabs, not a mask on the strip: a masked strip changed how
@@ -489,26 +612,27 @@ body {
 
 /* One shared left content edge: the TEXT of every top-level block sits on the
  * column's left edge, so a straight vertical line down the page touches all
- * of it. Decorations — list markers, task checkboxes, the quote bar — hang
- * LEFT of that line into the gutter, and framed blocks below extend one
- * --dohc-editor-block-inset past the column on BOTH sides so their inner
- * padding lands their text back on the edge (degrades to a flush frame when
- * the pane is too narrow for the overhang). */
+ * of it. List markers and the quote bar hang LEFT of that line into the
+ * gutter. A task list's checkboxes and a table's frame start ON the line
+ * instead. Framed blocks below extend one --dohc-editor-block-inset past the
+ * column on BOTH sides so their inner padding lands their text back on the
+ * edge (degrades to a flush frame when the pane is too narrow for the
+ * overhang). */
 .dohc-notion-editor > pre,
-.dohc-notion-editor > table,
 .dohc-notion-editor > .dohc-callout,
 .dohc-notion-editor > .dohc-mermaid-preview {
   max-width: calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset));
 }
 
 /* The resizable TableView owns its chrome gutter and horizontal scrollbar.
- * Its outer width includes enough room for the left row grips and right add
- * strip while the table itself keeps the same framed reading-column measure. */
+ * At every pane width it reaches 22px past the column on each side, into the
+ * editor's 56px padding, for the left row grips and the right add strip, so
+ * the table itself fills the reading column. */
 .dohc-notion-editor > .tableWrapper {
-  width: 100%;
-  max-width: calc(
-    var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset) + 44px
-  );
+  width: calc(min(100%, var(--dohc-editor-measure)) + 44px);
+  max-width: none;
+  margin-left: calc(max(0px, (100% - var(--dohc-editor-measure)) / 2) - 22px);
+  margin-right: 0;
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -621,12 +745,13 @@ body {
   list-style: none;
 }
 
-/* Top-level task lists: text on the content edge, checkbox hanging in the
- * gutter. Repeated with the attribute selectors because the plain `> ul`
- * rule above loses specificity to the base task-list rule. */
+/* Top-level task lists: the checkbox starts on the content edge, and the
+ * text one checkbox and gap (23px) after it. Nested lists keep the 24px step.
+ * Repeated with the attribute selectors because the plain `> ul` rule above
+ * loses specificity to the base task-list rule. */
 .dohc-notion-editor > ul[data-type="taskList"],
 .dohc-notion-editor > ul:has(> li[data-checked]) {
-  padding-left: 0;
+  padding-left: 23px;
 }
 
 .dohc-notion-editor li:is([data-type="taskItem"], [data-checked]) {
@@ -807,19 +932,6 @@ body {
   border-left: 1px solid var(--dohc-line);
 }
 
-/* The table frame extends one block inset past the column, so the outer
- * columns pad back to it: 1px table border + 15px = the 16px inset, landing
- * first-column text on the shared content edge (last column mirrors it). */
-.dohc-notion-editor th:first-child,
-.dohc-notion-editor td:first-child {
-  padding-left: calc(var(--dohc-editor-block-inset) - 1px);
-}
-
-.dohc-notion-editor th:last-child,
-.dohc-notion-editor td:last-child {
-  padding-right: calc(var(--dohc-editor-block-inset) - 1px);
-}
-
 .dohc-notion-editor tr:first-child > th,
 .dohc-notion-editor tr:first-child > td {
   border-top: 0;
@@ -828,6 +940,12 @@ body {
 .dohc-notion-editor th {
   background: var(--dohc-panel);
   font-weight: 600;
+}
+
+/* A cell ends at its padding when a paragraph ends it. The editor draws the
+ * column-resize handle after the cell's last block, so it does not count. */
+.dohc-notion-editor :is(th, td) > p:nth-last-child(1 of :not(.column-resize-handle)) {
+  margin-bottom: 0;
 }
 
 /* Tiptap cell-selection tint. */
@@ -930,8 +1048,7 @@ body {
 /* Each hang, named by blockControls.tsx, is where the block's first-line mark
  * starts. A bullet reaches about 0.7em + 7.5px in every editor font. A
  * number reaches one ch per digit of the list's first number, plus its
- * period and space (theme.ts). The checkbox and the quote bar sit at fixed
- * offsets. */
+ * period and space (theme.ts). The quote bar sits at a fixed offset. */
 .dohc-block-affordance[data-hang="bullet"] {
   --dohc-block-hang: calc(0.7em + 7.5px);
 }
@@ -942,27 +1059,19 @@ body {
   );
 }
 
-.dohc-block-affordance[data-hang="checkbox"] {
-  --dohc-block-hang: 23px;
-}
-
 .dohc-block-affordance[data-hang="bar"] {
   --dohc-block-hang: 12px;
 }
 
 /* Framed blocks reach one block inset past the text edge once the gutter is
- * wider than the editor's 56px padding. A table's wrapper reaches 22px
- * further, for its row grips and ⋯ button. */
+ * wider than the editor's 56px padding. A table's frame starts on the text
+ * edge, and at every width its row grips and ⋯ button reach 22px past it. */
 .dohc-block-affordance[data-hang="frame"] {
   --dohc-block-hang: clamp(0px, var(--dohc-block-gutter) - 56px, var(--dohc-editor-block-inset));
 }
 
 .dohc-block-affordance[data-hang="table"] {
-  --dohc-block-hang: clamp(
-    0px,
-    var(--dohc-block-gutter) - 56px,
-    var(--dohc-editor-block-inset) + 22px
-  );
+  --dohc-block-hang: 22px;
 }
 
 /* The shown cluster sits above the others: a stacked one can run past its
@@ -1031,93 +1140,6 @@ body {
   pointer-events: none;
 }
 
-.dohc-graph-edge {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  animation: dohc-graph-edge-draw 520ms ease-out forwards;
-}
-
-.dohc-graph-node {
-  cursor: pointer;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: dohc-graph-node-in 360ms ease-out both;
-  transition: transform 82ms cubic-bezier(0.18, 0.9, 0.2, 1);
-  will-change: transform;
-}
-
-.dohc-graph-node:active {
-  cursor: grabbing;
-}
-
-.dohc-graph-node-halo {
-  fill: transparent;
-  stroke: var(--dohc-match);
-  stroke-width: 1.5;
-  opacity: 0;
-  transition:
-    opacity 70ms linear,
-    stroke-width 90ms cubic-bezier(0.18, 0.9, 0.2, 1);
-}
-
-.dohc-graph-node-dot {
-  /* Paper-on-panel: the canvas is bg-panel, so inactive dots sit on bg. */
-  fill: var(--dohc-bg);
-  stroke: var(--dohc-muted);
-  transition:
-    fill 70ms linear,
-    stroke 70ms linear,
-    stroke-width 82ms cubic-bezier(0.18, 0.9, 0.2, 1);
-}
-
-.dohc-graph-node-dot[data-active='true'] {
-  fill: var(--dohc-ink);
-  stroke: var(--dohc-ink);
-}
-
-.dohc-graph-node text {
-  transition:
-    fill 70ms linear,
-    font-weight 70ms linear;
-}
-
-.dohc-graph-node:is(:hover, :focus-visible) {
-  transform: scale(1.16);
-}
-
-.dohc-graph-node:is(:hover, :focus-visible) .dohc-graph-node-halo {
-  opacity: 0.34;
-  stroke-width: 2.5;
-}
-
-.dohc-graph-node:is(:hover, :focus-visible) .dohc-graph-node-dot {
-  fill: var(--dohc-match);
-  stroke: var(--dohc-ink);
-  stroke-width: 2.25;
-}
-
-.dohc-graph-node:is(:hover, :focus-visible) text {
-  fill: var(--dohc-match);
-  font-weight: 650;
-}
-
-@keyframes dohc-graph-edge-draw {
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes dohc-graph-node-in {
-  from {
-    opacity: 0;
-    transform: scale(0.72);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
 /* Centered with the same measure as the content column (left 50% +
  * translate, since an absolute widget's static position ignores the
  * column's auto margins). 112px = the editor's horizontal padding. */
@@ -1146,13 +1168,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-.dohc-code-block-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--dohc-agent);
 }
 
 .dohc-code-language-select {
@@ -1235,6 +1250,12 @@ body {
 .dohc-wikilink-pill--broken {
   border-style: dashed;
   color: var(--dohc-subtle);
+}
+
+/* Node-selected, the pill takes the text selection's tint over its fill,
+ * as a selected Ref chip does. */
+.dohc-wikilink-pill.ProseMirror-selectednode {
+  background-image: linear-gradient(var(--dohc-selection), var(--dohc-selection));
 }
 
 .dohc-wikilink-pill__label {
@@ -1674,9 +1695,9 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-.dohc-table-grip:focus-visible,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-grip:focus-visible,
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1710,13 +1731,13 @@ body {
 .dohc-table-grip.is-open,
 .dohc-table-grip.is-dragging,
 .dohc-table-grip.is-drop-target,
-.dohc-table-grip:focus-visible {
+[data-keyboard-nav] .dohc-table-grip:focus-visible {
   pointer-events: auto;
   opacity: 1;
 }
 
 .dohc-table-grip:hover,
-.dohc-table-grip:focus-visible,
+[data-keyboard-nav] .dohc-table-grip:focus-visible,
 .dohc-table-grip.is-open {
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1902,7 +1923,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active,
-.dohc-table-row-resize:focus-visible,
+[data-keyboard-nav] .dohc-table-row-resize:focus-visible,
 .dohc-table-row-resize.is-resizing {
   opacity: 1;
   pointer-events: auto;
@@ -1913,7 +1934,7 @@ body {
 }
 
 .dohc-table-row-resize.is-active:hover::after,
-.dohc-table-row-resize:focus-visible::after,
+[data-keyboard-nav] .dohc-table-row-resize:focus-visible::after,
 .dohc-table-row-resize.is-resizing::after {
   opacity: 1;
 }
@@ -1946,8 +1967,8 @@ body {
 /* The table menu (⋯) and the append strips reveal on table hover. */
 .dohc-table-node:hover .dohc-table-menu-btn,
 .dohc-table-node:hover .dohc-table-append,
-.dohc-table-menu-btn:focus-visible,
-.dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible,
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   opacity: 1;
 }
 
@@ -1971,7 +1992,7 @@ body {
 }
 
 .dohc-table-menu-btn:hover,
-.dohc-table-menu-btn:focus-visible {
+[data-keyboard-nav] .dohc-table-menu-btn:focus-visible {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
@@ -1998,7 +2019,7 @@ body {
 }
 
 .dohc-table-append:hover,
-.dohc-table-append:focus-visible {
+[data-keyboard-nav] .dohc-table-append:focus-visible {
   @apply bg-hover;
   color: var(--dohc-ink);
 }
@@ -2359,7 +2380,6 @@ body {
   padding: 4px 7px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
   color: var(--dohc-muted);
   text-align: left;
   text-overflow: ellipsis;
@@ -2397,22 +2417,6 @@ body {
   color: var(--dohc-subtle);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
-}
-
-/* A brief warm-ink wash on the heading the outline just scrolled to —
- * "briefly focuses it" without stealing keyboard focus in read-only mode. */
-@keyframes dohc-outline-target-flash {
-  from {
-    background: var(--dohc-selection);
-  }
-  to {
-    background: transparent;
-  }
-}
-
-.dohc-outline-target-flash {
-  border-radius: 4px;
-  animation: dohc-outline-target-flash 900ms ease-out;
 }
 
 [data-theme='dark'] .dohc-outline-panel {
@@ -2680,11 +2684,6 @@ body {
 .dohc-callout-type-picker.is-open .dohc-callout-type-trigger {
   background: color-mix(in srgb, var(--dohc-callout-accent) 12%, transparent);
 }
-.dohc-callout-type-trigger:focus-visible {
-  outline: 2px solid
-    color-mix(in srgb, var(--dohc-callout-accent) 55%, transparent);
-  outline-offset: 1px;
-}
 .dohc-callout-type-chevron {
   width: 12px;
   height: 12px;
@@ -2733,13 +2732,20 @@ body {
 }
 .dohc-callout-type-option:hover {
   @apply bg-hover;
-  outline: none;
 }
 
-.dohc-callout-type-option:focus-visible,
 .dohc-callout-type-option[aria-selected='true'] {
   @apply bg-selected;
-  outline: none;
+}
+
+/* Keyboard focus takes the hover fill, like other focus rows, so a focused
+ * option never looks chosen. The chosen option keeps its fill under focus. */
+[data-keyboard-nav] .dohc-callout-type-option:focus-visible {
+  outline: 1px solid var(--dohc-accent);
+  outline-offset: -1px;
+}
+[data-keyboard-nav] .dohc-callout-type-option:not([aria-selected='true']):focus-visible {
+  @apply bg-hover;
 }
 
 .dohc-callout-title-input {
@@ -2859,10 +2865,10 @@ mark.dohc-highlight,
  * field, and the empty/error states so math reads correctly in both themes.
  * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
 :root {
-  --dohc-math-error-color: #a43e2a;
+  --dohc-math-error-color: #9d3c28;
 }
 [data-theme='dark'] {
-  --dohc-math-error-color: #e08065;
+  --dohc-math-error-color: #e1866c;
 }
 
 .dohc-math-inline {
@@ -2956,12 +2962,6 @@ input.dohc-math__source {
   min-width: 8ch;
 }
 
-@utility dohc-focus-visible {
-  &:focus-visible {
-    outline: 2px solid var(--dohc-accent);
-  }
-}
-
 @utility dohc-focus-input {
   &:focus {
     outline: none;
@@ -2972,4 +2972,76 @@ input.dohc-math__source {
 
 @utility dohc-section-label {
   @apply text-[12px] font-medium text-subtle;
+}
+
+/* An agent at work: three dots in its hue. Under reduced motion they hold still. */
+.dohc-working-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.dohc-working-dots > i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: dohc-working-dot 1.2s ease-in-out infinite;
+}
+.dohc-working-dots > i:nth-child(2) {
+  opacity: 0.65;
+  animation-delay: 0.2s;
+}
+.dohc-working-dots > i:nth-child(3) {
+  opacity: 1;
+  animation-delay: 0.4s;
+}
+@keyframes dohc-working-dot {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-2px); }
+}
+
+/* A thread's latest reply under its parent: two lines of running text. Lists
+ * keep their markers inline. The end of the second line fades out. */
+.dohc-chat-peek {
+  max-height: 40px;
+  overflow: hidden;
+  line-height: 20px;
+  mask-image: linear-gradient(black, black), linear-gradient(to right, black calc(100% - 64px), transparent);
+  mask-size: 100% 20px, 100% 20px;
+  mask-position: top, bottom;
+  mask-repeat: no-repeat;
+}
+.dohc-chat-peek :is(div, p, ul, ol, li, blockquote, pre, h1, h2, h3, h4, h5, h6) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+/* A chip or inline box keeps to the line, so two lines stay two lines. */
+.dohc-chat-peek * {
+  max-height: 20px;
+  vertical-align: top;
+}
+.dohc-chat-peek :is(p, li, blockquote, pre, h1, h2, h3, h4, h5, h6)::after {
+  content: " ";
+}
+.dohc-chat-peek ul > li::before {
+  content: "• ";
+}
+.dohc-chat-peek ol {
+  counter-reset: dohc-peek;
+}
+.dohc-chat-peek ol > li {
+  counter-increment: dohc-peek;
+}
+.dohc-chat-peek ol > li::before {
+  content: counter(dohc-peek) ". ";
+}
+
+/* The list contains each message's layout but not its paint, so a hover
+ * bar can rise over the message above. */
+[data-chat-virtualized] .legend-list-content-container > * > * {
+  contain: layout style !important;
 }

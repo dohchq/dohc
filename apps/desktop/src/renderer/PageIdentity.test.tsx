@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Profiler, useState } from "react";
+import { Profiler, useLayoutEffect, useState } from "react";
 import * as Y from "yjs";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { FRONTMATTER_SOURCE_META_KEY } from "@dohc/ydoc-projection/frontmatter";
 import { Lexer } from "marked";
 import { PageIdentity } from "./PageIdentity";
 import { NoticeCenter } from "./workbench/NoticeCenter";
-import { parseFrontmatter } from "./markdown/frontmatter";
+import { parseFrontmatter, PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 
 function ControlledPageIdentity(props: { initialBody: string; stem: string }) {
   const [body, setBody] = useState(props.initialBody);
@@ -52,6 +53,20 @@ describe("PageIdentity", () => {
       expect(input.placeholder).toBe("2026-plan");
     });
 
+    // Untitled is a file name too, so a new page's draws the same way.
+    it("draws the file name in the secondary voice, and a folded Add title in the hint voice", () => {
+      const placeholder = (body: string, stem: string) => {
+        const view = render(<PageIdentity body={body} onChange={() => {}} filenameStem={stem} />);
+        const title = screen.getByTestId("page-title") as HTMLTextAreaElement;
+        const drawn = [title.placeholder, title.classList.contains("placeholder:text-muted")];
+        view.unmount();
+        return drawn;
+      };
+      expect(placeholder("Body text\n", "2026-plan")).toEqual(["2026-plan", true]);
+      expect(placeholder("", "Untitled")).toEqual(["Untitled", true]);
+      expect(placeholder("# Plan\n", "plan")).toEqual(["Add title", false]);
+    });
+
     it("writes the title into frontmatter through onChange", async () => {
       const user = userEvent.setup();
       render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
@@ -60,6 +75,74 @@ describe("PageIdentity", () => {
 
       expect(currentMeta().title).toBe("Roadmap");
       expect(screen.getByTestId("current-body").textContent).toContain("# Body\n");
+    });
+
+    it("says the title and icon are read-only when dohc refuses a title change", async () => {
+      const user = userEvent.setup();
+      // The alias reads the title's anchor, so a new title would rewrite it.
+      const body = "---\ntitle: &t Plan\nalias: *t\n---\n\n# Body\n";
+      const onChange = vi.fn();
+      render(<PageIdentity body={body} onChange={onChange} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />);
+      expect(screen.queryByText("Title and icon are read-only")).toBeNull();
+
+      await user.type(screen.getByTestId("page-title"), "!");
+
+      expect(onChange).not.toHaveBeenCalled();
+      const flag = screen.getByRole("status");
+      const label = screen.getByText("Title and icon are read-only");
+      expect(flag.contains(label)).toBe(true);
+      expect(label.title).toBe(PROPERTIES_READ_ONLY_REASON);
+      expect(label.className).toContain("text-warning");
+      expect(label.className).not.toContain("text-danger");
+      const lock = flag.querySelector("svg.lucide-lock");
+      expect(lock?.getAttribute("aria-hidden")).toBe("true");
+      expect(lock?.getAttribute("width")).toBe("12");
+      const open = screen.getByRole("button", { name: "Open externally" });
+      expect(flag.contains(open)).toBe(true);
+    });
+
+    it.each([false, true])("shows a locked block's title read-only, with no flag (shared: %s)", async (shared) => {
+      const user = userEvent.setup();
+      // Written on one line, the block cannot change one property without
+      // rewriting the others.
+      const body = "---\n{title: Plan, owner: Sam}\n---\n\n# Body\n";
+      const doc = markdownToYDoc(body);
+      const onChange = vi.fn();
+      try {
+        render(
+          shared
+            ? <PageIdentity ydoc={doc} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />
+            : <PageIdentity body={body} onChange={onChange} filenameStem="plan" file={{ workspaceId: "ws", path: "plan.md" }} />,
+        );
+        const title = screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement;
+        expect(title.value).toBe("Plan");
+        expect(title.readOnly).toBe(true);
+        expect(screen.queryByTestId("page-icon-add")).toBeNull();
+        expect(screen.queryByRole("status")).toBeNull();
+
+        await user.type(title, "!");
+
+        expect(title.value).toBe("Plan");
+        expect(onChange).not.toHaveBeenCalled();
+        expect(screen.queryByRole("status")).toBeNull();
+        expect(screen.queryByText("Title and icon are read-only")).toBeNull();
+      } finally { doc.destroy(); }
+    });
+
+    it("shows the title read-only when the block locks before the page listens", () => {
+      const doc = markdownToYDoc("---\ntitle: Plan\n---\n\n# Body\n");
+      const locked = markdownToYDoc("---\n{title: Plan, owner: Sam}\n---\n\n# Body\n");
+      // Another device's change lands after the title renders, before its effect listens.
+      function LocksOnCommit() {
+        useLayoutEffect(() => {
+          doc.getMap("meta").set(FRONTMATTER_SOURCE_META_KEY, locked.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY));
+        }, []);
+        return null;
+      }
+      try {
+        render(<><PageIdentity ydoc={doc} filenameStem="plan" /><LocksOnCommit /></>);
+        expect((screen.getByRole("textbox", { name: "Page title" }) as HTMLTextAreaElement).readOnly).toBe(true);
+      } finally { doc.destroy(); locked.destroy(); }
     });
 
     it("removes the title key when the field is cleared", async () => {
@@ -216,7 +299,7 @@ describe("PageIdentity", () => {
             onOpenConflicts={ignore}
             onRefreshShareView={ignore}
             onRebuildEngineStore={ignore}
-            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: !toastShown }]}
+            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", atMs: 1, canRetry: true, seen: !toastShown }]}
             onRetryWorkspaceError={ignore}
             onHideWorkspaceError={ignore}
           />
@@ -258,7 +341,7 @@ describe("PageIdentity", () => {
             onOpenConflicts={ignore}
             onRefreshShareView={ignore}
             onRebuildEngineStore={ignore}
-            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: true }]}
+            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", atMs: 1, canRetry: true, seen: true }]}
             onRetryWorkspaceError={ignore}
             onHideWorkspaceError={ignore}
           />

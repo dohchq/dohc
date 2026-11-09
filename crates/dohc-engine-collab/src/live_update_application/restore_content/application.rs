@@ -349,6 +349,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate,
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         let b = &held.binding;
@@ -357,7 +358,7 @@ impl ApplicationOwner {
             let mut budget = Budget { remaining: max_bytes };
             budget.json(&input.admitted)?;
             let prepared: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND proposal_candidate_sha256=?5 AND operation_id=?6 AND resume_receipt_json IS NULL)",
+                "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND proposal_candidate_sha256=?5 AND operation_id=?6 AND resume_receipt_json IS NULL AND cancelled_json IS NULL)",
                 params![b.workspace_id, b.main_version_id, b.object_id, held.namespace, input.candidate_digest,operation.operation_id],
                 |row| row.get(0),
             ).map_err(read_sql)?;
@@ -403,6 +404,7 @@ impl ApplicationOwner {
                 namespace: held.namespace.clone(),
                 coordinate: held.coordinate.clone(),
                 binding: event.metadata.accepted.binding.clone(),
+                activation_id: held.activation_id.clone(),
                 live: false,
             };
             insert_application(tx, &application_held, &event, sequence)?;
@@ -422,7 +424,7 @@ impl ApplicationOwner {
             verify_saved(tx, &held, &receipt, &proposal, &projected)?;
             let json = String::from_utf8(budget.json(&receipt)?).map_err(|_| ApplicationError::Corrupt)?;
             let changed = tx.execute(
-                "UPDATE live_restore_fences SET application_json=?5,application_delivery_id=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?7 AND application_json IS NULL AND resume_receipt_json IS NULL",
+                "UPDATE live_restore_fences SET application_json=?5,application_delivery_id=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?7 AND application_json IS NULL AND resume_receipt_json IS NULL AND cancelled_json IS NULL",
                 params![b.workspace_id, b.main_version_id, b.object_id, held.namespace, json, receipt.admitted.accepted.receipt.delivery_id,operation.operation_id],
             ).map_err(write_sql)?;
             if changed != 1 {

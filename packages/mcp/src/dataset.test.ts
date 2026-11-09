@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DohcCliError } from "@dohc/cli/errors";
 import { dataset, type ToolContext } from "./tools";
 const request = {action:"invoke",workspaceId:"workspace",datasetPath:"equipment/dataset.json",operationId:"00000000-0000-4000-8000-000000000002",revision:1,revisionSha256:"a".repeat(64),input:{name:"Camera"},idempotencyKey:"add-1"};
 describe("dataset MCP transport", () => {
@@ -35,6 +36,13 @@ describe("dataset MCP transport", () => {
     expect(await dataset(context,request)).toEqual(reply);
     expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({verb:"dataset",args:{cwd:context.root,actor:"agent",request}}));
     expect(await dataset({...context,request:async () => ({...reply,extraAuthority:true})},request)).toMatchObject({ok:false});
+  });
+  it("tells an agent to archive a Collection before deleting it", async () => {
+    const reason = "dohc: This Collection isn't archived. Archive it before you delete it permanently.";
+    const send = vi.fn(async () => { throw new DohcCliError(reason); }), context:ToolContext = {root:"/workspace",home:"/home",request:send};
+    const expected = {workspaceId:"workspace",datasetId:"00000000-0000-4000-8000-000000000001",hostEpoch:"epoch",approvedRevisionHash:"a".repeat(64),revision:0,digest:"b".repeat(64)};
+    expect(await dataset(context,{action:"delete",workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected,reviewToken:"c".repeat(64),acknowledge:true})).toEqual({ok:false,reason});
+    expect(send).toHaveBeenCalledOnce();
   });
   it("does not turn folder sharing or arbitrary SQL into dataset authority", async () => {
     const send = vi.fn(), context:ToolContext = {root:"/workspace",home:"/home",request:send};

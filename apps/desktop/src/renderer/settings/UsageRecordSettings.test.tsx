@@ -107,7 +107,7 @@ describe("usage record in Privacy", () => {
     bridge.readUsageRecord.mockResolvedValueOnce({ ...EMPTY, enabled: false });
     render(<UsageRecordSettings />);
     expect((await screen.findByTestId("usage-record-empty")).textContent).toBe(
-      "No counts saved.Turn the record on to count what you do in dohc.");
+      "No counts saved. Turn the record on to count what you do in dohc.");
     expect(card().dataset.state).toBe("off");
     expect(screen.queryByTestId("usage-record-clear")).toBeNull();
     expect(screen.queryByTestId("usage-record-off")).toBeNull();
@@ -190,7 +190,8 @@ describe("usage record in Privacy", () => {
     render(<UsageRecordSettings />);
     fireEvent.click(await screen.findByTestId("usage-record-clear"));
     const confirm = screen.getByTestId("usage-record-clear-confirm");
-    expect(confirm.getAttribute("role")).toBe("dialog");
+    // The panel that holds the card is the dialog, named by its title.
+    expect(screen.getByRole("dialog", { name: "Clear the usage record?" }).contains(confirm)).toBe(true);
     expect(confirm.textContent).toContain("Clear the usage record?");
     expect(confirm.textContent).toContain("dohc cannot restore them.");
     fireEvent.click(within(confirm).getByTestId("usage-record-clear-copy"));

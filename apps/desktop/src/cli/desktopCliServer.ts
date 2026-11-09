@@ -28,6 +28,7 @@ import {
   type startCliServer as startCliServerImplementation,
 } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import { agentHandle } from "../settings/userSettings";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -38,6 +39,10 @@ import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
+import type {
+  DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult,
+  ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
+} from "@dohc/workspace-contracts/share-link-agents";
 import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
@@ -54,12 +59,39 @@ import type { createVersionRounds } from "../versionRounds";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
-import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import { UNNAMED_AGENT_ID, VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+
+// The engine reads at most this many accounts for one agent you run.
+const MAX_AGENT_REQUESTERS = 64;
+
+// The accounts this computer's person posts as in a workspace, as its
+// registry entry records them: the owner account sync started with, or the
+// account that opened a received copy, and each joined channel's account. A
+// post with no account is theirs only in a workspace they own.
+export function workspaceRequesters(
+  workspace: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels">,
+): { requesters: string[]; unattributedCounts: boolean } {
+  const own = workspace.shareView
+    ? workspace.shareView.recipientUserId
+    : (workspace.remote ?? workspace.pausedRemote)?.ownerUserId;
+  const accounts = [own, ...(workspace.sharedChannels ?? []).map((channel) => channel.recipientUserId)];
+  return {
+    requesters: [...new Set(accounts.filter((account): account is string => Boolean(account)))].slice(0, MAX_AGENT_REQUESTERS),
+    unattributedCounts: !workspace.shareView,
+  };
+}
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
-  const { depth = 0, onBehalfOf } = origin.attribution;
+  const { depth = 0, onBehalfOf, agentRunId } = origin.attribution;
   if (onBehalfOf === undefined) throw new Error("The agent write has no local person identity.");
-  return { kind: "agent", agentId: origin.actorOriginId ?? "dohc-mcp", onBehalfOf, ...(depth > 0 ? { depth } : {}) };
+  return {
+    kind: "agent",
+    agentId: origin.actorOriginId ?? UNNAMED_AGENT_ID,
+    ...(origin.agentName !== undefined ? { agentName: origin.agentName } : {}),
+    onBehalfOf,
+    ...(agentRunId !== undefined ? { agentRunId } : {}),
+    ...(depth > 0 ? { depth } : {}),
+  };
 }
 
 // With no editor open, the file holds the document's settled text.
@@ -79,6 +111,13 @@ interface DesktopCliServerDependencies<State> {
     list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>): Promise<Extract<import("@dohc/cli/protocol").CliResultByVerb["liveDocuments"], {ok: true}>["documents"]>;
     retry(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, path: string): Promise<void>;
   };
+  /** The Share dialog's Agents list and Disconnect for one link (shareLinkAgentActions.ts). */
+  shareLinkAgents?: {
+    list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: ShareLinkAgentsInput): Promise<ListRelayShareLinkAgentsResult>;
+    disconnect(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: ShareLinkAgentDisconnectInput): Promise<DisconnectRelayShareLinkAgentResult>;
+  };
+  /** Catches a live page, or a folder holding one, up with the server before an agent moves it. */
+  beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
   ownerLiveRecovery?: {
     keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
@@ -99,6 +138,9 @@ interface DesktopCliServerDependencies<State> {
   /** A window's press path, for one workspace. */
   buttons(workspace: RegistryEntry): CliButtonsPort;
   findWorkspace(workspaceId: string): RegistryEntry | null;
+  /** The agent you run with this id in this computer's settings, or null. */
+  agentYouRun(agentId: string): Promise<{ name: string } | null>;
+  agentWaiting?: CliServerOptions["agentWaiting"];
   listWorkspaces(): RegistryEntry[];
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
   activity: {
@@ -114,6 +156,8 @@ interface DesktopCliServerDependencies<State> {
     agentRunDepth(workspaceId: string): number;
     dispatchedAgent(workspaceId: string): string | null;
     dispatchedRunId(workspaceId: string): string | null;
+    agentWriteRunId(workspaceId: string): string | null;
+    dispatchedRunSecret(workspaceId: string): string | null;
     agentRunWorkspace(runId: string): string | undefined;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
@@ -261,6 +305,7 @@ export function createDesktopCliServer<State>(
         const attachmentId = operation.workspace.attachmentId;
         return work(operation, {
           capture: current, requestId, trashItem: dependencies.trashItem,
+          ...(dependencies.beforeMove ? {beforeMove: (storedSpelling: () => Promise<string>) => dependencies.beforeMove!(workspace.workspaceId, storedSpelling)} : {}),
           linkRewrites: {workspaceId: workspace.workspaceId, signal: operation.signal,
             history: {rewriteHistoryLinks: input => operationHistory.rewriteHistoryLinks!(input)}},
           markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
@@ -294,6 +339,7 @@ export function createDesktopCliServer<State>(
         return work(operation);
       });
     return {
+      signal: publicationAttachment,
       workspaceId: workspace.workspaceId,
       historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory, {agent: true})),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
@@ -307,6 +353,16 @@ export function createDesktopCliServer<State>(
           if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.shareCopy!(operation, input);
         }) } : {}),
+      ...(dependencies.shareLinkAgents ? { shareLinkAgents: {
+        list: (input: ShareLinkAgentsInput) => withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+          return dependencies.shareLinkAgents!.list(operation, input);
+        }),
+        disconnect: (input: ShareLinkAgentDisconnectInput) => withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+          return dependencies.shareLinkAgents!.disconnect(operation, input);
+        }),
+      } } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
@@ -438,18 +494,21 @@ export function createDesktopCliServer<State>(
               });
           return { path: live.path, markdown };
         },
-        edit: ({ path, edit, origin }) =>
+        edit: ({ path, edit, origin, allowLossySourceSha256 }) =>
           liveDocuments.editDocument({
+            ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
             workspaceId: workspace.workspaceId,
             path,
             origin,
             assertEditable: async (resolved) => {
-              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+              const source = await lossyNoteText(workspace.rootPath, resolved);
+              if (source !== null && createHash("sha256").update(source).digest("hex") !== allowLossySourceSha256) {
                 throw new Error(lossyNoteRefusal(resolved));
               }
             },
-            change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
+            change: (state, { keepBlocks, headSha256 }) =>
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, headSha256,
+                ...(allowLossySourceSha256 ? {} : { refuseLossy: path }) }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
@@ -501,7 +560,7 @@ export function createDesktopCliServer<State>(
             versions: {
               list: async () => {
                 const snapshot = await capture.listVersions();
-                return { versions: snapshot.versions.map(workspaceVersionForIpc), activeVersionId: snapshot.activeVersionId };
+                return { versions: snapshot.versions.map(version => workspaceVersionForIpc(version)), activeVersionId: snapshot.activeVersionId };
               },
               compare: async (versionId, afterPath) => {
                 // Unreadable rules hide every file, as the desktop's History does.
@@ -530,8 +589,16 @@ export function createDesktopCliServer<State>(
                 // After a rename, a side can sit at another path than its conflict.
                 const shown = (conflict: (typeof page.conflicts)[number]) =>
                   [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
+                const forAgents = (conflict: (typeof page.conflicts)[number]) => {
+                  const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
+                  if (waitingVersion === null) return listed;
+                  // The conflict's own path, which a waiting move does not change.
+                  const message = `A newer version of ${conflict.path} from another machine is waiting. It comes in after this conflict is resolved.`;
+                  const { code, objectId, originId, originSeq } = waitingVersion;
+                  return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
+                };
                 return {
-                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
+                  conflicts: page.conflicts.filter(shown).map(forAgents),
                   nextAfterConflictId: page.nextAfterConflictId,
                 };
               },
@@ -553,7 +620,8 @@ export function createDesktopCliServer<State>(
               merge: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
                 const merged = await capture.mergeVersionIntoMain(versionId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
-                return merged;
+                // The CLI reply carries the counts only.
+                return { mergedFileCount: merged.mergedFileCount, unchangedFileCount: merged.unchangedFileCount, conflictCount: merged.conflictCount };
               }, { done: () => ({}), failed: {} }),
               resolve: (conflictId, resolution) => dependencies.versionRound(workspace.workspaceId, async () => {
                 await capture.resolveConflict(conflictId, resolution.keep === "combined" ? { kind: "apply-merged", text: resolution.text }
@@ -677,7 +745,17 @@ export function createDesktopCliServer<State>(
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       dispatchedAgent: (workspaceId) => activity.dispatchedAgent(workspaceId),
       dispatchedRunId: (workspaceId) => activity.dispatchedRunId(workspaceId),
+      agentWriteRunId: (workspaceId) => activity.agentWriteRunId(workspaceId),
+      dispatchedRunSecret: (workspaceId) => activity.dispatchedRunSecret(workspaceId),
       agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
+      connectedAgent: async (workspaceId, agentId) => {
+        const agent = await dependencies.agentYouRun(agentId);
+        const workspace = findWorkspace(workspaceId);
+        return agent && workspace
+          ? { agentId, name: agent.name, handle: agentHandle(agent.name), ...workspaceRequesters(workspace) }
+          : null;
+      },
+      agentWaiting: dependencies.agentWaiting,
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

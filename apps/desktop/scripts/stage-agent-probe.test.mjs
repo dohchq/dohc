@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,9 +9,8 @@ import { runProbeProcess, windowsProbeOwner } from "../src/agents/agentProbeProc
 import { resolveSpawnCommand } from "../src/process/windowsSpawn.ts";
 import { readPinnedCompilerNode } from "./stage-app-compiler.mjs";
 import { requireAgentProbe, stageAgentProbe } from "./stage-agent-probe.mjs";
+import { builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
 const { getFileMatchers, copyFiles } = builderRequire("app-builder-lib/out/fileMatcher.js");
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 

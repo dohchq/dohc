@@ -195,14 +195,19 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
                 && object
                     .get("agentRunId")
                     .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                // The name a connected agent gave itself: a label History
+                // shows, never an identity.
+                && object.get("agentName").is_none_or(|value| {
+                    value.as_str().is_some_and(|value| !value.trim().is_empty())
+                })
                 && object
                     .get("depth")
                     .is_none_or(|value| depth_within(value, 1))
-                // Only the relay attests an author; a local caller names no more.
+                // A local caller names no more; only the relay attests the rest.
                 && object.keys().all(|key| {
                     matches!(
                         key.as_str(),
-                        "kind" | "agentId" | "onBehalfOf" | "agentRunId" | "depth"
+                        "kind" | "agentId" | "agentName" | "onBehalfOf" | "agentRunId" | "depth"
                     )
                 })
         }
@@ -233,6 +238,7 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
     }
     for field in [
         "agentId",
+        "agentName",
         "automationId",
         "humanId",
         "onBehalfOf",
@@ -379,7 +385,7 @@ mod tests {
     #[test]
     fn locally_supplied_authors_fit_the_moment_identity_and_json_budgets() {
         let agent = json!({"kind":"agent", "agentId":"runner", "onBehalfOf":"person"});
-        for field in ["agentId", "onBehalfOf", "agentRunId"] {
+        for field in ["agentId", "agentName", "onBehalfOf", "agentRunId"] {
             let mut bounded = agent.clone();
             bounded[field] = json!("é".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES / 2));
             assert!(validated_author(Some(&bounded)).is_ok());
@@ -442,6 +448,17 @@ mod tests {
             validated_author(Some(&run)).expect("a valid agent run"),
             Some(json!([run]).to_string())
         );
+        let mut named = agent.clone();
+        named["agentName"] = json!("Codex");
+        assert_eq!(
+            validated_author(Some(&named)).expect("a connected agent's name"),
+            Some(json!([named]).to_string())
+        );
+        for name in [json!(""), json!("  "), json!("Co\u{7}dex"), json!(7)] {
+            let mut invalid = agent.clone();
+            invalid["agentName"] = name;
+            assert!(validated_author(Some(&invalid)).is_err(), "{invalid}");
+        }
         for (field, value) in [
             ("relayConfirmed", json!(true)),
             ("relayConfirmed", json!(false)),

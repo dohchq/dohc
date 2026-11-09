@@ -24,17 +24,31 @@ Production operators must set five values:
 
 ## Remote MCP for shared links
 
-Agents can use `/mcp` over Streamable HTTP. It supports current per-request MCP and older stateless clients.
-The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes authentication.
+Each share link has its own MCP address, `/mcp/s/<secret>`, where `<secret>` is the text after `#` in the share URL.
+The address uses Streamable HTTP. It supports current per-request MCP and older stateless clients.
+The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
 
-1. Take the secret after `#` in the share URL.
-2. POST `{"secret":"<secret>"}` as JSON to `/api/mcp/exchange` on the same origin.
-3. Connect the MCP client to `/mcp` with `Authorization: Bearer <bearer>` from the exchange response.
-4. Keep and reuse the bearer for that agent. Each exchange creates a separate link identity.
+An agent signs in with the standard MCP authorization (MCP 2025-06-18):
+
+1. The MCP client connects without a token. share-web answers 401, and its `WWW-Authenticate` header names `/.well-known/oauth-protected-resource/mcp/s/<secret>`.
+2. The client reads that document and `/.well-known/oauth-authorization-server`, then registers at `/oauth/register`.
+3. The client opens `/oauth/authorize` in a browser with an S256 PKCE challenge. Its `resource` is the full MCP address.
+4. A person reads the consent page and selects **Allow**. The page names the share, its access, the name the agent reported, and the host the browser returns to. Anyone who has the MCP address can do this step, because the address holds the link secret.
+5. The client trades the code for tokens at `/oauth/token`. It sends `Authorization: Bearer <access token>` on each MCP request.
+
+An access token lasts 1 hour. The client gets a new one with its refresh token.
+Each refresh token works once. If a used one comes back, the relay ends that agent's connection.
+A token works only at the MCP address it was issued for.
+The relay keeps every client, sign-in request, connection, and token, and checks the token on every call. Restarting share-web does not sign an agent out.
+Resetting, widening, or revoking the link, or deleting its share, ends its agent connections. Each agent must then sign in again.
+
+Browser MCP clients can call the MCP address, both metadata documents, `/oauth/register`, and `/oauth/token` from any origin. These answers allow no credentials.
+The consent page and its decision accept only this origin. The decision also needs the cookie that the same browser received with the page.
+These checks stop another site from allowing an agent through a person's browser. They do not protect the link. The MCP address gives the link's full access, so share it only as you share the link.
 
 The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
 On a Group share that is the Group's channel, read with `dohc_read_channel`.
-A read-write link also gets `dohc_post_channel`, which posts there as its link holder; the owner sees the post marked as from a link holder.
+A read-write link also gets `dohc_post_channel`. It posts there under the name the agent reported when it signed in, and the owner sees the post marked as from an agent on the link.
 On any other share it is the share discussion, which Comment and Edit links can also post to.
 The relay checks the grant again for every action, and a refusal arrives as a sentence the agent can act on.
 If a post's answer is lost, the tool says the post may have landed. Send it again with the same `idempotencyKey`; it posts once.
@@ -52,13 +66,13 @@ It needs the Public Edit release, not the document host. The relay names the lin
 `accepted` means the relay recorded the change in the owner's history. The owner's computer applies it at its next sync.
 An MCP request that carries a write may be up to 9 MiB, room for 4 MiB of text that JSON escapes in two bytes. A file can go as base64 instead of text, as the viewer sends it in a request of up to 7 MiB.
 A write goes in an MCP request of its own, never in a batch.
-Share-web holds one such body per link and four in all, across both. Other MCP requests stay at 32 KiB.
+share-web holds one such body per link, for its browsers and agents together, and four in all. Other MCP requests stay at 32 KiB.
 Settled file reads can lag live documents. File reads are limited to 256 KiB; other tool results are limited to 1 MiB.
 
-The bearer uses the same bounded, in-memory session store as browser links.
-Restarting share-web or evicting the session invalidates it. Re-exchange the link to start a new agent identity.
-Browser cookies cannot authenticate MCP requests. The bearer never contains the relay workload key or a browser account credential.
-Do not log `Authorization` headers, exchange bodies, or bearer responses.
+share-web keeps no agent token. Browser cookies cannot authenticate MCP requests, and share-web refuses a token in the query string.
+A token never contains the relay workload key or a browser account credential.
+Each refused bearer spends one from its client address's allowance of 30, which refills one every two seconds. When the allowance is spent, every MCP request from that address that carries a bearer gets 429 until it refills, valid or not. A valid bearer never spends from it, and a request without one, the first step of sign-in, is never refused for it.
+Do not log `Authorization` headers, `/oauth/token` request or response bodies, consent form fields, or consent cookies. Do not log MCP paths or the `/oauth/authorize` query, which hold the link secret. [Public origin and proxy](#public-origin-and-proxy) lists each one.
 
 Each edit opens a fresh live connection and adds a Yjs client clock to the document.
 This implementation is for bounded edits, not high-frequency automated rewriting.
@@ -150,10 +164,14 @@ The relay still performs a bounded credential lookup to distinguish a valid
 secret after the per-IP allowance is exhausted; the global budget bounds this
 work. Request bodies and relay responses have size limits and ten-second deadlines.
 
-Link secrets reach the server only in a POST body or cookie; URL fragments stay
-in the browser. Strip query strings from proxy access logs. Do not log request
-bodies, `Cookie`, `Set-Cookie`, or the internal client-IP header. Disable body
-capture in traces and error reports. `share-web` already sends
+A link secret reaches the server in a POST body, a cookie, an MCP path, or the
+`/oauth/authorize` query. URL fragments stay in the browser. Never log the path
+of a request under `/mcp/s/` or `/.well-known/oauth-protected-resource/mcp/s/`;
+removing the query string does not remove the secret there. Never log the query
+of `/oauth/authorize`, or the `Referer` header, which carries that query on the
+consent decision. Do not log request bodies, `Authorization`, `Cookie`,
+`Set-Cookie`, or the internal client-IP header. Disable body capture in traces
+and error reports. `share-web` already sends
 `private, no-store`; the proxy must not override or cache that response.
 
 If the relay is unavailable or sends an invalid response to an authenticated
@@ -324,12 +342,39 @@ Waiter capacity receives 429. Response size overflow receives 413; request a sma
 The configured named session request and response byte limits also apply.
 Share-web refuses malformed, oversized, redirected, or non-JSON relay responses.
 Link holders cannot use these endpoints or create chat link grants.
-A link on a Group share reads and posts in the Group's channel through the viewer and `/mcp` instead.
+A link on a Group share reads and posts in the Group's channel through the viewer and `/mcp/s/<secret>` instead.
 
 The corresponding trusted relay endpoints use `/sync/named-chat/channels` and `/sync/named-chat/messages`.
 They require the recipient account cookie, configured public Origin, and relay exchange key.
 The desktop transport also accepts `hold` on `GET /sync/shares/:shareId/log`.
 It retains its existing envelope, channel filtering, and cursor contract.
+
+### Alerts on this device
+
+A signed-in browser keeps one push subscription per installation on this server.
+Each endpoint is a POST with a JSON body, the public Origin, and the account session cookie.
+The browser mints `installationId` once: 16 random bytes in base64url.
+
+- `POST /api/push/status` takes `{installationId}` and returns the installation's state.
+- `POST /api/push/subscribe` takes `{installationId, vapidKeyId, endpoint, p256dh, auth, expiresAtMs}`.
+- `POST /api/push/unsubscribe` takes `{installationId}`.
+
+Configure all three relay values: `DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY`, `DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY`, and `DOHC_RELAY_PUSH_VAPID_SUBJECT`.
+The keys are a matching P-256 pair in base64url. The subject is a contact URI, such as `mailto:admin@example.com`.
+Keep the private key on the relay and reuse the pair after a restart. Rotating the pair requires browsers to subscribe again.
+Partial configuration stops the relay and names each missing value.
+With no push configuration set, status and unsubscribe return `{ok: true, available: false}`. Subscribe receives 409.
+Otherwise each returns `{ok: true, available: true, vapidPublicKey, vapidKeyId, enabled, generation, fingerprint}`.
+`DOHC_RELAY_PUSH_HOSTS` optionally replaces the allowed push hosts with a comma-separated list.
+The defaults are `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com`, and `.notify.windows.com`.
+A leading dot matches subdomains, such as a browser endpoint under `notify.windows.com`.
+Subscribe receives 409 when its endpoint is outside that list.
+`fingerprint` is the hex SHA-256 of the stored endpoint. The server never returns an endpoint.
+Alerts are on only for the account sign-in that turned them on, until that sign-in or the browser subscription expires.
+When another account signs in on the same browser and subscribes with the same `installationId` and `endpoint`, the alerts move to that account.
+Another installation's endpoint, or another account's installation with a different endpoint, receives 409. A changed `vapidKeyId` also receives 409.
+Link holders and signed-out browsers receive 401.
+The trusted relay endpoints are POSTs to `/sync/push/status`, `/sync/push/subscribe`, and `/sync/push/unsubscribe`.
 
 
 ## Storage and recovery
@@ -476,6 +521,9 @@ The file accepts these fields; all except `settlement` are required. Unknown fie
 | `ingress` | `{aggregateBytes, applicationWorkingReserveBytes, maxUploads, uploadDeadlineMs}` for the daemon |
 | `client` | `{aggregateBytes, maxUploads, connectTimeoutMs, requestDeadlineMs}` for the relay client |
 | `settlement` | Optional `{maxApplicationsPerSettlement}` with a positive integer limit |
+
+Also set `DOHC_ENGINE_READER_CONFIG` to the Markdown reader's JSON configuration, with absolute `node`, `bundle` and `manifest` paths.
+The relay refuses to start a service host without it.
 
 Each root must be an existing canonical directory with the intended workspace
 identity and main version initialized through the engine. Use dedicated service

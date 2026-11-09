@@ -4,6 +4,7 @@ import {
   cleanup,
   render,
   screen,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -110,6 +111,17 @@ describe("LazyDesktopSettings", () => {
     await screen.findByTestId("error-boundary-settings");
     await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  // The boundary's own button says Try again, so its words don't say it too.
+  it("says Try again only on its button after a failed load", async () => {
+    render(
+      <LazyDesktopSettings {...settingsProps()} loader={async () => { throw new Error("settings chunk unavailable"); }} />,
+    );
+    const boundary = await screen.findByTestId("error-boundary-settings");
+    expect(within(boundary).getByText("The workspace is still available.")).toBeTruthy();
+    expect(boundary.textContent?.match(/Try again/g)).toHaveLength(1);
+    expect(within(boundary).getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 
   it("reopens without the loading skeleton once the chunk has loaded", async () => {

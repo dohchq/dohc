@@ -10,9 +10,10 @@ import {
   Settings2,
   Share2,
   Square,
+  X,
 } from "lucide-react";
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { useDismiss } from "./ui/useDismiss";
@@ -27,7 +28,8 @@ import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
-import { OwnerAppEntry, OwnerAppPublication } from "./OwnerAppPublication";
+import { OwnerAppPublication } from "./OwnerAppPublication";
+import { AppViewBody, useAppView, type AppViewNotices } from "./AppView";
 import { ipcErrorMessage } from "./ipcError";
 import { isWorkspaceRestricted, withErrorWords } from "../ipc/errorWords";
 import { RestrictedModeState, TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
@@ -224,6 +226,18 @@ export function SitePreviewPage(props: {
   // Opens an app of this workspace in a tab. A notice that outlives this page
   // uses it to take the person back to the app it is about.
   onOpenApp?: (siteRoot: string) => void;
+  // Notices by identity, so a later success takes back an app's failure.
+  notices?: AppViewNotices;
+  // The tab shows this page. A hidden page stays mounted, so its app keeps running.
+  visible?: boolean;
+  // The tab is the focused group's active tab, so focus belongs in the app.
+  focused?: boolean;
+  // Changes each time the person presses this page's tab, which puts focus in the app.
+  focusRequest?: number;
+  // The app's title, for its tab.
+  onTitle?: (title: string) => void;
+  // The workspace's server connection, for Review app's Share links.
+  access?: ComponentProps<typeof OwnerAppPublication>["access"];
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
@@ -279,6 +293,10 @@ export function SitePreviewPage(props: {
   }, []);
   const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
   siteContextRef.current = siteContext;
+  // The app whose review is open. Another app or workspace never shows it.
+  const [reviewFor, setReviewFor] = useState<string | null>(null);
+  const reviewOpen = reviewFor === siteContext;
+  const setReviewOpen = useCallback((open: boolean) => setReviewFor(open ? siteContext : null), [siteContext]);
 
   const reloadSite = useCallback(async () => {
     const request = ++loadRequestRef.current;
@@ -598,7 +616,7 @@ export function SitePreviewPage(props: {
   }, [preview, props.siteRoot, props.workspaceId, siteContext]);
 
   useEffect(() => {
-    if (preview?.mode !== "dev") return;
+    if (preview?.mode !== "dev" || props.visible === false) return;
     void refreshPreviewLogs();
     const interval = setInterval(() => {
       void refreshPreviewLogs();
@@ -607,7 +625,7 @@ export function SitePreviewPage(props: {
       clearInterval(interval);
       logsRequestRef.current += 1;
     };
-  }, [preview?.mode, refreshPreviewLogs]);
+  }, [preview?.mode, props.visible, refreshPreviewLogs]);
 
   useEffect(() => {
     if (
@@ -714,14 +732,67 @@ export function SitePreviewPage(props: {
     !props.sharedView &&
     site?.authority.kind === "workspace" &&
     !!props.onShareSite;
-  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0
-    && site.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
+  const declaresApp = !!site?.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
+  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0 && declaresApp;
+  const appView = useAppView({
+    workspaceId: props.workspaceId,
+    appRoot: props.siteRoot,
+    enabled: needsPublication,
+    visible: props.visible ?? true,
+    focused: props.focused ?? false,
+    focusRequest: props.focusRequest ?? 0,
+    approvals: localApprovals,
+    holdFocus: reviewOpen,
+    notices: props.notices,
+    reportError: props.reportError,
+  });
+  const onTitle = props.onTitle;
+  const title = site?.title;
+  useEffect(() => {
+    if (title !== undefined) onTitle?.(title);
+  }, [onTitle, title]);
 
   return (
-    <div data-testid="site-preview-page" className="flex min-h-0 flex-1 flex-col bg-bg">
-      <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-4 py-1.5">
-        <Globe2 size={14} aria-hidden className="text-subtle" />
-        <span className="truncate text-[13px] font-medium text-ink">
+    <div
+      data-testid="site-preview-page"
+      className="flex min-h-0 flex-1 flex-col bg-bg"
+      // The mouse's back and forward buttons, where they reach dohc.
+      onMouseUp={needsPublication ? (event) => {
+        if (event.button === 3) appView.navigate("back");
+        if (event.button === 4) appView.navigate("forward");
+      } : undefined}
+    >
+      <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-2 py-1.5">
+        {needsPublication ? (
+          <IconButton
+            ref={appView.toolbarStart}
+            data-testid="app-view-reload"
+            aria-label={appView.loading ? "Stop loading" : "Reload app"}
+            title={appView.loading ? "Stop loading" : "Reload app"}
+            disabled={!appView.canReload}
+            onClick={appView.loading ? appView.stop : appView.reload}
+            className="size-7"
+          >
+            {appView.loading ? <X size={13} aria-hidden /> : <RefreshCcw size={13} aria-hidden />}
+          </IconButton>
+        ) : (
+          <IconButton
+            data-testid="site-preview-reload"
+            aria-label="Reload preview"
+            title="Reload preview"
+            disabled={!preview || !previewUrlAllowed}
+            onClick={() => {
+              if (!preview) return;
+              const url = new URL(preview.url);
+              url.searchParams.set("t", String(Date.now()));
+              setPreview({ ...preview, url: url.href });
+            }}
+            className="size-7"
+          >
+            <RefreshCcw size={13} aria-hidden />
+          </IconButton>
+        )}
+        <span className="min-w-0 truncate text-[13px] font-medium text-ink" title={site?.title ?? props.siteRoot}>
           {site?.title ?? props.siteRoot}
         </span>
         {site?.authority.kind === "share" ? (
@@ -729,46 +800,7 @@ export function SitePreviewPage(props: {
             Shared
           </span>
         ) : null}
-        {props.variant === "panel" ? null : (
-          <span className="truncate font-mono text-[11px] text-subtle">{props.siteRoot}</span>
-        )}
-        <div className="ml-auto flex items-center gap-1.5">
-          {preview ? (
-            <>
-              {previewUrlAllowed ? (
-                <>
-                  <span
-                    data-testid="site-preview-mode"
-                    className="hidden text-[11px] text-subtle sm:inline"
-                  >
-                    {modeLabel(preview.mode)}
-                  </span>
-                  <IconButton
-                    data-testid="site-preview-reload"
-                    aria-label="Reload preview"
-                    title="Reload preview"
-                    onClick={() => {
-                      const url = new URL(preview.url);
-                      url.searchParams.set("t", String(Date.now()));
-                      setPreview({ ...preview, url: url.href });
-                    }}
-                    className="size-7"
-                  >
-                    <RefreshCcw size={13} aria-hidden />
-                  </IconButton>
-                  <IconButton
-                    data-testid="site-preview-open-external"
-                    aria-label="Open preview externally"
-                    title="Open preview externally"
-                    onClick={() => void openLinkExternally(preview.url)}
-                    className="size-7"
-                  >
-                    <ExternalLink size={13} aria-hidden />
-                  </IconButton>
-                </>
-              ) : null}
-            </>
-          ) : null}
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {props.onShowSource ? (
             <IconButton
               data-testid="site-preview-show-source"
@@ -793,8 +825,41 @@ export function SitePreviewPage(props: {
             </IconButton>
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
-            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
+            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} title={site.title} reportError={props.reportError} access={props.access}
+              localApproval={needsPublication ? "tab" : declaresApp ? "browser" : null}
+              testId={needsPublication ? "app-view-review" : "site-preview-review"} open={reviewOpen} onOpenChange={setReviewOpen}
               onLocalChange={localApprovalChanged} onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
+          ) : null}
+          {needsPublication ? (
+            <IconButton
+              data-testid="app-view-open-browser"
+              aria-label="Open in browser"
+              title="Open in browser"
+              disabled={!appView.canOpenInBrowser}
+              onClick={() => void appView.openInBrowser()}
+              className="size-7"
+            >
+              <ExternalLink size={13} aria-hidden />
+            </IconButton>
+          ) : (
+            <IconButton
+              data-testid="site-preview-open-external"
+              aria-label="Open in browser"
+              title="Open in browser"
+              disabled={!preview || !previewUrlAllowed}
+              onClick={() => preview && void openLinkExternally(preview.url)}
+              className="size-7"
+            >
+              <ExternalLink size={13} aria-hidden />
+            </IconButton>
+          )}
+          {preview && previewUrlAllowed ? (
+            <span
+              data-testid="site-preview-mode"
+              className="hidden text-[11px] text-subtle sm:inline"
+            >
+              {modeLabel(preview.mode)}
+            </span>
           ) : null}
           {modes.length > 0 ? (
             <details
@@ -832,7 +897,7 @@ export function SitePreviewPage(props: {
                       setBlocked(null);
                       void start(mode, true);
                     }}
-                    className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+                    className="dohc-focus-row flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
                   >
                     {mode === "build" ? (
                       <Hammer size={12} aria-hidden />
@@ -930,14 +995,14 @@ export function SitePreviewPage(props: {
             </div>
           ) : null}
 
-          {!preview && blocked && !runningMode ? (
+          {needsPublication ? (
+            <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
+          ) : !preview && blocked && !runningMode ? (
             <RestrictedModeState variant="page" asking={trust.asking} onTrust={() => void trustWorkspace()} />
           ) : !preview ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />
-              {needsPublication ? <OwnerAppEntry workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
-                reload={localApprovals} onLocalChange={localApprovalChanged}
-                onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} /> : <div className="max-w-sm text-sm text-muted">
+              <div className="max-w-sm text-sm text-muted">
                 {modes.length > 0
                   ? idleReason === "exited"
                     ? "Dev server exited. Use Preview options to run it again."
@@ -950,7 +1015,7 @@ export function SitePreviewPage(props: {
                     ? null
                     : "This app did not start automatically. Choose another mode in Preview options."
                   : "This app has no previewable entry, dev script, or build output yet."}
-              </div>}
+              </div>
               {idleReason === "exited" && previewLogs.length > 0 ? (
                 <LogsDetails
                   logs={previewLogs}

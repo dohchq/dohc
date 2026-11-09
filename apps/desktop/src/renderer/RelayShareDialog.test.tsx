@@ -282,6 +282,8 @@ const bridgeMock = {
   retuneRelayShareLink: vi.fn(),
   rotateRelayShareLink: vi.fn(),
   revokeRelayShareLink: vi.fn(),
+  listRelayShareLinkAgents: vi.fn(),
+  disconnectRelayShareLinkAgent: vi.fn(),
   listRelayShares: vi.fn(),
   listRelayShareDiscussion: vi.fn(),
   pollRelayShareDiscussionActivity: vi.fn(),
@@ -330,6 +332,8 @@ beforeEach(() => {
     url: LINK_URL_B,
   });
   bridgeMock.revokeRelayShareLink.mockResolvedValue({ outcome: "ended", undo: UNDO });
+  bridgeMock.listRelayShareLinkAgents.mockResolvedValue({ agents: [], nextCursor: null });
+  bridgeMock.disconnectRelayShareLinkAgent.mockResolvedValue({ connectionId: "connection-1" });
   bridgeMock.listRelayShares.mockResolvedValue({ granted: [], received: [] });
   bridgeMock.listRelayShareDiscussion.mockResolvedValue(discussionPage());
   bridgeMock.pollRelayShareDiscussionActivity.mockImplementation(
@@ -1084,6 +1088,142 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByText(LINK_URL)).toBeNull();
   });
 
+  it("copies the address an agent signs in with beside the link, and never shows it", async () => {
+    const secret = "A".repeat(43);
+    const shareLink = `https://share.dohc.test/s/#${secret}`;
+    const agentAddress = `https://share.dohc.test/mcp/s/${secret}`;
+    bridgeMock.createRelayShareLink.mockResolvedValue(linkResult(shareLink));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+
+    const copy = await screen.findByTestId("share-link-agent-copy");
+    expect(copy.textContent).toBe("Copy for an agent");
+    expect(document.body.textContent).not.toContain(agentAddress);
+    expect(writeText).not.toHaveBeenCalled();
+    await user.click(copy);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(agentAddress);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  it("offers no agent address for a link that is not a share link", async () => {
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await screen.findByTestId("share-link-url");
+    expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
+  });
+
+  it("lists a link's agents in its row, and Disconnect takes one off", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1")] });
+    bridgeMock.listRelayShareLinkAgents.mockResolvedValue({
+      agents: [
+        { connectionId: "connection-1", reportedName: "Claude Code", connectedAtMs: CREATED_MS, lastActionAtMs: CREATED_MS + 60_000 },
+        { connectionId: "connection-2", reportedName: null, connectedAtMs: CREATED_MS, lastActionAtMs: null },
+      ],
+      nextCursor: null,
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const row = await screen.findByTestId("share-link-row-grant-link-1");
+    const agents = await within(row).findByRole("region", { name: "Agents" });
+    expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledWith({ workspaceId: "ws-1", shareId: "share-grant-link-1", grantId: "grant-link-1" });
+    const named = within(agents).getByTestId("share-link-agent-connection-1");
+    expect(named.textContent).toContain("Claude Code");
+    expect(named.textContent).toContain("Name reported by the agent");
+    expect(named.textContent).toContain(`Last action ${shortTimestamp(CREATED_MS + 60_000)}`);
+    const unnamed = within(agents).getByTestId("share-link-agent-connection-2");
+    expect(unnamed.textContent).toContain("Agent");
+    expect(unnamed.textContent).toContain("The agent reported no name");
+    expect(unnamed.textContent).toContain(`Signed in ${shortTimestamp(CREATED_MS)}`);
+
+    await user.click(within(named).getByRole("button", { name: "Disconnect Claude Code" }));
+    expect(bridgeMock.disconnectRelayShareLinkAgent).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      shareId: "share-grant-link-1",
+      grantId: "grant-link-1",
+      connectionId: "connection-1",
+    });
+    await waitFor(() => expect(within(agents).queryByTestId("share-link-agent-connection-1")).toBeNull());
+    expect(within(agents).getByTestId("share-link-agent-connection-2")).toBeTruthy();
+    expect(bridgeMock.revokeRelayShareLink).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing extra for a link with no agents, or an ended link", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("grant-link-1"), readableLink("grant-link-2", { status: "revoked", revokedAtMs: CREATED_MS + 1 })],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await screen.findByTestId("share-link-row-grant-link-1");
+    await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalled());
+    await act(async () => {});
+    // An ended link has no agents to read.
+    expect(bridgeMock.listRelayShareLinkAgents.mock.calls.every(([input]) => (input as { grantId: string }).grantId === "grant-link-1")).toBe(true);
+    expect(screen.queryByRole("region", { name: "Agents" })).toBeNull();
+    expect(screen.queryByText("dohc could not load this link's agents.")).toBeNull();
+  });
+
+  it("reads a link's agents once each time the link tab is shown, and again when the links change", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1")] });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await screen.findByTestId("share-link-row-grant-link-1");
+    await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(1));
+
+    // The same links on return: the list's own read is the only one.
+    await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+    await showLinkPane(user);
+    await waitFor(() => expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(2);
+
+    // Changed links, as after Reset or a new link elsewhere: the list reads again.
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1", { lastUsedAtMs: CREATED_MS + 5 })] });
+    await user.click(screen.getByRole("radio", { name: "Invite by email" }));
+    await showLinkPane(user);
+    await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(4));
+    await act(async () => {});
+    expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(4);
+  });
+
   it("shows every dependent identity and cancel never mutates a link", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [
@@ -1200,7 +1340,7 @@ describe("RelayShareDialog", () => {
       supportedLinkAccess: ["view", "comment"],
       independentGrants: [independentGrant("named-1", { recipientEmail: "friend@example.test" })],
     });
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -1278,7 +1418,7 @@ describe("RelayShareDialog", () => {
         undo: UNDO,
       });
     bridgeMock.revokeRelayShareLink.mockRejectedValueOnce(new Error("relay down"));
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn() };
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
     const user = userEvent.setup();
     const view = render(
       <RelayShareDialog

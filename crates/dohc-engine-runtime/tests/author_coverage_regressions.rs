@@ -54,6 +54,7 @@ async fn append(actor: &ActorHandle, key: &DocKey, bytes: Vec<u8>, id: &str) {
                 on_behalf_of: Some("person".into()),
                 depth: 0,
                 run: None,
+                agent_run_id: None,
             }),
             None,
             false,
@@ -87,6 +88,7 @@ async fn settle(
             3,
             faults,
             CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -395,6 +397,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
             1,
             5,
             None,
+            None,
         )
     });
     assert!(matches!(
@@ -437,6 +440,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
                 "remote-origin",
                 1,
                 9,
+                None,
                 None,
             )
         })
@@ -627,6 +631,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
                 1,
                 6,
                 None,
+                None,
             )
         })
         .expect("projection");
@@ -653,6 +658,7 @@ async fn sync_projection_credits_folded_authors_and_consumes_pending() {
                 "remote",
                 2,
                 8,
+                None,
                 None,
             )
         })
@@ -699,6 +705,7 @@ async fn file_rewrite_discards_pending_authors_of_replaced_content() {
                         on_behalf_of: Some("person".into()),
                         depth: 0,
                         run: None,
+                        agent_run_id: None,
                     }),
                     6,
                 )
@@ -971,6 +978,7 @@ async fn inactive_version_projection_without_a_job_remains_resolved() {
                 1,
                 3,
                 None,
+                None,
             )
         })
         .expect("inactive projection");
@@ -990,6 +998,7 @@ async fn inactive_version_projection_without_a_job_remains_resolved() {
                 "remote",
                 1,
                 4,
+                None,
                 None,
             )
         })

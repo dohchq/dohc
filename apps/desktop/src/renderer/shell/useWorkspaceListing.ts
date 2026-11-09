@@ -59,6 +59,7 @@ export function useWorkspaceListing(workspaceId: string) {
     request: number;
     listingSource: "cached" | "fresh";
   } | null>(null);
+  // Resolves with main's answer, also when a newer answer already shows.
   const refreshFiles = useCallback(
     async (options: { allowCached?: true } = {}) => {
       const request = ++filesRequest.current;
@@ -70,7 +71,7 @@ export function useWorkspaceListing(workspaceId: string) {
           ...options,
         });
         if (workspaceToken.current !== token || request <= committedFilesRequest.current) {
-          return result.cached === true;
+          return result;
         }
         committedFilesRequest.current = request;
         // IPC returns new arrays even when revalidation found no change.
@@ -102,7 +103,7 @@ export function useWorkspaceListing(workspaceId: string) {
           request,
           listingSource: result.cached === true ? "cached" : "fresh",
         });
-        return result.cached === true;
+        return result;
       } catch (error) {
         if (workspaceToken.current === token && request > failedFilesRequest.current) {
           failedFilesRequest.current = request;
@@ -123,6 +124,8 @@ export function useWorkspaceListing(workspaceId: string) {
     () => committedFilesRequest.current !== 0,
     [],
   );
+  // The newest listing asked for, answered or not.
+  const newestFilesRequest = useCallback(() => filesRequest.current, []);
   const prepareRestoredTabPruning = useCallback(
     (restoredTabPaths: ReadonlySet<string>, dirtyPaths: ReadonlySet<string>) => {
       if (!filesRevalidated || restoredTabPaths.size === 0) return null;
@@ -169,6 +172,7 @@ export function useWorkspaceListing(workspaceId: string) {
     fileListingCommit,
     refreshFiles,
     hasCommittedListing,
+    newestFilesRequest,
     prepareRestoredTabPruning,
   };
 }

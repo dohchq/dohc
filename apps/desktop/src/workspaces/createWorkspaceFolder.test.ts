@@ -2,10 +2,22 @@ import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readlink, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, parse } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DISK_ROOT_REFUSAL, FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL } from "@dohc/workspace-core";
-import { canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
+import { DISK_ROOT_REFUSAL, HOME_FOLDER_REFUSAL, stateFolderRefusal } from "@dohc/workspace-core";
+import { assertNotStateFolder, canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
 import { readSyncHistory, recordSynced, scheduleComputer } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
+
+// The refusal's name crosses IPC, so the screen that shows it offers
+// another folder, or Remove from list, and no Try again.
+const refusal = (message: string) => ({ name: "WorkspaceFolderRefusalError", message });
+function thrown(run: () => void): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return null;
+}
 
 // Seams for a folder swapped mid-open and for a mounted disk.
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -17,11 +29,13 @@ const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:
 const computer = { installId: "install-here", label: "This Mac" };
 let base: string;
 let homeDir: string;
+let stateDir: string;
 const linkType = process.platform === "win32" ? "junction" : "dir";
 
 beforeEach(async () => {
   base = await createTestScratch("dohc-create-");
   homeDir = await createTestScratch("dohc-create-home-");
+  stateDir = await createTestScratch("dohc-create-state-");
 });
 
 afterEach(() => {
@@ -44,9 +58,9 @@ describe("createWorkspaceFolder", () => {
     const manifest = JSON.stringify({ version: 1, workspaceId, kind: "personal", mode: "local-first" });
     await writeFile(manifestPath, manifest);
 
-    await expect(createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" })).rejects.toMatchObject({
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" })).rejects.toMatchObject({
       name: "ReservedWorkspaceIdError",
-      message: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      message: `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
     });
     expect(await readFile(manifestPath, "utf8")).toBe(manifest);
     expect(await readdir(join(root, ".dohc"))).toEqual(["manifest.json"]);
@@ -64,7 +78,7 @@ describe("createWorkspaceFolder", () => {
     const manifestPath = join(root, ".dohc", "manifest.json");
     await writeFile(manifestPath, manifest);
 
-    await expect(createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" })).rejects.toMatchObject({
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" })).rejects.toMatchObject({
       name: "WorkspaceManifestError",
       code,
       message,
@@ -88,7 +102,7 @@ describe("createWorkspaceFolder", () => {
     if (hasManifest) await writeFile(manifestPath, manifest);
     await symlink(outside, join(root, ".dohc"), linkType);
 
-    await expect(createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" })).rejects.toThrow();
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" })).rejects.toThrow();
 
     expect(await readdir(outside)).toEqual(hasManifest ? ["manifest.json"] : []);
     if (hasManifest) expect(await readFile(manifestPath, "utf8")).toBe(manifest);
@@ -96,7 +110,7 @@ describe("createWorkspaceFolder", () => {
 
   it("creates a fresh workspace with its manifest and nothing else in the folder", async () => {
     const root = join(base, "personal");
-    const created = await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    const created = await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     const manifest = JSON.parse(
       await readFile(join(root, ".dohc", "manifest.json"), "utf8"),
     );
@@ -117,26 +131,26 @@ describe("createWorkspaceFolder", () => {
 
   it("names the computer that keeps Collections only for a workspace it makes, never one it adopts or joins", async () => {
     const root = join(base, "kept");
-    await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     const record = await readFile(join(root, ".dohc", "collections.json"), "utf8");
-    await createWorkspaceFolder({ rootPath: root, homeDir, computer: { installId: "install-desk", label: "Desk" }, kind: "personal" });
+    await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer: { installId: "install-desk", label: "Desk" }, kind: "personal" });
     expect(await readFile(join(root, ".dohc", "collections.json"), "utf8"), "attaching again keeps the record").toBe(record);
     const joined = join(base, "joined-collections");
-    await createWorkspaceFolder({ rootPath: joined, homeDir, computer, kind: "personal", workspaceId: "ws-synced-elsewhere" });
+    await createWorkspaceFolder({ rootPath: joined, homeDir, stateDir, computer, kind: "personal", workspaceId: "ws-synced-elsewhere" });
     expect(await readdir(join(joined, ".dohc"))).not.toContain("collections.json");
   });
 
   it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {
     const root = join(base, "reattached");
-    await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     await recordSynced(root);
     // Forgetting drops only the registry entry; attaching the folder again
     // adopts its manifest and leaves the record.
-    await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     expect(await readSyncHistory(root)).toBe("synced");
 
     const joined = join(base, "joined-history");
-    await createWorkspaceFolder({ rootPath: joined, homeDir, computer, kind: "personal", workspaceId: "ws-synced-elsewhere" });
+    await createWorkspaceFolder({ rootPath: joined, homeDir, stateDir, computer, kind: "personal", workspaceId: "ws-synced-elsewhere" });
     expect(await readSyncHistory(joined), "a join synced").toBe("synced");
 
     const legacy = join(base, "legacy");
@@ -160,7 +174,7 @@ describe("createWorkspaceFolder", () => {
       JSON.stringify(existing),
     );
 
-    const adopted = await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    const adopted = await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
 
     expect(adopted.workspaceId).toBe("ws-existing-identity");
     const manifest = JSON.parse(
@@ -174,6 +188,7 @@ describe("createWorkspaceFolder", () => {
     const created = await createWorkspaceFolder({
       rootPath: root,
       homeDir,
+      stateDir,
       computer,
       kind: "personal",
       workspaceId: "ws-synced-elsewhere",
@@ -200,6 +215,7 @@ describe("createWorkspaceFolder", () => {
     const created = await createWorkspaceFolder({
       rootPath: root,
       homeDir,
+      stateDir,
       computer,
       kind: "personal",
       workspaceId: "ws-somewhere-else",
@@ -213,34 +229,97 @@ describe("createWorkspaceFolder", () => {
     await mkdir(real);
     await symlink(real, link, linkType);
 
-    const created = await createWorkspaceFolder({ rootPath: link, homeDir, computer, kind: "personal" });
+    const created = await createWorkspaceFolder({ rootPath: link, homeDir, stateDir, computer, kind: "personal" });
 
     expect(created.rootPath).toBe(canonicalWorkspaceRoot(real));
     expect(created.rootPath).not.toBe(link);
     expect(await readdir(real)).toEqual([".dohc"]);
-    expect(await createWorkspaceFolder({ rootPath: real, homeDir, computer, kind: "personal" })).toEqual(created);
-    expect(await createWorkspaceFolder({ rootPath: link, homeDir, computer, kind: "personal" })).toEqual(created);
+    expect(await createWorkspaceFolder({ rootPath: real, homeDir, stateDir, computer, kind: "personal" })).toEqual(created);
+    expect(await createWorkspaceFolder({ rootPath: link, homeDir, stateDir, computer, kind: "personal" })).toEqual(created);
   });
 
   it("refuses a link to the home folder or the filesystem root and writes nothing there", async () => {
     await writeFile(join(homeDir, "notes.md"), "mine");
     const toHome = join(base, "home-link");
     await symlink(homeDir, toHome, linkType);
-    await expect(createWorkspaceFolder({ rootPath: toHome, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow("workspace root cannot be the home directory itself");
+    await expect(createWorkspaceFolder({ rootPath: toHome, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(HOME_FOLDER_REFUSAL));
     expect(await readdir(homeDir)).toEqual(["notes.md"]);
 
     const toDisk = join(base, "disk-link");
     await symlink(parse(base).root, toDisk, linkType);
-    await expect(createWorkspaceFolder({ rootPath: toDisk, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow("workspace root cannot be the filesystem root");
+    await expect(createWorkspaceFolder({ rootPath: toDisk, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(DISK_ROOT_REFUSAL));
+  });
+
+  it("refuses dohc's state folder and a folder that holds it, by any path, and writes nothing there", async () => {
+    const appData = join(base, "AppData");
+    const state = join(appData, "Roaming", "dohc");
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, "dohc-settings.json"), "{}");
+    const toAppData = join(base, "app-data-link");
+    await symlink(appData, toAppData, linkType);
+    const stateLink = join(base, "state-link");
+    await symlink(state, stateLink, linkType);
+    for (const rootPath of [appData, join(appData, "Roaming"), state, toAppData]) {
+      await expect(createWorkspaceFolder({ rootPath, homeDir, stateDir: state, computer, kind: "personal" }), rootPath)
+        .rejects.toMatchObject(refusal(stateFolderRefusal("holds")));
+    }
+    // dohc may name its state folder through a link too.
+    await expect(createWorkspaceFolder({ rootPath: appData, homeDir, stateDir: stateLink, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(stateFolderRefusal("holds")));
+    expect(await readdir(appData)).toEqual(["Roaming"]);
+    expect(await readdir(state)).toEqual(["dohc-settings.json"]);
+    // A folder beside it is an ordinary choice.
+    await expect(createWorkspaceFolder({ rootPath: join(appData, "notes"), homeDir, stateDir: state, computer, kind: "personal" }))
+      .resolves.toMatchObject({ kind: "personal" });
+  });
+
+  it("refuses a folder inside dohc's state folder, by any path, and writes nothing there", async () => {
+    const state = join(base, "AppData", "Roaming", "dohc");
+    const inside = join(state, "cli-bin");
+    await mkdir(inside, { recursive: true });
+    const stateLink = join(base, "state-link");
+    await symlink(state, stateLink, linkType);
+    for (const rootPath of [inside, join(stateLink, "cli-bin")]) {
+      await expect(createWorkspaceFolder({ rootPath, homeDir, stateDir: state, computer, kind: "personal" }), rootPath)
+        .rejects.toMatchObject(refusal(stateFolderRefusal("inside")));
+    }
+    // dohc may name its state folder through a link too.
+    await expect(createWorkspaceFolder({ rootPath: inside, homeDir, stateDir: stateLink, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(stateFolderRefusal("inside")));
+    expect(await readdir(inside)).toEqual([]);
+  });
+
+  it("refuses to open an already registered workspace that holds dohc's state folder, and leaves it as it was", async () => {
+    // Registered before dohc refused such folders: a workspace in AppData,
+    // registered through a link to it.
+    const appData = join(base, "AppData");
+    const state = join(appData, "Roaming", "dohc");
+    const registered = await createWorkspaceFolder({ rootPath: appData, homeDir, stateDir, computer, kind: "personal" });
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, "dohc-settings.json"), "{}");
+    const link = join(base, "app-data-link");
+    await symlink(appData, link, linkType);
+    const before = await readdir(appData);
+    for (const picked of [registered.rootPath, link]) {
+      expect(thrown(() => assertNotStateFolder(canonicalWorkspaceRoot(picked), state))).toMatchObject(refusal(stateFolderRefusal("holds")));
+    }
+    // A workspace registered inside the state folder is refused too.
+    const inside = await createWorkspaceFolder({ rootPath: join(state, "notes"), homeDir, stateDir, computer, kind: "personal" });
+    expect(thrown(() => assertNotStateFolder(inside.rootPath, state))).toMatchObject(refusal(stateFolderRefusal("inside")));
+    expect(await readdir(appData)).toEqual(before);
+    expect(await readFile(join(state, "dohc-settings.json"), "utf8")).toBe("{}");
+    // Another registered workspace opens as before.
+    const other = await createWorkspaceFolder({ rootPath: join(base, "notes"), homeDir, stateDir: state, computer, kind: "personal" });
+    expect(() => assertNotStateFolder(canonicalWorkspaceRoot(other.rootPath), state)).not.toThrow();
   });
 
   it("refuses the home folder named through a link to it", async () => {
     const homeLink = join(base, "home-alias");
     await symlink(homeDir, homeLink, linkType);
-    await expect(createWorkspaceFolder({ rootPath: homeDir, homeDir: homeLink, computer, kind: "personal" }))
-      .rejects.toThrow("workspace root cannot be the home directory itself");
+    await expect(createWorkspaceFolder({ rootPath: homeDir, homeDir: homeLink, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(HOME_FOLDER_REFUSAL));
     expect(await readdir(homeDir)).toEqual([]);
   });
 
@@ -261,7 +340,7 @@ describe("createWorkspaceFolder", () => {
         return actualFs.lstat(...args);
       }) as typeof lstat);
 
-      await expect(createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" }))
+      await expect(createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" }))
         .rejects.toThrow("The folder changed while dohc was opening it. Open it again.");
       expect(await readdir(join(replaced, ".dohc"))).toEqual([]);
       expect(await readdir(join(moved, ".dohc"))).toEqual([]);
@@ -277,16 +356,16 @@ describe("createWorkspaceFolder", () => {
       return parent;
     });
 
-    await expect(createWorkspaceFolder({ rootPath: mounted, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow(DISK_ROOT_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: mounted, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(DISK_ROOT_REFUSAL));
     expect(await readdir(mounted)).toEqual([]);
   });
 
   it.skipIf(process.platform === "win32")("refuses a link to a mounted filesystem such as /dev", async () => {
     const link = join(base, "device-link");
     await symlink("/dev", link, linkType);
-    await expect(createWorkspaceFolder({ rootPath: link, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow(DISK_ROOT_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: link, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(DISK_ROOT_REFUSAL));
   });
 
   // /Volumes reports the system's device, so only its identity marks it.
@@ -294,7 +373,7 @@ describe("createWorkspaceFolder", () => {
     const link = join(base, "volumes-link");
     await symlink("/Volumes", link, linkType);
     for (const rootPath of ["/Volumes", link]) {
-      await expect(createWorkspaceFolder({ rootPath, homeDir, computer, kind: "personal" })).rejects.toThrow(DISK_ROOT_REFUSAL);
+      await expect(createWorkspaceFolder({ rootPath, homeDir, stateDir, computer, kind: "personal" })).rejects.toMatchObject(refusal(DISK_ROOT_REFUSAL));
     }
   });
 
@@ -303,7 +382,7 @@ describe("createWorkspaceFolder", () => {
     const other = join(base, "mounts");
     await mkdir(other);
     statOf("/Volumes", async () => await actualFs.stat(other, { bigint: true }));
-    await expect(createWorkspaceFolder({ rootPath: other, homeDir, computer, kind: "personal" })).rejects.toThrow(DISK_ROOT_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: other, homeDir, stateDir, computer, kind: "personal" })).rejects.toMatchObject(refusal(DISK_ROOT_REFUSAL));
     expect(await readdir(other)).toEqual([]);
   });
 
@@ -311,8 +390,8 @@ describe("createWorkspaceFolder", () => {
     const root = join(base, "bound-root");
     await mkdir(root);
     statOf("/", async () => await actualFs.stat(root, { bigint: true }));
-    await expect(createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow(FILESYSTEM_ROOT_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(DISK_ROOT_REFUSAL));
     expect(await readdir(root)).toEqual([]);
   });
 
@@ -324,22 +403,22 @@ describe("createWorkspaceFolder", () => {
     // A bind mount or firmlink gives one folder two real paths.
     statOf(otherName, async () => await actualFs.stat(root, { bigint: true }));
 
-    await expect(createWorkspaceFolder({ rootPath: root, homeDir: otherName, computer, kind: "personal" }))
-      .rejects.toThrow(HOME_FOLDER_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: root, homeDir: otherName, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(HOME_FOLDER_REFUSAL));
     expect(await readdir(root)).toEqual([]);
   });
 
   it.skipIf(process.platform !== "darwin")("refuses the home folder through macOS's data volume alias", async () => {
     const alias = `/System/Volumes/Data${canonicalWorkspaceRoot(homeDir)}`;
     expect(existsSync(alias)).toBe(true);
-    await expect(createWorkspaceFolder({ rootPath: alias, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow(HOME_FOLDER_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: alias, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(HOME_FOLDER_REFUSAL));
     expect(await readdir(homeDir)).toEqual([]);
   });
 
   it.skipIf(process.platform === "win32")("keeps a backslash that is part of a folder's name", async () => {
     const root = join(base, "trip\\2026");
-    const created = await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" });
+    const created = await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
     expect(created.rootPath).toBe(canonicalWorkspaceRoot(root));
     expect(created.rootPath.endsWith("/trip\\2026")).toBe(true);
     expect(await readdir(base)).toEqual(["trip\\2026"]);
@@ -349,12 +428,12 @@ describe("createWorkspaceFolder", () => {
   it("checks an existing folder before creating anything, and creates only a missing one", async () => {
     const toHome = join(base, "home-link");
     await symlink(homeDir, toHome, linkType);
-    await expect(createWorkspaceFolder({ rootPath: toHome, homeDir, computer, kind: "personal" }))
-      .rejects.toThrow(HOME_FOLDER_REFUSAL);
+    await expect(createWorkspaceFolder({ rootPath: toHome, homeDir, stateDir, computer, kind: "personal" }))
+      .rejects.toMatchObject(refusal(HOME_FOLDER_REFUSAL));
     expect(vi.mocked(mkdir).mock.calls.map(([path]) => path)).not.toContain(toHome);
 
     const fresh = join(base, "new", "Trip");
-    await createWorkspaceFolder({ rootPath: fresh, homeDir, computer, kind: "personal" });
+    await createWorkspaceFolder({ rootPath: fresh, homeDir, stateDir, computer, kind: "personal" });
     expect(await readdir(fresh)).toEqual([".dohc"]);
   });
 
@@ -367,7 +446,7 @@ describe("createWorkspaceFolder", () => {
       await mkdir(root);
       await chmod(locked, 0o000);
       try {
-        await expect(createWorkspaceFolder({ rootPath: root, homeDir: join(locked, "home"), computer, kind: "personal" }))
+        await expect(createWorkspaceFolder({ rootPath: root, homeDir: join(locked, "home"), stateDir, computer, kind: "personal" }))
           .rejects.toMatchObject({ code: "EACCES" });
       } finally {
         await chmod(locked, 0o700);
@@ -378,7 +457,7 @@ describe("createWorkspaceFolder", () => {
 
   it("rejects relative workspace roots", async () => {
     await expect(
-      createWorkspaceFolder({ rootPath: "relative/place", homeDir, computer, kind: "personal" }),
+      createWorkspaceFolder({ rootPath: "relative/place", homeDir, stateDir, computer, kind: "personal" }),
     ).rejects.toThrow(/absolute/i);
   });
 });
@@ -392,7 +471,7 @@ describe("manifest entry custody", () => {
     if (exists) await writeFile(target, content);
     await symlink(target, path, "file");
     const link = await readlink(path);
-    const error = await createWorkspaceFolder({ rootPath: root, homeDir, computer, kind: "personal" })
+    const error = await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" })
       .then(() => null, (error: unknown) => error);
     expect((await lstat(path)).isSymbolicLink()).toBe(true);
     expect(await readlink(path)).toBe(link);

@@ -1,6 +1,10 @@
-import { getShareCopyDetails, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
+import { liveStopError } from "../ipc/liveEditingStop";
+import { HOST_STOP_CASES, hostStopWireError } from "../testing/liveStopHost.test-helper";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, moveWorkspacePath, retryKeptEdits, saveRecoveryCopy, stopAgain as stopAgainTool, workspaceStatus } from "@dohc/mcp/tools";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
+import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
+import { createShareLinkAgentActions } from "../ipc/shareLinkAgentActions";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import { closeTestStorages, testStorage, testHandler, request as relayRequest, inspectDatabase, storagePath, SHARE_WEB_ORIGIN, RELAY_EXCHANGE_KEY } from "@dohc/sync-relay/testing";
@@ -14,14 +18,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { documentEditUpdate, documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
 import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliTransportResponseSchema, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { accessCliQueries, createAccessOwner } from "../access/accessOwner";
-import { createDesktopCliServer } from "./desktopCliServer";
+import { createDesktopCliServer, workspaceRequesters } from "./desktopCliServer";
 import { handleCliRequestLine } from "./cliServer";
 import type { CliServerOptions, CliServerHandle } from "./cliServer";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -83,7 +87,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     listOpenConflictsPage: vi.fn<Capture["listOpenConflictsPage"]>(async () => ({ conflicts: [], nextAfterConflictId: null })),
     createVersion: vi.fn<Capture["createVersion"]>(async name => ({ versions: [{ id: "created", workspaceId: "workspace", kind: "named", name, createdAtMs: 1, forkPoint: { versionId: "main" } }], activeVersionId: "created" })),
     switchVersion: vi.fn<Capture["switchVersion"]>(async versionId => ({ activeVersionId: versionId, changedFileCount: 2 })),
-    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0 })),
+    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0, replacedProtectedPaths: [".env"] })),
     resolveConflict: vi.fn<Capture["resolveConflict"]>(),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
@@ -121,7 +125,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
-    agentIdsNamedIn: async () => [],
+    agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -137,9 +141,10 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
+    agentYouRun: vi.fn(async (agentId: string) => agentId === "terminal" ? { name: "Terminal" } : null),
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgent: vi.fn(() => null), dispatchedRunId: vi.fn(() => null), dispatchedRunSecret: vi.fn(() => null), agentWriteRunId: vi.fn(() => null), agentRunWorkspace: vi.fn(() => undefined) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -179,7 +184,45 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
 
 afterEach(() => vi.restoreAllMocks());
 
+describe("agents you run through the CLI", () => {
+  it("names an agent you run with its handle and the workspace's accounts for its person", async () => {
+    const f = fixture();
+    await f.create().startDesktopCliServer();
+    expect(await f.options().connectedAgent("workspace", "terminal")).toEqual({
+      agentId: "terminal", name: "Terminal", handle: "Terminal", requesters: ["owner"], unattributedCounts: true,
+    });
+    expect(await f.options().connectedAgent("workspace", "default")).toBeNull();
+    expect(await f.options().connectedAgent("missing", "terminal")).toBeNull();
+  });
+
+  it("counts the accounts this computer's person posts as, and posts with no account only where they own the work", () => {
+    const channel = { shareId: "s", channelWireId: "w", access: "read-write" as const, granterEmail: null, relayUrl: "https://relay.test" };
+    expect(workspaceRequesters({})).toEqual({ requesters: [], unattributedCounts: true });
+    expect(workspaceRequesters({ pausedRemote: { serverUrl: "https://cloud.test", ownerUserId: "owner" } }))
+      .toEqual({ requesters: ["owner"], unattributedCounts: true });
+    expect(workspaceRequesters({
+      remote: { serverUrl: "https://cloud.test", ownerUserId: "owner" },
+      sharedChannels: [{ ...channel, recipientUserId: "owner" }, { ...channel, recipientUserId: "other-account" }],
+    })).toEqual({ requesters: ["owner", "other-account"], unattributedCounts: true });
+    // In a received copy, the owner's posts are not yours.
+    const shareView = { shareId: "s", granterEmail: null, genericChatWritable: true, grantedSelector: { paths: [], versionId: null } } as unknown as NonNullable<RegistryEntry["shareView"]>;
+    expect(workspaceRequesters({ shareView: { ...shareView, recipientUserId: "me", granterUserId: "owner" } }))
+      .toEqual({ requesters: ["me"], unattributedCounts: false });
+    expect(workspaceRequesters({ shareView })).toEqual({ requesters: [], unattributedCounts: false });
+  });
+});
+
 describe("desktop CLI workspace context", () => {
+  it("passes the physical attachment signal to the CLI context", async () => {
+    const f = fixture();
+    const signal = await f.authorities.withOperation("workspace", operation => operation.signal);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(context.signal).toBe(signal);
+    expect(context.signal!.aborted).toBe(false);
+    await f.authorities.invalidate("workspace");
+    expect(context.signal!.aborted).toBe(true);
+  });
+
   it("routes Access refresh to the IPC owner for the socket workspace only", async () => {
     const scratch = await createTestScratch("cli-access-refresh-");
     const f = fixture(scratch);
@@ -442,7 +485,7 @@ describe("desktop CLI workspace context", () => {
       const conflict = (id: string, path: string, incomingPath = path) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(incomingPath, "theirs"),
-        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
       // c3's incoming side sits at a path History does not track.
       f.capture.listOpenConflictsPage.mockResolvedValue({ conflicts: [conflict("c1", "notes.md"),
         conflict("c2", "private/journal.md"), conflict("c3", "moved.md", "private/moved.md")], nextAfterConflictId: null });
@@ -459,9 +502,11 @@ describe("desktop CLI workspace context", () => {
       const mcp = (verb: "versionList" | "versionCompare" | "versionConflicts", args: Record<string, unknown> = {}) =>
         send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
 
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
-      expect(await mcp("versionList")).toMatchObject({ ok: true, activeVersionId: "draft",
-        versions: [{ id: "main", kind: "main", canMergeIntoMain: false }, { id: "draft", name: "Draft", canMergeIntoMain: true }] });
+      // Each version but Main says what it was made from, as the versions menu does.
+      expect(await mcp("versionList")).toEqual({ ok: true, activeVersionId: "draft", versions: [
+        { id: "main", name: "Main", kind: "main", createdAtMs: 10, canMergeIntoMain: false },
+        { id: "draft", name: "Draft", kind: "named", createdAtMs: 10, canMergeIntoMain: true, madeFromVersionId: "main" }] });
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // Untracked and secret files are left out, and the next page starts
       // after the last file shown, never after a hidden one.
@@ -482,6 +527,23 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionConflicts")).toMatchObject({ ok: true, nextAfterConflictId: null,
         conflicts: [{ conflictId: "c1", path: "notes.md", currentText: "mine", incomingText: "theirs", baseText: "base" }] });
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
+      // A conflict nothing waits behind says nothing about waiting.
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waiting");
+      // A newer version held behind a conflict reads as one fact, worded with
+      // the conflict's own path. Its coordinates sit beside the message.
+      const waitingVersion = { code: "resolve-existing-conflict" as const, objectId: "notes-object", originId: "computer-d", originSeq: 4 };
+      const held = { conflicts: [{ ...conflict("c1", "notes.md", "moved/notes.md"), metadata: { origin: "sync" as const }, waitingVersion }],
+        nextAfterConflictId: null };
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect(await mcp("versionConflicts")).toMatchObject({ ok: true, conflicts: [{ conflictId: "c1", origin: "sync", waiting: {
+        code: "resolve-existing-conflict",
+        message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
+        objectId: "notes-object", originId: "computer-d", originSeq: 4 } }] });
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waitingVersion");
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect((await cli("version", "conflicts")).stdout).toBe(
+        "c1 · sync · notes.md\n  A newer version from another machine is waiting. It comes in after you resolve this conflict.\n");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
       expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
 
@@ -491,7 +553,7 @@ describe("desktop CLI workspace context", () => {
         reason: "Version files are hidden because dohc can't read .dohc/files.toml" });
       expect(await cli("version", "conflicts")).toEqual({ exitCode: 1, stdout: "",
         stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
@@ -528,7 +590,7 @@ describe("desktop CLI workspace context", () => {
       const conflict = (id: string, path: string, side: typeof text | typeof binary = text) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(path, "theirs"),
-        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
       const open = { conflicts: [conflict("c1", "notes.md"), conflict("c2", "logo.png", binary), conflict("c3", "private/journal.md")],
         nextAfterConflictId: null };
       f.capture.listOpenConflictsPage.mockResolvedValue(open);
@@ -568,7 +630,7 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionMerge", { version: "Nested" })).toEqual({ ok: false, reason: "Only versions made from Main can merge into Main." });
       expect(await mcp("versionMerge", { version: "Later" })).toEqual({ ok: false, reason: "No version is called Later. Run dohc version list to see them." });
       expect(f.capture.mergeVersionIntoMain).not.toHaveBeenCalled();
-      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3 });
+      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3, replacedProtectedPaths: [] });
       // The merge prints the conflicts it left, except the one at a path History does not track.
       expect((await cli("version", "merge", "Draft")).stdout)
         .toBe("Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n");
@@ -759,11 +821,57 @@ describe("desktop CLI workspace context", () => {
       session.getMap("meta").set("dohcMarkdownSource", lossy);
       session.getMap("meta").set("dohcMarkdownSourceSha256", sha(lossy));
       session.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(session)));
-      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true })).rejects.toThrow(
+      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true, headSha256: sha(lossy) })).rejects.toThrow(
         "dohc can't change readme.md without also changing parts it can't show",
       );
       expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the authoritative head for an edited witness and forwards explicit consent with an absent head", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-consent-"));
+    const source = "# Readme\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const doc = markdownToYDoc(source);
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    Y.applyUpdate(doc, documentEditUpdate(Y.encodeStateAsUpdate(doc), { replacement: "Unsettled tail." }, { keepBlocks: true })!);
+    try {
+      await writeFile(join(root, "readme.md"), source);
+      const f = fixture(root);
+      const context = await f.create().openCliWorkspace(f.workspace);
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
+      const edit = { path: "readme.md", edit: { find: "Editable.", replacement: "Changed." }, origin };
+      await context.documents!.edit(edit);
+      const [guarded] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      const state = Y.encodeStateAsUpdate(doc);
+      for (const headSha256 of [null, sha(source)]) {
+        await expect(guarded.change(state, { keepBlocks: true, headSha256 })).rejects.toThrow("parts it can't show");
+      }
+      const converted = await guarded.change(state, { keepBlocks: true, headSha256: sha("converted head") });
+      expect(converted).toBeInstanceOf(Uint8Array);
+      // Until the head arrives, the source the note records can't show that
+      // the edit is safe, so the agent hears to try again.
+      await expect(guarded.change(state, { keepBlocks: true })).rejects.toThrow(
+        "dohc is still checking readme.md for parts it can't show, so nothing changed. Try again in a moment.",
+      );
+
+      await context.documents!.edit({ ...edit, allowLossySourceSha256: sha(source) });
+      const [consented] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[1]!;
+      expect(consented.allowLossySourceSha256).toBe(sha(source));
+      await expect(consented.assertEditable("readme.md")).resolves.toBeUndefined();
+      const update = await consented.change(state, { keepBlocks: true, headSha256: null });
+      Y.applyUpdate(doc, update!);
+      expect(yDocToMarkdown(doc)).toContain("Changed.");
+      expect(await readFile(join(root, "readme.md"), "utf8")).toBe(source);
+
+      await writeFile(join(root, "readme.md"), source.replace("Hidden.", "Another source."));
+      await expect(consented.assertEditable("readme.md")).rejects.toThrow("parts it can't show");
+    } finally {
+      doc.destroy();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -777,10 +885,13 @@ describe("desktop CLI workspace context", () => {
     const [input] = edit.mock.calls[0]!;
     expect(input).toMatchObject({ workspaceId: "workspace", path: "notes.md", origin });
     const current = markdownToYDoc("Draft plan.");
-    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true }))!);
+    Y.applyUpdate(current, (await input.change(Y.encodeStateAsUpdate(current), { keepBlocks: true, headSha256: null }))!);
     expect(documentMarkdown(Y.encodeStateAsUpdate(current))).toBe("Final plan.");
+    // A note that records no source takes the edit while its head is unknown.
+    expect(await input.change(Y.encodeStateAsUpdate(markdownToYDoc("Draft plan.")), { keepBlocks: true }))
+      .toBeInstanceOf(Uint8Array);
     // A refusal from the projection reaches the caller.
-    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true }))
+    await expect(input.change(Y.encodeStateAsUpdate(markdownToYDoc("Final plan.")), { keepBlocks: true, headSha256: null }))
       .rejects.toThrow("not in the document");
   });
 
@@ -820,6 +931,10 @@ describe("desktop CLI workspace context", () => {
       expect(write.mock.calls[2]![2]).toEqual({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 });
       await context.documents!.create({ path: "woken-named.md", markdown: "Hi.", origin: { ...woken, actorOriginId: "Codex" } });
       expect(write.mock.calls[3]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "person-local", depth: 3 });
+      // A file written in a run names that run, so two runs stay two authors.
+      const inRun = { actorOriginId: "Codex", attribution: { ...woken.attribution, agentRunId: "run-1" } };
+      await context.documents!.create({ path: "in-run.md", markdown: "Hi.", origin: inRun });
+      expect(write.mock.calls[4]![2]).toEqual({ kind: "agent", agentId: "Codex", onBehalfOf: "person-local", depth: 3, agentRunId: "run-1" });
 
       await expect(context.documents!.create({ path: "taken.md", markdown: "x", origin }))
         .rejects.toThrow("taken.md already exists. Edit it instead.");
@@ -831,7 +946,8 @@ describe("desktop CLI workspace context", () => {
       await expect(context.documents!.create({ path: "later.md", markdown: "Text", origin }))
         .rejects.toThrow("dohc created later.md, but could not write its text (engine busy). Edit the document to add it.");
       expect(await readFile(join(root, "later.md"), "utf8")).toBe("");
-      expect(edit).toHaveBeenCalledTimes(5);
+      // Five creates wrote their text, and later.md tried once.
+      expect(edit).toHaveBeenCalledTimes(6);
 
       // Two creates of one path: one creates it, the other is told it exists.
       const race = await Promise.allSettled([
@@ -992,11 +1108,25 @@ describe("raw fileWrite socket requests", () => {
     expect(await f.invoke([{ path, contentBase64: "bmV3" }])).toMatchObject({ ok: false });
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
   });
-  it.each([undefined, "Client name"])("records the %s handshake name at the run depth", async agent => {
+  it.each([undefined, "Client name"])("records a connected agent named %s as the unnamed agent with that name, at the run depth", async agent => {
     const f = await setup();
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     expect(await f.invoke([{ path: "plain.txt", contentBase64: "bmV3" }], "agent", agent)).toEqual({ ok: true, written: ["plain.txt"] });
-    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 });
+    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2])
+      .toEqual({ kind: "agent", agentId: "dohc-mcp", ...(agent ? { agentName: agent } : {}), onBehalfOf: "person-local", depth: 4 });
+  });
+  it("names the run a file was written in, and none outside a run", async () => {
+    const f = await setup();
+    vi.mocked(f.dependencies.activity.agentWriteRunId).mockReturnValueOnce("run-1").mockReturnValueOnce("run-2");
+    for (const path of ["first.txt", "second.txt", "outside.txt"]) {
+      expect(await f.invoke([{ path, contentBase64: "bmV3" }], "agent", "Codex")).toEqual({ ok: true, written: [path] });
+    }
+    expect(vi.mocked(f.dependencies.activity.agentWriteRunId)).toHaveBeenCalledWith("workspace");
+    expect(f.capture.writeAuthoredFile.mock.calls.map(call => call[2])).toEqual([
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Codex", onBehalfOf: "person-local", agentRunId: "run-1" },
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Codex", onBehalfOf: "person-local", agentRunId: "run-2" },
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Codex", onBehalfOf: "person-local" },
+    ]);
   });
   it("enforces byte limits and base64 validation without MCP", async () => {
     const f = await setup();
@@ -1035,7 +1165,7 @@ describe("raw fileWrite socket requests", () => {
     const opened = join(await createTestScratch("dohc-cli-linked-"), "linked");
     await symlink(real, opened, process.platform === "win32" ? "junction" : "dir");
     const registered = await createWorkspaceFolder({
-      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), kind: "personal", computer: { installId: "install-here", label: "This Mac" },
+      rootPath: opened, homeDir: await createTestScratch("dohc-cli-linked-home-"), stateDir: await createTestScratch("dohc-cli-linked-state-"), kind: "personal", computer: { installId: "install-here", label: "This Mac" },
     });
     // The authority resolves roots the way main does.
     const f = fixture(registered.rootPath, (root) => realpathSync.native(root));
@@ -1159,7 +1289,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       expect(result).toMatchObject({ok: true, fromPath: "old.md", toPath: "new.md", undo: {available: false, paths: [],
         reason: "Rename finished. dohc could not save Undo information or update links to this file. Rename it back yourself."}});
       const authored = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-      expect(authored).toMatchObject({author: {kind: "agent", agentId: "Client"}});
+      expect(authored).toMatchObject({author: {kind: "agent", agentId: "dohc-mcp"}});
       expect(await readMoveRecovery(f.root, authored.operationId)).toBeUndefined();
       expect(await readFile(join(f.root, "new.md"), "utf8")).toBe("original");
       expect(engine).not.toHaveBeenCalled();
@@ -1400,14 +1530,14 @@ describe("raw fileMove and fileDelete socket requests", () => {
     expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
   });
 
-  it.each([undefined, "Client name"])("records the %s handshake name at the run depth", async agent => {
+  it.each([undefined, "Client name"])("records a connected agent named %s as the unnamed agent with that name, at the run depth", async agent => {
     const f = await setup();
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
       .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt", undo: { available: true } });
     expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/local\/trash\//) });
-    const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
+    const author = { kind: "agent", agentId: "dohc-mcp", ...(agent ? { agentName: agent } : {}), onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
       { operation: "move", author, operationId: expect.stringMatching(/^dohc-operation:/) }, { operation: "delete", author, operationId: expect.stringMatching(/^dohc-operation:/) },
     ]);
@@ -1543,6 +1673,99 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
   });
 });
 
+// Both agent doors reach the Share dialog's Agents list and Disconnect through
+// desktop attachment admission. The relay stand-in records what main asks it.
+async function linkAgentsFixture() {
+  const root = await createTestScratch("dohc-cli-link-agents-");
+  const f = fixture(root);
+  let credentials: CloudCredentials = { serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
+    userId: "owner", email: "owner@test", token: "secret" };
+  const remote = vi.fn(async (workspace: RegistryEntry) => {
+    if (!workspaceRemoteMatchesCredentials(workspace.remote!, credentials)) throw Error("Sign in to the account that synced this workspace.");
+    return { credentials, credentialGeneration: 1 };
+  });
+  const agent = { connectionId: "connection", reportedName: "Claude", connectedAtMs: 1, lastActionAtMs: null };
+  const relay = vi.fn(async (_account: CloudCredentials, path: string, _init?: RequestInit): Promise<unknown> => path.endsWith("/disconnect")
+    ? { ok: true, agent: { ...agent, status: "disconnected" } }
+    : { ok: true, agents: [{ ...agent, status: "active" }], nextCursor: null });
+  f.dependencies.shareLinkAgents = createShareLinkAgentActions<RegistryEntry>({ remoteForWorkspace: remote, currentCredentialGeneration: () => 1,
+    relayJson: relay, relayShareErrorCopy: () => "The share changed. Try again." });
+  await f.create().startDesktopCliServer();
+  const transport = async (input: CliRequestWithoutToken) => {
+    const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
+    const response = cliTransportResponseSchema.parse(JSON.parse(line));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const cli = async (argv: string[]) => {
+    const result = await executeCli({ argv: [...argv, "--json"], cwd: root, env: {}, request: transport });
+    if (result.exitCode !== 0) return { ok: false, reason: result.stderr };
+    const { schemaVersion: _schemaVersion, ...answer } = JSON.parse(result.stdout);
+    return answer;
+  };
+  const list = (door: "cli" | "mcp", cursor?: string) => door === "mcp"
+    ? listLinkAgents({ root, home: "state", request: transport }, { shareId: "share", grantId: "grant", ...(cursor ? { cursor } : {}) })
+    : cli(["share", "agents", "share", "grant", ...(cursor ? ["--cursor", cursor] : [])]);
+  const disconnect = (door: "cli" | "mcp") => door === "mcp"
+    ? disconnectLinkAgent({ root, home: "state", request: transport }, { shareId: "share", grantId: "grant", connectionId: "connection" })
+    : cli(["share", "disconnect", "share", "grant", "connection"]);
+  return { ...f, root, agent, list, disconnect, transport, remote, relay,
+    otherAccount: () => { credentials = { ...credentials, userId: "stranger" }; } };
+}
+
+describe.each(["cli", "mcp"] as const)("link agents through %s", door => {
+  it("lists the agents of the admitted workspace's link with the owner's credentials", async () => {
+    const f = await linkAgentsFixture();
+    expect(await f.list(door)).toEqual({ agents: [f.agent], nextCursor: null });
+    expect(f.relay.mock.lastCall?.[0]).toMatchObject({ userId: "owner" });
+    expect(f.relay.mock.lastCall?.[1]).toBe("/sync/workspace/shares/share/links/grant/agents");
+    await f.list(door, "next");
+    expect(f.relay.mock.lastCall?.[1]).toBe("/sync/workspace/shares/share/links/grant/agents?cursor=next");
+  });
+  it("disconnects exactly the named connection", async () => {
+    const f = await linkAgentsFixture();
+    expect(await f.disconnect(door)).toEqual({ connectionId: "connection" });
+    expect(f.relay).toHaveBeenCalledOnce();
+    expect(f.relay.mock.lastCall?.slice(1)).toEqual(["/sync/workspace/shares/share/links/grant/agents/connection/disconnect", { method: "POST" }]);
+  });
+  it("refuses another account before contacting the relay", async () => {
+    const f = await linkAgentsFixture(); f.otherAccount();
+    expect(await f.list(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
+    expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses a received workspace at socket per-verb admission", async () => {
+    const f = await linkAgentsFixture(); vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+    expect(await f.list(door)).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it("refuses a received marker before reading credentials", async () => {
+    const f = await linkAgentsFixture(); f.workspace.shareView = {} as RegistryEntry["shareView"];
+    expect(await f.list(door)).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it("refuses a relay reply for another connection", async () => {
+    const f = await linkAgentsFixture();
+    f.relay.mockResolvedValue({ ok: true, agent: { ...f.agent, connectionId: "other", status: "disconnected" } });
+    expect(await f.disconnect(door)).toMatchObject({ ok: false });
+  });
+  it("refuses a caller-named workspace before contacting the relay", async () => {
+    const f = await linkAgentsFixture();
+    await expect(f.transport({ protocolVersion: CLI_PROTOCOL_VERSION, door, verb: "shareAgents",
+      args: { shareId: "share", grantId: "grant", cwd: f.root, actor: "agent", workspaceId: "other-workspace" } } as unknown as CliRequestWithoutToken)).rejects.toThrow();
+    expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses a retired desktop attachment before reading credentials", async () => {
+    const f = await linkAgentsFixture(); const context = await f.create().openCliWorkspace(f.workspace);
+    await f.authorities.invalidate("workspace");
+    await expect(context.shareLinkAgents!.list({ shareId: "share", grantId: "grant" })).rejects.toThrow("This workspace changed while this ran. Try again.");
+    await expect(context.shareLinkAgents!.disconnect({ shareId: "share", grantId: "grant", connectionId: "connection" })).rejects.toThrow("This workspace changed while this ran. Try again.");
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+});
+
 // Both agent doors reach the desktop engine's Save recovery copy and Try again
 // through the desktop CLI server. The stand-in engine keeps refused edits per
 // workspace, as main's own record does. It leaves the incident to the server.
@@ -1616,6 +1839,76 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
 }
 
 describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
+  it("returns the edits-pending Stop's server answer with nothing left to release", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
+    f.stopAgain.mockImplementation(async (operation, again) => {
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+        {workspace: operation.workspace, assertCurrent() {}});
+      return {keptEdits: "kept"};
+    });
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
+      reason: door === "cli" ? "dohc: Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment.\n"
+        : "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."});
+    expect(h.recorded()).toBeUndefined();
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+  });
+  it.each(["paused", "session-host-refused"])("returns the Resume instruction for an edits-pending %s Stop", async state => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
+    h.relay.mockImplementation(async (_credentials, _path, init) => {
+      if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+      return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: state === "paused" ? "paused" : "unavailable",
+        ...(state === "paused" ? {} : {reason: state})}]};
+    });
+    f.stopAgain.mockImplementation(async (operation, again) => {
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+        {workspace: operation.workspace, assertCurrent() {}});
+      return {keptEdits: "kept"};
+    });
+    const words = "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.";
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false, reason: door === "cli" ? `dohc: ${words}\n` : words});
+    expect(h.recorded()).toBeUndefined();
+  });
+  it.each(["conflict-parent-withheld", "quarantine"] as const)("returns the %s pending Stop answer", async reason => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", reason === "quarantine" ? {
+      ownerLiveQuarantines: () => [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "paused")]} : {});
+    h.relay.mockImplementation(async (_credentials, _path, init) => {
+      if (init?.method === "DELETE") throw liveStopError({code: "edits-pending"});
+      return {ok: true, documents: [{path: "notes/plan.md", objectId: "object-plan", status: "unavailable",
+        reason: reason === "quarantine" ? "workspace-changed" : reason}]};
+    });
+    f.stopAgain.mockImplementation(async (operation, again) => {
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+        {workspace: operation.workspace, assertCurrent() {}});
+      return {keptEdits: "kept"};
+    });
+    const words = reason === "quarantine"
+      ? "Live editing didn't stop. The server hasn't finished applying edits to this document. Try again in a moment."
+      : "Live editing didn't stop. A conflict was resolved in this document, so the server can't resume live editing for it.";
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false,
+      reason: door === "cli" ? `dohc: ${words}\n` : words});
+    expect(h.recorded()).toBeUndefined();
+  });
+  it.each(HOST_STOP_CASES)("returns the %s Stop answer and %s detail with no Stop request left", async (code, sessionHost, words) => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan");
+    const answer = `${words}\nServer: ${sessionHost}`;
+    h.relay.mockRejectedValueOnce(hostStopWireError(code, sessionHost, "untrusted relay text"));
+    f.stopAgain.mockImplementation(async (operation, again) => {
+      await h.actions.stopForAgent({workspaceId: operation.workspace.workspaceId, path: again.path, again},
+        {workspace: operation.workspace, assertCurrent() {}});
+      return {keptEdits: "kept"};
+    });
+    expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ok: false, reason: door === "cli" ? `dohc: ${answer}\n` : answer});
+    expect(h.recorded()).toBeUndefined();
+    expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "clear"]);
+  });
   it("lists each restore queue as save-only and saves the exact incident", async () => {
     const f = await keptEditsFixture();
     f.kept.workspace = ["old-1:delivery:0", "old-2:delivery:0"].map(incident =>

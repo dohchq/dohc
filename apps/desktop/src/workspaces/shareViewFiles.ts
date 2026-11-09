@@ -36,7 +36,10 @@ import {
   createShareViewLifecycle,
   readSharedViewProjectionDebt,
   type CaptureSharedViewLocalDivergenceOutcome,
+  type CaptureSharedViewRefreshOutcome,
   type RefreshSharedViewOutcome,
+  setAsideCollisionRecord,
+  standaloneShareViewFailureOutcome,
   type StandaloneShareViewRefreshOutcome,
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
@@ -169,13 +172,13 @@ export type ShareViewReconcileOutcome =
       capturedPaths: number;
       repairedPaths: number;
       unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
-      collisionRecordQuarantined: boolean;
     }
   | {
       kind: "repair";
       repairedPaths: number;
       unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
-      collisionRecordQuarantined: boolean;
+      // Paths a best-effort capture gave up on. A store write may have landed first.
+      failedPaths: string[];
     }
   | {
       kind: "refresh";
@@ -296,6 +299,15 @@ export class ShareViewMountRollbackError extends Error {
       cause: rollbackError,
     });
     this.name = "ShareViewMountRollbackError";
+  }
+}
+
+// A mount refresh that failed after its capture set the share's collision
+// record aside. `failure` is what stopped it.
+export class SetAsideRefreshError extends Error {
+  constructor(readonly failure: unknown) {
+    super(errorMessage(failure), { cause: failure });
+    this.name = "SetAsideRefreshError";
   }
 }
 
@@ -729,11 +741,6 @@ export function createShareViewFiles(
         workspaceLease: lease,
       });
       await recordRecoveredPaths(target, captured);
-      if (captured.collisionRecordQuarantined) {
-        throw new Error(
-          "The shared view's recovery record was damaged and has been set aside. Retry the change.",
-        );
-      }
       assertShareChangesJournalable(captured.unjournalablePaths);
       assertHeldSpellingsUnchanged(captured.unjournalablePaths);
     }
@@ -890,7 +897,7 @@ export function createShareViewFiles(
     const capture = () =>
       target.kind === "standalone"
         ? lifecycle.captureStandalone(standaloneCaptureInput())
-        : lifecycle.captureShared({
+        : (request === "refresh" ? lifecycle.captureSharedRefresh : lifecycle.captureShared)({
             rootDir: target.rootPath,
             workspaceId: target.storeWorkspaceId,
             store,
@@ -909,7 +916,7 @@ export function createShareViewFiles(
       return { kind: "settle", ...captured };
     }
 
-    let recovered: CaptureSharedViewLocalDivergenceOutcome;
+    let recovered: CaptureSharedViewRefreshOutcome;
     if (target.kind === "standalone" && request === "refresh") {
       const captureOutcome = await lifecycle.captureStandaloneRefresh(
         standaloneCaptureInput(),
@@ -929,7 +936,7 @@ export function createShareViewFiles(
         kind: "repair",
         repairedPaths: localChanges,
         unjournalablePaths: recovered.unjournalablePaths,
-        collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+        failedPaths: recovered.failedPaths ?? [],
       };
     }
 
@@ -941,7 +948,7 @@ export function createShareViewFiles(
         changedPaths: localChanges,
         excludedPaths: [],
         unjournalablePaths: recovered.unjournalablePaths,
-        collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+        collisionRecordQuarantined: recovered.collisionRecordQuarantined ?? false,
         refusedOps: 0,
         refusedDetail: null,
       };
@@ -950,65 +957,76 @@ export function createShareViewFiles(
         : outcome;
     };
 
-    let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
-    if (target.ended) {
-      outcome = localOutcome("ended");
-    } else {
-      const relay = await dependencies.resolveRelay(target);
-      if (relay === null) {
-        outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
+    try {
+      let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
+      if (target.ended) {
+        outcome = localOutcome("ended");
       } else {
-        const pull: Parameters<
-          ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
-        >[0]["pull"] = async (input) =>
-          dependencies.pull(target, relay, {
-            grantedSelector: input.grantedSelector,
-            recordRefusals: input.recordRefusals,
-            recordCollisions: input.recordCollisions,
-            recordChangedPaths: input.recordChangedPaths,
-          });
-        const recordRefusals = async (refusals: ShareViewRefusal[]) =>
-          dependencies.recordRefusals(target, refusals);
+        const relay = await dependencies.resolveRelay(target);
+        if (relay === null) {
+          outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
+        } else {
+          const pull: Parameters<
+            ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
+          >[0]["pull"] = async (input) =>
+            dependencies.pull(target, relay, {
+              grantedSelector: input.grantedSelector,
+              recordRefusals: input.recordRefusals,
+              recordCollisions: input.recordCollisions,
+              recordChangedPaths: input.recordChangedPaths,
+            });
+          const recordRefusals = async (refusals: ShareViewRefusal[]) =>
+            dependencies.recordRefusals(target, refusals);
 
-        outcome =
-          target.kind === "standalone"
-            ? await lifecycle.reconcileStandalone({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                relay,
-                shareId: target.shareId,
-                pull,
-                store,
-                pinnedSelector: target.grantedSelector,
-                recordRefusals,
-                captured: recovered,
-                preservedPaths: target.unsavedPaths,
-                onCursorCommitted,
-              })
-            : await lifecycle.refreshCaptured({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                relay,
-                shareId: target.shareId,
-                pull,
-                store,
-                pinnedSelector: target.grantedSelector,
-                recordRefusals,
-                captured: recovered,
-                preservedPaths: target.unsavedPaths,
-                onCursorCommitted,
-              });
+          outcome =
+            target.kind === "standalone"
+              ? await lifecycle.reconcileStandalone({
+                  rootDir: target.rootPath,
+                  workspaceId: target.storeWorkspaceId,
+                  relay,
+                  shareId: target.shareId,
+                  pull,
+                  store,
+                  pinnedSelector: target.grantedSelector,
+                  recordRefusals,
+                  captured: recovered,
+                  preservedPaths: target.unsavedPaths,
+                  onCursorCommitted,
+                })
+              : await lifecycle.refreshCaptured({
+                  rootDir: target.rootPath,
+                  workspaceId: target.storeWorkspaceId,
+                  relay,
+                  shareId: target.shareId,
+                  pull,
+                  store,
+                  pinnedSelector: target.grantedSelector,
+                  recordRefusals,
+                  captured: recovered,
+                  preservedPaths: target.unsavedPaths,
+                  onCursorCommitted,
+                });
+        }
       }
+      if (
+        "ok" in outcome
+          ? outcome.ok && outcome.status === "ended"
+          : outcome.status === "ended"
+      ) {
+        await dependencies.markEnded(target);
+        await dependencies.retireTarget(target);
+      }
+      return { kind: "refresh", outcome };
+    } catch (error) {
+      // The capture set the record aside, so a refresh that then fails
+      // says so too.
+      if (!recovered.collisionRecordQuarantined) throw error;
+      if (target.kind !== "standalone") throw new SetAsideRefreshError(error);
+      return {
+        kind: "refresh",
+        outcome: { ...standaloneShareViewFailureOutcome(error, localChanges), ...setAsideCollisionRecord(recovered) },
+      };
     }
-    if (
-      "ok" in outcome
-        ? outcome.ok && outcome.status === "ended"
-        : outcome.status === "ended"
-    ) {
-      await dependencies.markEnded(target);
-      await dependencies.retireTarget(target);
-    }
-    return { kind: "refresh", outcome };
   }
 
   async function recordRecoveredPaths(target: ActiveShareViewFilesTarget, captured: CaptureSharedViewLocalDivergenceOutcome): Promise<void> {
@@ -1043,8 +1061,6 @@ export function createShareViewFiles(
           preservedPaths: target.unsavedPaths,
           bestEffort: true,
         });
-        // If a recovery record cannot identify its paths, preserve the full copy.
-        if (captured.collisionRecordQuarantined) return null;
         return [...new Set([
           ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
           ...(captured.failedPaths ?? []),

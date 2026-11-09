@@ -1,10 +1,10 @@
-import type { ChatDispatchNotice, ChatDispatchStoppedRun, RunnerSelfTestResult } from "../ipc/bridgeContract";
-import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
+import { nextStepWords, type ChatDispatchFailedRun, type ChatDispatchNextStep, type ChatDispatchNotice, type RunnerSelfTestResult } from "../ipc/bridgeContract";
+import { AGENTS_RESTRICTED_MESSAGE, CLAUDE_MIN_VERSION, launchCommand, launchProfile, supportsAgentProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
-import { cutText } from "@dohc/automation-executor/automation-chat";
+import { cutText } from "@dohc/workspace-contracts/names";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createChatRunnerProcess,
@@ -13,9 +13,11 @@ import {
   type RunnerProcess,
   type ChatRunnerProcessOptions,
   type ReplyRuntimeAvailability,
+  type RunDohcTools,
 } from "./chatRunnerProcess";
 import type {
   AgentDispatchClaim,
+  AgentDispatchRecord,
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
@@ -27,6 +29,7 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
+import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
 // How a run ended, as its notice says it.
@@ -61,45 +64,80 @@ function savedRunOutcome(run: AgentRunRecord): Exclude<RunOutcome, "finished" | 
 
 const NOTICE_AGENT_NAME_MAX_CHARS = 32;
 
-// "Atlas's run failed in "Plan day 2"" or "Restricted Mode blocked Atlas's
-// run in "Plan day 2"". What happened comes first and names last, so a clamp
-// cuts only a name: the agent's Settings name at 32 characters, then the
-// thread's to fit. An agent no longer in Settings is "Your agent".
-function runNoticeTitle(outcome: RunOutcome, thread: string, agentName: string | undefined): string {
-  const agent = agentName === undefined ? undefined : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
-  const whose = (first: boolean) => `${agent ?? (first ? "Your agent" : "your agent")}'s run`;
-  const sentence = {
-    finished: `${agent ?? "Your agent"} finished`,
-    stopped: `Stopped ${agent === undefined ? "the run" : whose(false)}`,
-    "no-reply": `${whose(true)} produced no reply`,
-    "timed-out": `${whose(true)} timed out`,
-    failed: `${whose(true)} failed`,
-    "not-started": `${whose(true)} failed to start`,
-    restarted: `dohc restarted and stopped ${whose(false)}`,
-    quit: `dohc quit and stopped ${whose(false)}`,
-    restricted: `Restricted Mode blocked ${whose(false)}`,
-  } satisfies Record<RunOutcome, string>;
-  const what = sentence[outcome];
+// The ways a run can end without the agent's reply. The conversation, the
+// toast and Notices all say "Nova didn't reply" and why.
+type FailedOutcome = Extract<RunOutcome, "failed" | "no-reply" | "timed-out" | "not-started" | "restarted" | "quit">;
+const FAILED_OUTCOMES: ReadonlySet<RunOutcome> = new Set<FailedOutcome>([
+  "failed", "no-reply", "timed-out", "not-started", "restarted", "quit",
+]);
+const isFailedOutcome = (outcome: RunOutcome): outcome is FailedOutcome => FAILED_OUTCOMES.has(outcome);
+
+// A reply already posted must not be posted again. Quit and restart keep
+// their existing recovery path, including runs that posted before the stop.
+function canRepeatFailedRun(outcome: FailedOutcome, posted: boolean): boolean {
+  return !posted || outcome === "quit" || outcome === "restarted";
+}
+
+// The agent's Settings name at 32 characters. An agent no longer in
+// Settings is "Your agent".
+function noticeAgentName(agentName: string | undefined): string {
+  return agentName === undefined ? "Your agent" : cutText(agentName, NOTICE_AGENT_NAME_MAX_CHARS);
+}
+
+// What a run that ended with its reply, or with no failure of its own, says.
+// An agent no longer in Settings is "your agent".
+function endedRunTitle(outcome: Exclude<RunOutcome, FailedOutcome>, agentName: string | undefined): string {
+  const agent = agentName === undefined ? undefined : noticeAgentName(agentName);
+  const whose = `${agent ?? "your agent"}'s run`;
+  return {
+    finished: `${agent ?? "Your agent"} replied`,
+    stopped: `Stopped ${agent === undefined ? "the run" : whose}`,
+    restricted: `Restricted Mode blocked ${whose}`,
+  }[outcome];
+}
+
+// "Atlas didn't reply in "Plan day 2"". What happened comes first and the
+// thread last, so a clamp cuts only the thread's name.
+function runNoticeTitle(what: string, thread: string): string {
   if (!thread) return what;
   return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
 }
 
-// A run that failed to start says why and what to do next.
-// Only a missing PATH runtime recommends installing Node.js.
-// Other outcomes have no body. A body holds no control characters,
-// or the notice store would refuse it.
-function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome, nodeAvailable?: ReplyRuntimeAvailability): string {
-  if ((outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available) {
+// Why a run didn't reply, as one sentence: the notice's body and the second
+// half of the line under the message. A missing PATH runtime says to install
+// Node.js. A body holds no control characters, or the notice store would
+// refuse it.
+function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): string {
+  if (needsNodeJs(outcome, nodeAvailable)) {
     return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
   }
-  if (outcome !== "not-started" || !run.failureReason) return "";
-  const reason = [...run.failureReason
-    .slice(`${RUNNER_START_FAILURE}: `.length)
-    .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
-    .trim()];
-  return reason.length <= NOTICE_BODY_MAX_CHARS
-    ? reason.join("")
-    : `${reason.slice(0, NOTICE_BODY_MAX_CHARS - 1).join("")}…`;
+  switch (outcome) {
+    case "failed":
+      return "Its run ended with an error.";
+    case "no-reply":
+      return "Its run ended without a reply.";
+    case "timed-out": {
+      const minutes = /^\d+/u.exec(run.failureReason?.slice(`${RUN_TIMEOUT} `.length) ?? "")?.[0];
+      return minutes ? `It ran past its ${minutes}-minute limit.` : "It ran past its time limit.";
+    }
+    case "restarted":
+      return "dohc restarted during its run.";
+    case "quit":
+      return "dohc quit during its run.";
+    case "not-started": {
+      const detail = (run.failureReason ?? "")
+        .slice(`${RUNNER_START_FAILURE}: `.length)
+        .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
+        .trim();
+      const lead = "It couldn't start: ";
+      if (!detail) return "It couldn't start.";
+      return lead + cutText(detail, NOTICE_BODY_MAX_CHARS - lead.length);
+    }
+  }
+}
+
+function needsNodeJs(outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): boolean {
+  return (outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available;
 }
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -125,8 +163,7 @@ const SELF_TEST_MARKER_PREFIX = "dohc-runner-self-test:";
 const SELF_TEST_OPENING = "Reply here to check the agent connection.";
 
 function clip(name: string): string {
-  const chars = [...name];
-  return chars.length <= NOTICE_NAME_MAX_CHARS ? name : `${chars.slice(0, NOTICE_NAME_MAX_CHARS - 1).join("")}…`;
+  return cutText(name, NOTICE_NAME_MAX_CHARS);
 }
 
 export interface ChatDispatchWorkspace {
@@ -159,6 +196,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // WorkspaceRestrictedError in Restricted Mode; the answer is a synchronous
   // check that trust still holds, for the spawn itself.
   assertMayStartAgent(workspace: ChatDispatchWorkspace): Promise<() => void>;
+  // The version an agent's tool reports to --version, or null.
+  agentToolVersion(executable: string): Promise<string | null>;
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
@@ -188,7 +227,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // at the run's chain depth, for the person main names.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch } | null,
+    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch; secret: string } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -200,7 +239,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
     runId: string;
   }): boolean | Promise<boolean>;
   hasPendingRunMessageLink?(workspace: ChatDispatchWorkspace, runId: string): boolean;
-  listAppQuitRecoveries?(
+  listFailedRunRecoveries?(
     workspace: ChatDispatchWorkspace,
     threadId?: string,
   ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
@@ -215,11 +254,21 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   };
 }
 
+// A failed run shown under its request, with or without Try again.
+interface StoppedRun {
+  run: AgentRunRecord;
+  outcome: FailedOutcome;
+  attemptCount?: number;
+  // Whether its attempts and posted replies allow the request to run again.
+  retryable: boolean;
+}
+
 interface ChatDispatchThreadState {
   liveRunId: string | null;
+  liveTriggerMessageId: string | null;
   pendingCount: number;
   paused: boolean;
-  stoppedRun?: ChatDispatchStoppedRun;
+  failedRun?: ChatDispatchFailedRun;
 }
 
 interface LiveRun {
@@ -277,6 +326,12 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 // A custom command replies through the dohc CLI.
 type ReplyForm = "argument" | "mcp";
 
+// A new secret for each run. Only the run's process gets it, so only its
+// requests are the run's.
+function runSecret(): string {
+  return randomBytes(32).toString("hex");
+}
+
 function replyFormFor(tool: AgentLaunchProfile["tool"] | undefined): ReplyForm {
   return tool ? "mcp" : "argument";
 }
@@ -293,15 +348,32 @@ function replyToolCall(threadId: string, runId: string): string {
 // (agentToolCatalog.ts), and a Codex run doesn't trust the workspace
 // (codexRunConfig.ts). Both leave out the workspace's instruction files.
 // Both tools' profiles refuse anything that needs approval, so the run hears
-// it before a refusal turns its reply into an explanation.
-function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
+// it before a refusal turns its reply into an explanation. A file chip,
+// `@[path]`, opens from chat; nothing in a message opens a folder,
+// Collection, or chat yet, so the run names those. Only a run with every dohc
+// tool hears of them.
+function buildRunnerPrompt(
+  threadMarkdown: string,
+  threadId: string,
+  runId: string,
+  tool: AgentLaunchProfile["tool"] | undefined,
+  dohcTools: RunDohcTools,
+): string {
   const form = replyFormFor(tool);
   const instructionsFile = tool === "claude"
     ? "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them. "
     : tool === "codex"
       ? "If the workspace has an AGENTS.override.md file at its root, read it first and follow it. If it has none, do the same with an AGENTS.md file there. "
       : "";
-  const approvals = tool ? "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it, and if a refusal kept you from part of the request, say so in one line. " : "";
+  const workspaceTools = form === "mcp" && dohcTools === "all"
+    ? "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server. "
+    : "";
+  const approvals = form === "mcp"
+    ? "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it. "
+    : "";
+  const report = form === "mcp"
+    ? "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen. "
+    : "Report outcomes, not tool logs. ";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
@@ -312,7 +384,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
 
 ## Report contract
 
-${instructionsFile}Work on the request represented by this thread. ${approvals}Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. ${workspaceTools}${approvals}${report}${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -477,6 +549,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runId: string,
   ): boolean {
     return options.hasPendingRunMessageLink?.(workspace, runId) === true;
+  }
+
+  // A reply whose link is still being written counts as posted.
+  async function runPosted(workspace: ChatDispatchWorkspace, runId: string): Promise<boolean> {
+    return runMessageLinkPending(workspace, runId) || (await options.dispatchStoreFor(workspace)
+      .listRunMessages(workspace.workspaceId, runId, durableDispatchRequest)).length > 0;
   }
 
   function workspaceProcessReserved(workspace: ChatDispatchWorkspace): boolean {
@@ -670,6 +748,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!live.child.hasExited()) return false;
     await clearLiveAttribution(live);
     liveRuns.delete(live.workspace.workspaceId);
+    // Try again waits for the process to exit, so read the run again.
+    notifyRunUpdated(live.workspace, live.claim.run.threadId);
     await releaseLiveWorkspace(live);
     return true;
   }
@@ -727,6 +807,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (run.endedAtMs === undefined) return;
         const saved = savedRunOutcome(run);
         let outcome: RunOutcome;
+        let reply: string | undefined;
         if (saved !== "exited") {
           outcome = saved;
         } else if (run.failureHandled) {
@@ -738,13 +819,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         } else {
           const linked = await dispatch.listRunMessages(workspaceId, runId, durableDispatchRequest);
           outcome = linked.length === 0 ? "no-reply" : "finished";
+          reply = linked.at(-1);
           // After a restart, no in-memory check is left to mark it failed.
           if (outcome === "no-reply") await markRunFailureHandled(workspace, run);
         }
         // A request Restricted Mode stopped whose requeue landed before
         // dohc could drop the notice is back in line, so the notice is stale.
         if (outcome !== "restricted" || !(await backInLine(dispatch, run))) {
-          await noticeRun(workspace, run, outcome);
+          await noticeRun(workspace, run, outcome, reply);
         }
       }
       await notices.owed.remove(workspaceId, runId);
@@ -782,35 +864,86 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  // Tells this computer's person how a run ended.
+  // Tells this computer's person how a run ended. A finished run's notice
+  // names one of the agent's replies, so a chat showing it can skip the notice.
   async function noticeRun(
     workspace: ChatDispatchWorkspace,
     run: AgentRunRecord,
     outcome: RunOutcome,
+    reply?: string,
   ): Promise<void> {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
-    let nodeAvailable: ReplyRuntimeAvailability | undefined;
-    if (outcome === "failed" || outcome === "no-reply") {
-      nodeAvailable = await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath));
-      if (nodeAvailable?.source === "path" && !nodeAvailable.available && outcome === "failed") {
-        const replies = await options.dispatchStoreFor(workspace)
-          .listRunMessages(workspaceId, run.runId, durableDispatchRequest);
-        if (replies.length > 0) nodeAvailable = undefined;
+    const agent = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId);
+    const words: { lead: string; reason: string; nextStep?: ChatDispatchNextStep } = isFailedOutcome(outcome)
+      ? await failureWords(workspace, run, outcome, agent)
+      : { lead: endedRunTitle(outcome, agent?.name), reason: "" };
+    // The toast and Notices row end with the step under the message, worded
+    // for the chat it shows in. Only a very long agent name reaches the cut.
+    let body = words.reason;
+    if (words.nextStep) {
+      try {
+        const { channel } = await options.chatStoreFor(workspace).getThread({ workspaceId, threadId: run.threadId });
+        const step = nextStepWords(words.nextStep, channel?.kind === "agent" ? channel.agentId : undefined);
+        body = cutText(`${words.reason} ${step}`, NOTICE_BODY_MAX_CHARS);
+      } catch (error) {
+        reportError(error);
       }
     }
     await options.runNotices.post({
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(
-        outcome,
-        await threadTitle(workspace, run.threadId),
-        (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name,
-      ),
-      body: runNoticeBody(run, outcome, nodeAvailable),
-      target: { thread: run.threadId, run: run.runId },
+      title: runNoticeTitle(words.lead, await threadTitle(workspace, run.threadId)),
+      body,
+      target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
     });
+  }
+
+  // How a run without its reply reads: "Nova didn't reply", or "Nova
+  // stopped before finishing" once it posted, and why. A missing Node.js is
+  // the reason only for a run that posted nothing, since one that posted
+  // found it.
+  async function failureWords(
+    workspace: ChatDispatchWorkspace,
+    run: AgentRunRecord,
+    outcome: FailedOutcome,
+    agent: Agent | undefined,
+    attemptCount?: number,
+  ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchNextStep }> {
+    const posted = outcome !== "no-reply" && outcome !== "not-started" && await runPosted(workspace, run.runId);
+    const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
+      ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
+      : undefined;
+    const words = {
+      lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
+      reason: runFailureReason(run, outcome, nodeAvailable),
+    };
+    // A run that couldn't start or needs Node.js has its own next step.
+    if (outcome === "not-started" || needsNodeJs(outcome, nodeAvailable)) return words;
+    // Try again stays until the request has had two attempts, unless
+    // running it again would repeat what it posted.
+    if (canRepeatFailedRun(outcome, posted)) {
+      let attempts = attemptCount;
+      try {
+        attempts ??= (await options.listFailedRunRecoveries?.(workspace, run.threadId))
+          ?.find((each) => each.run.runId === run.runId)?.attemptCount;
+      } catch (error) {
+        reportError(error);
+        return words;
+      }
+      if (attempts === undefined || attempts < 2) return words;
+    }
+    // Otherwise the person asks the agent again, in a message the chat
+    // words, with the @handle the composer inserts. A message won't wake an
+    // agent that's gone or an agent dohc starts that's off, so its step is in
+    // Settings, in the order its DM checks them, by the full name its DM and
+    // Settings show. An agent you run reads the message once it's connected.
+    const handle = agent ? handleForName(agent.name) : "";
+    const nextStep: ChatDispatchNextStep = !agent ? { kind: "add-agent" }
+      : agent.launch && !agent.enabled ? { kind: "turn-on", name: agent.name }
+      : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
+    return { ...words, nextStep };
   }
 
   // The thread's title, read from its own channel's threads. An empty title
@@ -930,36 +1063,55 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       // A claim from before a lost response can name an agent turned off since.
       if (!agent) throw new Error("this agent is off or no longer set up");
+      const profile = launchProfile(agent.launch);
+      // dohc can't hold a person's own command to the reply tool, so an
+      // automation starts only Claude Code or Codex.
+      if (!profile && claim.chainDepth > 0) throw new Error("an automation can start only an agent that uses Claude Code or Codex");
+      if (profile?.tool === "claude" && !supportsAgentProfile("claude", await options.agentToolVersion(profile.executable))) {
+        throw new Error(`update Claude Code to ${CLAUDE_MIN_VERSION} or later to use this agent`);
+      }
+      const secret = runSecret();
       await options.setRunAttribution(workspace, {
         agentId: agent.id,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
         dispatch: "run",
+        secret,
       });
+      // Only people's own messages, which only the owner's send records,
+      // start a run at depth 0. A run an automation started gets the reply
+      // tool and can't write.
+      const dohcTools: RunDohcTools = claim.chainDepth === 0 ? "all" : "reply";
       const markdown = await buildRunnerThreadContext({
         dispatchStore: dispatch,
         store: options.chatStoreFor(workspace),
         workspaceId: workspace.workspaceId,
         threadId: claim.run.threadId,
         askingMessageId: claim.run.triggerMessageId,
-        // An MCP-form run's server offers only the reply tool, so it cannot
-        // read what was left out.
-        ...(replyFormFor(launchProfile(agent.launch)?.tool) === "argument"
+        ...(replyFormFor(profile?.tool) === "argument"
           ? { readEarlier: `dohc chat show ${claim.run.threadId} --peek` }
-          : {}),
+          : dohcTools === "all" ? { readEarlier: "dohc_read_chat" } : {}),
       });
       if (stopped) {
         throw new Error("dohc is quitting before the runner can start.");
       }
-      const child = spawnConfiguredRunner({
+      const child = await spawnConfiguredRunner({
         rootPath: workspace.rootPath,
         threadId: claim.run.threadId,
         runId: claim.run.runId,
+        agentName: agent.name,
         logPath,
         command: launchCommand(agent.launch),
-        profile: launchProfile(agent.launch),
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, launchProfile(agent.launch)?.tool),
-        assertMayStart,
+        profile,
+        dohcTools,
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, profile?.tool, dohcTools),
+        runSecret: secret,
+        // A reply-only Codex run checks its servers first, and dohc can start
+        // quitting meanwhile.
+        assertMayStart: () => {
+          if (stopped) throw new Error("dohc is quitting before the runner can start.");
+          assertMayStart();
+        },
       });
       const timeout = setTimeout(() => {
         void enqueue(workspace.workspaceId, () => timeOutLiveRun(live));
@@ -1075,10 +1227,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (failedCount === 0) continue;
       notifyRunUpdated(workspace, threadId);
       const agent = agents.find(({ id }) => id === agentId);
+      // An agent you run reads its requests itself, so nothing is wrong to tell.
+      if (agent && !agent.launch) continue;
       const message = !agent
         ? "That agent isn't set up on this computer. Set it up in Settings → Agents."
-        : agent.launch ? `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`
-          : `${clip(agent.name)} has no chat runner set up. Set one up in Settings → Agents.`;
+        : `${clip(agent.name)}'s chat runner is off. Turn it on in Settings → Agents.`;
       try {
         options.onDispatchNotice?.(workspace, { reason: "no-runner", threadId, message });
       } catch (error) {
@@ -1109,10 +1262,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         ),
       ),
     );
-    // The engine claims the oldest request in a thread that is not paused,
-    // and the claim records the listed request's agent's command. A request
-    // written since the list was read can win the claim. Its own agent still
-    // runs, but the run records the listed agent's command.
+    // Scope each claim to the agent whose command it records.
     const next = pending.find(({ threadId }) => pauseStates.get(threadId)?.paused !== true);
     const nextAgent = (next && runnable.get(next.agentId)) ?? [...runnable.values()][0]!;
     if (dispatch.resolveUncertainClaim) {
@@ -1122,6 +1272,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         uncertainClaim = await dispatch.resolveUncertainClaim(
           workspace.workspaceId,
           {
+            agentId: nextAgent.id,
             command: launchCommand(nextAgent.launch),
             logPath: logPathTemplate(),
           },
@@ -1205,6 +1356,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       let claim: AgentDispatchClaim | null;
       try {
         claim = await dispatch.claimNextPending(workspace.workspaceId, {
+          agentId: candidate.agentId,
           command: launchCommand(runnable.get(candidate.agentId)!.launch),
           logPath: logPathTemplate(),
         });
@@ -1218,19 +1370,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runReservations.delete(workspace.workspaceId);
         if (bypassBudget) budgetBypassThreads.add(bypassKey);
         await releaseWorkspaceLease(releaseWorkspace);
-        return;
+        continue;
       }
       await startClaim(workspace, claim, runnable.get(claim.run.agentId), releaseWorkspace, assertMayStart);
       return;
     }
   }
 
-  // Each agent dohc can start has its own chat. A background pass must not
-  // create a chat for an agent that is off. One agent's chat that cannot be
-  // made does not keep the others from theirs, and a later scan tries again.
+  // Each agent dohc starts and each agent you run has its own chat. A
+  // background pass must not create a chat for an agent dohc starts that is
+  // off. One agent's chat that cannot be made does not keep the others from
+  // theirs, and a later scan tries again.
   async function ensureAgentChats(workspace: ChatDispatchWorkspace): Promise<void> {
     for (const agent of await options.readDispatchAgents()) {
-      if (!agent.enabled || !agent.launch) continue;
+      if (agent.launch && !agent.enabled) continue;
       try {
         await options.chatStoreFor(workspace).ensureAgentChannel({
           workspaceId: workspace.workspaceId,
@@ -1266,8 +1419,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       await settleRunNotice(workspace, claim.run.runId);
     }
     const recoveries =
-      (await options.listAppQuitRecoveries?.(workspace)) ?? [];
+      (await options.listFailedRunRecoveries?.(workspace)) ?? [];
     for (const recovery of recoveries) {
+      const outcome = savedRunOutcome(recovery.run);
+      if (outcome !== "quit" && outcome !== "restarted") continue;
       // A handled run's notice is already owed, by this sweep or an earlier
       // one. A stopped run stays in this list until someone tries it again.
       if (recovery.run.failureHandled) continue;
@@ -1573,27 +1728,64 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
-    const [pauseState, pending, stopped] = await Promise.all([
+    const pendingRead = Promise.resolve(dispatch.listPending(workspaceId));
+    const [pauseState, pending, failed] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
-      dispatch.listPending(workspaceId),
-      stoppedRunForThread(workspace, threadId),
+      pendingRead,
+      failedRunForThread(workspace, threadId, pendingRead),
     ]);
     const live = liveRuns.get(workspaceId);
+    const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
     return {
-      liveRunId:
-        live?.claim.run.threadId === threadId && live.finalized === false
-          ? live.claim.run.runId
-          : null,
+      liveRunId: running?.runId ?? null,
+      liveTriggerMessageId: running?.triggerMessageId ?? null,
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
-      ...(stopped ? { stoppedRun: stopped.stopped } : {}),
+      ...(failed ? { failedRun: failed } : {}),
+    };
+  }
+
+  // The failed run's words for the line under its message. The same lookup
+  // decides whether Try again can put this request back in line.
+  async function failedRunForThread(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+    pending: Promise<readonly AgentDispatchRecord[]>,
+  ): Promise<ChatDispatchFailedRun | null> {
+    const dispatch = options.dispatchStoreFor(workspace);
+    const [stopped, latest] = await Promise.all([
+      stoppedRunForThread(workspace, threadId),
+      dispatch.latestRunForThread(workspace.workspaceId, threadId),
+    ]);
+    let found = stopped;
+    if (!found?.retryable && latest?.endedAtMs !== undefined) {
+      const outcome = savedRunOutcome(latest);
+      // Completed runs that posted are absent from the recovery list,
+      // but their failure still belongs under the message they answered.
+      if (outcome !== "exited" && isFailedOutcome(outcome) &&
+          outcome !== "quit" && outcome !== "restarted" &&
+          !(await pending).some((each) => each.triggerMessageId === latest.triggerMessageId && each.agentId === latest.agentId)) {
+        if (!canRepeatFailedRun(outcome, await runPosted(workspace, latest.runId))) found = { run: latest, outcome, retryable: false };
+      }
+    }
+    if (!found) return null;
+    const { run, outcome, retryable } = found;
+    const agent = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId);
+    const { lead, reason, nextStep } = await failureWords(workspace, run, outcome, agent, found.attemptCount);
+    return {
+      runId: run.runId,
+      triggerMessageId: run.triggerMessageId,
+      words: `${lead}. ${reason}`,
+      ...(nextStep ? { nextStep } : {}),
+      retryable,
     };
   }
 
   // The one place that decides which run Try again can run again: the
-  // conversation's newest run that a quit or restart stopped, while it is
-  // still its agent's latest run there and its request is still stopped.
+  // conversation's newest failed run, while it is still its agent's latest
+  // run there and its request is still stopped. Posted replies prevent a
+  // second run unless dohc's quit or restart stopped the first one.
   // Another agent's run in the conversation doesn't hide it, and neither
   // does a run that has used both its attempts. Once the request is back in
   // line, the conversation shows it waiting instead. Runs live in this
@@ -1601,32 +1793,32 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function stoppedRunForThread(
     workspace: ChatDispatchWorkspace,
     threadId: string,
-  ): Promise<{ stopped: ChatDispatchStoppedRun; agentId: string } | null> {
-    const recoveries = (await options.listAppQuitRecoveries?.(workspace, threadId)) ?? [];
+  ): Promise<StoppedRun | null> {
+    const recoveries = (await options.listFailedRunRecoveries?.(workspace, threadId)) ?? [];
     const dispatch = options.dispatchStoreFor(workspace);
-    let exhausted: { stopped: ChatDispatchStoppedRun; agentId: string } | null = null;
+    const checkedAgents = new Set<string>();
+    let exhausted: StoppedRun | null = null;
     for (const { run, attemptCount } of recoveries.toReversed()) {
-      const ending = savedRunOutcome(run);
-      if (ending !== "restarted" && ending !== "quit") continue;
+      if (checkedAgents.has(run.agentId)) continue;
+      checkedAgents.add(run.agentId);
+      const saved = savedRunOutcome(run);
+      const outcome = saved === "exited" && run.failureHandled && !runMessageLinkPending(workspace, run.runId)
+        ? "no-reply" : saved;
+      if (outcome === "exited" || !isFailedOutcome(outcome)) continue;
       const latest = await dispatch.latestRunForThread(workspace.workspaceId, threadId, run.agentId);
       if (latest?.runId !== run.runId) continue;
-      const found = {
-        stopped: {
-          runId: run.runId,
-          triggerMessageId: run.triggerMessageId,
-          ending,
-          retryable: attemptCount < 2,
-        },
-        agentId: run.agentId,
-      };
-      if (found.stopped.retryable) return found;
+      // A timed-out run's process can still post until it exits.
+      const running = liveRuns.get(workspace.workspaceId)?.claim.run.runId === run.runId;
+      const retryable = attemptCount < 2 && !running && canRepeatFailedRun(outcome, await runPosted(workspace, run.runId));
+      const found: StoppedRun = { run, outcome, attemptCount, retryable };
+      if (found.retryable) return found;
       exhausted ??= found;
     }
     return exhausted;
   }
 
-  // Try again on a stopped run puts its request back in line. False when
-  // the run can't be tried again any more, as after a second press.
+  // Try again puts an eligible failed run's request back in line. False
+  // when its attempts or posted replies prevent another run.
   async function retryStoppedRun(
     workspaceId: string,
     threadId: string,
@@ -1636,10 +1828,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace) throw new Error("This workspace is not open. Open it again.");
       const found = await stoppedRunForThread(workspace, threadId);
-      if (found?.stopped.runId !== runId || !found.stopped.retryable) return false;
+      if (found?.run.runId !== runId || !found.retryable) return false;
       // A request for an agent this computer can't start would fail as soon
       // as it was back in line, so it stays stopped and the person learns why.
-      const agent = (await options.readDispatchAgents()).find(({ id }) => id === found.agentId);
+      const agent = (await options.readDispatchAgents()).find(({ id }) => id === found.run.agentId);
       if (!agent?.enabled || !agent.launch) {
         const why = !agent
           ? "That agent is not set up on this computer."
@@ -1649,8 +1841,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const requeued = (await options.requeueFailedTrigger?.({
         workspaceId,
         ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
-        triggerMessageId: found.stopped.triggerMessageId,
-        agentId: found.agentId,
+        triggerMessageId: found.run.triggerMessageId,
+        agentId: found.run.agentId,
         runId,
       })) === true;
       if (!requeued) return false;
@@ -1666,7 +1858,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<RunnerSelfTestResult> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
-    if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+    if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
     if (
       workspaceProcessReserved(workspace)
     ) {
@@ -1681,6 +1873,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);
       if (!assertMayStart) return { ok: false, detail: SELF_TEST_RESTRICTED_DETAIL };
+      const profile = launchProfile(agent.launch);
+      if (profile?.tool === "claude" && !supportsAgentProfile("claude", await options.agentToolVersion(profile.executable))) {
+        return { ok: false, detail: `Update Claude Code to ${CLAUDE_MIN_VERSION} or later to use this agent.` };
+      }
 
       // A self-test spawns a real runner and writes a scratch thread, so it
       // takes the same run lease and engine gate as a claimed run. A workspace
@@ -1733,7 +1929,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return {
             ok: false,
             detail: shuttingDown
-              ? "Agent dispatch is stopping."
+              ? "dohc is quitting."
               : "A runner became active before the self-test could start.",
           };
         }
@@ -1743,29 +1939,38 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           title: SELF_TEST_THREAD_TITLE,
           body: SELF_TEST_OPENING,
         });
-        if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+        if (shuttingDown) return { ok: false, detail: "dohc is quitting." };
         if (liveRuns.has(workspaceId) || runReservations.has(workspaceId) || selfTests.has(workspaceId) || options.runSlotOccupied?.(workspace) === true) {
           return { ok: false, detail: "A runner became active before the self-test could start." };
         }
         // The same reply form as a real run, so passing proves replies work.
-        const prompt = replyFormFor(launchProfile(agent.launch)?.tool) === "mcp"
+        const prompt = replyFormFor(profile?.tool) === "mcp"
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
           : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
+        const secret = runSecret();
         await options.setRunAttribution(workspace, {
           agentId: agent.id,
           agentRunId: runId,
           depth: 0,
           dispatch: "self-test",
+          secret,
         });
-        const child = spawnConfiguredRunner({
+        const child = await spawnConfiguredRunner({
           rootPath: workspace.rootPath,
           threadId,
           runId,
+          agentName: agent.name,
           logPath,
           command,
-          profile: launchProfile(agent.launch),
+          profile,
+          // The self-test checks only that the reply arrives.
+          dohcTools: "reply",
           prompt,
-          assertMayStart,
+          runSecret: secret,
+          assertMayStart: () => {
+            if (shuttingDown) throw new Error("Agent dispatch is stopping.");
+            assertMayStart();
+          },
         });
         return await new Promise<RunnerSelfTestResult>((resolveResult) => {
           const complete = async (result: RunnerSelfTestResult) => {
@@ -1817,17 +2022,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             if (!test || test.settled) return;
             try {
               const messages = await chat.listMessages({ workspaceId, threadId });
-              if (
-                messages.some(
-                  (message) =>
-                    message.author.kind === "agent" &&
-                    message.body.trim() === marker,
-                )
-              ) {
+              const replies = messages.filter(
+                (message) => message.author.kind === "agent" && message.body.trim() === marker,
+              );
+              // Only the run's own reply carries its agent. A reply that lost
+              // the run's secret is the unnamed agent's, so the check ends there.
+              if (replies.some((message) => message.authorAgentId === agent.id)) {
                 await complete({
                   ok: true,
                   detail:
                     "Runner self-test passed. The harness reported through dohc chat.",
+                });
+                return;
+              }
+              if (replies.length > 0) {
+                await complete({
+                  ok: false,
+                  unconfirmed: true,
+                  detail: `${agent.name}'s Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in ${agent.name}'s details.`,
+                  logPath,
                 });
                 return;
               }

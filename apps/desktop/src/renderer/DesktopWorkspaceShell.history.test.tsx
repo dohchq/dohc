@@ -24,8 +24,9 @@ describe("history page", () => {
     const message = "dohc could not read file changes for this workspace.";
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(message);
-    expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
     expect(toast.textContent).not.toContain("Restart");
+    await userEvent.click(within(toast).getByRole("button", { name: "Details" }));
+    expect(within(toast).getByRole("button", { name: "Copy details" })).toBeTruthy();
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByRole("dialog", { name: "Notices" }).textContent).toContain(message);
     await userEvent.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
@@ -114,6 +115,8 @@ describe("history page", () => {
     };
     const decision = deferred<typeof FAILED_HISTORY_STATUS>();
     const bridge = makeBridge(Promise.resolve(null));
+    // No saved layout, so the History click below stays the shown view.
+    bridge.getWorkspaceUiState = vi.fn(async () => null);
     bridge.openWorkspace = vi.fn(() => decision.promise);
     // Main's answer while the build runs: the entry exists, and its recorder
     // fields are still the defaults it registered before awaiting the build.
@@ -350,7 +353,7 @@ describe("history page", () => {
     renderShell(bridge);
     await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
-    expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
+    expect((await screen.findByTestId("engine-moment-summary")).textContent).toBe("Renamed to b.md");
     await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
     await user.click(screen.getByTestId("engine-moment-open"));
     expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
@@ -384,7 +387,7 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-history-load-more"));
     expect(await screen.findByText("Older admitted edit")).toBeTruthy();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(bridge.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: timelineCursor(80) }));
   });
 
@@ -491,7 +494,9 @@ describe("history page", () => {
     }
   });
 
-  it("still says so when capture has failed and the newest-moment read stays updating", async () => {
+  // History paused already says capture failed, with its own Try again, so
+  // the newest-moment read that stays updating adds no row of its own.
+  it("shows only History paused when capture has failed and the newest-moment read stays updating", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { bridge, state } = freshnessShell();
@@ -501,14 +506,16 @@ describe("history page", () => {
       state.queued.push("updating", "updating", "updating", "updating", "updating");
       act(() => bridge.emitWorkspaceActivity());
       await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
-      const toast = await screen.findByTestId("workspace-shell-error");
-      expect(toast.textContent).toContain("dohc could not check whether open files changed.");
-      expect(toast.textContent).toContain("Recent changes are still being added to History.");
+      await waitFor(() => expect(state.queued).toHaveLength(0));
+      await act(async () => {});
+      expect(screen.getByTestId("workspace-shell-error").textContent)
+        .toContain("Your files still save normally. Open files may not show changes made outside dohc until History records again.");
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       const notices = screen.getByRole("dialog", { name: "Notices" });
-      expect(notices.textContent).toContain("dohc could not check whether open files changed.");
-      await userEvent.click(within(notices).getByRole("button", { name: "Try again" }));
-      await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+      within(notices).getByTestId("notice-history-capture-failed");
+      expect(notices.textContent).not.toContain("dohc could not check whether open files changed.");
+      expect(notices.textContent).not.toContain("Recent changes are still being added to History.");
+      expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
     } finally {
       vi.useRealTimers();
     }
@@ -558,8 +565,8 @@ describe("history page", () => {
     await act(async () => {});
     const readsInB = bridge.readWorkspaceText.mock.calls.length;
 
-    // A's held read answers `updating` under a failed capture: in A it would
-    // retry, then report. In B it does nothing at all.
+    // A's held read answers `updating`. In A it would retry. In B it does
+    // nothing at all.
     latestMomentOrder = 9;
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -572,7 +579,8 @@ describe("history page", () => {
       vi.useRealTimers();
     }
     expect(readsOfA).toBe(readsOfABeforeAnswer);
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    // B's own paused capture may toast; A's failure may not.
+    expect(screen.queryByTestId("workspace-shell-error")?.textContent ?? "").not.toContain("dohc could not check whether open files changed.");
     expect(bridge.readWorkspaceText.mock.calls.length).toBe(readsInB);
   });
 
@@ -610,14 +618,27 @@ describe("history page", () => {
     );
     expect(hidden.textContent).not.toContain("TOML parse error");
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
+
+    // Open goes to the file to fix, and a failure to open it is a toast.
+    const opened = "dohc could not open /w/.dohc/visibility.toml. No application is associated with this file. Open the file in a text editor.";
+    bridge.openWorkspacePolicyFile = vi.fn(async () => {
+      throw new Error(`Error invoking remote method 'desktop:open-workspace-policy-file': Error: ${opened}`);
+    });
+    await user.click(within(hidden).getByRole("button", { name: "Open visibility.toml" }));
+    expect(bridge.openWorkspacePolicyFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE.workspaceId,
+      file: ".dohc/visibility.toml",
+    });
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(opened);
+    expect(bridge.listHistory).toHaveBeenCalledOnce();
 
     await user.click(within(hidden).getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
     expect(screen.queryByTestId("history-policy-hidden")).toBeNull();
   });
 
-  it("reports a refused restore in dohc's words, and Try again asks before it restores", async () => {
+  it("reports a refused restore in dohc's words, and Try again reads the change before it restores", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const moment = historyMoment("m-1", "Wrote the plan");
     bridge.listHistory = vi.fn(async () => historyPage([moment]));
@@ -634,7 +655,6 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
 
     const toast = await screen.findByTestId("workspace-shell-error");
     // What failed is the title and what to fix is the body, so the title's
@@ -644,14 +664,13 @@ describe("history page", () => {
     expect(toast.textContent).not.toContain("TOML parse error");
     expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
 
-    // Try again reads the change again, then opens its confirm dialog
-    // instead of restoring.
+    // Try again reads the change again, then restores it.
     const readsBefore = bridge.readEngineMoment.mock.calls.length;
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
-    expect(await screen.findByTestId("engine-diff-restore-confirm")).toBeTruthy();
-    expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore);
-    await user.click(screen.getByTestId("engine-diff-confirm-restore"));
     await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
+    expect(bridge.readEngineMoment.mock.invocationCallOrder[readsBefore]).toBeLessThan(
+      restoreEngineMomentFile.mock.invocationCallOrder[1]!,
+    );
     expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
       "Restored the earlier state. Undo restore is available here.",
     );
@@ -659,7 +678,7 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("keeps a hidden change's tab nameless and asks nothing when Try again finds it hidden", async () => {
+  it("keeps a hidden change's tab nameless and restores nothing when Try again finds it hidden", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const moment = historyMoment("m-1", "Wrote the plan");
     const blocked = {
@@ -684,7 +703,6 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     await user.click(await screen.findByTestId("engine-moment-open"));
     await user.click(await screen.findByTestId("engine-diff-restore-file"));
-    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
     const toast = await screen.findByTestId("workspace-shell-error");
     const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
     expect(tab.textContent).toContain("Diff: plan.md");
@@ -703,7 +721,6 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore));
     await act(async () => {});
     expect(screen.getByTestId("engine-diff-hidden")).toBeTruthy();
-    expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
     expect(tab.textContent).toContain("History change");
     expect(tab.textContent).not.toContain("plan.md");
     expect(restoreEngineMomentFile).toHaveBeenCalledOnce();
@@ -840,7 +857,8 @@ describe("history page", () => {
       const line = await screen.findByTestId("history-paused");
       expect(line.textContent).toBe("History paused");
       expect(screen.queryByTestId("history-updating")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      // The panel's line offers no Try again; the paused capture's toast does.
+      expect(screen.queryAllByRole("button", { name: "Try again" }).filter(button => button.closest("[data-dohc-toasts]") === null)).toHaveLength(0);
 
       bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
       act(() => bridge.emitWorkspaceActivity());
@@ -1886,14 +1904,14 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
 
     await act(async () => {
       first.resolve(historyPage([]));
       await first.promise;
     });
-    expect(await screen.findByText("No changes yet")).toBeTruthy();
+    expect(await screen.findByText("No changes yet.")).toBeTruthy();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
   });
 
@@ -1916,7 +1934,7 @@ describe("history page", () => {
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     // The lanes share one banner, so the sentence has to say which one went
     // stale — the cause alone names none of them — and it has to offer the way
     // back that the rendered timeline has just hidden.
@@ -2061,7 +2079,7 @@ describe("history page", () => {
   // recovery read fails, and the switch's own refresh fails too. The surface
   // then has no page and no way to get one on its own — and it used to answer
   // that by telling a workspace with real history that it had no changes.
-  it("never says 'No changes yet' for a read that failed", async () => {
+  it("never says 'No changes yet.' for a read that failed", async () => {
     const stranded = deferred<TimelinePage>();
     const retry = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
@@ -2145,7 +2163,7 @@ describe("history page", () => {
 
     // No page, and no read on the way. The surface says what happened.
     await waitFor(() => expect(screen.getByTestId("history-load-failed")).toBeTruthy());
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(screen.queryByText("Wrote the note in the draft")).toBeNull();
     expect(screen.getByTestId("history-load-failed").textContent).toContain(
       "dohc could not load this workspace's history.",
@@ -2238,7 +2256,7 @@ describe("history page", () => {
     await waitFor(() =>
       expect(screen.queryByText("Wrote the note in the draft")).toBeNull(),
     );
-    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(screen.queryByText("No changes yet.")).toBeNull();
     expect(await screen.findByTestId("history-load-failed")).toBeTruthy();
   });
 
@@ -2617,6 +2635,7 @@ describe("history page", () => {
         mergedFileCount: 1,
         unchangedFileCount: 0,
         conflictCount: 0,
+        replacedProtectedPaths: [],
         conflicts: [],
         nextAfterConflictId: null,
       })),
@@ -3437,6 +3456,9 @@ describe("shared view moment-diff tab", () => {
 
     await screen.findByTestId("engine-moment-diff-page");
     expect(bridge.readEngineMoment).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId, momentId: "m-1" });
+    // More still opens the file, and holds no way to restore.
+    await userEvent.setup().click(screen.getByTestId("engine-diff-more"));
+    expect(screen.getByTestId("engine-diff-open-file")).toBeTruthy();
     for (const control of ["engine-diff-restore-file", "engine-diff-shared-restore", "engine-diff-stop-and-restore", "engine-diff-undo-restore"]) {
       expect(screen.queryByTestId(control)).toBeNull();
     }

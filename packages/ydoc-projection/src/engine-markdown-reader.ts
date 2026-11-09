@@ -1,4 +1,5 @@
 import {digest} from 'lib0/hash/sha256'
+import {LIVE_MARKDOWN_MAX_BYTES} from '@dohc/live-session-contract/limits'
 import {updateYFragment, yXmlFragmentToProseMirrorRootNode} from 'y-prosemirror'
 import * as Y from 'yjs'
 import {readMarkdownSourceWitness} from './artifact-markdown.js'
@@ -8,7 +9,7 @@ import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, m
 import {createLiveMarkdownJournalValidator, isProseMirrorSchemaError, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import type {OrderedLiveUpdateCutPolicy} from './orderedLiveUpdateCut.js'
 
-const MAX_SOURCE_BYTES = 2 * 1024 * 1024
+const MAX_SOURCE_BYTES = LIVE_MARKDOWN_MAX_BYTES
 const MAX_UPDATE_BYTES = 20 * 1024 * 1024
 const utf8 = new TextEncoder()
 const sha = (bytes: Uint8Array) => Array.from(digest(bytes), byte => byte.toString(16).padStart(2, '0')).join('')
@@ -167,7 +168,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         const canonical = yDocToMarkdown(doc)
         imported = markdownToYDoc(source)
         if (doc.getMap('meta').get('dohcMarkdownSourceReader') === 1
-          && (witness.source !== source || !root(doc).eq(root(imported)))) {
+          && (witness.source !== source || !root(doc).eq(root(imported))
+            || !sameFrontmatterValue(getDohcYDocFrontmatter(doc), getDohcYDocFrontmatter(imported)))) {
           // Expiry needs a valid old reading and a strict proof of the current state.
           requireReading(utf8.encode(witness.source).length <= MAX_SOURCE_BYTES, 'capacity-refused')
           earlier = witness.source === source ? undefined : markdownToYDoc(witness.source)

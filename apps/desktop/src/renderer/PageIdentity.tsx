@@ -1,9 +1,9 @@
 import { useFocusReturn } from "./ui/focusReturn";
 import { isComposingKey } from "./ui/keys";
 import {
+  FRONTMATTER_SOURCE_META_KEY,
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
-  FRONTMATTER_EDIT_REFUSED_MESSAGE,
 } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
@@ -20,7 +20,7 @@ import {
   parseFrontmatter,
 } from "./markdown/frontmatter";
 import { lexesAsH1, opensWithH1 } from "./markdown/firstBlock";
-import { TOPMATTER_FLAG } from "./pageTopmatter";
+import { type OpenExternallyTarget, ReadOnlyPropertiesFlag } from "./fileInspectorUi";
 
 // The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
 // are reserved keys the document system owns — this
@@ -114,7 +114,7 @@ function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
 const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
 // Its own line under the icon, as large as the drawing's title. Like the
 // body, it shows focus by its caret alone, so it draws no field edge.
-const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle focus:shadow-none!`;
+const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-muted focus:shadow-none!`;
 // Folded beside "Add icon", and shown with it while the pointer is over the
 // page's identity or the field has focus. A read-only page has nothing to
 // add, so it stays hidden. Square corners keep its focus underline straight,
@@ -164,6 +164,8 @@ export type PageIdentityProps = (
   onEnterBody?: () => void;
   // A new page opens with the cursor in its title.
   autoFocus?: boolean;
+  // The note's file, which a refused title or icon offers to open externally.
+  file?: OpenExternallyTarget;
 };
 
 // A title is one line, so pasted or dropped line breaks become spaces.
@@ -220,16 +222,36 @@ export function PageIdentity(props: PageIdentityProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
   const opening = (props.opening ?? false) && !props.readOnly;
-  const readOnly = (props.readOnly ?? false) || opening;
   const [ydocRevision, setYdocRevision] = useState(0);
 
   useEffect(() => {
     if (!ydoc) return;
     const map = ydoc.getMap(FRONTMATTER_FIELD);
+    const meta = ydoc.getMap("meta");
     const update = () => setYdocRevision((revision) => revision + 1);
+    // The block's text decides whether it is locked.
+    const updateSource = (event: Y.YMapEvent<unknown>) => {
+      if (event.keysChanged.has(FRONTMATTER_SOURCE_META_KEY)) update();
+    };
     map.observe(update);
-    return () => map.unobserve(update);
+    meta.observe(updateSource);
+    // A change made after the render, before these listened, reads too.
+    update();
+    return () => {
+      map.unobserve(update);
+      meta.unobserve(updateSource);
+    };
   }, [ydoc]);
+
+  // A block dohc can't split shows its title and icon read-only. The
+  // properties row below says why.
+  const locked = useMemo(
+    () => (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body)),
+    // ydocRevision re-reads the document after a shared write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [body, ydoc, ydocRevision],
+  );
+  const readOnly = (props.readOnly ?? false) || opening || locked;
 
   const meta = useMemo(() => {
     if (ydoc) return mapToObject(ydoc.getMap(FRONTMATTER_FIELD));
@@ -269,9 +291,9 @@ export function PageIdentity(props: PageIdentityProps) {
     }
   }
 
-  // The title keeps its own draft so typing stays smooth; it re-syncs from
-  // frontmatter whenever an external change lands and the field isn't focused
-  // (mirrors how PropertiesPanel avoids a dirty-loop with the editor).
+  // While the field has focus it shows its own draft, so typing stays smooth
+  // and an outside change waits for the blur. Without focus it shows the
+  // frontmatter's title in the same render that changes it.
   const [titleDraft, setTitleDraft] = useState(title);
   const [titleFocused, setTitleFocused] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
@@ -321,9 +343,6 @@ export function PageIdentity(props: PageIdentityProps) {
     titleCaret.current = null;
     titleRef.current?.setSelectionRange(caret, caret);
   });
-  useEffect(() => {
-    if (!titleFocused) setTitleDraft(title);
-  }, [title, titleFocused]);
   // The same field folds and unfolds, so focus, caret and Tab order stay.
   // It folds while it holds no text, whether or not it has focus, so focus
   // and blur never move what is below it: the first character typed opens
@@ -394,7 +413,9 @@ export function PageIdentity(props: PageIdentityProps) {
       {/* The icon's line, then the title on its own line. Folded, the title
           joins the icon's line. */}
       <div className="dohc-page-identity__inner flex flex-wrap items-center gap-x-1 gap-y-3">
-        {editRefused ? <span role="status" className={`${TOPMATTER_FLAG} basis-full px-1.5`} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in Source</span> : null}
+        {editRefused ? (
+          <ReadOnlyPropertiesFlag role="status" label="Title and icon are read-only" file={props.file} className="basis-full px-1.5" />
+        ) : null}
         <div className="relative min-h-5">
           {icon ? (
             <button
@@ -487,7 +508,7 @@ export function PageIdentity(props: PageIdentityProps) {
           aria-label="Page title"
           rows={1}
           autoFocus={props.autoFocus}
-          value={titleDraft}
+          value={titleFocused ? titleDraft : title}
           placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}
           readOnly={readOnly}
@@ -496,6 +517,8 @@ export function PageIdentity(props: PageIdentityProps) {
             titleComposing.current = false;
             setBlurHeld(false);
             setOpenWhileComposing(false);
+            // A held blur keeps the draft it was composing.
+            if (!titleFocused) setTitleDraft(title);
             setTitleFocused(true);
           }}
           onBlur={() => {
@@ -504,7 +527,6 @@ export function PageIdentity(props: PageIdentityProps) {
               return;
             }
             setTitleFocused(false);
-            setTitleDraft(title);
           }}
           onCompositionStart={() => {
             titleComposing.current = true;

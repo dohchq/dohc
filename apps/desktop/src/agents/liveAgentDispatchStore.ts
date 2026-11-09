@@ -35,8 +35,8 @@ export interface LiveAgentDispatchStoreHandle {
     agentId: string;
     runId: string;
   }): Promise<boolean>;
-  /** Stopped runs in the workspace, or only in one thread. */
-  listAppQuitRecoveries(workspaceId: string, threadId?: string): Promise<ChatDispatchRecovery[]>;
+  /** Failed runs in the workspace, or only in one thread. */
+  listFailedRunRecoveries(workspaceId: string, threadId?: string): Promise<ChatDispatchRecovery[]>;
   close(): Promise<void>;
 }
 
@@ -106,7 +106,7 @@ export function createLiveAgentDispatchStore(
     workspaceId: string,
     claimOptions: Parameters<
       AwaitableAgentDispatchStore["claimNextPending"]
-    >[1] = {},
+    >[1],
     unresolvedOnly = false,
   ): Promise<AgentDispatchClaim | null> => {
     assertWorkspaceId(workspaceId);
@@ -143,9 +143,9 @@ export function createLiveAgentDispatchStore(
   const store: AwaitableAgentDispatchStore = {
     recordTrigger: async (input) =>
       await invoke(async (adapter) => await adapter.recordTrigger(input)),
-    claimNextPending: async (workspaceId, claimOptions = {}) =>
+    claimNextPending: async (workspaceId, claimOptions) =>
       await claimPending(workspaceId, claimOptions),
-    resolveUncertainClaim: async (workspaceId, claimOptions = {}) =>
+    resolveUncertainClaim: async (workspaceId, claimOptions) =>
       await claimPending(workspaceId, claimOptions, true),
     failPendingForThread: async (input) => {
       assertWorkspaceId(input.workspaceId);
@@ -445,7 +445,7 @@ export function createLiveAgentDispatchStore(
         { retryTransportErrors: true },
       );
     },
-    listAppQuitRecoveries: async (workspaceId, threadId) => {
+    listFailedRunRecoveries: async (workspaceId, threadId) => {
       assertWorkspaceId(workspaceId);
       return await invoke(
         async (adapter) => {
@@ -453,7 +453,7 @@ export function createLiveAgentDispatchStore(
           let cursor: string | undefined;
           do {
             const page: ChatRecoveriesPage = await adapter.request(
-              CHATS_METHOD.dispatchListAppQuitRecoveries,
+              CHATS_METHOD.dispatchListFailedRunRecoveries,
               {
                 ...(threadId !== undefined ? { threadId } : {}),
                 pageLimit: 500,

@@ -9,10 +9,11 @@ import { registerWorkspaceHeadingsIpcHandlers, createWorkspaceFilesIpc } from ".
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { registerOperations } from "./operationTable";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
+import { createExplorerMenuIpc } from "./explorerMenuIpc";
+import { explorerMenuOperations } from "./explorerMenuOperations";
 import { CHANNELS } from "./channels";
 import * as visibilityReads from "../workspaces/workspaceListingVisibility";
-import { CreateWorkspaceFileResult, DeleteWorkspacePathResult, type WorkspaceListingVisibility } from "./bridgeContract";
-import { createFirstAppFiles } from "../renderer/workbench/createFirstApp";
+import { ExplorerMenuEntries, type WorkspaceListingVisibility } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { WorkspaceFileListingCache } from "../workspaces/workspaceFileListingCache";
@@ -146,11 +147,18 @@ async function harness(history?: OperationHistory) {
   let canInstall = false;
   registerNativeMenusIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler, assertTrustedSender: trusted, app: { isPackaged: false },
-    exactRendererWorkspaceReferences: references, sharedViewOf: () => sharedScope,
+    exactRendererWorkspaceReferences: references,
     windowForSender: () => undefined, buildFromTemplate: buildMenu,
-    currentUpdateState: () => ({ canInstall }), ensureOwnedProjectionCurrent: repair,
-    shell: { showItemInFolder: reveal },
+    currentUpdateState: () => ({ canInstall }),
   });
+  registerOperations<typeof explorerMenuOperations, Event, Operation>({
+    handle: registerHandler,
+    assertTrustedSender: trusted,
+    withActiveWorkspace: (event: Event, id, message, work) => withOperation(event.sender, id, message, work),
+  }, explorerMenuOperations, createExplorerMenuIpc<Event, Workspace, Operation>({
+    sharedViewOf: () => sharedScope, ensureOwnedProjectionCurrent: repair,
+    shell: { showItemInFolder: reveal }, platform: "linux",
+  }));
   const invoke = async (channel: string, payload: unknown = { workspaceId: "workspace" }, isTrusted = true) => {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`missing ${channel}`);
@@ -219,14 +227,14 @@ describe("registered workspace file handlers", () => {
     expect(readHistoryPage).not.toHaveBeenCalled();
   });
 
-  it("moves a file through the registered move channel", async () => {
+  it("moves an ordinary file through the registered move channel", async () => {
     const h = await harness();
-    await writeFile(join(h.workspace.rootPath, "before.md"), "move me");
+    await writeFile(join(h.workspace.rootPath, "before.txt"), "move me");
     await expect(h.invoke(workspaceFileOperations.moveWorkspacePath.channel, {
-      workspaceId: "workspace", fromPath: "before.md", toPath: "after.md",
-    })).resolves.toEqual({ path: "after.md", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
-    expect(await readFile(join(h.workspace.rootPath, "after.md"), "utf8")).toBe("move me");
-    await expect(readFile(join(h.workspace.rootPath, "before.md"))).rejects.toMatchObject({ code: "ENOENT" });
+      workspaceId: "workspace", fromPath: "before.txt", toPath: "after.txt",
+    })).resolves.toEqual({ path: "after.txt", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
+    expect(await readFile(join(h.workspace.rootPath, "after.txt"), "utf8")).toBe("move me");
+    await expect(readFile(join(h.workspace.rootPath, "before.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("replaces text through the registered write-text channel", async () => {
@@ -250,73 +258,6 @@ describe("registered workspace file handlers", () => {
     expect(await readFile(join(h.workspace.rootPath, "assets/pixel.png"))).toEqual(Buffer.from(bytes));
   });
 
-  it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
-    const h = await harness();
-    // Rollback deletes what it made, through the workspace trash.
-    await openedLocalState(h.workspace);
-    const root = h.workspace.rootPath;
-    const foreignPath = collision === "root" ? "app/notes.txt"
-      : collision === "file" ? "app/index.html" : "app/scripts/notes.txt";
-    const deleted: string[] = [];
-    let injected = false;
-    const inject = async () => {
-      await mkdir(join(root, foreignPath, ".."), { recursive: true });
-      await writeFile(join(root, foreignPath), "agent work");
-      injected = true;
-    };
-    const result = createFirstAppFiles({
-      workspaceId: "workspace", files: [], folders: [],
-      mutations: {
-        createWorkspaceFolder: async (payload) => {
-          if (!injected && (collision === "root" ||
-            collision === "subfolder" && payload.relativePath === "app/scripts")) await inject();
-          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFolder.channel, payload));
-        },
-        createWorkspaceFile: async (payload) => {
-          if (!injected && collision === "file") await inject();
-          if (payload.relativePath === "app/package.json") throw new Error("later write failed");
-          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFile.channel, payload));
-        },
-        deleteWorkspacePath: async (payload) => {
-          deleted.push(payload.relativePath);
-          return DeleteWorkspacePathResult.parse(await h.invoke(workspaceFileOperations.deleteWorkspacePath.channel, payload));
-        },
-      },
-    });
-    await expect(result).rejects.toMatchObject({ code: "EEXIST" });
-    expect(await readFile(join(root, foreignPath), "utf8")).toBe("agent work");
-    expect(deleted).not.toContain(foreignPath);
-    if (collision === "root") expect(deleted).toEqual([]);
-    if (collision === "subfolder") expect(deleted).not.toContain("app/scripts");
-    expect(await h.invoke(workspaceFileOperations.listWorkspaceFiles.channel)).toMatchObject({
-      files: [{ path: foreignPath, kind: "file" }],
-    });
-  });
-
-  it("keeps foreign descendants added to a created folder before rollback", async () => {
-    const h = await harness();
-    // Rollback deletes what it made, through the workspace trash.
-    await openedLocalState(h.workspace);
-    await expect(createFirstAppFiles({
-      workspaceId: "workspace", files: [], folders: [],
-      mutations: {
-        createWorkspaceFolder: async (payload) => CreateWorkspaceFileResult.parse(
-          await h.invoke(workspaceFileOperations.createWorkspaceFolder.channel, payload)),
-        createWorkspaceFile: async (payload) => {
-          if (payload.relativePath === "app/package.json") {
-            await writeFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "agent work");
-            throw new Error("later write failed");
-          }
-          return CreateWorkspaceFileResult.parse(await h.invoke(workspaceFileOperations.createWorkspaceFile.channel, payload));
-        },
-        deleteWorkspacePath: async (payload) => DeleteWorkspacePathResult.parse(
-          await h.invoke(workspaceFileOperations.deleteWorkspacePath.channel, payload)),
-      },
-    })).rejects.toThrow("later write failed");
-    expect(await readFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "utf8")).toBe("agent work");
-    expect(await readdir(join(h.workspace.rootPath, "app"))).toEqual(["scripts"]);
-  });
-
   it("registers all file, heading, and menu channels with their trust and parser order", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
@@ -325,7 +266,8 @@ describe("registered workspace file handlers", () => {
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
       workspaceFileOperations.openFileExternally.channel, workspaceFileOperations.readExternalOpen.channel,
-      CHANNELS.listWorkspaceHeadings, CHANNELS.showExplorerMenu, CHANNELS.showWorkbenchMenu,
+      CHANNELS.listWorkspaceHeadings, CHANNELS.showWorkbenchMenu,
+      explorerMenuOperations.readExplorerMenu.channel, explorerMenuOperations.revealExplorerPath.channel,
     ]);
     for (const channel of h.handlers.keys()) {
       const payload = channel === workspaceFileOperations.readWorkspaceText.channel
@@ -682,13 +624,11 @@ describe("registered native menu handlers", () => {
 
   it("derives sharing and update controls from main-owned state", async () => {
     const h = await harness();
-    await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
-    expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(true);
-    h.buildMenu.mockClear();
+    const file = { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false };
+    expect(await h.invoke(explorerMenuOperations.readExplorerMenu.channel, file)).toContainEqual({ kind: "item", label: "Share…", id: "share" });
     h.setSharedScope({ access: "view", ended: false });
-    await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
-    expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(false);
-    h.buildMenu.mockClear();
+    expect(await h.invoke(explorerMenuOperations.readExplorerMenu.channel, file)).not.toContainEqual(expect.objectContaining({ id: "share" }));
+    expect(h.buildMenu).not.toHaveBeenCalled();
     h.setCanInstall(true);
     await h.invoke(CHANNELS.showWorkbenchMenu, { workspaceId: "workspace", context: "status" });
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(expect.arrayContaining([
@@ -701,11 +641,10 @@ describe("registered native menu handlers", () => {
   it("offers Share… on a workspace without sync, but not on the root, a mount path or a shared view", async () => {
     const h = await harness();
     expect(h.workspace.remote).toBeUndefined();
-    const offersShare = async (path: string | undefined, kind: "file" | "folder" | "root") => {
-      h.buildMenu.mockClear();
-      await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path, kind, pinned: false });
-      return h.buildMenu.mock.calls[0]![0].some((item) => item.label === "Share…");
-    };
+    const offersShare = async (path: string | undefined, kind: "file" | "folder" | "root") =>
+      ExplorerMenuEntries.parse(
+        await h.invoke(explorerMenuOperations.readExplorerMenu.channel, { workspaceId: "workspace", path, kind, pinned: false }),
+      ).some((entry) => entry.kind === "item" && entry.label === "Share…");
     expect(await offersShare("notes.md", "file")).toBe(true);
     expect(await offersShare("notes", "folder")).toBe(true);
     expect(await offersShare(undefined, "root")).toBe(false);
@@ -715,8 +654,9 @@ describe("registered native menu handlers", () => {
     expect(await offersShare("notes.md", "file")).toBe(false);
   });
 
-  // main's own reading of the registry marker, through the native menu. The
-  // intact row proves the menu still offers writes when nothing is damaged.
+  // main's own reading of the registry marker, through the entries it
+  // returns. The intact row proves the menu still offers writes when nothing
+  // is damaged.
   it.each([
     ["intact", {}, true],
     ["no share id", { shareId: undefined }, false],
@@ -728,13 +668,23 @@ describe("registered native menu handlers", () => {
       grantedSelector: { paths: [], versionId: "main", access: "edit" }, ...damage,
     }));
     for (const [kind, path] of [["root", undefined], ["folder", "notes"]] as const) {
-      h.buildMenu.mockClear();
-      await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path, kind, pinned: false });
-      const labels = h.buildMenu.mock.calls[0]![0].map((item) => item.label);
-      for (const create of ["New File", "New Collection…", "Import Files…"]) {
-        expect(labels.includes(create), `${kind}: ${create}`).toBe(offered);
+      const entries = ExplorerMenuEntries.parse(
+        await h.invoke(explorerMenuOperations.readExplorerMenu.channel, { workspaceId: "workspace", path, kind, pinned: false }));
+      const ids = entries.flatMap((entry) => (entry.kind === "item" ? [entry.id] : []));
+      for (const create of ["new-file", "new-collection", "import-files"] as const) {
+        expect(ids.includes(create), `${kind}: ${create}`).toBe(offered);
       }
     }
+  });
+
+  it("reads the menu inside the sender's own workspace", async () => {
+    const h = await harness();
+    await expect(h.invoke(explorerMenuOperations.readExplorerMenu.channel, {
+      workspaceId: "foreign", path: "notes.md", kind: "file", pinned: false,
+    })).rejects.toThrow("changed workspaces");
+    await expect(h.invoke(explorerMenuOperations.readExplorerMenu.channel, {
+      workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false,
+    }, false)).rejects.toThrow("untrusted");
   });
 
   it("reads test choices per invoke and rejects stale menu results", async () => {
@@ -761,17 +711,34 @@ describe("registered native menu handlers", () => {
 
   it("contains explorer reveals before passing a path to the OS", async () => {
     const h = await harness();
-    vi.stubEnv("DOHC_DESKTOP_TEST", "1");
-    vi.stubEnv("DOHC_TEST_EXPLORER_MENU_CHOICE", "open-externally");
-    await expect(h.invoke(CHANNELS.showExplorerMenu, {
-      workspaceId: "workspace", path: "../outside.md", kind: "file", pinned: false,
+    await expect(h.invoke(explorerMenuOperations.revealExplorerPath.channel, {
+      workspaceId: "workspace", path: "../outside.md",
     })).rejects.toThrow();
     expect(h.reveal).not.toHaveBeenCalled();
     await writeFile(join(h.workspace.rootPath, "notes.md"), "body");
-    await expect(h.invoke(CHANNELS.showExplorerMenu, {
-      workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false,
-    })).resolves.toBe("open-externally");
+    await expect(h.invoke(explorerMenuOperations.revealExplorerPath.channel, {
+      workspaceId: "workspace", path: "notes.md",
+    })).resolves.toBeUndefined();
     expect(h.reveal).toHaveBeenCalledWith(expect.stringMatching(/notes\.md$/));
+  });
+
+  it("refuses a reveal outside the workspace, through a link that leaves it, or with no path", async () => {
+    const h = await harness();
+    const outside = await createTestScratch("reveal-outside-");
+    await writeFile(join(outside, "secret.md"), "secret");
+    await symlink(outside, join(h.workspace.rootPath, "escape"), process.platform === "win32" ? "junction" : "dir");
+    const reveal = (path?: string) =>
+      h.invoke(explorerMenuOperations.revealExplorerPath.channel, { workspaceId: "workspace", ...(path !== undefined ? { path } : {}) });
+    for (const path of ["../outside.md", join(outside, "secret.md"), "escape/secret.md", "escape"]) {
+      await expect(reveal(path), path).rejects.toThrow();
+    }
+    await expect(reveal()).rejects.toThrow();
+    expect(h.reveal).not.toHaveBeenCalled();
+
+    await writeFile(join(h.workspace.rootPath, "notes.md"), "body");
+    await expect(reveal("notes.md")).resolves.toBeUndefined();
+    expect(h.reveal).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/notes\.md$/));
+    expect(h.buildMenu).not.toHaveBeenCalled();
   });
 });
 

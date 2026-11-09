@@ -13,6 +13,7 @@ import {
   verifyEmailPage,
 } from "./pages";
 import type { ReadinessReport } from "./readiness";
+import { readBodyAtMost, type BodyRead } from "./readBody";
 
 // Every route this service answers. main.ts owns the process (env, Postgres,
 // sockets); this module owns request handling so the routes can be tested
@@ -49,6 +50,9 @@ export interface RouterOptions {
     sentEmails?: () => EmailMessage[];
   };
 }
+
+// Every body a dohc client sends to /api/auth is a small JSON object.
+export const AUTH_BODY_MAX_BYTES = 64 * 1024;
 
 /** Routes that make Better Auth send mail, and so need a transport. */
 const EMAIL_ROUTES = new Set([
@@ -106,7 +110,11 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
           cors,
         );
       }
-      const response = await options.auth.handler(request);
+      const bounded = await withBodyAtMost(request, AUTH_BODY_MAX_BYTES);
+      if (!bounded) {
+        return json({ code: "BODY_TOO_LARGE", message: "This request is too large." }, 413, { ...cors, connection: "close" });
+      }
+      const response = await options.auth.handler(bounded);
       response.headers.set("cache-control", "no-store");
       for (const [name, value] of Object.entries(cors)) response.headers.set(name, value);
       return response;
@@ -214,6 +222,22 @@ function deviceErrorKind(error: unknown): "expired" | "invalid" | null {
   if (code === "expired_token") return "expired";
   if (code === "invalid_request") return "invalid";
   return null;
+}
+
+// The request with its body read into memory, or null once the body is
+// declared or read past maxBytes. It never cancels the body, because the
+// adapter would then destroy the socket before the 413 reached the client.
+async function withBodyAtMost(request: Request, maxBytes: number): Promise<Request | null> {
+  if (!request.body) return request;
+  if (Number(request.headers.get("content-length") ?? "0") > maxBytes) return null;
+  const reader = request.body.getReader();
+  let read: BodyRead;
+  try {
+    read = await readBodyAtMost(reader, maxBytes);
+  } finally {
+    reader.releaseLock();
+  }
+  return "bytes" in read ? new Request(request, { body: read.bytes }) : null;
 }
 
 function readyResponse(report: ReadinessReport): Response {

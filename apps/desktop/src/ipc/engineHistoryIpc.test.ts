@@ -387,6 +387,17 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       expect(EngineMomentDetailRecord.safeParse({...record, authors: [author], authorPresentations}).success, JSON.stringify(author)).toBe(false);
     }
   });
+  it("shows no name an agent gave with a character that hides or reorders text", () => {
+    for (const agentName of ["‮avon", "No​va", "Nova⁦", "ㅤ", "Nova­"]) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      const agent = {kind: "agent", agentId: "writer", agentName, onBehalfOf: "owner"} as const;
+      detail.moment.authors = [agent];
+      expect(engineMomentDetailForIpc(detail, names)).toMatchObject({agentAuthorName: "owner"});
+      detail.moment.authors = [agent, {kind: "agent", agentId: "other", onBehalfOf: "local"}];
+      expect(engineMomentDetailForIpc(detail, names)).toMatchObject({authorLabels: ["owner", "You"]});
+    }
+  });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide("v2\n") }),
@@ -558,6 +569,50 @@ describe("versionConflictForIpc binary sides", () => {
     expect(conflict.currentText).toBe("main side");
     expect(conflict.incomingText).toBe("feature side");
     expect(WorkspaceVersionConflict.parse(conflict)).toEqual(conflict);
+  });
+});
+
+describe("versionConflictForIpc waiting version", () => {
+  const sides = {
+    id: "conflict_1",
+    path: "notes.md",
+    sourceVersionId: "main",
+    targetVersionId: "main",
+    metadata: { origin: "sync" },
+    current: { exists: true, text: "here" },
+    incoming: { exists: true, text: "there" },
+    base: { exists: true, text: "before" },
+  };
+  const waitingVersion = {
+    code: "resolve-existing-conflict" as const,
+    objectId: "object_1",
+    originId: "computer-d",
+    originSeq: 3,
+  };
+
+  it("carries the waiting version, and null when there is none", () => {
+    const waiting = versionConflictForIpc({ ...sides, waitingVersion });
+    expect(waiting.waitingVersion).toEqual(waitingVersion);
+    expect(WorkspaceVersionConflict.parse(waiting)).toEqual(waiting);
+    // Never undefined: a missing field reads as none.
+    expect(versionConflictForIpc(sides).waitingVersion).toBeNull();
+    expect(versionConflictForIpc({ ...sides, waitingVersion: null }).waitingVersion).toBeNull();
+    const { waitingVersion: _omitted, ...older } = versionConflictForIpc(sides);
+    expect(WorkspaceVersionConflict.parse(older).waitingVersion).toBeNull();
+  });
+
+  it("refuses a malformed waiting version", () => {
+    const conflict = versionConflictForIpc(sides);
+    for (const malformed of [
+      { ...waitingVersion, code: "conflict-wait-limit" },
+      { ...waitingVersion, originSeq: -1 },
+      { ...waitingVersion, originId: "" },
+      { ...waitingVersion, path: "notes.md" },
+    ]) {
+      expect(
+        WorkspaceVersionConflict.safeParse({ ...conflict, waitingVersion: malformed }).success,
+      ).toBe(false);
+    }
   });
 });
 

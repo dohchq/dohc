@@ -84,6 +84,38 @@ fn entries(s: &EngineStore, ch: &str) -> Vec<Value> {
         .clone()
 }
 
+/// A link post names its link; an agent's link post also names its connection.
+#[test]
+fn conversation_links_page_carries_a_link_author_and_its_agent_connection() {
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "f", "notes/current.md");
+    alias(&mut s, "g", "notes/other.md");
+    exec(&mut s, "INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms,
+            link_grant_id,link_principal_id,agent_connection_id) VALUES
+        ('ws','t',1,'link-message:guest','link','Guest','',2,'grant-1','principal-1',NULL),
+        ('ws','t',2,'link-message:agent','link','Helper','',3,'grant-1','principal-2','connection-1');");
+    attach(&mut s, "guest", Some("f"), 2, "t", "link-message:guest");
+    attach(&mut s, "agent", Some("g"), 3, "t", "link-message:agent");
+    demand(&mut s, "a");
+    drain(&mut s);
+    let rows = entries(&s, "a");
+    let author = |id: &str| {
+        rows.iter()
+            .find(|row| row["attachmentId"] == id)
+            .unwrap_or_else(|| panic!("{id} is listed"))["author"]
+            .clone()
+    };
+    assert_eq!(
+        author("guest"),
+        json!({"authorKind":"link","authorDisplayName":"Guest","linkGrantId":"grant-1","linkPrincipalId":"principal-1"})
+    );
+    assert_eq!(
+        author("agent"),
+        json!({"authorKind":"link","authorDisplayName":"Helper","linkGrantId":"grant-1","linkPrincipalId":"principal-2",
+            "agentConnectionId":"connection-1"})
+    );
+}
+
 #[test]
 fn conversation_links_seed_collapses_heading_mentions_and_excludes_standalone_and_orphans() {
     let (_scratch, mut s) = fixture();
@@ -115,6 +147,28 @@ fn conversation_links_seed_collapses_heading_mentions_and_excludes_standalone_an
     assert_eq!(rows[0]["attachmentId"], "latest");
     assert_eq!(rows[0]["author"]["authorDisplayName"], "Bea");
     assert!(rows[0]["author"].get("authorUserId").is_none());
+}
+
+#[test]
+fn conversation_links_name_the_agent_whose_run_wrote_the_post() {
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "f", "notes/run.md");
+    alias(&mut s, "g", "notes/connected.md");
+    exec(
+        &mut s,
+        "INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms,author_agent_id) VALUES('ws','t',1,'run','agent','Nova','',2,'default'),('ws','t',2,'connected','agent','Nova','',3,NULL);",
+    );
+    attach(&mut s, "from-run", Some("f"), 2, "t", "run");
+    attach(&mut s, "from-connected", Some("g"), 3, "t", "connected");
+    demand(&mut s, "a");
+    drain(&mut s);
+    let rows = entries(&s, "a");
+    let author = |id: &str| {
+        let row = rows.iter().find(|r| r["attachmentId"] == id);
+        row.expect("the entry")["author"].clone()
+    };
+    assert_eq!(author("from-run")["authorAgentId"], "default");
+    assert!(author("from-connected").get("authorAgentId").is_none());
 }
 
 #[test]
@@ -369,7 +423,8 @@ fn conversation_links_local_sync_and_pending_replay_use_the_same_projection() {
                     heading_occurrence: None,
                 }],
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 10,
                 request_id: None,
             },

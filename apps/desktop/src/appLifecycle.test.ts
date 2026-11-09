@@ -1,11 +1,14 @@
 import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
+import { writeFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createAutomationWakeConsumer, createAutomationWakeIntents, type AutomationWakeIntent } from "./automations/automationWakeIntents";
 import { createTestScratch } from "./workspaces/testTemp";
+import { createRegistryStore } from "./workspaces/registryStore";
+import { startupFailureBox } from "./launch/startupFailureBox";
 import { createWorkspaceAuthorityOwner } from "./workspaces/workspaceAuthorityOwner";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
 import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
@@ -51,6 +54,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     app,
     runtime: { platform: "win32", argv: [process.execPath], execPath: process.execPath },
     handoff: { slot, pendingCodeChanged: vi.fn() },
+    workLinks: { open: vi.fn(async (link) => { log.push(`work-link:${link.reference}`); }) },
     windows: {
       create: vi.fn(() => {
         log.push("window");
@@ -87,7 +91,6 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
         return settings.promise;
       }),
       applySettings: vi.fn((value) => { log.push("settings-apply"); zoom = value.zoom; }),
-      prepareCli: vi.fn(() => undefined),
       registerHandlers: vi.fn(() => { log.push("handlers"); }),
       markFirstWindow: vi.fn(() => { log.push("first-window"); }),
       reportFailure: vi.fn(() => { log.push("report-failure"); }),
@@ -171,21 +174,6 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.services.updateAfterStartupFailure).not.toHaveBeenCalled();
     expect(f.app.quit).not.toHaveBeenCalled();
     expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
-  });
-
-  it("waits for platform CLI preparation before handlers without delaying the engine and settings reads", async () => {
-    const preparation = deferred();
-    const f = fixture((d) => { d.bootstrap.prepareCli = () => preparation.promise; });
-    const ready = f.lifecycle.start();
-    f.appReady.resolve();
-    await f.settingsRequested.promise;
-    expect(f.dependencies.bootstrap.startEngine).toHaveBeenCalledOnce();
-    expect(f.dependencies.bootstrap.registerHandlers).not.toHaveBeenCalled();
-    f.settings.resolve({ zoom: 2 });
-    f.engine.resolve(true);
-    preparation.resolve();
-    await ready;
-    expect(f.log.indexOf("handlers")).toBeLessThan(f.log.indexOf("window"));
   });
 
   it("opens launch paths before later intents and activates only after the renderer subscribes", async () => {
@@ -326,6 +314,27 @@ describe("desktop bootstrap", () => {
     expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(
       restarting ? ["report-failure", "updates", "update-check"] : ["report-failure", "updates", "update-check", "quit"],
     );
+  });
+
+  it("shows the registry guidance when the workspace list is corrupt, then checks for an update", async () => {
+    const registryFile = join(await createTestScratch("dohc-lifecycle-registry-"), "dohc-workspaces.json");
+    await writeFile(registryFile, "{ this is not json");
+    const boxes: Array<{ title: string; content: string }> = [];
+    const f = fixture((d) => {
+      d.bootstrap.registerHandlers = () => { createRegistryStore(registryFile).list(); };
+      d.bootstrap.reportFailure = vi.fn((error: unknown) => {
+        boxes.push(startupFailureBox(error));
+        f.log.push("report-failure");
+      });
+    });
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    await ready;
+    expect(boxes).toEqual([{
+      title: "dohc couldn't read its workspace registry",
+      content: expect.stringContaining(`File: ${registryFile}\n`),
+    }]);
+    expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(["report-failure", "updates", "update-check", "quit"]);
   });
 
   it("keeps activation and incoming paths deferred when the daemon cannot start", async () => {
@@ -494,6 +503,7 @@ describe("desktop bootstrap", () => {
 });
 
 const handoffUrl = `dohc://open/${"a".repeat(43)}?relay=${encodeURIComponent("https://relay.example")}`;
+const workLinkUrl = `dohc://l/${"b".repeat(43)}?server=${encodeURIComponent("https://dohc.example")}`;
 
 describe("desktop open intents", () => {
   it("captures cold and pre-ready handoffs without creating another window", async () => {
@@ -537,6 +547,39 @@ describe("desktop open intents", () => {
     f.app.emit("second-instance", {}, [process.execPath, "dohc://invalid", "--open-workspace=next"]);
     await opened.promise;
     expect(f.dependencies.workspaces.openPath).toHaveBeenCalledWith("next", { id: 1, zoom: 1.5 });
+  });
+
+  it("opens a launch work link once the first window loads", async () => {
+    const opened = deferred<string>();
+    const f = fixture((d) => {
+      d.runtime.argv.push(workLinkUrl);
+      d.workLinks.open = vi.fn(async (link) => { opened.resolve(link.server); });
+    });
+    await boot(f);
+    expect(f.dependencies.workLinks.open).not.toHaveBeenCalled();
+    f.loaded.resolve(true);
+    await expect(opened.promise).resolves.toBe("https://dohc.example");
+    expect(f.dependencies.workLinks.open).toHaveBeenCalledOnce();
+  });
+
+  it("opens a work link from the OS at once after startup, without another window", async () => {
+    const f = fixture();
+    await boot(f);
+    f.app.emit("open-url", event(), workLinkUrl);
+    expect(f.dependencies.workLinks.open).toHaveBeenCalledWith({ server: "https://dohc.example", reference: "b".repeat(43) });
+    expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
+    expect(f.slot.pending()).toBeNull();
+  });
+
+  it("opens a second instance's work link and ignores a malformed one", async () => {
+    const f = fixture();
+    await boot(f);
+    f.app.emit("second-instance", {}, [process.execPath, `dohc://l/${"b".repeat(43)}?server=https://dohc.example`]);
+    expect(f.dependencies.workLinks.open).not.toHaveBeenCalled();
+    expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
+    f.app.emit("second-instance", {}, [process.execPath, workLinkUrl]);
+    expect(f.dependencies.workLinks.open).toHaveBeenCalledOnce();
+    expect(f.dependencies.windows.showOrCreate).not.toHaveBeenCalled();
   });
 
   it.each(["argv", "open-file", "second-instance"])("retains %s failures and reports each once after renderer readiness", async (source) => {

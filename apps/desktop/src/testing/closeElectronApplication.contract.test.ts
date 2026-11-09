@@ -6,7 +6,9 @@ import { QUIT_ASK_TIMEOUT_MS, WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
 const cleanup = vi.hoisted(() => ({ finish: () => {}, calls: 0 }));
 vi.mock("node:child_process", async (original) => ({
   ...await original<typeof import("node:child_process")>(),
-  execFile: (_file: string, _args: string[], _options: unknown, callback: (error: null) => void) => {
+  execFile: (file: string, _args: string[], _options: unknown, callback: (error: null, stdout?: string) => void) => {
+    // POSIX forced cleanup lists the child's descendants first. The fake child has none.
+    if (file === "ps") return callback(null, "");
     cleanup.calls += 1;
     cleanup.finish();
     callback(null);

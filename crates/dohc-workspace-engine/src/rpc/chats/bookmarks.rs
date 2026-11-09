@@ -91,6 +91,14 @@ struct ChatBookmarkMarkFailedParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkRetryFailedParams {
+    owner_user_id: String,
+    bookmark_id: String,
+    generation: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatBookmarkMarkStaleParams {
     owner_user_id: String,
     bookmark_id: String,
@@ -446,6 +454,35 @@ impl EngineService {
         )
         .await?;
         Ok(bookmark_json(&workspace_id, &bookmark))
+    }
+
+    pub(crate) async fn chats_bookmarks_retry_failed(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkRetryFailedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let transition = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.retryFailed",
+            open.actor.chat_bookmark_retry_failed(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                params.generation,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
+            "applied": transition.applied,
+        }))
     }
 
     pub(crate) async fn chats_bookmarks_mark_failed(

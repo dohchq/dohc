@@ -156,7 +156,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("decision-thread".to_owned()),
             },
@@ -181,7 +182,8 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: Some("local-resolver".to_owned()),
             },
@@ -1481,6 +1483,7 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     let link = Some(ChatMessageLinkAuthor {
         grant_id: "grant-1".to_owned(),
         principal_id: "principal-1".to_owned(),
+        agent_connection_id: None,
     });
     assert_eq!(read.link_author, link);
     let mention: String = engine
@@ -1547,6 +1550,9 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         ("linkGrantId", json!(" grant-1")),
         ("linkPrincipalId", json!("")),
         ("linkPrincipalId", json!("principal-2")),
+        ("agentConnectionId", json!("")),
+        ("agentConnectionId", json!(" connection-1")),
+        ("agentConnectionId", json!(1)),
         ("authorKind", json!("human")),
         ("messageId", json!("forged")),
     ] {
@@ -1606,6 +1612,61 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         apply_chat_envelope(&mut engine, &at_cap, &NoFaults).expect("link message at the cap"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
+}
+
+/// An agent that joined with a link posts as that link, and its post also
+/// names the agent connection the relay authenticated.
+#[test]
+fn a_link_agent_post_replays_with_its_agent_connection() {
+    use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let mut payload = link_message_payload("link-message:agent", "Done");
+    payload["agentConnectionId"] = json!("connection-1");
+    let message = envelope(LINK_ORIGIN, 0, "chat.message.append", payload);
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults).expect("agent link message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let read = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message:agent")
+        .expect("read the agent link message");
+    let agent = Some(ChatMessageLinkAuthor {
+        grant_id: "grant-1".to_owned(),
+        principal_id: "principal-1".to_owned(),
+        agent_connection_id: Some("connection-1".to_owned()),
+    });
+    assert_eq!(read.link_author, agent);
+
+    // A post that waits for its thread replays with its connection.
+    let mut early = link_message_payload("link-message:agent-early", "Early");
+    early["threadId"] = json!("late-thread");
+    early["agentConnectionId"] = json!("connection-1");
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(LINK_ORIGIN, 1, "chat.message.append", early),
+        &NoFaults,
+    )
+    .expect("parked agent link message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let replayed = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message:agent-early")
+        .expect("read the replayed agent link message");
+    assert_eq!(replayed.link_author, agent);
 }
 
 /// Only the relay names a message with the link message prefix. A device's
@@ -2052,6 +2113,9 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![
                 group_message("peer", 3, "m-1", "thread-imported", "human", "/task One"),
                 group_message("peer", 4, "m-2", "thread-imported", "human", "/task Two"),
@@ -2059,6 +2123,7 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let pull = |engine: &mut EngineStore| {
         client.pull_chat_workspace(
@@ -3065,7 +3130,8 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("default-thread-request".to_owned()),
             },
@@ -3293,7 +3359,8 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("long-wire-local-request".to_owned()),
             },
@@ -3876,7 +3943,8 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-message-after-refusal".to_owned()),
             },
@@ -3919,7 +3987,8 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 33,
                 request_id: Some("authored-child-after-refusal".to_owned()),
             },
@@ -4074,7 +4143,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-thread-after-refusal".to_owned()),
             },
@@ -4099,7 +4169,8 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 32,
                 request_id: Some("second-local-message-after-refusal".to_owned()),
             },
@@ -5941,7 +6012,8 @@ fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEn
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("notes-request".to_owned()),
             },
@@ -6200,4 +6272,344 @@ fn received_and_parked_messages_wake_no_agent_here() {
         (2, 0),
         "only the sender's computer records a request"
     );
+}
+
+#[test]
+fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused() {
+    use dohc_engine_domain::{ChatReportedAgent, LinkedChatStore};
+    let setup = |engine: &mut EngineStore, origin: &str| {
+        for (seq, kind, payload) in [
+            (
+                0,
+                "chat.channel.create",
+                json!({"channelId": "channel-1", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 10}),
+            ),
+            (
+                1,
+                "chat.thread.create",
+                json!({"threadId": "thread-1", "title": "", "createdAtMs": 20, "channelSlug": "general", "channelWireId": "channel-1"}),
+            ),
+        ] {
+            apply_chat_envelope(engine, &envelope(origin, seq, kind, payload), &NoFaults)
+                .expect("apply chat op");
+        }
+    };
+    let message = |author_kind: &str, reported: serde_json::Value| {
+        let mut message = json!({
+            "messageId": "message-1",
+            "threadId": "thread-1",
+            "authorKind": author_kind,
+            "authorDisplayName": "Nova",
+            "body": "Opened a PR",
+            "createdAtMs": 20,
+            "authorReported": reported,
+        });
+        if author_kind == "agent" {
+            message["authorOwnerDisplayName"] = json!("Ice");
+        }
+        message
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    setup(&mut engine, "reported");
+    let op = envelope(
+        "reported",
+        2,
+        "chat.message.append",
+        message(
+            "agent",
+            json!({"product": "Claude Code", "version": "2.1", "model": "Claude Opus 5.5"}),
+        ),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let stored = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "message-1")
+        .expect("message");
+    assert_eq!(
+        stored.author_reported,
+        Some(ChatReportedAgent {
+            product: Some("Claude Code".to_owned()),
+            version: Some("2.1".to_owned()),
+            model: Some("Claude Opus 5.5".to_owned()),
+        })
+    );
+
+    // A message from a build that sends no report stores none.
+    let (_scratch, _path, mut engine) = open_store();
+    setup(&mut engine, "unreported");
+    let mut unreported = message("agent", json!(null));
+    unreported
+        .as_object_mut()
+        .expect("payload")
+        .remove("authorReported");
+    let op = envelope("unreported", 2, "chat.message.append", unreported);
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .get_message("ws", "message-1")
+            .expect("message")
+            .author_reported,
+        None
+    );
+
+    for (author_kind, reported) in [
+        ("human", json!({"product": "Claude Code"})),
+        ("agent", json!({"version": "2.1"})),
+        ("agent", json!({"product": "Claude\u{7}Code"})),
+        // 40 emoji are 80 UTF-16 units, past the limit JavaScript counts.
+        ("agent", json!({"model": "\u{1F600}".repeat(40)})),
+        ("agent", json!({"product": "\u{FEFF}Claude Code"})),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        setup(&mut engine, "bad-report");
+        let op = envelope(
+            "bad-report",
+            2,
+            "chat.message.append",
+            message(author_kind, reported),
+        );
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+}
+
+/// An agent message that arrives before its thread keeps its report when it
+/// replays. A build that did not know the field parked any value, so replay
+/// checks it and refuses a bad one instead of failing the thread.
+#[test]
+fn a_parked_agent_message_keeps_its_report_and_a_bad_parked_report_is_refused() {
+    use dohc_engine_domain::{ChatReportedAgent, LinkedChatStore};
+    let channel = envelope(
+        "channel-peer",
+        0,
+        "chat.channel.create",
+        json!({"channelId": "channel-1", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 10}),
+    );
+    let message = envelope(
+        "message-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "message-1",
+            "threadId": "thread-1",
+            "authorKind": "agent",
+            "authorDisplayName": "Nova",
+            "authorOwnerDisplayName": "Ice",
+            "body": "Opened a PR",
+            "createdAtMs": 20,
+            "authorReported": {"product": "Claude Code", "version": "2.1"},
+        }),
+    );
+    let thread = envelope(
+        "thread-peer",
+        0,
+        "chat.thread.create",
+        json!({"threadId": "thread-1", "title": "", "createdAtMs": 20, "channelSlug": "general", "channelWireId": "channel-1"}),
+    );
+    let park = |engine: &mut EngineStore| {
+        for op in [&channel, &message] {
+            assert_eq!(
+                apply_chat_envelope(engine, op, &NoFaults).expect("apply or park"),
+                ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+            );
+        }
+    };
+    let stored = |engine: &EngineStore| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'message-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("count messages")
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    park(&mut engine);
+    assert_eq!(stored(&engine), 0, "the message waits for its thread");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .get_message("ws", "message-1")
+            .expect("replayed message")
+            .author_reported,
+        Some(ChatReportedAgent {
+            product: Some("Claude Code".to_owned()),
+            version: Some("2.1".to_owned()),
+            model: None,
+        })
+    );
+
+    for bad in [
+        json!({"product": "\u{FEFF}Claude Code"}),
+        json!({"version": "2.1"}),
+        json!("Claude Code"),
+        json!(42),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        park(&mut engine);
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log \
+                     SET payload_json=json_set(payload_json,'$.authorReported',json(?1)) \
+                     WHERE origin_id='message-peer' AND origin_seq=0",
+                    [bad.to_string()],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("park the report an older build kept");
+        let ApplyOutcome {
+            primary,
+            refusals,
+            sharing_declined,
+        } = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread applies");
+        assert!(sharing_declined.is_empty());
+        assert_eq!(primary, ApplyDisposition::Applied(Vec::new()), "{bad}");
+        assert_eq!(
+            refusals,
+            vec![ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: "message-peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "chat.message.append".to_owned(),
+                reason: RefusalReason::InvalidInput {
+                    reason: "pending chat message reported agent is invalid".to_owned(),
+                },
+            }],
+            "{bad}"
+        );
+        assert_eq!(stored(&engine), 0, "{bad}");
+    }
+}
+
+/// A build that did not know `agentConnectionId` parked it unchecked. Replay
+/// keeps a good one on a link message, and refuses one on another message or
+/// one not in its stored form instead of failing the thread.
+#[test]
+fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() {
+    use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
+
+    // Parks `message` before its thread exists, then plants `connection`
+    // in its payload as an older build kept it.
+    fn park(engine: &mut EngineStore, message: &ReplicationEnvelope, connection: &str) {
+        imported_chat_fixture(engine, "peer");
+        assert_eq!(
+            apply_chat_envelope(engine, message, &NoFaults).expect("park"),
+            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+        );
+        assert_eq!(pending_chat_coordinate_count(engine), 1);
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log \
+                     SET payload_json=json_set(payload_json,'$.agentConnectionId',?1) \
+                     WHERE origin_id=?2 AND origin_seq=0",
+                    params![connection, message.origin_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("park the connection an older build kept");
+    }
+
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
+    );
+    let mut link_payload = link_message_payload("link-message:parked", "Early");
+    link_payload["threadId"] = json!("late-thread");
+    let link = envelope(LINK_ORIGIN, 0, "chat.message.append", link_payload);
+    let human = envelope(
+        "message-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "parked",
+            "threadId": "late-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Early",
+            "createdAtMs": 30
+        }),
+    );
+    let stored = |engine: &EngineStore| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE thread_id = 'late-thread'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("count messages")
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    park(&mut engine, &link, "connection-1");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .get_message("ws", "link-message:parked")
+            .expect("replayed link message")
+            .link_author,
+        Some(ChatMessageLinkAuthor {
+            grant_id: "grant-1".to_owned(),
+            principal_id: "principal-1".to_owned(),
+            agent_connection_id: Some("connection-1".to_owned()),
+        })
+    );
+
+    for (message, bad) in [
+        (&human, "connection-1"),
+        (&link, " connection-1"),
+        (&link, "connection-\u{1}"),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        park(&mut engine, message, bad);
+        let ApplyOutcome {
+            primary,
+            refusals,
+            sharing_declined,
+        } = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread applies");
+        assert!(sharing_declined.is_empty());
+        assert_eq!(primary, ApplyDisposition::Applied(Vec::new()), "{bad:?}");
+        assert_eq!(
+            refusals,
+            vec![ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: message.origin_id.clone(),
+                origin_seq: 0,
+                op_kind: "chat.message.append".to_owned(),
+                reason: RefusalReason::InvalidInput {
+                    reason: "pending chat message link author is invalid".to_owned(),
+                },
+            }],
+            "{bad:?}"
+        );
+        assert_eq!(stored(&engine), 0, "{bad:?}");
+    }
 }

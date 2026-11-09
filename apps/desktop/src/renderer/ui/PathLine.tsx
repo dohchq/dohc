@@ -8,17 +8,31 @@ import { useLayoutEffect, useRef, useState } from "react";
 
 export type PathParts = { first: string; middle: string; name: string };
 
-// Splits a path as the OS spells it: a Windows path starts with a drive or
-// "\\" and uses "\"; any other path uses "/". The three parts join back into
-// the path.
+// A Windows path starts with a drive or "\\" and uses "\"; any other path
+// uses "/".
+function separatorOf(path: string): string {
+  return /^([A-Za-z]:\\|\\\\)/.test(path) ? "\\" : "/";
+}
+
+// Splits a path as the OS spells it. The three parts join back into the path.
 export function splitPath(path: string): PathParts {
-  const separator = /^([A-Za-z]:\\|\\\\)/.test(path) ? "\\" : "/";
+  const separator = separatorOf(path);
   const nameStart = path.lastIndexOf(separator) + 1;
   // The first folder runs through the separator after its own name: "C:\",
   // "\\server\", "/home/". Without one, or past the name, it is all before the name.
   const afterFirst = path.indexOf(separator, path.search(separator === "\\" ? /[^\\]/ : /[^/]/)) + 1;
   const firstEnd = afterFirst === 0 ? nameStart : Math.min(afterFirst, nameStart);
   return { first: path.slice(0, firstEnd), middle: path.slice(firstEnd, nameStart), name: path.slice(nameStart) };
+}
+
+// Cuts a path after each separator, so a line can break between folders.
+// The pieces join back into the path.
+export function pathPieces(path: string): string[] {
+  const separator = separatorOf(path);
+  return path
+    .split(separator)
+    .map((piece, index, pieces) => (index < pieces.length - 1 ? piece + separator : piece))
+    .filter((piece) => piece !== "");
 }
 
 export function PathLine(props: { path: string; className?: string }) {

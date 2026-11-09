@@ -86,6 +86,7 @@ fn facts(
             on_behalf_of: Some("user:ice".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         }),
         source: source.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms: 50,
@@ -443,6 +444,7 @@ fn a_claim_carries_the_change_kind_actor_and_bounded_field_facts() {
         on_behalf_of: Some("user:ice".to_owned()),
         depth: 0,
         run: None,
+        agent_run_id: None,
     });
     applied.fields = vec![
         CollectionFieldChangeFact {
@@ -540,6 +542,7 @@ fn a_claim_keeps_the_person_or_link_the_relay_accepted_its_change_from() {
             on_behalf_of: Some("claimed-person".to_owned()),
             depth: 0,
             run: None,
+            agent_run_id: None,
         });
         let claims = claim_for(&mut store, WS, &applied, 10 + origin_seq);
         assert_eq!(claims[0].change.shared_author.as_ref(), Some(&author));
@@ -1584,7 +1587,8 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         now_ms,
         request_id: None,
         author_agent_id: None,
-        named_agent_ids: Vec::new(),
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
     }
 }
 
@@ -1744,7 +1748,8 @@ fn a_group_message_claims_each_matching_subscription_once() {
                 attachments: Vec::new(),
                 automation: None,
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 25,
                 request_id: None,
             },
@@ -2042,6 +2047,7 @@ fn changed_by(
             on_behalf_of: Some("local".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         });
     }
     applied
@@ -2087,6 +2093,7 @@ fn ask_agent(
     chats
         .claim_next_pending(
             WS,
+            "default",
             &format!("run-{message_id}"),
             "agent",
             None,
@@ -2227,7 +2234,8 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                         chain_depth,
                     }),
                     author_agent_id: None,
-                    named_agent_ids: Vec::new(),
+                    author_reported: None,
+                    wake_agent_ids: Vec::new(),
                     now_ms: 11,
                     request_id: None,
                 },
@@ -2248,7 +2256,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
             .expect("queue");
     }
     let claim = chats
-        .claim_next_pending(WS, "run-1", "agent", None, 15, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "agent", None, 15, &NO_FAULTS)
         .expect("claim")
         .expect("a run");
     assert_eq!(claim.run.trigger_message_id, "m-first");
@@ -2292,7 +2300,8 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                 attachments: Vec::new(),
                 automation: None,
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: vec!["default".to_owned()],
                 now_ms: 17,
                 request_id: None,
             },
@@ -2300,7 +2309,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
         )
         .expect("a person's request");
     let again = chats
-        .claim_next_pending(WS, "run-2", "agent", None, 18, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-2", "agent", None, 18, &NO_FAULTS)
         .expect("claim again")
         .expect("the requeued run");
     assert_eq!(again.run.trigger_message_id, "m-first");
@@ -2385,6 +2394,7 @@ fn an_agents_moment_author_carries_its_runs_depth() {
             on_behalf_of: Some("local".to_owned()),
             depth,
             run: None,
+            agent_run_id: None,
         };
         let author =
             moment_author_json(Some("dohc-chat-runner"), Some(&attribution)).expect("author");

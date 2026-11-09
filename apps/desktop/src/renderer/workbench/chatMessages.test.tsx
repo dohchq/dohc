@@ -12,8 +12,9 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
+  pinnedChatDay,
 } from "./chatMessages";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import { extractChatFileReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
 
@@ -21,7 +22,7 @@ import { setChosenColors } from "./chosenColors";
 
 // Real implementations, spied: every message-body render runs the file-token
 // scan, so its call count shows whether a message actually re-rendered.
-vi.mock("./chatFileMentions", { spy: true });
+vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
 // Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
 // view send through this composer, so its Enter semantics are load-bearing
@@ -171,6 +172,29 @@ describe("chat authorship display", () => {
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
   });
 
+  // Every connected agent of one account shares that account's unnamed agent group, so only its name tells two apart.
+  it.each([
+    ["your", "Claude", "Codex", { group: "unnamed-agent", hue: null, self: true, connected: true }],
+    ["another person's", "Scout", "Helper", { group: "7", hue: null, self: false, connected: true }],
+  ] as const)("starts a new run when %s connected agent with another name posts next", (_owner, first, second, presentation) => {
+    const at = new Date(2026, 8, 17, 12).getTime();
+    const post = (id: string, authorDisplayName: string, minute: number): ChatMessageRecord => ({
+      id, threadId: "thread", presentation,
+      authorKind: "agent", authorDisplayName, body: "Done.", createdAtMs: at + minute * 60_000,
+    });
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[post("a", first, 0), post("b", second, 1), post("c", second, 2)]}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    expect(screen.getAllByTestId("test-chat-message").map((row) => row.dataset.continues)).toEqual(["false", "false", "true"]);
+    expect(screen.getAllByTestId("test-chat-message-author").map((author) => author.textContent)).toEqual([first, second]);
+  });
+
   it("fits a continued message's time in the avatar's column, without AM or PM", () => {
     // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
     const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;
@@ -196,7 +220,8 @@ describe("chat authorship display", () => {
     for (const at of [1, 3]) {
       const { createdAtMs } = messages[at]!;
       expect(slot(items[at]!).className).toBe(slot(items[at - 1]!).className);
-      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["w-9", "shrink-0", "justify-end"]));
+      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["justify-end"]));
+      expect(items[at]!.querySelector(".group")!.className).toContain("grid-cols-[36px_minmax(0,1fr)]");
       const time = slot(items[at]!).querySelector("time")!;
       expect(time.textContent).toBe(formatClockDigits(createdAtMs));
       expect(time.textContent).not.toMatch(/AM|PM/i);
@@ -299,6 +324,47 @@ describe("chat authorship display", () => {
     expect(avatar.className).toMatch(/\brounded-full\b/u);
     expect(avatar.className).toContain("border-dashed");
     expect(avatar.className).not.toMatch(/hue/u);
+  });
+
+  it("shows an agent that joined with a link as an agent, then a link holder", () => {
+    render(
+      <AgentSettingsProvider settings={DEFAULT_USER_SETTINGS}>
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[
+            { presentation: { group: "7", hue: null, self: false },
+              id: "message-link-agent",
+              threadId: "thread-1",
+              authorKind: "link",
+              linkAgent: true,
+              authorDisplayName: "Claude Code",
+              body: "Booked the cabin",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />
+      </AgentSettingsProvider>,
+    );
+    const author = screen.getByTestId("test-chat-message-author");
+    expect(author.textContent).toBe("Claude Code");
+    expect(author.querySelector(".text-agent")?.textContent).toBe("Claude Code");
+    const badge = screen.getByTestId("test-chat-agent-badge");
+    const mark = screen.getByTestId("test-chat-message-link-holder");
+    expect(badge.getAttribute("aria-label")).toBe("agent");
+    expect(mark.textContent).toBe("Link holder");
+    expect(mark.title).toBe("Link holder");
+    // A screen reader meets the agent badge, then the name, then the link mark.
+    expect(badge.compareDocumentPosition(author) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(author.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const avatar = document.querySelector<HTMLElement>("[data-link-agent]")!;
+    expect(avatar.title).toBe("Claude Code");
+    expect(avatar.className).toMatch(/\brounded-lg\b/u);
+    expect(avatar.className).toContain("border-dashed");
+    expect(avatar.className).toContain("border-agent");
+    expect(avatar.className).toContain("text-agent");
   });
 
   it("renders file chips without requiring a person or agent roster", () => {
@@ -526,6 +592,24 @@ describe("chat authorship display", () => {
   });
 });
 
+describe("an empty chat", () => {
+  it("shows the picture its caller gives over the label, centered in the list", () => {
+    render(<ChatMessageList testIdPrefix="lane" messages={[]} loading={false} emptyLabel="No messages yet."
+      emptyPicture={<svg data-testid="empty-picture" />} />);
+    const label = screen.getByText("No messages yet.");
+    expect(screen.getByTestId("empty-picture")).toBeTruthy();
+    expect(label.tagName).toBe("SPAN");
+  });
+
+  it("says it in one muted line, with no picture or glyph, when the caller gives none", () => {
+    const { container } = render(<ChatMessageList testIdPrefix="linked-chat" messages={[]} loading={false} emptyLabel="No messages yet about notes.md." />);
+    const label = screen.getByText("No messages yet about notes.md.");
+    expect(label.tagName).toBe("P");
+    expect(label.className).toContain("text-muted");
+    expect(container.querySelector("svg")).toBeNull();
+  });
+});
+
 describe("formatChatTime", () => {
   it("includes the year only for day labels outside the current year", () => {
     const now = new Date(2026, 8, 17).getTime();
@@ -553,6 +637,31 @@ describe("formatChatTime", () => {
       }),
       iso: new Date(at).toISOString(),
     });
+  });
+});
+
+describe("pinnedChatDay", () => {
+  it("hides the label while the top row's day divider is fully visible", () => {
+    expect(pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: true })).toBeNull();
+  });
+
+  it("shows the day while the top row's divider crosses or sits above the top edge", () => {
+    expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: false })).toBe("Today");
+  });
+
+  it("shows the day for a top row whose divider is further up", () => {
+    expect(pinnedChatDay({ day: "Today", startsDay: false, dividerFullyVisible: true })).toBe("Today");
+  });
+
+  it("hides the label when the conversation fits without scrolling", () => {
+    // The first message is the top row, and its divider is in full view.
+    expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: true })).toBeNull();
+    expect(pinnedChatDay(null)).toBeNull();
+  });
+
+  it("pins nothing while another day's divider passes under the pinned copy", () => {
+    expect(pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: false }, true)).toBeNull();
+    expect(pinnedChatDay({ day: "Yesterday", startsDay: false, dividerFullyVisible: true }, true)).toBeNull();
   });
 });
 

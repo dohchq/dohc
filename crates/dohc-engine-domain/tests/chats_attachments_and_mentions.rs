@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, LinkedChatStore,
-    LocalAttachmentInput, MentionCursor, NoFaults, SendMessage, StartChannelThread,
-    attachment_id_for, parse_mention_handles,
+    AgentReader, ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, LinkedChatStore,
+    LocalAttachmentInput, NoFaults, SendMessage, StartChannelThread, attachment_id_for,
+    parse_mention_handles,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -77,7 +77,8 @@ fn start_with(
                 options: Vec::new(),
                 attachments,
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms,
                 request_id: None,
             },
@@ -95,6 +96,33 @@ fn start_message(
     kind: ChatActorKind,
     author_user_id: Option<&str>,
     origin: Option<&str>,
+    body: &str,
+    now_ms: i64,
+) {
+    start_waking(
+        store,
+        channel_id,
+        thread_id,
+        message_id,
+        kind,
+        author_user_id,
+        origin,
+        &[],
+        body,
+        now_ms,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_waking(
+    store: &mut EngineStore,
+    channel_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    kind: ChatActorKind,
+    author_user_id: Option<&str>,
+    origin: Option<&str>,
+    wake_agent_ids: &[&str],
     body: &str,
     now_ms: i64,
 ) {
@@ -119,7 +147,8 @@ fn start_message(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: wake_agent_ids.iter().map(|id| (*id).to_owned()).collect(),
                 now_ms,
                 request_id: None,
             },
@@ -157,7 +186,8 @@ fn send_text(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms,
                 request_id: None,
             },
@@ -254,7 +284,8 @@ fn attachment_insert_and_replication_op_commit_together() {
             options: Vec::new(),
             attachments: vec![attachment("object")],
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 20,
             request_id: Some("request".to_owned()),
         },
@@ -484,7 +515,8 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
         options: Vec::new(),
         attachments: vec![attachment("object-a")],
         author_agent_id: None,
-        named_agent_ids: Vec::new(),
+        author_reported: None,
+        wake_agent_ids: Vec::new(),
         now_ms: 20,
         request_id: Some("request".to_owned()),
     };
@@ -531,7 +563,8 @@ fn send_message_returns_authoritative_attachments() {
                 options: Vec::new(),
                 attachments: vec![attachment("object")],
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: None,
             },
@@ -586,6 +619,35 @@ fn mention_parser_ignores_inline_and_fenced_code() {
         vec!["you"],
         "scanning code spans/fences adds three inert handles."
     );
+}
+
+#[test]
+fn mention_parser_skips_names_inside_file_links() {
+    // The expected handles are what chatMentionTokens in workspace-contracts reads.
+    let cases: [(&str, &[&str]); 12] = [
+        ("see @[trip @Nova notes.md]", &[]),
+        ("see @[notes @Nova.md#Day 1]", &[]),
+        (
+            "@[trip @Nova notes.md] for @Nova, and @Ana@[x.md]",
+            &["nova", "ana"],
+        ),
+        // A blank path or heading makes no link.
+        ("@[ ] @a @[ @b ]", &["a"]),
+        ("@[x.md# @c] @[y.md# ] @d", &["d"]),
+        // Neither does a nested opener, a line break, or an opener in code.
+        ("@[a @h @[b] @g]", &["h", "g"]),
+        ("@[a @i\nb]", &["i"]),
+        ("`@[` @j]", &["j"]),
+        ("`@[a @k]`", &[]),
+        // An escaped `]` stays in the path.
+        ("@[a%5D @l] @m", &["m"]),
+        // Multi-byte text before and inside a link.
+        ("日本 @[ノート @Nova.md] @Ana", &["ana"]),
+        ("@[ノート.md#見出し @Nova] @Bo", &["bo"]),
+    ];
+    for (body, handles) in cases {
+        assert_eq!(parse_mention_handles(body), handles, "{body:?}");
+    }
 }
 
 #[test]
@@ -668,7 +730,8 @@ fn local_start_and_send_index_mentions_atomically() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 40,
             request_id: None,
         },
@@ -799,7 +862,7 @@ fn mention_backfill_completes_before_first_read() {
         .backfill_mentions(WS, &NO_FAULTS)
         .expect("readiness backfill");
     let mentions = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", false, None, 10)
+        .list_mentions_for_handle(WS, "agent", None, 10)
         .expect("read");
     assert_eq!(
         mentions.len(),
@@ -831,7 +894,7 @@ fn mention_read_requires_present_message_and_thread() {
         })
         .expect("orphan index");
     let rows = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", false, None, 10)
+        .list_mentions_for_handle(WS, "agent", None, 10)
         .expect("list");
     assert!(
         rows.is_empty(),
@@ -839,63 +902,14 @@ fn mention_read_requires_present_message_and_thread() {
     );
 }
 
-#[test]
-fn mention_unread_filter_uses_agent_coordinate_tie_break() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "a-message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    send_text(
-        &mut store,
-        "thread",
-        "b-message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(WS, None, "thread", 20, "a-message", None, 30, &NO_FAULTS)
-        .expect("mark read");
-    let rows = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(
-            WS,
-            "agent",
-            true,
-            Some(MentionCursor {
-                created_at_ms: 19,
-                message_id: "z".to_owned(),
-            }),
-            10,
-        )
-        .expect("unread mentions");
-    assert_eq!(
-        rows.iter()
-            .map(|row| row.message_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["b-message"],
-        "timestamp-only unread comparison hides the equal-time later id.",
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
-fn send_naming(
+fn send_waking(
     store: &mut EngineStore,
     thread_id: &str,
     message_id: &str,
     kind: ChatActorKind,
     origin: Option<&str>,
-    named_agent_ids: &[&str],
+    wake_agent_ids: &[&str],
     body: &str,
     now_ms: i64,
     faults: &dyn dohc_engine_storage::FaultInjector,
@@ -918,13 +932,20 @@ fn send_naming(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: named_agent_ids.iter().map(|id| (*id).to_owned()).collect(),
+                author_reported: None,
+                wake_agent_ids: wake_agent_ids.iter().map(|id| (*id).to_owned()).collect(),
                 now_ms,
                 request_id: None,
             },
             faults,
         )
         .map(|_| ())
+}
+
+fn run(run_id: &str) -> AgentReader {
+    AgentReader::Run {
+        run_id: run_id.to_owned(),
+    }
 }
 
 fn requests(store: &EngineStore) -> Vec<(String, String, String, i64, i64)> {
@@ -954,7 +975,7 @@ fn requests(store: &EngineStore) -> Vec<(String, String, String, i64, i64)> {
 }
 
 #[test]
-fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
+fn a_message_in_an_agent_chat_wakes_only_the_agents_its_sender_lists() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
     LinkedChatStore::new(&mut store)
@@ -964,10 +985,26 @@ fn a_message_in_an_agent_chat_requests_that_agent_in_its_own_write() {
         &mut store,
         "research-chat",
         "agent-thread",
+        "unlisted",
+        ChatActorKind::Human,
+        None,
+        None,
+        "hello",
+        19,
+    );
+    assert!(
+        requests(&store).is_empty(),
+        "an agent you run gets no request for its DM, so the sender lists none."
+    );
+    start_waking(
+        &mut store,
+        "research-chat",
+        "listed-thread",
         "direct",
         ChatActorKind::Human,
         None,
         None,
+        &["research"],
         "hello",
         20,
     );
@@ -1002,7 +1039,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     LinkedChatStore::new(&mut store)
         .ensure_agent_channel(WS, "research-chat", "research", "Research", 11, &NO_FAULTS)
         .expect("agent chat");
-    start_message(
+    start_waking(
         &mut store,
         "research-chat",
         "agent-thread",
@@ -1010,6 +1047,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
         ChatActorKind::Human,
         None,
         None,
+        &["research"],
         "hello",
         20,
     );
@@ -1024,7 +1062,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
         "Opening",
         21,
     );
-    send_naming(
+    send_waking(
         &mut store,
         "group-thread",
         "asks-both",
@@ -1038,7 +1076,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     .expect("send");
     let unread = |store: &mut EngineStore, run_id: &str, after: Option<(i64, String)>| {
         LinkedChatStore::new(store)
-            .list_agent_unread_requests(WS, run_id, after, 10)
+            .list_agent_unread_requests(WS, &run(run_id), after, 10)
             .map(|requests| {
                 requests
                     .into_iter()
@@ -1046,11 +1084,11 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
                     .collect::<Vec<_>>()
             })
     };
-    let read = |store: &mut EngineStore, run_id: Option<&str>| {
+    let read = |store: &mut EngineStore, reader: AgentReader| {
         LinkedChatStore::new(store)
             .mark_thread_read_by_agent(
                 WS,
-                run_id,
+                &reader,
                 "group-thread",
                 30,
                 "asks-both",
@@ -1062,7 +1100,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     };
 
     let research = LinkedChatStore::new(&mut store)
-        .claim_next_pending(WS, "run-1", "", None, 35, &NO_FAULTS)
+        .claim_next_pending(WS, "research", "run-1", "", None, 35, &NO_FAULTS)
         .expect("claim")
         .expect("research's run");
     assert_eq!(research.run.agent_id, "research");
@@ -1074,13 +1112,13 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
         unread(&mut store, "run-1", Some((20, "direct".to_owned()))).expect("requests"),
         vec!["asks-both"]
     );
-    read(&mut store, None);
+    read(&mut store, AgentReader::Unnamed);
     assert_eq!(
         unread(&mut store, "run-1", None).expect("requests"),
         vec!["direct", "asks-both"],
         "an agent outside a run keeps its own place."
     );
-    read(&mut store, Some("run-1"));
+    read(&mut store, run("run-1"));
     assert_eq!(
         unread(&mut store, "run-1", None).expect("requests"),
         vec!["direct"]
@@ -1095,7 +1133,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     );
 
     let default = LinkedChatStore::new(&mut store)
-        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-2", "", None, 60, &NO_FAULTS)
         .expect("claim")
         .expect("the default agent's run");
     assert_eq!(default.run.agent_id, "default");
@@ -1104,7 +1142,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
         vec!["asks-both"],
         "research reading the message leaves it unread for the default agent."
     );
-    read(&mut store, Some("run-2"));
+    read(&mut store, run("run-2"));
     assert!(
         unread(&mut store, "run-2", None)
             .expect("requests")
@@ -1131,7 +1169,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         "Opening",
         20,
     );
-    send_naming(
+    send_waking(
         &mut store,
         "thread",
         "both",
@@ -1156,7 +1194,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
     );
     let mut chats = LinkedChatStore::new(&mut store);
     let first = chats
-        .claim_next_pending(WS, "run-1", "", None, 40, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "", None, 40, &NO_FAULTS)
         .expect("claim")
         .expect("first agent");
     assert_eq!(
@@ -1168,7 +1206,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
     );
     assert!(
         chats
-            .claim_next_pending(WS, "run-2", "", None, 41, &NO_FAULTS)
+            .claim_next_pending(WS, "research", "run-2", "", None, 41, &NO_FAULTS)
             .expect("claim while running")
             .is_none(),
         "one run at a time per workspace."
@@ -1177,7 +1215,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         .complete_dispatch(WS, "run-1", 0, 50, &NO_FAULTS)
         .expect("complete");
     let second = chats
-        .claim_next_pending(WS, "run-2", "", None, 60, &NO_FAULTS)
+        .claim_next_pending(WS, "research", "run-2", "", None, 60, &NO_FAULTS)
         .expect("claim")
         .expect("second agent");
     assert_eq!(
@@ -1193,7 +1231,7 @@ fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
         .expect("complete");
     assert!(
         chats
-            .claim_next_pending(WS, "run-3", "", None, 80, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run-3", "", None, 80, &NO_FAULTS)
             .expect("claim")
             .is_none()
     );
@@ -1217,7 +1255,7 @@ fn cli_messages_wake_no_agent_and_only_people_name_agents() {
         "from the terminal",
         20,
     );
-    send_naming(
+    send_waking(
         &mut store,
         "thread",
         "cli-named",
@@ -1230,7 +1268,7 @@ fn cli_messages_wake_no_agent_and_only_people_name_agents() {
     )
     .expect("cli send");
     assert!(requests(&store).is_empty());
-    let agent_naming = send_naming(
+    let agent_naming = send_waking(
         &mut store,
         "thread",
         "agent-named",
@@ -1245,7 +1283,7 @@ fn cli_messages_wake_no_agent_and_only_people_name_agents() {
         agent_naming,
         Err(dohc_engine_domain::DomainError::InvalidInput { .. })
     ));
-    let bad_id = send_naming(
+    let bad_id = send_waking(
         &mut store,
         "thread",
         "bad-id",
@@ -1264,6 +1302,88 @@ fn cli_messages_wake_no_agent_and_only_people_name_agents() {
 }
 
 #[test]
+fn a_message_wakes_exactly_its_listed_agents_and_enqueue_still_records() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "thread",
+        "opening",
+        ChatActorKind::Human,
+        None,
+        None,
+        "Opening",
+        20,
+    );
+    send_waking(
+        &mut store,
+        "thread",
+        "listed",
+        ChatActorKind::Human,
+        None,
+        &["research"],
+        "@Myagent and @Research",
+        30,
+        &NO_FAULTS,
+    )
+    .expect("send");
+    send_waking(
+        &mut store,
+        "thread",
+        "from-cli",
+        ChatActorKind::Human,
+        Some("cli"),
+        &[],
+        "@Research",
+        31,
+        &NO_FAULTS,
+    )
+    .expect("cli send");
+    let crowd: Vec<String> = (0..65).map(|index| format!("agent-{index}")).collect();
+    let crowd: Vec<&str> = crowd.iter().map(String::as_str).collect();
+    assert!(
+        matches!(
+            send_waking(
+                &mut store,
+                "thread",
+                "crowd",
+                ChatActorKind::Human,
+                None,
+                &crowd,
+                "Everyone",
+                32,
+                &NO_FAULTS,
+            ),
+            Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+        ),
+        "a message wakes at most 64 agents."
+    );
+    let woken = |store: &EngineStore| {
+        requests(store)
+            .into_iter()
+            .map(|(trigger, agent, ..)| (trigger, agent))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        woken(&store),
+        vec![("listed".to_owned(), "research".to_owned())],
+        "a mention outside the list wakes no agent, and a CLI post wakes none."
+    );
+    LinkedChatStore::new(&mut store)
+        .enqueue_dispatch(WS, "from-cli", "research", "thread", 32, &NO_FAULTS)
+        .expect("enqueue");
+    assert_eq!(
+        woken(&store),
+        vec![
+            ("from-cli".to_owned(), "research".to_owned()),
+            ("listed".to_owned(), "research".to_owned()),
+        ],
+        "a caller that enqueues a request still records it."
+    );
+}
+
+#[test]
 fn a_request_rolls_back_with_its_message() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
@@ -1278,7 +1398,7 @@ fn a_request_rolls_back_with_its_message() {
         "Opening",
         20,
     );
-    let failed = send_naming(
+    let failed = send_waking(
         &mut store,
         "thread",
         "named",
@@ -1318,7 +1438,7 @@ fn a_mention_that_woke_a_dohc_agent_is_not_in_the_agent_inbox() {
         20,
     );
     // A dohc agent named "Agent": the sender resolves @Agent to its id.
-    send_naming(
+    send_waking(
         &mut store,
         "thread",
         "named",
@@ -1339,7 +1459,7 @@ fn a_mention_that_woke_a_dohc_agent_is_not_in_the_agent_inbox() {
         "the named agent wakes exactly once."
     );
     let inbox = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", true, None, 10)
+        .list_agent_unread_requests(WS, &AgentReader::Unnamed, None, 10)
         .expect("inbox");
     assert!(
         inbox.is_empty(),
@@ -1364,7 +1484,7 @@ fn a_plain_agent_mention_stays_in_the_agent_inbox() {
     );
     assert!(requests(&store).is_empty(), "@agent wakes no dohc agent.");
     let inbox = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", true, None, 10)
+        .list_agent_unread_requests(WS, &AgentReader::Unnamed, None, 10)
         .expect("inbox");
     assert_eq!(
         inbox
@@ -1392,7 +1512,7 @@ fn windows_reserved_names_are_mention_lookup_keys() {
     );
     for handle in ["con", "NUL", "aux.txt"] {
         let mentions = LinkedChatStore::new(&mut store)
-            .list_mentions_for_handle(WS, handle, false, None, 10)
+            .list_mentions_for_handle(WS, handle, None, 10)
             .expect("reserved filename is a valid mention key");
         assert_eq!(mentions.len(), 1);
         assert_eq!(mentions[0].message_id, "message");

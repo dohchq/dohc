@@ -1194,7 +1194,7 @@ describe("the owner's read of a grant's direct writes", () => {
     const usage = () => db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?").get(WORKSPACE);
     const quota = usage();
     db.exec(`
-      DELETE FROM sync_relay_migrations WHERE migration_id = 'collection-write-authors-v1';
+      DELETE FROM sync_relay_migrations WHERE migration_id IN ('collection-write-authors-v1', 'agent-write-provenance-v1');
       ALTER TABLE sync_relay_collection_writes RENAME TO current_ledger;
       CREATE TABLE sync_relay_collection_writes (
         grant_id TEXT NOT NULL,

@@ -45,6 +45,20 @@ impl Drop for Daemon {
     }
 }
 impl Daemon {
+    /// Closes stdin and expects a clean exit. A failure shows the daemon's stderr.
+    fn close_cleanly(&mut self) {
+        drop(self.0.stdin.take());
+        let status = self.0.wait().unwrap();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = self.0.stderr.take() {
+            let _ = pipe.read_to_end(&mut stderr);
+        }
+        assert!(
+            status.success(),
+            "the daemon exited with {status}; stderr:\n{}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
     fn streamed(
         &mut self,
         id: u64,
@@ -228,6 +242,8 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
     };
     assert_eq!(settled.result["status"], "settled");
     assert_eq!(settled.result["settlement"]["materialized"], true);
+    // The first baseline covers no accepted edit, so it records nothing.
+    assert_eq!(settled.result["settlement"]["settlementId"], Value::Null);
     assert_eq!(
         std::fs::read_to_string(root.join("note.md")).unwrap(),
         markdown
@@ -251,12 +267,14 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
     };
     assert_eq!(covered.result["settlement"]["applicationCount"], 1);
     assert_eq!(covered.result["settlement"]["terminalCursor"], 2);
-    assert_eq!(
+    // The first recorded settlement publishes its own moment; the
+    // baseline's moment stays local.
+    assert_ne!(
         covered.result["settlement"]["momentId"],
         settled.result["settlement"]["momentId"]
     );
     let counts:(i64,i64)=db.query_row("SELECT (SELECT COUNT(*) FROM live_device_settlements),(SELECT COUNT(*) FROM engine_search_files_fts WHERE object_id='object' AND text=?1)",[markdown],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!(counts, (2, 1));
+    assert_eq!(counts, (1, 1));
     let Envelope::Error(refused) = daemon.request(
         8,
         "liveApplication.settle",
@@ -266,8 +284,7 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
         panic!("missing terminal refusal")
     };
     assert_eq!(refused.error.code, ErrorCode::InvalidParams);
-    drop(daemon.0.stdin.take());
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
 }
 
 #[test]
@@ -428,8 +445,7 @@ fn production_entrypoint_unloads_a_settled_document_and_reloads_its_accepted_edi
         std::fs::read_to_string(root.join("note.md")).unwrap(),
         markdown
     );
-    drop(daemon.0.stdin.take());
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
 }
 
 #[test]
@@ -499,8 +515,7 @@ fn production_entrypoint_starts_empty_and_changes_membership_without_restarting(
     ));
     // The same connection kept every operation; the daemon never restarted.
     assert!(listed(&mut daemon, 9).is_empty());
-    daemon.0.stdin.take();
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
 
     // A daemon without a configured host offers none of these operations.
     let mut ordinary = Daemon(command(None).spawn().unwrap());
@@ -510,6 +525,7 @@ fn production_entrypoint_starts_empty_and_changes_membership_without_restarting(
         "liveApplication.attachWorkspace",
         "liveApplication.detachWorkspace",
         "liveApplication.unloadDocument",
+        "liveApplication.reconcileActivation",
     ]
     .into_iter()
     .enumerate()
@@ -622,8 +638,7 @@ fn production_entrypoint_discovers_fixed_roots_after_authentication() {
         };
         assert_eq!(error.error.code, ErrorCode::Forbidden, "{method}");
     }
-    daemon.0.stdin.take();
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
     let store =
         dohc_engine_storage::EngineStore::open(&root.join(".dohc/engine/engine.db"), 0).unwrap();
     assert_eq!(
@@ -836,8 +851,7 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
     let mut reopened = Daemon(command(Some(&path)).spawn().unwrap());
     reopened.hello("configured-test-secret");
     assert!(matches!(reopened.read(), Envelope::HelloAck(_)));
-    reopened.0.stdin.take();
-    assert!(reopened.0.wait().unwrap().success());
+    reopened.close_cleanly();
     let other_root = scratch.path().join("other-root");
     std::fs::create_dir_all(other_root.join(".dohc/engine")).unwrap();
     std::fs::hard_link(

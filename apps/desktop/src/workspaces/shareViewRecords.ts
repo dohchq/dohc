@@ -20,7 +20,7 @@ export interface UnjournalablePath {
     | "local-collision"
     | "spelling-collision"
     | "unreadable";
-  // For a spelling collision, the shared spelling whose file this one reaches.
+  // Another path to name beside this one, such as a file blocking a folder.
   owner?: string;
 }
 
@@ -53,8 +53,11 @@ export function unjournalablePathMessages(
   ] as const) {
     const group = groups.get(reason);
     if (!group || group.length === 0) continue;
-    const names = namedPaths(group);
-    const one = group.length === 1;
+    const shown = reason === "local-collision"
+      ? [...new Set(group.map(entry => entry.owner ?? entry.path))].map(path => ({ path, reason }))
+      : group;
+    const names = namedPaths(shown);
+    const one = shown.length === 1;
     if (reason === "oversized-text") {
       messages.push(
         `${names} ${one ? "is" : "are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text limit. ` +
@@ -78,7 +81,7 @@ export function unjournalablePathMessages(
     } else if (reason === "local-collision") {
       messages.push(
         `${names} ${one ? "already has a file" : "already have files"} from this machine. ` +
-          `Move or remove ${one ? "this file" : "these files"} to receive the shared ${one ? "file" : "files"}.`,
+          `Move or rename ${one ? "this file" : "these files"} to receive the shared ${group.length === 1 ? "file" : "files"}.`,
       );
     } else if (reason === "spelling-collision") {
       const owner = one ? group[0]!.owner : undefined;

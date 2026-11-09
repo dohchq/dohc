@@ -34,6 +34,8 @@ import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
 import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
+import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare } from "./serviceHostEnrollment";
+import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -231,6 +233,7 @@ export function rotateLinkGrant(storage: StorageContext, input: {
         .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
         .run(generation, grant.grantId);
       retireCurrentLinkCredential(storage, grant.grantId, input.rotatedAtMs);
+      retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.rotatedAtMs);
       insertLinkCredential(storage, {
         credentialId: credential.credentialId,
         grantId: grant.grantId,
@@ -303,6 +306,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
       }
 
       const generation = widening ? grant.generation + 1 : grant.generation;
+      const covered = widening ? [] : serviceHostEnrollmentsCoveredByShare(storage, grant.shareId);
       storage.db
         .prepare(
           "UPDATE sync_relay_share_grants SET access = ?, generation = ? WHERE grant_id = ?",
@@ -311,6 +315,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
 
       if (wideningCredential) {
         retireCurrentLinkCredential(storage, grant.grantId, input.changedAtMs);
+        retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.changedAtMs);
         insertLinkCredential(storage, {
           credentialId: wideningCredential.credentialId,
           grantId: grant.grantId,
@@ -338,6 +343,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
           }
         }
         incrementActiveDependentGenerations(storage, grant.grantId);
+        retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
       }
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
@@ -374,6 +380,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         }
       }
       const revokedAtMs = Math.trunc(input.revokedAtMs);
+      const covered = serviceHostEnrollmentsCoveredByShare(storage, grant.shareId);
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND EXISTS (
           SELECT 1 FROM json_each(grants_json) receipt_grant
@@ -389,6 +396,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         .run(revokedAtMs, grant.grantId);
       if (grant.principalKind === "link") {
         retireCurrentLinkCredential(storage, grant.grantId, revokedAtMs);
+        retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, revokedAtMs);
         storage.db
           .prepare(
             `UPDATE sync_relay_share_grants
@@ -401,6 +409,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
         .run(grant.shareId, grant.shareId);
+      retireUncoveredServiceActivations(storage, covered, revokedAtMs);
       forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
@@ -1066,6 +1075,7 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
         .prepare("SELECT workspace_id FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
+      const covered = serviceHostEnrollmentsCoveredByShare(storage, shareId);
       storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
       const revoked = storage.db
         .prepare(
@@ -1084,6 +1094,8 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
+      retireAgentConnectionsInTransaction(storage, { shareId }, revokedAtMs);
+      retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
       forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)

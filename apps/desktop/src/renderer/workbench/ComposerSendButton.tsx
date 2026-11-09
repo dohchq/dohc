@@ -1,4 +1,4 @@
-import { LoaderCircle, Send } from "lucide-react";
+import { ArrowUp, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 // A send still in flight after this long shows the ring. A quicker send
@@ -18,20 +18,31 @@ function useSlowSend(sending: boolean): boolean {
   return sending && slow;
 }
 
-// The submit control every chat composer shares. It is disabled while a send
-// is in flight; once that send is slow, a ring takes the mark's place, the
-// control is busy, and a polite status says so. The control keeps its size
-// and accessible name. A busy control keeps full strength: at the disabled
-// 40% the ring measures under 3:1 on its fill, and it is the only sign.
+// The submit control every chat composer shares, in three looks: the accent
+// fill when there is something to send, an empty outline with a faint mark
+// when there is not, and a quiet fill with a full-strength ring once a send
+// is slow, so a send in progress never reads as either. It is disabled while
+// a send is in flight; a quicker send keeps the ready look. The busy control
+// is busy to assistive tech and a polite status says so. The control keeps
+// its size and accessible name in every look.
+const LOOK = {
+  ready: "border-transparent bg-accent text-bg cursor-pointer hover:opacity-90",
+  off: "border-line text-subtle cursor-not-allowed",
+  busy: "border-transparent bg-panel-2 text-ink cursor-progress",
+} as const;
+
 export function ComposerSendButton(props: {
   testId: string;
   label: string;
   sending: boolean;
   disabled: boolean;
-  shape: "icon" | "post";
+  // A chat's box sends from a 28px square; a new post sends from a worded
+  // button.
+  shape: "post" | "box";
 }) {
   const slow = useSlowSend(props.sending);
   const hidden = slow ? "invisible" : undefined;
+  const look = slow ? "busy" : props.disabled && !props.sending ? "off" : "ready";
   return (
     <>
       <button
@@ -40,12 +51,14 @@ export function ComposerSendButton(props: {
         aria-label={props.label}
         title={props.label}
         aria-busy={slow || undefined}
+        data-look={look}
         disabled={props.sending || props.disabled}
-        className={`relative shrink-0 rounded-md bg-accent text-bg ${
-          props.shape === "icon" ? "grid size-8 place-items-center" : "h-7 px-3 text-[12px] font-medium"
-        } ${slow ? "cursor-progress" : "cursor-pointer hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"}`}
+        className={`relative shrink-0 rounded-md border ${LOOK[look]} ${
+          props.shape === "box" ? "grid size-7 place-items-center" : "h-7 px-3 text-[12px] font-medium"
+        }`}
       >
-        {props.shape === "icon" ? <Send size={13} aria-hidden className={hidden} /> : <span className={hidden}>Post</span>}
+        {props.shape === "box" ? <ArrowUp size={15} strokeWidth={2} aria-hidden className={hidden} />
+          : <span className={hidden}>Post</span>}
         {slow ? (
           <LoaderCircle
             data-testid={`${props.testId}-pending`}

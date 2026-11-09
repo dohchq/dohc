@@ -6,7 +6,14 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
-import type { ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type {
+  LinkedChatStore,
+  ChatAgentReader,
+  ChatChannelType,
+  ChatMessageAutomationInput,
+  ChatReportedAgent,
+  ChatThreadLane,
+} from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -239,7 +246,8 @@ export class ChatsLiveAdapter {
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
-    namedAgentIds?: string[];
+    authorReported?: ChatReportedAgent;
+    wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     ownThread?: boolean;
@@ -287,8 +295,9 @@ export class ChatsLiveAdapter {
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
-        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
-          ? { namedAgentIds: input.namedAgentIds }
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
+        ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
+          ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
@@ -381,7 +390,8 @@ export class ChatsLiveAdapter {
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
-    namedAgentIds?: string[];
+    authorReported?: ChatReportedAgent;
+    wakeAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
@@ -425,8 +435,9 @@ export class ChatsLiveAdapter {
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
-        ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
-          ? { namedAgentIds: input.namedAgentIds }
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
+        ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
+          ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? messageId },
@@ -550,14 +561,14 @@ export class ChatsLiveAdapter {
 
   async markThreadReadByAgent(input: {
     workspaceId: string;
-    runId?: string;
+    reader: ChatAgentReader;
     threadId: string;
     upTo: { createdAtMs: number; messageId: string };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.agentReadMarkThreadRead, {
-      ...(input.runId !== undefined ? { runId: input.runId } : {}),
+      reader: input.reader,
       threadId: input.threadId,
       upTo: input.upTo,
       ...(input.expectedRevision !== undefined
@@ -566,15 +577,15 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string, runId?: string): Promise<ChatThread[]> {
+  async listAgentUnreadThreads(workspaceId: string, reader: ChatAgentReader): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
     this.assertWorkspace(workspaceId);
-    const rows: ChatThread[] = [];
+    const rows: Awaited<ReturnType<LinkedChatStore["listAgentUnreadThreads"]>> = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(
         CHATS_METHOD.agentReadListUnreadThreads,
         {
-          ...(runId !== undefined ? { runId } : {}),
+          reader,
           pageLimit: 500,
           ...(cursor !== undefined ? { cursor } : {}),
         },
@@ -585,14 +596,13 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
-  // The messages that asked a running run's agent and that it has not read.
-  async listAgentUnreadRequests(workspaceId: string, runId: string): Promise<ChatAgentRequest[]> {
+  async listAgentUnreadRequests(workspaceId: string, reader: ChatAgentReader): Promise<ChatAgentRequest[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAgentRequest[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
-        runId,
+        reader,
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -602,10 +612,27 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
+  async listAgentRequestsPage(input: {
+    workspaceId: string;
+    reader: ChatAgentReader;
+    channelId?: string;
+    threadId?: string;
+    after?: { createdAtMs: number; messageId: string };
+    limit?: number;
+  }): Promise<ChatsMethodResultMap[typeof CHATS_METHOD.agentReadListRequestsPage]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.agentReadListRequestsPage, {
+      reader: input.reader,
+      ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+      ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      ...(input.after !== undefined ? { after: input.after } : {}),
+      ...(input.limit !== undefined ? { pageLimit: input.limit } : {}),
+    });
+  }
+
   async listMentionsForHandle(
     workspaceId: string,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMention[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatMention[] = [];
@@ -613,9 +640,6 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.mentionsListForHandle, {
         handle,
-        ...(options?.unreadByAgentOnly !== undefined
-          ? { unreadByAgentOnly: options.unreadByAgentOnly }
-          : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -891,6 +915,20 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async retryFailedBookmark(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+  }): Promise<ChatBookmarkTransition> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.bookmarkRetryFailed, {
+      ownerUserId: input.ownerUserId,
+      bookmarkId: input.bookmarkId,
+      generation: input.generation,
+    });
+  }
+
   async markBookmarkStale(input: {
     workspaceId: string;
     ownerUserId: string;
@@ -941,13 +979,14 @@ export class ChatsLiveAdapter {
 
   async claimNextPending(
     workspaceId: string,
-    options?: { command?: string; logPath?: string },
+    options: { agentId: string; command?: string; logPath?: string },
   ): Promise<ChatDispatchClaim | null> {
     this.assertWorkspace(workspaceId);
     return this.request(CHATS_METHOD.dispatchClaimNextPending, {
+      agentId: options.agentId,
       runId: this.createId("run"),
-      ...(options?.command !== undefined ? { command: options.command } : {}),
-      ...(options?.logPath !== undefined ? { logPath: options.logPath } : {}),
+      ...(options.command !== undefined ? { command: options.command } : {}),
+      ...(options.logPath !== undefined ? { logPath: options.logPath } : {}),
     });
   }
 

@@ -47,6 +47,8 @@ export function daemonCaptureLifecycleAnswer(
     case "capture.flush":
     case "capture.reconcile":
       return { id: request.id, result: captureFlushResult() };
+    case "capture.retry":
+      return { id: request.id, result: { ...captureFlushResult(), restarted: false } };
     case "capture.setAuthor":
       return { id: request.id, result: { updated: true } };
     case "capture.hold":

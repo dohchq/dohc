@@ -21,7 +21,7 @@ export const USAGE_ACTION_IDS = [
   "dataset.attempt.reconcile", "dataset.attempt.cancel", "dataset.grant.set",
   "dataset.grant.remove", "dataset.export", "dataset.recovery.prepare", "dataset.recovery.claim",
   "dataset.recovery.discard", "dataset.file.upload", "dataset.form.create", "dataset.create",
-  "dataset.prepare", "dataset.approve", "dataset.discard", "dataset.migration.prepare",
+  "dataset.prepare", "dataset.approve", "dataset.discard", "dataset.migration.prepare", "dataset.change.ask",
   "dataset.schema.change.prepare", "dataset.migration.approve", "dataset.migration.discard",
   "dataset.operation.invoke", "app.link.create", "app.local.prepare", "app.local.launch",
   "app.publication.prepare", "app.publication.approve", "app.publication.cancel",

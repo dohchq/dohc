@@ -343,7 +343,7 @@ pub fn release_in_tx(
     let mut blobs = BTreeSet::from([observed.checkpoint_digest.clone()]);
     for id in &current {
         let entries = {
-            let mut stmt=tx.prepare("SELECT sequence,update_digest,byte_length,native_source_json,agent_declaration_json,automation_declaration_json,person_edit FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
+            let mut stmt=tx.prepare("SELECT sequence,update_digest,byte_length,native_source_json,agent_declaration_json,automation_declaration_json,person_edit,agent_run_id FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
             let rows = stmt
                 .query_map([&id], |r| {
                     Ok((
@@ -354,50 +354,33 @@ pub fn release_in_tx(
                         r.get::<_, Option<String>>(4)?,
                         r.get::<_, Option<String>>(5)?,
                         r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<String>>(7)?,
                     ))
                 })
                 .map_err(read_sql)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
         };
 
-        for (_, digest, length, native, agent, automation, person) in entries {
+        for (_, digest, length, native, agent, automation, person, run) in entries {
             let bytes = bounded_blob(tx, &digest)?;
             if bytes.len() as i64 != length {
                 return Err(OwnerOutboxError::Corrupt);
             }
-            let (actor, attribution) = if let Some(json) = native {
-                let source: OwnerOutboxSource =
-                    serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
-                let source = source.native().ok_or(OwnerOutboxError::Corrupt)?;
-                if source.binding != *binding || source.update_digest != digest {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
-                source.native_author()?.unwrap_or((None, None))
-            } else {
-                let agent = stored_declaration(agent)?;
-                let automation = stored_automation_declaration(automation)?;
-                if agent.is_some() && automation.is_some() {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
-                if let Some(a) = automation {
-                    (Some(a.automation_id), Some(a.attribution))
-                } else if let Some(a) = agent {
-                    (Some(a.agent_id.clone()), Some(a.attribution()))
-                } else if person == Some(1) {
-                    (
-                        Some("local-person".into()),
-                        Some(dohc_engine_domain::ChangeAttribution {
-                            actor_kind: dohc_engine_domain::ChangeActorKind::Human,
-                            on_behalf_of: None,
-                            depth: 0,
-                            run: None,
-                        }),
-                    )
-                } else {
-                    (None, None)
-                }
-            };
-            credited.push(((actor, attribution), bytes));
+            let source = native
+                .map(
+                    |json| -> Result<OwnerOutboxNativeSource, OwnerOutboxError> {
+                        let source: OwnerOutboxSource =
+                            serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
+                        let source = source.native().cloned().ok_or(OwnerOutboxError::Corrupt)?;
+                        if source.binding != *binding || source.update_digest != digest {
+                            return Err(OwnerOutboxError::Corrupt);
+                        }
+                        Ok(source)
+                    },
+                )
+                .transpose()?;
+            let credit = super::entry_credit(source.as_ref(), agent, run, automation, person)?;
+            credited.push((credit, bytes));
         }
     }
     if contains_pending_in(

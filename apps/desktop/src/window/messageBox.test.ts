@@ -13,10 +13,11 @@ const window = (destroyed: boolean) => ({ isDestroyed: () => destroyed }) as Bro
 beforeEach(() => vi.clearAllMocks());
 
 describe("showMessageBox", () => {
-  it("titles a box that has no title dohc", async () => {
+  it("titles a box that has no title dohc, and gives it push buttons", async () => {
     await showMessageBox({ message: "Do you trust the authors of the files in this workspace?" });
     expect(electron.dialog.showMessageBox).toHaveBeenCalledWith({
       title: "dohc",
+      noLink: true,
       message: "Do you trust the authors of the files in this workspace?",
     });
   });
@@ -29,8 +30,8 @@ describe("showMessageBox", () => {
   it("opens over the window while it is open, and on its own once it closes", async () => {
     const open = window(false);
     await showMessageBox({ message: "dohc isn't responding." }, open);
-    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith(open, { title: "dohc", message: "dohc isn't responding." });
+    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith(open, { title: "dohc", noLink: true, message: "dohc isn't responding." });
     await showMessageBox({ message: "dohc isn't responding." }, window(true));
-    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith({ title: "dohc", message: "dohc isn't responding." });
+    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith({ title: "dohc", noLink: true, message: "dohc isn't responding." });
   });
 });

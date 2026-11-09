@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { isInside } from "../security/pathContainment";
+import { isInsideOrUnknown } from "../security/pathContainment";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
@@ -81,29 +81,21 @@ export async function fileOrigin(
   resolve: (path: string) => Promise<string> = realpath,
 ): Promise<"own" | "received"> {
   if (shareViewIsPresent(workspace.shareView)) return "received";
-  const target = fileSystemCase(realTarget);
   const holds = async (place: string) => {
     try {
-      return isInside(fileSystemCase(await resolve(place)), target);
+      return await isInsideOrUnknown(await resolve(place), realTarget);
     } catch (error) {
       return !(error instanceof Error && "code" in error && error.code === "ENOENT");
     }
   };
   const elsewhere = registered
     .filter((entry) => entry.workspaceId !== workspace.workspaceId)
-    .map((entry) => shareViewIsPresent(entry.shareView) ? entry.rootPath : join(entry.rootPath, SHARED_WITH_ME_FOLDER))
-    .filter((place) => isInside(fileSystemCase(place), target));
+    .map((entry) => shareViewIsPresent(entry.shareView) ? entry.rootPath : join(entry.rootPath, SHARED_WITH_ME_FOLDER));
   const answers = await Promise.all([
     holds(join(workspace.rootPath, SHARED_WITH_ME_FOLDER)),
-    ...elsewhere.map(holds),
+    ...elsewhere.map(async (place) => await isInsideOrUnknown(place, realTarget) && holds(place)),
   ]);
   return answers.includes(true) ? "received" : "own";
-}
-
-// Windows and macOS's default volumes ignore case. Folding on a volume that
-// keeps case only makes more files open as copies.
-function fileSystemCase(path: string): string {
-  return process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
 }
 
 /** Copies the file into a fresh folder, marks the copy and makes it read-only. Opens nothing; throws when any step fails. */

@@ -82,8 +82,9 @@ interface WatchedWorkspace {
  */
 export class WorkspaceActivityState {
   entry: WatchedWorkspace | null = null;
-  // The run outlives capture when stopping sync restarts local activity.
-  agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun } | null = null;
+  // The run outlives capture when stopping sync restarts local activity. The
+  // secret is the one a run dohc dispatched got; it stays in this slot only.
+  agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun; secret?: string } | null = null;
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
   // Sync paused while Collection updates waited, and the reopen that ends
@@ -96,9 +97,11 @@ export interface WorkspaceActivityOptions {
   onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
-  // Live facts main owns: whether this workspace has cloud sync enabled
-  // (registry remote identity) and whether a cloud session exists right now.
-  cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
+  // Live facts main owns: why a synced workspace can't sync on this
+  // computer's session (absent when it can, or when the workspace doesn't
+  // sync), and the workspace's saved pause.
+  cloudStateFor?: (workspaceId: string) => {
+    syncBlocked?: "not-connected" | "account-unconfirmed";
     syncPause?: SyncStatusResult["syncPause"];
   };
   // Builds a sync engine for a workspace when it is enabled and connected;
@@ -182,6 +185,23 @@ export async function closeWorkspaceActivityAndRelay(options: {
   }
 }
 
+// The activity's last file read and saves go through the workspace's engine
+// session, which the rest close, so the activity closes first. Every step
+// runs, then the first failure is thrown.
+export async function closeActivityFirst(
+  closeActivity: () => Promise<unknown>,
+  closeRest: () => readonly Promise<unknown>[],
+): Promise<void> {
+  const results = [
+    ...(await Promise.allSettled([closeActivity()])),
+    ...(await Promise.allSettled(closeRest())),
+  ];
+  const failed = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failed) throw failed.reason;
+}
+
 export async function settleYDocsAfterFileObservation(
   drains: readonly Promise<unknown>[],
   settleYDocs: () => Promise<void>,
@@ -226,9 +246,10 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
     workspace: ActivityWorkspace,
     run: ActiveAgentRun | null,
+    secret?: string,
   ): void {
     const was = isAgentAtWork(state.agentRun?.run ?? null);
-    state.agentRun = run ? { workspace, run } : null;
+    state.agentRun = run ? { workspace, run, ...(secret === undefined ? {} : { secret }) } : null;
     const active = isAgentAtWork(run);
     if (active !== was) {
       publishAgentRunState(workspace.workspaceId, active);
@@ -250,10 +271,7 @@ export function createWorkspaceActivity(
   ): SyncStatusResult {
     const { workspaceId } = workspace;
     const liveSessionsGeneration = state.liveSessionsGeneration;
-    const cloud = options.cloudStateFor?.(workspaceId) ?? {
-      enabled: false,
-      connected: false,
-    };
+    const cloud = options.cloudStateFor?.(workspaceId) ?? {};
     const syncPause = cloud.syncPause;
     const preserved = state.preservedStatus;
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
@@ -270,12 +288,12 @@ export function createWorkspaceActivity(
       hasConflict: conflictCount > 0,
       // A retry someone asked for shows as syncing until it ends.
       syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
-      cloudEnabled: cloud.enabled,
-      // A confirmed-401 engine reads as disconnected (the existing
-      // "cloud-disconnected" surface) so the UI stops saying "connected" and
-      // prompts re-login, instead of spinning on a dead token. An engine
-      // stopped on the relay API version reads the same way.
-      cloudConnected: cloud.connected && !(snap?.authExpired ?? false) && !snap?.updateRequired,
+      // An engine stopped on the relay API version names the side to update.
+      // One whose sign-in the server refused stops too. Neither records a
+      // pause, so sync runs again once a new sign-in rebuilds the engine.
+      syncBlocked: snap?.updateRequired
+        ? "update-required"
+        : cloud.syncBlocked ?? (snap?.authExpired ? "sign-in-expired" : null),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -289,6 +307,7 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
+      ...(snap?.authExpired ? { signInExpired: true } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
@@ -837,6 +856,16 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queuePull();
   }
 
+  // The move guard's pull. A workspace without an engine counts as offline,
+  // so the guard skips its catch-up.
+  function cloudSyncOffline(state: WorkspaceActivityState): boolean {
+    const snapshot = state.entry?.engine?.snapshot();
+    return !snapshot || snapshot.syncFailure !== null;
+  }
+  async function catchUpCloudSync(state: WorkspaceActivityState, signal: AbortSignal): Promise<void> {
+    await state.entry?.engine?.catchUp({ signal });
+  }
+
   function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
   function retryFileObservation(state: WorkspaceActivityState): Promise<void> {
     if (!state.entry) return Promise.reject(new Error("This workspace is not open."));
@@ -878,6 +907,7 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
     run: ActiveAgentRun,
     expectedRootPath?: string,
+    secret?: string,
   ): Promise<boolean> {
     const { workspaceId } = workspace;
     const entry = state.entry;
@@ -891,7 +921,7 @@ export function createWorkspaceActivity(
       );
     }
     if (state.agentRun !== null) return false;
-    assignAgentRun(state, workspace, run);
+    assignAgentRun(state, workspace, run, secret);
     try {
       await entry.capture?.setActiveAgentRun(run);
       return true;
@@ -915,6 +945,8 @@ export function createWorkspaceActivity(
       return;
     }
     if (slot.run.agentRunId !== agentRunId) return;
+    // The run's secret stops working now, even if capture fails to let the run go.
+    delete slot.secret;
     await state.entry?.capture?.setActiveAgentRun(null);
     if (state.agentRun === slot) releaseAgentRun(state, slot.workspace, agentRunId);
   }
@@ -938,11 +970,18 @@ export function createWorkspaceActivity(
   }
 
   // The agent of a run dohc dispatched while it holds the slot, or null. The
-  // CLI writes as that agent whatever name a write claims, so the run stays
-  // one actor.
+  // CLI writes as that agent for a request that proves it is the run's,
+  // whatever name the request gives, so the run stays one actor.
   function dispatchedAgent(state: WorkspaceActivityState): string | null {
     const run = state.agentRun?.run;
     return run?.dispatch !== undefined ? run.agentId : null;
+  }
+
+  // The secret dohc gave the process of the run it dispatched, while that run
+  // holds the slot, or null. Only a request that carries it is the run's.
+  function dispatchedRunSecret(state: WorkspaceActivityState): string | null {
+    const slot = state.agentRun;
+    return slot?.run.dispatch !== undefined ? slot.secret ?? null : null;
   }
 
   // The engine's id for the run dohc dispatched while it holds the slot, or
@@ -951,6 +990,14 @@ export function createWorkspaceActivity(
   function dispatchedRunId(state: WorkspaceActivityState): string | null {
     const run = state.agentRun?.run;
     return run?.dispatch === "run" ? run.agentRunId : null;
+  }
+
+  // The run an agent's writes name while a run holds the slot, whichever
+  // agent writes, as with its depth: a run dohc dispatched or one started
+  // from Settings, or null. A self-test is not agent work and names none.
+  function agentWriteRunId(state: WorkspaceActivityState): string | null {
+    const run = state.agentRun?.run;
+    return run !== undefined && run.dispatch !== "self-test" ? run.agentRunId : null;
   }
 
   // The agent run holding the slot, as a local app's invocation is
@@ -1026,6 +1073,8 @@ export function createWorkspaceActivity(
     syncNow,
     pushRecorded,
     queueCloudPull,
+    cloudSyncOffline,
+    catchUpCloudSync,
     pullStarting,
     retryFileObservation,
     pullFinished,
@@ -1037,7 +1086,9 @@ export function createWorkspaceActivity(
     hasAgentRun,
     agentRunDepth,
     dispatchedAgent,
+    dispatchedRunSecret,
     dispatchedRunId,
+    agentWriteRunId,
     agentRun,
     agentRunState,
     engineCaptureFor,

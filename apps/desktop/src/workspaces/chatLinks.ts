@@ -118,6 +118,7 @@ export function createChatLinksReader(deps: {
               kind: author.authorKind, displayName: author.authorDisplayName, presentation,
               ...(author.authorKind === "link" || author.authorOwnerDisplayName === undefined
                 ? {} : { ownerDisplayName: author.authorOwnerDisplayName }),
+              ...(author.authorKind === "link" && author.agentConnectionId ? { linkAgent: true as const } : {}),
             },
           });
         }

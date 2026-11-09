@@ -4,8 +4,9 @@ export const NODE_MISSING_MESSAGE =
   "dohc commands need Node.js on PATH. Install Node.js 22.13 or newer, then try again.";
 
 export function agentRuntimeTarget(platform, arch) {
-  if (platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64") return "bundled";
-  if (platform === "linux" && ["x64", "arm64"].includes(arch)) return "path";
+  if (["win32", "linux"].includes(platform) && arch === "x64" || platform === "darwin" && arch === "arm64") return "bundled";
+  // Linux arm64 ships no Node.js, so its launchers use Node.js from PATH.
+  if (platform === "linux" && arch === "arm64") return "path";
   throw new Error(`Unsupported agent runtime target: ${platform}-${arch}`);
 }
 

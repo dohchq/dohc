@@ -134,6 +134,12 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
   origin: ActorNeutralWriteOrigin | "ydoc" | "capture-recovery" | "capture-recovery-cleared";
 }
 
+/**
+ * The agent a write names when an agent outside a run dohc dispatched gives
+ * no name. A dispatched run's writes name its agent's id instead.
+ */
+export const UNNAMED_AGENT_ID = "dohc-mcp";
+
 // Optional authorship carried by a MOMENT (never by snapshot metadata, which
 // stays actor-neutral). A moment names a nonempty list of authors, one per
 // person or agent whose edits it covers. Tracked agent runs stamp the agent
@@ -222,10 +228,11 @@ export type MomentAuthor =
   | AutomationMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
-// write names the person the agent works for. An automation names its run's
-// person, and none when its run has none.
+// write names the person the agent works for, and the name the agent gave
+// itself when no run holds the slot. An automation names its run's person,
+// and none when its run has none.
 export type MomentWriteAuthor =
-  | (Omit<AgentMomentAuthor, "agentName"> & { onBehalfOf: string })
+  | (AgentMomentAuthor & { onBehalfOf: string })
   | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName" | "relayConfirmed">
   | AutomationMomentAuthor;
 
@@ -281,6 +288,17 @@ type VersionedTextConflictResolution =
   | "kept-current";
 type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
+/**
+ * A newer version of a conflict's file that another computer saved. dohc
+ * holds it until the conflict is resolved.
+ */
+interface VersionedTextConflictWaitingVersion {
+  code: "resolve-existing-conflict";
+  objectId: string;
+  originId: string;
+  originSeq: number;
+}
+
 export interface VersionedTextConflictRecord {
   id: VersionedTextConflictId;
   workspaceId: WorkspaceId;
@@ -296,6 +314,8 @@ export interface VersionedTextConflictRecord {
   chosenFrom: VersionedTextConflictChoice;
   metadata: ActorNeutralWriteMetadata;
   resolution?: VersionedTextConflictResolution;
+  /** Read from conflict listings; `null` elsewhere. */
+  waitingVersion: VersionedTextConflictWaitingVersion | null;
 }
 
 type VersionedTextMergeResult =
@@ -418,11 +438,26 @@ export interface ChatMessageAppendPayload {
   // message carries no `authorUserId`, `authorOwnerDisplayName` or `origin`.
   linkGrantId?: string;
   linkPrincipalId?: string;
-  // The agent that wrote an agent message in one of its runs.
+  // The agent connection that wrote a link message. Only the relay sets it.
+  agentConnectionId?: string;
+  // The agent in Settings that wrote an agent message: one you run, or the
+  // agent of a run.
   authorAgentId?: string;
+  // What an agent reported about itself.
+  authorReported?: ChatReportedAgent;
   body: string;
   createdAtMs: number;
 }
+
+// What an agent says about itself: the product and version its MCP client
+// names in the handshake, and the model the agent states. dohc can't check
+// any of it, so it is only ever shown as reported. Absent means unknown, and
+// a version always comes with its product.
+export type ChatReportedAgent = {
+  product?: string;
+  version?: string;
+  model?: string;
+};
 
 type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
 type ChatFollowState = "following" | "unfollowed";
@@ -712,7 +747,9 @@ type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string }
   | { kind: "automation"; displayName: string }
-  | { kind: "link"; displayName: string; grantId: string; principalId: string };
+  // `agentConnectionId` marks an agent that joined with the link and posted
+  // through its sign-in; the link principal stays the authority.
+  | { kind: "link"; displayName: string; grantId: string; principalId: string; agentConnectionId?: string };
 type ChatWriteActor = Exclude<ChatActor, { kind: "link" }>;
 
 // The automation executor's claim on a message it writes. Stays on this computer.
@@ -819,6 +856,9 @@ export interface ChannelThreadSummary {
     createdAtMs: number;
     bodySnippet: string;
     automation?: ChatMessageAutomation;
+    authorReported?: ChatReportedAgent;
+    // The agent in Settings that wrote the message. Provenance only.
+    authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
@@ -856,6 +896,7 @@ interface ChatStreamPost {
 export interface ChatStreamItem {
   position: ChatStreamPosition;
   message: ChatMessage;
+  decision?: Omit<ChatDecisionRecord, "workspaceId">;
   reactions: ChatReaction[];
   // Set for, and only for, a post.
   post?: ChatStreamPost;
@@ -919,8 +960,10 @@ export interface ChatMessage {
   body: string;
   createdAtMs: number;
   automation?: ChatMessageAutomation;
-  // The agent that wrote the message in one of its runs. Provenance only.
+  // The agent in Settings that wrote the message. Provenance only.
   authorAgentId?: string;
+  // What the agent reported about itself. Only an agent message has one.
+  authorReported?: ChatReportedAgent;
   attachments: ChatAttachment[];
   // Thread and stream reads name each open agent request: one per agent that
   // was asked to answer this message and has not finished. Absent when none.
@@ -948,11 +991,43 @@ interface ChatAgentReadState {
   updatedAtMs: number;
 }
 
+// Which agent reads, and so which place in each thread moves. A run dohc
+// dispatched reads as its agent while it runs. Unnamed agents share one place
+// and do not read agent chats. An agent you run reads its chat, mentions of
+// its handle, and threads it posted in, where only its person asks it: a post
+// by one of `requesters`, or a post with no account when `unattributedCounts`.
+export type ChatAgentReader =
+  | { kind: "run"; runId: string }
+  | { kind: "unnamed" }
+  | {
+      kind: "connected";
+      agentId: string;
+      handle: string;
+      requesters: string[];
+      unattributedCounts: boolean;
+    };
+
 // A message that asked one agent, which that agent has not read.
 interface ChatAgentRequestRecord {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   authorKind: ChatActor["kind"];
+  createdAtMs: number;
+}
+
+// An unread request with what a waiting agent shows.
+interface ChatAgentRequestDetail {
+  threadId: ChatThreadId;
+  messageId: ChatMessageId;
+  channel: {
+    id: ChatChannelId;
+    kind: ChatChannelKind;
+    name: string;
+    slug: string;
+    purpose: string;
+  } | null;
+  author: { kind: ChatActor["kind"]; displayName: string };
+  body: string;
   createdAtMs: number;
 }
 
@@ -1143,11 +1218,13 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    // The agent writing in one of its runs. Only an agent author has one.
+    // The agent in Settings writing. Only an agent author has one.
     authorAgentId?: string;
-    // The author's own agents the message names, resolved on this computer.
-    // Each one wakes, as does the agent whose chat this is. Never journaled.
-    namedAgentIds?: string[];
+    // What the agent reported about itself. Only an agent author has one.
+    authorReported?: ChatReportedAgent;
+    // Every agent this message wakes, resolved from this computer's settings:
+    // its DM's agent and each agent dohc starts that it names. Never journaled.
+    wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
     // Desktop's own thread in an agent DM, an automation's wake thread or the
@@ -1219,11 +1296,13 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    // The agent writing in one of its runs. Only an agent author has one.
+    // The agent in Settings writing. Only an agent author has one.
     authorAgentId?: string;
-    // The author's own agents the message names, resolved on this computer.
-    // Each one wakes, as does the agent whose chat this is. Never journaled.
-    namedAgentIds?: string[];
+    // What the agent reported about itself. Only an agent author has one.
+    authorReported?: ChatReportedAgent;
+    // Every agent this message wakes, resolved from this computer's settings:
+    // its DM's agent and each agent dohc starts that it names. Never journaled.
+    wakeAgentIds?: string[];
     author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
@@ -1280,23 +1359,30 @@ export interface LinkedChatStore {
   ): Promise<ChatAttachment[]>;
   linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
   fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
-  // An agent's place in each thread. A run dohc dispatched names itself and
-  // reads as its agent; without a run, the reads are those of agents outside
-  // a run. The engine refuses a run that is not running.
+  // A reader's place in each thread. The engine refuses a run that is not
+  // running.
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
-    runId?: string;
+    reader: ChatAgentReader;
     threadId: ChatThreadId;
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<ChatThread[]>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, runId: string): Promise<ChatAgentRequestRecord[]>;
-  // unreadByAgentOnly reads the place agents outside a run share.
+  listAgentUnreadThreads(workspaceId: WorkspaceId, reader: ChatAgentReader): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, reader: ChatAgentReader): Promise<ChatAgentRequestRecord[]>;
+  // One page of a reader's unread requests after `after`, oldest first, in
+  // one Group or thread when named. `more` is set when another page follows.
+  listAgentRequestsPage(input: {
+    workspaceId: WorkspaceId;
+    reader: ChatAgentReader;
+    channelId?: ChatChannelId;
+    threadId?: ChatThreadId;
+    after?: { createdAtMs: number; messageId: ChatMessageId };
+    limit?: number;
+  }): Promise<{ requests: ChatAgentRequestDetail[]; more: boolean }>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMentionRecord[]>;
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
@@ -1413,6 +1499,13 @@ export interface LinkedChatStore {
     generation: number;
     failureReason: string;
   }): Promise<ChatBookmarkTransitionResult>;
+  // Queues a failed projection again at the same generation.
+  retryFailedBookmark(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+  }): Promise<ChatBookmarkTransitionResult>;
   markBookmarkStale(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;
@@ -1489,7 +1582,7 @@ export interface AgentDispatchStore {
   }): boolean;
   claimNextPending(
     workspaceId: WorkspaceId,
-    options?: { command?: string; logPath?: string },
+    options: { agentId: string; command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
   // Fails one agent's pending requests in the thread.
   failPendingForThread(input: {
@@ -1761,8 +1854,9 @@ export type NonEmptyLocalAuthorLabel = string & {
 export type ChangeAuthor =
   | { kind: "user"; userId: string }
   // depth is the chain depth of the agent's run: 0 unless an automation
-  // started it.
-  | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number }
+  // started it. agentRunId names the run it wrote in, when one held the
+  // workspace's run slot.
+  | { kind: "agent"; agentId: string; onBehalfOf: string; depth: number; agentRunId?: string }
   // An automation's write, derived main-side from the claim the executor is
   // running, never from a request. automationId is the engine subscription
   // id ("collection:<collection id>#<automation id>"), and depth is the

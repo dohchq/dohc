@@ -5,7 +5,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
-import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type { ChatChannelType, ChatReportedAgent, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 
 export const CHATS_METHOD = {
   channelCreate: "chats.channels.create",
@@ -38,6 +38,7 @@ export const CHATS_METHOD = {
   conversationLinks: "chats.conversations.listLinks",
   attachmentsListFileMentions: "chats.attachments.listFileMentions",
   mentionsListForHandle: "chats.mentions.listForHandle",
+  agentReadListRequestsPage: "chats.agentReadState.listRequestsPage",
   agentReadListUnreadRequests: "chats.agentReadState.listUnreadRequests",
   agentReadListUnreadThreads: "chats.agentReadState.listUnreadThreads",
   agentReadMarkThreadRead: "chats.agentReadState.markThreadRead",
@@ -54,6 +55,7 @@ export const CHATS_METHOD = {
   bookmarkArchive: "chats.bookmarks.archive",
   bookmarkMarkPending: "chats.bookmarks.markPending",
   bookmarkMarkFailed: "chats.bookmarks.markFailed",
+  bookmarkRetryFailed: "chats.bookmarks.retryFailed",
   bookmarkMarkStale: "chats.bookmarks.markStale",
   dispatchEnqueue: "chats.dispatch.enqueue",
   dispatchClaimNextPending: "chats.dispatch.claimNextPending",
@@ -72,7 +74,7 @@ export const CHATS_METHOD = {
   dispatchSetThreadPaused: "chats.dispatch.setThreadPaused",
   dispatchMarkFailureHandled: "chats.dispatch.markFailureHandled",
   dispatchRequeueFailedTrigger: "chats.dispatch.requeueFailedTrigger",
-  dispatchListAppQuitRecoveries: "chats.dispatch.listAppQuitRecoveries",
+  dispatchListFailedRunRecoveries: "chats.dispatch.listFailedRunRecoveries",
   dispatchComplete: "chats.dispatch.complete",
   dispatchFail: "chats.dispatch.fail",
 } as const;
@@ -164,7 +166,8 @@ type ChatThreadStartParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
-  namedAgentIds?: string[];
+  authorReported?: ChatReportedAgent;
+  wakeAgentIds?: string[];
   nowMs?: number;
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
@@ -214,7 +217,8 @@ type ChatMessageSendParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
-  namedAgentIds?: string[];
+  authorReported?: ChatReportedAgent;
+  wakeAgentIds?: string[];
   nowMs?: number;
 };
 type ChatMessagesListParams = ChatsJsonObject & {
@@ -252,14 +256,30 @@ type ChatThreadPageParams = ChatPageParams & { threadId: string };
 type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
-  unreadByAgentOnly?: boolean;
 };
-// A run dohc dispatched names itself, and the engine reads its agent from the
-// run's record. Without a run, the reads are those of agents outside a run.
-type ChatAgentUnreadThreadsParams = ChatPageParams & { runId?: string };
-type ChatAgentRequestsParams = ChatPageParams & { runId: string };
+// Which agent reads. A run dohc dispatched names itself, and the engine reads
+// its agent from the run's record.
+type ChatAgentReaderParams =
+  | (ChatsJsonObject & { kind: "run"; runId: string })
+  | (ChatsJsonObject & { kind: "unnamed" })
+  | (ChatsJsonObject & {
+      kind: "connected";
+      agentId: string;
+      handle: string;
+      requesters: string[];
+      unattributedCounts: boolean;
+    });
+type ChatAgentUnreadThreadsParams = ChatPageParams & { reader: ChatAgentReaderParams };
+type ChatAgentRequestsParams = ChatPageParams & { reader: ChatAgentReaderParams };
+type ChatAgentRequestsPageParams = ChatsJsonObject & {
+  reader: ChatAgentReaderParams;
+  channelId?: string;
+  threadId?: string;
+  after?: ChatsJsonObject & { createdAtMs: number; messageId: string };
+  pageLimit?: number;
+};
 type ChatAgentReadMarkParams = ChatsJsonObject & {
-  runId?: string;
+  reader: ChatAgentReaderParams;
   threadId: string;
   upTo: ChatsJsonObject & { createdAtMs: number; messageId: string };
   expectedRevision?: number;
@@ -327,6 +347,7 @@ type ChatDispatchEnqueueParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatDispatchClaimParams = ChatsJsonObject & {
+  agentId: string;
   runId: string;
   command?: string;
   logPath?: string;
@@ -379,7 +400,7 @@ export type ChatRunMessagesPage =
   ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListRunMessages];
 type ChatThreadRunsPage = typeof RunRecordsPageSchema.Type;
 export type ChatRecoveriesPage =
-  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListAppQuitRecoveries];
+  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListFailedRunRecoveries];
 export type ChatFeedPage =
   ChatsMethodResultMap[typeof CHATS_METHOD.feedListPersonal];
 
@@ -414,6 +435,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {channelWireId:string;scope:string;sharedChannelRowsUncovered:number;cursor?:string};
   [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsParams;
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
+  [CHATS_METHOD.agentReadListRequestsPage]: ChatAgentRequestsPageParams;
   [CHATS_METHOD.agentReadListUnreadRequests]: ChatAgentRequestsParams;
   [CHATS_METHOD.agentReadListUnreadThreads]: ChatAgentUnreadThreadsParams;
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadMarkParams;
@@ -430,6 +452,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.bookmarkArchive]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkMarkPending]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkMarkFailed]: ChatBookmarkMarkFailedParams;
+  [CHATS_METHOD.bookmarkRetryFailed]: ChatBookmarkGenerationParams;
   [CHATS_METHOD.bookmarkMarkStale]: ChatBookmarkMarkStaleParams;
   [CHATS_METHOD.dispatchEnqueue]: ChatDispatchEnqueueParams;
   [CHATS_METHOD.dispatchClaimNextPending]: ChatDispatchClaimParams;
@@ -448,7 +471,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatDispatchSetPausedParams;
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatDispatchRunParams;
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: ChatDispatchRequeueParams;
-  [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatDispatchRecoveriesParams;
+  [CHATS_METHOD.dispatchListFailedRunRecoveries]: ChatDispatchRecoveriesParams;
   [CHATS_METHOD.dispatchComplete]: ChatDispatchCompleteParams;
   [CHATS_METHOD.dispatchFail]: ChatDispatchFailParams;
 };
@@ -511,6 +534,7 @@ const ChatActorSchema = Schema.Union([
     displayName: Schema.String,
     grantId: Schema.NonEmptyString,
     principalId: Schema.NonEmptyString,
+    agentConnectionId: Schema.optionalKey(Schema.NonEmptyString),
   }),
 ]);
 // A link message names no account, owner, actor key, origin or automation.
@@ -523,6 +547,11 @@ const noAccountOnLinkMessage = Schema.makeFilter(
 );
 const ChatMessageAutomationSchema = mutableStruct({
   automationId: Schema.String,
+});
+const ChatReportedAgentSchema = mutableStruct({
+  product: Schema.optionalKey(Schema.String),
+  version: Schema.optionalKey(Schema.String),
+  model: Schema.optionalKey(Schema.String),
 });
 const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({
@@ -576,6 +605,7 @@ const ChatMessageSchema = mutableStruct({
   createdAtMs: AnyInt,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   authorAgentId: Schema.optionalKey(Schema.String),
+  authorReported: Schema.optionalKey(ChatReportedAgentSchema),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   // Thread and stream reads name each open agent request. Absent when none.
   agentRequests: Schema.optionalKey(Schema.mutable(Schema.Array(ChatStreamAgentRequestSchema))),
@@ -748,6 +778,23 @@ const ChatAgentRequestSchema = mutableStruct({
   authorKind: MessageAuthorKindSchema,
   createdAtMs: AnyInt,
 });
+// An unread request with what a waiting agent shows.
+const ChatAgentRequestDetailSchema = mutableStruct({
+  threadId: Schema.String,
+  messageId: Schema.String,
+  channel: Schema.NullOr(
+    mutableStruct({
+      id: Schema.String,
+      kind: ChannelKindSchema,
+      name: Schema.String,
+      slug: Schema.String,
+      purpose: Schema.String,
+    }),
+  ),
+  author: mutableStruct({ kind: MessageAuthorKindSchema, displayName: Schema.String }),
+  body: Schema.String,
+  createdAtMs: AnyInt,
+});
 const ChatChannelOpeningMessageSchema = mutableStruct({
   authorActorKey: Schema.optionalKey(Schema.String),
   origin: Schema.optionalKey(Schema.Literal("cli")),
@@ -758,6 +805,8 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   createdAtMs: AnyInt,
   bodySnippet: Schema.String,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
+  authorReported: Schema.optionalKey(ChatReportedAgentSchema),
+  authorAgentId: Schema.optionalKey(Schema.String),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 }).check(noAccountOnLinkMessage);
 const ChatChannelThreadSummarySchema = mutableStruct({
@@ -839,6 +888,7 @@ const ChatStreamPageSchema = mutableStruct({
       mutableStruct({
         position: ChatStreamPositionSchema,
         message: ChatMessageSchema,
+        decision: Schema.optionalKey(ChatDecisionSchema),
         reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
         post: Schema.optionalKey(ChatStreamPostSchema),
       }),
@@ -920,10 +970,19 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.mentionsListForHandle]: pageSchema({
     mentions: Schema.mutable(Schema.Array(ChatMentionSchema)),
   }),
+  [CHATS_METHOD.agentReadListRequestsPage]: mutableStruct({
+    requests: Schema.mutable(Schema.Array(ChatAgentRequestDetailSchema)),
+    more: Schema.Boolean,
+  }),
   [CHATS_METHOD.agentReadListUnreadRequests]: pageSchema({
     requests: Schema.mutable(Schema.Array(ChatAgentRequestSchema)),
   }),
-  [CHATS_METHOD.agentReadListUnreadThreads]: ThreadsPageSchema,
+  [CHATS_METHOD.agentReadListUnreadThreads]: pageSchema({
+    threads: Schema.mutable(Schema.Array(mutableStruct({
+      ...ChatThreadSchema.fields,
+      lastRead: mutableStruct({ createdAtMs: NonnegativeInt, messageId: Schema.String }),
+    }))),
+  }),
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,
   [CHATS_METHOD.followsSet]: ChatFollowSchema,
   [CHATS_METHOD.followsList]: pageSchema({
@@ -949,6 +1008,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.bookmarkArchive]: ChatBookmarkSchema,
   [CHATS_METHOD.bookmarkMarkPending]: ChatBookmarkSchema,
   [CHATS_METHOD.bookmarkMarkFailed]: BookmarkTransitionSchema,
+  [CHATS_METHOD.bookmarkRetryFailed]: BookmarkTransitionSchema,
   [CHATS_METHOD.bookmarkMarkStale]: BookmarkTransitionSchema,
   [CHATS_METHOD.dispatchEnqueue]: mutableStruct({ enqueued: Schema.Boolean }),
   [CHATS_METHOD.dispatchClaimNextPending]: Schema.NullOr(
@@ -977,7 +1037,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatThreadPauseSchema,
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatRunSchema,
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: Schema.Boolean,
-  [CHATS_METHOD.dispatchListAppQuitRecoveries]: pageSchema({
+  [CHATS_METHOD.dispatchListFailedRunRecoveries]: pageSchema({
     recoveries: Schema.mutable(
       Schema.Array(
         mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt }),

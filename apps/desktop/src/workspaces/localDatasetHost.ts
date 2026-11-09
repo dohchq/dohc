@@ -22,6 +22,7 @@ import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import { createLocalApps } from "./localApps";
 import { createLocalDatasetApps, localDatasetAppStorage, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createLocalCollectionApps, localCollectionAppStorage, type LocalCollectionEngine } from "./localCollectionApps";
+import { createLocalUnconnectedApps, localUnconnectedAppStorage } from "./localUnconnectedApps";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
@@ -49,9 +50,10 @@ export interface LocalDatasetAutomationContext { readonly automationId: string; 
 /**
  * The owner's agent, as main derives it for one invocation: the owner's
  * authority, attributed to the agent at its run's chain depth, 0 outside a
- * chain. Attribution never grants access.
+ * chain. `agentId` names an agent you run; a run dohc dispatched leaves it
+ * out. Attribution never grants access.
  */
-export interface LocalDatasetAgent { readonly depth: number; readonly approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent }
+export interface LocalDatasetAgent { readonly depth: number; readonly agentId?: string; readonly approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent }
 type AgentContext = { readonly agent: LocalDatasetAgent };
 type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
@@ -150,6 +152,7 @@ const artifactBytes = 256 * 1024;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const decode = (value: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(value);
 const allowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path) && !path.toLowerCase().split("/").includes(".dohc");
+const datasetAuthorityAgent = (agent: LocalDatasetAgent) => agent.agentId === undefined ? { depth: agent.depth } : { depth: agent.depth, agentId: agent.agentId };
 
 /** Owner-only local data authority. Apps do not receive this object or its storage paths. */
 export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
@@ -221,7 +224,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     assertCurrent(); const result = work(); active.add(result);
     try { return await result; } finally { active.delete(result); }
   }
-  /** Charges a Dataset's usage, or with null the Collection app ledger. */
+  /** Charges a Dataset's usage, or with null the ledger of apps outside a Dataset: Collection apps and apps that reach no workspace data. */
   function charge(datasetId: string | null, bytes: number) {
     if (!Number.isSafeInteger(bytes)) throw new Error("Invalid Collection storage allocation.");
     const changed = db.prepare("UPDATE local_dataset_budget SET bytes=bytes+? WHERE singleton=1 AND bytes+?>=0 AND bytes+?<=?").run(bytes, bytes, bytes, maxStoredBytes);
@@ -329,7 +332,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         const agent = agentContexts.has(context as AgentContext) ? context as AgentContext : null;
         if (context !== owner && automation === null && agent === null) return apps.resolveAuthority(context as LocalDatasetAppContext, request);
         if (request.workspaceId !== workspaceId || request.access.kind !== "data") throw new Error("Collection access is not permitted.");
-        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agent.depth }, person: options.localPersonId() };
+        if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: datasetAuthorityAgent(agent.agent), person: options.localPersonId() };
         if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, person: options.localPersonId() };
         return { caller: { kind: "automation", automationId: automation.automationId }, principalKey: automationKey(automation.automationId),
           chainDepth: automation.depth, authorizeOperation: automation.authorizeOperation, ...(automation.person === null ? {} : { person: automation.person }) };
@@ -449,12 +452,17 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       });
     }
     function agentContext(agent: LocalDatasetAgent): AgentContext {
-      const context = Object.freeze({ agent: Object.freeze({ depth: agent.depth }) });
+      const context = Object.freeze({ agent: Object.freeze(datasetAuthorityAgent(agent)) });
       agentContexts.add(context);
       return context;
     }
     const recovery = createLocalDatasetRecovery({workspaceId,maxBytes:maxStoredBytes+2*1024*1024,signal:lifetime.signal,assertCurrent,
-      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input)});
+      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input),
+      async discardUnfinished(datasetId) {
+        assertCurrent();
+        const row = db.prepare("SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND phase NOT IN ('installed','claimed')").get(workspaceId, datasetId);
+        if (row) await host.discardRecovery(owner, {workspaceId, datasetId, transferId: String(row.import_id)});
+      }});
     // After a change to which rules a dataset runs, or whether it runs.
     const changed = <T>(value: T): T => { if (!closed) options.onDatasetsChanged?.(); return value; };
     const local = {
@@ -519,10 +527,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
       transferStatus(datasetId: string) { assertCurrent(); return transfers.status(datasetId); },
-      // Each end, failed or not, tells the automation runner, which reads the transfer record again.
+      transferInFlight(datasetId: string) { assertCurrent(); return transfers.inFlight(datasetId); },
+      // The fence and a finished move tell the automation runner, which reads the transfer record again. A stop
+      // changes nothing it reads: the reads a change sets off would resume the move, and its next stop would set off more.
       transferToShared(input: { datasetId: string; targetOrigin: string; target: DatasetTransferTarget; signal?: AbortSignal }) {
-        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) }))
-          .then(changed, (error: unknown) => { changed(undefined); throw error; });
+        return tracked(() => transfers.transfer({ ...input, signal: signal(input.signal) })).then(changed);
       },
       upload(input: LocalDatasetUpload, appContext?: LocalDatasetAppContext) {
         return tracked(async () => {
@@ -676,7 +685,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         })();
       },
     };
-    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db), localCollectionAppStorage(db)], assertCurrent, transaction,
+    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db), localCollectionAppStorage(db), localUnconnectedAppStorage(db)], assertCurrent, transaction,
       charge: (kind, resourceId, bytes) => charge(kind === "dataset" ? resourceId : null, bytes) });
     const collections = createLocalCollectionApps({ db, store: appStore, workspaceId, assertCurrent, transaction: commit, charge: bytes => charge(null, bytes),
       engine() {
@@ -707,7 +716,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
     });
-    localApps = createLocalApps(appStore, apps, collections);
+    localApps = createLocalApps(appStore, apps, collections, createLocalUnconnectedApps({ store: appStore, workspaceId, assertCurrent }));
     return { ...local, apps: localApps };
   } catch (error) {
     closed = true; lifetime.abort();

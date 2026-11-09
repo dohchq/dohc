@@ -11,6 +11,8 @@ type ReadyInput = Parameters<DesktopLinkedChatStore["markBookmarkReady"]>[0];
 type FailedInput = Parameters<DesktopLinkedChatStore["markBookmarkFailed"]>[0];
 type WriteInput = Parameters<WorkspaceEngineCapture["writeGeneratedTextFile"]>[0];
 type ArchiveInput = Parameters<WorkspaceEngineCapture["archiveGeneratedTextFile"]>[0];
+type RetryInput = Parameters<DesktopLinkedChatStore["retryFailedBookmark"]>[0];
+type MovedInput = Parameters<WorkspaceEngineCapture["generatedTextArchiveMoved"]>[0];
 
 function fixture() {
   const workspace: Workspace = { workspaceId: "workspace", rootPath: "root" };
@@ -54,6 +56,15 @@ function fixture() {
       row = { ...row, state: "archived", generation: row.generation + 1, projectionState: "pending" };
       return row;
     }),
+    markBookmarkPending: vi.fn(async () => {
+      row = { ...row, generation: row.generation + 1, projectionState: "pending", failureReason: undefined };
+      return row;
+    }),
+    retryFailedBookmark: vi.fn(async (input: RetryInput) => {
+      const applied = row.generation === input.generation && row.projectionState === "failed";
+      if (applied) row = { ...row, projectionState: "pending", failureReason: undefined };
+      return { bookmark: row, applied };
+    }),
   };
   const capture = {
     writeGeneratedTextFile: vi.fn(async (input: WriteInput) => ({
@@ -62,6 +73,9 @@ function fixture() {
     archiveGeneratedTextFile: vi.fn(async (input: ArchiveInput) => ({
       fromPath: input.fromPath, path: input.toPath, objectId: "projection-object", changed: true,
     })),
+    checkGeneratedTextArchive: vi.fn(async (_path: string): Promise<void> => undefined),
+    // The engine moved nothing unless a test says so.
+    generatedTextArchiveMoved: vi.fn(async (_input: MovedInput): Promise<boolean> => false),
   };
   const disposed = vi.fn();
   const authorities = createWorkspaceAuthorityOwner({
@@ -158,6 +172,53 @@ describe("desktop chat bookmarks", () => {
       generation: 2, projectionObjectId: "projection-object", projectionPath: test.bookmark.destinationPath,
     });
     expect(test.state().operationLanes.size).toBe(0);
+  });
+
+  it("keeps a bookmark and its page when the page has live editing on", async () => {
+    const test = fixture();
+    const refused = Object.assign(new Error("dohc can't archive the page while it has live editing on"), { name: "LivePageOwnedError" });
+    test.capture.checkGeneratedTextArchive.mockRejectedValueOnce(refused);
+    await expect(test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark")).rejects.toBe(refused);
+    expect(test.capture.checkGeneratedTextArchive).toHaveBeenCalledWith(test.bookmark.destinationPath);
+    expect(test.store.archiveBookmark).not.toHaveBeenCalled();
+    expect(test.capture.archiveGeneratedTextFile).not.toHaveBeenCalled();
+    expect(test.store.markBookmarkFailed).not.toHaveBeenCalled();
+    // Try again after Stop archives it.
+    await test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark");
+    expect(test.store.archiveBookmark).toHaveBeenCalledTimes(1);
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an archive refused after its first check for a person to try again, with no retry by itself", async () => {
+    const test = fixture();
+    // Live editing starts between the first check and the page's move.
+    const refused = Object.assign(new Error("dohc can't archive the page while it has live editing on"), { name: "LivePageOwnedError" });
+    test.capture.archiveGeneratedTextFile.mockRejectedValueOnce(refused);
+    await expect(test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark")).rejects.toBe(refused);
+    const failed = await test.store.findBookmark();
+    expect(failed).toMatchObject({ state: "archived", projectionState: "failed" });
+    // The worker and its timer never move the page again by themselves.
+    test.owner.start();
+    test.owner.queueChatBookmarkProjection("workspace");
+    await vi.advanceTimersByTimeAsync(90_000);
+    test.owner.stop();
+    expect(test.store.listPendingBookmarks).toHaveBeenCalled();
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledOnce();
+    expect(test.store.markBookmarkPending).not.toHaveBeenCalled();
+    expect(await test.store.findBookmark()).toMatchObject({ state: "archived", projectionState: "failed" });
+    // Try again after Stop finds the page unmoved, checks it again, and
+    // archives it at a new generation.
+    await expect(test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark"))
+      .resolves.toMatchObject({ state: "archived", projectionState: "ready", generation: 3 });
+    expect(test.capture.generatedTextArchiveMoved).toHaveBeenCalledWith({ fromPath: test.bookmark.destinationPath,
+      toPath: "Bookmarks/Chats/Archived/Chat--thread--g2.md" });
+    expect(test.capture.checkGeneratedTextArchive).toHaveBeenCalledTimes(2);
+    expect(test.store.retryFailedBookmark).not.toHaveBeenCalled();
+    expect(test.store.markBookmarkPending).toHaveBeenCalledOnce();
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenLastCalledWith(expect.objectContaining({
+      toPath: "Bookmarks/Chats/Archived/Chat--thread--g3.md" }));
+    expect(test.store.archiveBookmark).toHaveBeenCalledOnce();
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledTimes(2);
   });
 
   it("waits for the persisted identity before querying pending bookmarks after a relay pull", async () => {

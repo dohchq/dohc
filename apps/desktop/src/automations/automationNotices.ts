@@ -3,7 +3,7 @@ import type { SwitchedOffBy } from "@dohc/automation-executor/automation-history
 export { whoChangedLast, whoSwitchedOff, type AutomationsFileHistory, type SwitchedOffBy } from "@dohc/automation-executor/automation-history";
 import { createHash } from "node:crypto";
 import { NOTICE_TITLE_MAX_CHARS, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
-import { cutText } from "@dohc/automation-executor/automation-chat";
+import { cutText } from "@dohc/workspace-contracts/names";
 import {
   automationFailedNoticeId,
   type FailureComputer,

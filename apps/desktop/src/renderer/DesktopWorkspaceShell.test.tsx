@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
-import type { EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, SitePackageInfo } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { WORKBENCH_PERSIST_DELAY_MS, type Workspace } from "./DesktopWorkspaceShell";
@@ -21,7 +21,7 @@ import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
-import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW, OTHER_WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 vi.mock("./shell/useWorkspaceListing", { spy: true });
@@ -563,7 +563,7 @@ describe("collection folders", () => {
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
+        listener({ sessionId, workspaceId: WORKSPACE.workspaceId, path: "tasks/one.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
 
@@ -655,20 +655,19 @@ describe("collection folders", () => {
     expect(within(palette).queryByText("New folder")).toBeNull();
   });
 
-  const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
+  const DOCUMENT = "Page";
   const DRAWING = FILE_KIND_RECORDS.drawing.name;
   it.each<[string, Workspace, string[]]>([
-    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING, "App"]],
+    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING]],
     ["a View share view", SHARE_VIEW, []],
     ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, []],
-    // An app is a folder, and a received share takes no new folder.
     ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, [DOCUMENT, "Collection", DRAWING]],
   ])("offers start tiles in the empty editor of %s only where the palette offers their command", async (_name, workspace, offered) => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))), workspace);
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     const start = within(within(screen.getByTestId("editor-group-primary")).getByTestId("start-surface"));
 
-    for (const label of [DOCUMENT, "Collection", DRAWING, "App"]) {
+    for (const label of [DOCUMENT, "Collection", DRAWING]) {
       expect(start.queryByRole("button", { name: label }) !== null).toBe(offered.includes(label));
     }
     if (offered.length === 0) expect(start.getByText("Select a file")).toBeTruthy();
@@ -684,7 +683,7 @@ describe("start surface", () => {
 
   it("opens a new page from the document tile", async () => {
     const start = await startSurface();
-    fireEvent.click(start.getByRole("button", { name: FILE_KIND_RECORDS.markdown.name }));
+    fireEvent.click(start.getByRole("button", { name: "Page" }));
     expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 
@@ -701,18 +700,6 @@ describe("start surface", () => {
     await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "Untitled.excalidraw" }),
     ));
-  });
-
-  it("creates one app from App, however often it is pressed", async () => {
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
-    const start = await startSurface(bridge);
-    const app = start.getByRole("button", { name: "App" });
-    fireEvent.click(app);
-    fireEvent.click(app);
-    await waitFor(() => expect(bridge.createWorkspaceFolder).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "app" }),
-    ));
-    expect(bridge.createWorkspaceFolder.mock.calls.filter(([payload]) => payload.relativePath === "app")).toHaveLength(1);
   });
 
   it("lists recent files that still exist and opens one", async () => {
@@ -833,7 +820,9 @@ describe("content search", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("clears the activity badge as soon as the query is cleared", async () => {
+  // The rail's badge means something waits for you; a search's results
+  // don't. The panel's header counts them.
+  it("shows no count on the Search button while results exist", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -872,14 +861,15 @@ describe("content search", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByTestId("activity-search-count").textContent).toBe("2"),
+      expect(screen.getByTestId("search-summary").textContent).toBe("2 results in 2 files"),
     );
+    const searchButton = screen.getByTestId("activity-search");
+    expect(searchButton.getAttribute("aria-label")).toBe("Search");
+    expect(searchButton.textContent).toBe("");
 
-    await user.clear(input);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId("activity-search-count")).toBeNull();
-    });
+    await user.click(screen.getByTestId("activity-explorer"));
+    expect(screen.getByTestId("activity-search").getAttribute("aria-label")).toBe("Search");
+    expect(screen.getByTestId("activity-search").textContent).toBe("");
   });
 
   // The results outlive the panel, so the criteria that produced them
@@ -1039,13 +1029,8 @@ describe("graph view", () => {
     const pageGraph = (await screen.findAllByTestId("graph-view")).find(
       (view) => view.dataset.variant === "page",
     )!;
-    const graphNodes = await within(pageGraph).findAllByTestId("graph-node");
-    expect(
-      graphNodes.find((node) => node.dataset.path === "b.md")?.dataset.active,
-    ).toBe("true");
-    expect(
-      graphNodes.find((node) => node.dataset.path === "a.md")?.dataset.active,
-    ).toBe("false");
+    const graphCanvas = await within(pageGraph).findByTestId("graph-canvas");
+    await waitFor(() => expect(graphCanvas.dataset.activePath).toBe("b.md"));
   });
 
   it("opens as a side panel first, then opens the full graph in an editor tab", async () => {
@@ -1244,43 +1229,24 @@ describe("open editors", () => {
     expect(await screen.findAllByTestId("tree-row")).toHaveLength(2);
   });
 
-  it("surfaces open-editor title actions for untitled files and close-all", async () => {
+  it("closes every editor from the Open editors header, which has no new-file action", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New untitled text file"));
+    const rows = await screen.findAllByTestId("tree-row");
+    for (const path of ["a.md", "b.md"]) {
+      await user.click(rows.find((row) => row.getAttribute("data-path") === path)!);
+      expect(await screen.findByTestId(`tab-${path}`)).toBeTruthy();
+    }
+    expect(screen.getAllByTestId("open-editor-row")).toHaveLength(2);
+    const header = screen.getByTestId("open-editors-header");
+    expect(within(header).queryByLabelText("New untitled text file")).toBeNull();
 
-    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-      relativePath: "Untitled.txt",
-      initialText: "",
-    });
-    expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
-
-    await user.click(screen.getByLabelText("Close all editors"));
-    await waitFor(() => expect(screen.queryByTestId("tab-Untitled.txt")).toBeNull());
-    expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
-  });
-
-  it("numbers untitled text files after case-insensitive file and folder matches", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
-      files: [{ path: "untitled.txt", kind: "file" as const }],
-      folders: ["UNTITLED 2.TXT"],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New untitled text file"));
-
-    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-      relativePath: "Untitled 3.txt",
-      initialText: "",
-    });
+    await user.click(within(header).getByLabelText("Close all editors"));
+    await waitFor(() => expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0));
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
   });
 
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
@@ -1808,6 +1774,67 @@ describe("settings entry points", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
+  it("closes settings on a press outside them", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await screen.findByTestId("settings-dialog");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  });
+
+  it("reports a save that fails after settings closed, with Try again, in a toast and Notices", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("The settings file is read-only.");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).getByText(/The settings file is read-only\./)).toBeTruthy();
+  });
+
+  it("reports a save that fails after settings closed in the workspace open by then", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    const user = userEvent.setup();
+    const view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.type(await screen.findByTestId("general-preferred-name-input"), "Sam");
+    await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    const change = bridge.setUserSettings.mock.lastCall![0];
+    // The root mounts a new shell for the workspace switched to.
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell key={OTHER_WORKSPACE.workspaceId} workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      </>,
+    );
+    await screen.findByTestId("activity-settings");
+    await act(async () => save.reject(new Error("The settings file is read-only.")));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("The settings file is read-only.");
+    bridge.setUserSettings.mockClear();
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.setUserSettings).toHaveBeenCalledExactlyOnceWith(change));
+  });
+
   it("opens settings from the command palette and menu command", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -1843,9 +1870,30 @@ describe("settings entry points", () => {
   });
 });
 
+const SITE: SitePackageInfo = {
+  root: "app",
+  title: "App",
+  kind: "static",
+  confidence: "high",
+  entryPath: "app/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["app/index.html"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+
 describe("customize", () => {
-  it("opens the sidebar's settings from its menu, and Add an app here… opens Apps", async () => {
+  it("opens the sidebar's settings from its menu, and Add an app here… opens the Explorer's apps", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -1856,10 +1904,42 @@ describe("customize", () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
     await user.click(screen.getByLabelText("Close settings"));
 
+    // From another view, the menu opens the Explorer on its first app.
+    await user.click(screen.getByTestId("activity-search"));
     await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Add an app here…" }));
-    // The rail marks Apps at once; its view loads on its own clock.
-    expect(screen.getByTestId("activity-sites").getAttribute("aria-current")).toBe("page");
+    await user.click(await screen.findByRole("menuitem", { name: "Add an app here…" }));
+    expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page");
+    const appRow = await screen.findByTestId("sites-row");
+    await waitFor(() => expect(document.activeElement).toBe(appRow));
+    expect(screen.queryByTestId("activity-sites")).toBeNull();
+  });
+
+  it("keeps a listed app's files out of Home's Pages before its folder is read", async () => {
+    const bridge = makeBridge(Promise.resolve(HOME_STATE));
+    bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: [{ path: "notes.md", kind: "file" }, { path: "trip/README.md", kind: "file" }, { path: "trip/index.html", kind: "file" }],
+      folders: ["trip"],
+    });
+    renderShell(bridge);
+
+    await screen.findByTestId("sites-row");
+    const pages = screen.getByTestId("explorer-pages");
+    expect(pages.querySelector('[data-path="notes.md"]')).not.toBeNull();
+    expect(pages.querySelector('[data-path="trip"]')).toBeNull();
+    expect(pages.querySelector('[data-path="trip/README.md"]')).toBeNull();
+  });
+
+  it("offers Add an app here… only while the workspace has an app", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listSites).toHaveBeenCalled());
+    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
+    expect(screen.getByRole("menuitem", { name: "Customize…" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Add an app here…" })).toBeNull();
   });
 });
 
@@ -2506,5 +2586,92 @@ describe("workbench render cost", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("a chat page archive refused for live editing", () => {
+  const PAGE = "Bookmarks/Chats/Team-update--thread-team.md";
+  const TITLE = `dohc can't archive "${PAGE}" while it has live editing on`;
+  const bookmark = {
+    bookmarkId: "bookmark-team", targetKind: "thread" as const, targetId: "thread-team", threadId: "thread-team",
+    mode: "live" as const, destinationPath: PAGE, state: "active" as const, projectionState: "ready" as const,
+    generation: 1, createdAtMs: 1, updatedAtMs: 1,
+  };
+  function chatsBridge() {
+    const bridge = Object.assign(
+      makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
+      {
+        listChatChannels: vi.fn(async () => ({
+          channels: [{ id: "channel-team", name: "team", slug: "team", kind: "channel" as const,
+            createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "channel-team" }],
+          fileThreads: [],
+        })),
+        listChatChannelShares: vi.fn(async () => ({
+          joined: [{ channelWireId: "channel-team", joined: null }],
+          sessionKey: "session-a",
+          relay: { state: "answered" as const, granted: [], received: [], removed: [] },
+        })),
+        listChannelThreads: vi.fn(async () => ({
+          threads: [{
+            id: "thread-team", title: "Team update", createdAtMs: 1, updatedAtMs: 1, channelId: "channel-team",
+            messageCount: 1, lastReadSequence: 1, unreadCount: 0,
+            openingMessage: { presentation: { group: "fixture", hue: null, self: false }, id: "message-team",
+              authorKind: "human" as const, authorDisplayName: "Alice", bodySnippet: "A settled update",
+              createdAtMs: 1, reactions: [] },
+          }],
+          viewerAuthorId: "you",
+        })),
+        listChatBookmarks: vi.fn(async () => ({ bookmarks: [bookmark] })),
+        archiveChatBookmark: vi.fn(async (_input: { workspaceId: string; bookmarkId: string }) =>
+          ({ bookmark: { ...bookmark, state: "archived" as const } })),
+      },
+    );
+    bridge.archiveChatBookmark.mockRejectedValueOnce(Object.assign(new Error([TITLE,
+      "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10))), { name: "LivePageOwnedError" }));
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null,
+      documents: [{ path: "other.md", objectId: "object-other", status: "ready" as const, canResume: false },
+        { path: PAGE, objectId: "object-page", status: "ready" as const, canResume: false }] }));
+    return bridge;
+  }
+  async function refuse(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByTestId("chats-channel"));
+    const saved = await screen.findByTestId("chats-post-bookmark");
+    await waitFor(() => expect(saved.getAttribute("aria-pressed")).toBe("true"));
+    await user.click(saved);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    return { saved, toast };
+  }
+  async function expectNoRefusal(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(TITLE)).toBeNull();
+  }
+
+  it("opens Live documents at the page's row, and Try again after closing it archives the page and clears the notice", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsBridge();
+    renderShell(bridge);
+    const { toast } = await refuse(user);
+    await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await within(dialog).findByRole("button", { name: `Stop live editing for ${PAGE}` });
+    expect(within(dialog).getByTestId(`live-document-row-${PAGE}`).getAttribute("aria-current")).toBe("true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.archiveChatBookmark).toHaveBeenCalledTimes(2));
+    await expectNoRefusal(user);
+  });
+
+  it("clears the notice when the bookmark's own control archives the page", async () => {
+    const user = userEvent.setup();
+    const bridge = chatsBridge();
+    renderShell(bridge);
+    const { saved } = await refuse(user);
+    await user.click(saved);
+    await waitFor(() => expect(bridge.archiveChatBookmark).toHaveBeenCalledTimes(2));
+    await expectNoRefusal(user);
   });
 });

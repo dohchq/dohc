@@ -74,18 +74,46 @@ it("hands the page to the plain editor when its file opens without a live sessio
   const user = userEvent.setup();
   const fileExists = renderNewPage();
   await user.keyboard("Lisbon{Enter}Day one");
+  // The title must show in the same change that removes the new page, not a
+  // render later, so the page never shows an empty title.
+  let titleAtHandOff: string | undefined;
+  const observer = new MutationObserver(() => {
+    if (titleAtHandOff === undefined && !screen.queryByTestId("new-page")) {
+      titleAtHandOff = (screen.getByLabelText("Page title") as HTMLTextAreaElement).value;
+    }
+  });
+  observer.observe(document.body, { subtree: true, childList: true });
   fileExists();
 
   await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+  observer.disconnect();
+  expect(titleAtHandOff).toBe("Lisbon");
   const editor = screen.getByTestId("markdown-editor");
   expect(editor.getAttribute("contenteditable")).toBe("true");
   expect(editor.textContent).toBe("Day one");
   expect(editor).toBe(document.activeElement);
-  expect((screen.getByLabelText("Page title") as HTMLTextAreaElement).value).toBe("Lisbon");
   await waitFor(
     () => expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].text).toMatch(/^---\ntitle: Lisbon\n---\n\nDay one\n?$/),
     { timeout: 3_000 },
   );
+});
+
+it("keeps a renamed title through blur while its save is still on the way", async () => {
+  const bridge = bridgeFor({ available: false });
+  bridge.writeWorkspaceText.mockImplementation(() => new Promise(() => undefined));
+  const user = userEvent.setup();
+  const fileExists = renderNewPage();
+  await user.keyboard("Lisbon{Enter}Day one");
+  fileExists();
+  await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+  await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled(), { timeout: 3_000 });
+
+  const title = screen.getByLabelText("Page title") as HTMLTextAreaElement;
+  await user.click(title);
+  await user.keyboard("{End} trip");
+  await user.click(screen.getByTestId("markdown-editor"));
+  expect(title).not.toBe(document.activeElement);
+  expect(title.value).toBe("Lisbon trip");
 });
 
 it("shows a file that opens read-only", async () => {
@@ -110,5 +138,5 @@ it("shows a file that could not be read", async () => {
 
   await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
   expect(screen.getByTestId("file-inspector").parentElement!.hasAttribute("inert")).toBe(false);
-  expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+  expect(screen.getByText("dohc could not read this file.")).toBeTruthy();
 });

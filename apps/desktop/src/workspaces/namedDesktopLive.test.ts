@@ -91,6 +91,18 @@ it("reports only host acknowledgement as saved and never settles a local file", 
   expect(f.preserveDraft).not.toHaveBeenCalled();
 });
 
+it("reports no file head with the note and each update, so the note check still judges a shared note", async () => {
+  const f = fixture();
+  const onRemoteUpdate = vi.fn();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate});
+  expect(provider.headSha256).toBeNull();
+  // A teammate's update records another source.
+  f.session.doc.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64));
+  expect(onRemoteUpdate, "forward the update without a head -> the renderer forgets the head and checks the note for good")
+    .toHaveBeenCalledExactlyOnceWith(expect.any(Uint8Array), {sha256: null});
+  await provider.close();
+});
+
 it("preserves exact pending state before close and retains the provider if storage fails", async () => {
   const f = fixture();
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});

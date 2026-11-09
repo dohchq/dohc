@@ -4,6 +4,8 @@ import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt
 import {readRestoreAdmission,restoreIntegrity as require,type RestoreAdmission} from "./liveRestoreCheckpoint";
 import {LIVE_RESTORE_LIFECYCLES as table,LIVE_RESTORE_OPERATIONS as operations} from "./liveRestoreOperationSchema";
 import {authorityInteger} from "./liveDocumentAuthority";
+import {LIVE_RESTORE_CANCELLATIONS} from "./liveRestoreCancellationSchema";
+import {parseNativeRestoreCancellationAnswer} from "../liveRestoreFence";
 import type {SqliteDb} from "./types";
 
 export function validateRestoreLifecycle(admission: RestoreAdmission, value: RestoreLifecycle): void {
@@ -45,18 +47,73 @@ export function retainedRestoreLifecycle(db: SqliteDb, namespace: string, operat
   validateRestoreLifecycle(admission,lifecycle);
   require(row.pending_settlement_json===null || row.settlement_json===null);
   const base=Buffer.byteLength(JSON.stringify([row.relay_database_namespace,row.operation_id,row.workspace_id,row.max_evidence_bytes,row.admission_json,row.admission_sha256]));
-  require(authorityInteger(row.accounted_bytes,1)===base+bytes+authorityInteger(row.receipt_reservation_bytes));
+  require(authorityInteger(row.accounted_bytes,1)===base+bytes+authorityInteger(row.receipt_reservation_bytes)+authorityInteger(row.publication_reservation_bytes));
   return {admission,lifecycle,row};
 }
 
-export function requireResumedBinding(db:SqliteDb,namespace:string,original:LiveObjectBinding,current:LiveObjectBinding):void {
+/**
+ * The binding a finished restore left at its new fence: its resume's, or the
+ * one its host stopped at when the owner declined it after the fence. Null
+ * for any other phase.
+ */
+export function finishedRestoreBinding(db:SqliteDb,namespace:string,operationId:string,phase:unknown):LiveObjectBinding|null {
+  if (phase==="resumed") return retainedRestoreLifecycle(db,namespace,operationId)?.lifecycle.resume?.binding ?? null;
+  if (phase!=="declined") return null;
+  const row=db.prepare(`SELECT acknowledgment_json FROM ${LIVE_RESTORE_CANCELLATIONS} WHERE relay_database_namespace=? AND operation_id=? AND outcome='fence-cancelled'`)
+    .get(namespace,operationId);
+  if (!row) return null;
+  const answer=parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
+  require(answer.status==="fenceCancelled");
+  return answer.binding;
+}
+
+/** Native `require_cancelled` (`restore_fence.rs`) steps across at most this many generations, `CHECKPOINT_EVENTS`. */
+export const MAX_DECLINED_GENERATIONS=4095;
+// The largest host answer a step loads, native's accepted header bound.
+const MAX_ANSWER_BYTES=643_576;
+/**
+ * The binding the history before `binding` was accepted at, or null when it
+ * can't be. Restores declined after their fence moved the generation with no
+ * accepted event, so each one ending at `binding` steps back to its old
+ * binding. Its host must have stopped at that binding, and its cutover must be
+ * `previous`, the event before. Each host answer it loads is charged to
+ * `chargeBytes`.
+ */
+export function acrossDeclinedRestores(db:SqliteDb,namespace:string,binding:LiveObjectBinding,previous:number,
+  chargeBytes?:(value:number)=>void):LiveObjectBinding|null {
+  let expected=binding;
+  for (let steps=0;;steps++) {
+    const declined=restoreDeclinedAt(db,namespace,expected,chargeBytes);
+    if (!declined) return expected;
+    if (steps===MAX_DECLINED_GENERATIONS || !isDeepStrictEqual(declined.binding,expected) || declined.cutover!==previous) return null;
+    expected=declined.oldBinding;
+  }
+}
+function restoreDeclinedAt(db:SqliteDb,namespace:string,binding:LiveObjectBinding,chargeBytes?:(value:number)=>void):
+  {binding:LiveObjectBinding;oldBinding:LiveObjectBinding;cutover:number}|null {
+  const header=db.prepare(`SELECT o.operation_id,length(CAST(c.acknowledgment_json AS BLOB)) AS bytes FROM ${operations} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
+    WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=? AND o.new_fence=? AND o.phase='declined' AND c.outcome='fence-cancelled'`)
+    .get(namespace,binding.workspaceId,binding.mainVersionId,binding.objectId,binding.lineageClaimId,binding.restoreFenceGeneration);
+  if (!header) return null;
+  const bytes=authorityInteger(header.bytes,1);
+  require(bytes<=MAX_ANSWER_BYTES);
+  chargeBytes?.(bytes);
+  const row=db.prepare(`SELECT o.cutover_cursor,c.acknowledgment_json FROM ${operations} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
+    WHERE o.relay_database_namespace=? AND o.operation_id=?`).get(namespace,header.operation_id)!;
+  const answer=parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
+  require(answer.status==="fenceCancelled");
+  const {oldBinding}=answer.receipt.fence.operation;
+  require(oldBinding.restoreFenceGeneration===binding.restoreFenceGeneration-1);
+  return {binding:answer.binding,oldBinding,cutover:authorityInteger(row.cutover_cursor)};
+}
+
+export function requireFinishedRestoreBinding(db:SqliteDb,namespace:string,original:LiveObjectBinding,current:LiveObjectBinding):void {
   require(isDeepStrictEqual({...original,restoreFenceGeneration:current.restoreFenceGeneration},current));
   if (original.restoreFenceGeneration===current.restoreFenceGeneration) return;
   require(original.restoreFenceGeneration<current.restoreFenceGeneration);
-  const row=db.prepare(`SELECT operation_id FROM ${operations} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence=? AND phase='resumed'`)
+  const row=db.prepare(`SELECT operation_id,phase FROM ${operations} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence=?`)
     .get(namespace,current.workspaceId,current.mainVersionId,current.objectId,current.restoreFenceGeneration);
   require(row);
-  const saved=retainedRestoreLifecycle(db,namespace,String(row.operation_id));
-  require(saved?.lifecycle.resume && isDeepStrictEqual(saved.lifecycle.resume.binding,current));
+  require(isDeepStrictEqual(finishedRestoreBinding(db,namespace,String(row.operation_id),row.phase),current));
   parseLiveObjectBinding(original);
 }

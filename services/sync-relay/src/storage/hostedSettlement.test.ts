@@ -1,17 +1,31 @@
-import { afterAll, afterEach, expect, it } from "vitest";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
 import {
   registered,
   cleanupLiveDeliveryFixtures,
 } from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { prepareHostedSettlements, parseSettlementAuthors } from "./hostedSettlement.js";
+import { nativeSettlementId, prepareHostedSettlements, parseSettlementAuthors, settlementRecordDigest } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
+import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettlement.json";
+const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+afterEach(() => logged.mockClear());
 afterEach(cleanupLiveDeliveryFixtures);
+/** Each logged refusal as "<stage> <check>", in order. */
+const refusedChecks = () => logged.mock.calls.flatMap(([line]) =>
+  /^\[sync-relay\] live settlement refused at (\w+): workspace [^,]+, settlement [^,]+, check ([a-z-]+)\.$/u
+    .exec(String(line))?.slice(1).join(" ") ?? []);
 
 it("fits 1023 named authors and the window's marker in a settlement snapshot", () => {
   const authors = Array.from({length: 1023}, (_, index) => ({kind: "human", humanId: String(index), humanName: "Reader"}));
   const marker = {kind: "unattributed"};
   expect(parseSettlementAuthors([...authors, marker])).toHaveLength(1024);
   expect(() => parseSettlementAuthors([...authors, {kind: "human", humanId: "new", humanName: "Reader"}, marker])).toThrow();
+});
+// The engine's `update_native_audit_fixture` writes this settlement.
+it("derives the engine's own settlement ID and record digest", () => {
+  const {payload} = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
+  const {record, recordDigest} = payload as unknown as {record: Record<string, unknown>; recordDigest: string};
+  expect(nativeSettlementId(record)).toBe(record.settlementId);
+  expect(settlementRecordDigest(record)).toBe(recordDigest);
 });
 it("records deterministic settlement refusal and advances later origin operations without publishing its moment", async () => {
   const f = registered({ deployment: true });
@@ -50,6 +64,9 @@ it("records deterministic settlement refusal and advances later origin operation
     expect(result.settlementRefusals).toMatchObject([
       { originSeq: start, momentId: "forged", reason: "authorship-mismatch" },
     ]);
+    expect(logged.mock.calls).toEqual([[
+      "[sync-relay] live settlement refused at prepare: workspace workspace, settlement forged, check record-digest.",
+    ]]);
     expect(
       f.storage.fetchLogCoordinate({
         workspaceId: "workspace",
@@ -72,13 +89,19 @@ it("records deterministic settlement refusal and advances later origin operation
   }
 });
 import { createHash } from "node:crypto";
-import { encodeStateAsUpdate } from "yjs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { applyUpdate, encodeStateAsUpdate } from "yjs";
 import { createLiveMarkdownRegistrationValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { stableJsonStringify } from "../canonicalJson.js";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory.js";
 import { RestoreHistoryBudget } from "./liveAcceptedHistory.js";
 import { liveValidation } from "../liveValidation.js";
 import { createShareReadQueries } from "../shareReadQueries.js";
+import {OwnerCommittedDelivery} from "../ownerCommittedDelivery.js";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {attachLiveJournalHistory,createLiveJournalHistoryAuthority} from "./liveJournalHistory.js";
 const hash = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 const policy = {
@@ -100,6 +123,7 @@ function publication(
   automation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration,
   update?: Uint8Array,
   agentId = "trip",
+  owner = false,
 ) {
   f.doc.gc = false;
   const baselineBytes = new TextEncoder().encode(
@@ -111,19 +135,20 @@ function publication(
     content: baselineBytes,
     createdAtMs: 1,
   });
-  const captured = f.capture(update ?? f.update("title", id), id, automation ? {kind: "owner", userId: "owner", shareId: "share"} : {
+  const accountId = owner ? "owner" : "reader";
+  const captured = f.capture(update ?? f.update("title", id), id, automation || owner ? {kind: "owner", userId: "owner", shareId: "share"} : {
     kind: "named",
     userId: "reader",
     grantId: "grant",
   });
   const accepted = f.storage.commitLiveUpdateJournal({
     ...captured,
-    ...(automation ? {trustedAutomation: automation} : {trustedAccount: { accountId: "reader", name: "Reader" }}),
+    ...(automation ? {trustedAutomation: automation} : {trustedAccount: { accountId, name: owner ? "Owner" : "Reader" }}),
     metadata: automation ? captured.metadata : {
       ...captured.metadata,
       authorContext: {
         kind: "account",
-        accountId: "reader",
+        accountId,
         agent: {
           agentId,
           agentName: "Trip",
@@ -133,7 +158,7 @@ function publication(
       },
     },
   });
-  expect(accepted.result.kind).toBe("accepted");
+  expect(accepted.result).toMatchObject({kind: "accepted"});
   const receipt = accepted.admitted!.metadata.accepted.receipt;
   const bytes = encodeStateAsUpdate(f.doc),
     stateSha = hash(bytes);
@@ -171,15 +196,19 @@ function publication(
     : null;
   const namespace = String(row.relay_database_namespace),
     document = f.input.evidence.document;
+  const acceptedEventCount = Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0);
   const record = {
-    settlementId: `settlement-${id}`,
+    settlementId: "",
     relayDatabaseNamespace: namespace,
     binding: captured.metadata.binding,
+    hostCoordinate: {hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"},
     previousCursor: previous,
     terminalCursor: receipt.journalCursor,
-    acceptedEventCount:
-      Number(row.accepted_event_count) -
-      Number(prior?.accepted_event_count ?? 0),
+    previousYdocSequence: 0,
+    localYdocSequence: 1,
+    applicationCount: acceptedEventCount,
+    nativeIntervalDigest: hash(`native-interval-${id}`),
+    acceptedEventCount,
     acceptedIntervalDigest: hash(
       JSON.stringify([
         "live-settlement-accepted-interval-v1",
@@ -205,8 +234,12 @@ function publication(
     ),
     momentId: id,
     markdownDigest: markdownSha,
+    sourceStateVectorDigest: hash(`state-vector-${id}`),
     acceptedStateBlobSha256: stateSha,
+    recordedAtMs: 1,
+    restoreOperationId: null,
   };
+  record.settlementId = nativeSettlementId(record);
   const payload = {
     momentId: id,
     objectId: document.objectId,
@@ -223,7 +256,7 @@ function publication(
     recordedAtMs: 1,
     settlementReference: {
       formatVersion: 1,
-      recordDigest: hash(stableJsonStringify(record)),
+      recordDigest: settlementRecordDigest(record),
       record,
     },
   };
@@ -264,7 +297,7 @@ it("keeps one unattributed marker beside named settlement contributors", async (
       const accepted = f.storage.commitLiveUpdateJournal(f.capture(f.update("title", id), id, {
         kind: "named", userId: "reader", grantId: "grant",
       }));
-      expect(accepted.result.kind).toBe("accepted");
+      expect(accepted.result).toMatchObject({kind: "accepted"});
       expect(accepted.admitted!.metadata.authorSnapshot).toEqual([]);
     }
     const last = publication(f, "mixed-coverage");
@@ -287,6 +320,7 @@ it("refuses a client-supplied unattributed marker on settlement publication", as
     first.op.payloadJson = stableJsonStringify({...first.payload, authors: [{kind: "unattributed"}]});
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toMatchObject([{reason: "authorship-mismatch"}]);
+    expect(refusedChecks()).toEqual(["prepare client-authors"]);
     expect(f.raw.prepare("SELECT 1 FROM sync_relay_object_moments WHERE moment_id='client-marker'").get()).toBeUndefined();
   } finally { f.close(); }
 });
@@ -346,6 +380,149 @@ it("authenticates full accepted state and publishes exact journal contributors t
     f.close();
   }
 });
+it("starts a later proof at the Markdown its predecessor verified, not at the baseline", async () => {
+  const f = registered({ deployment: true });
+  try {
+    const first = publication(f, "first");
+    await prepare(f, [first.op]);
+    append(f, [first.op]);
+    const baseline = f.input.evidence.projectedMarkdownSha256;
+    expect(first.markdownSha).not.toBe(baseline);
+    const stale = publication(f, "stale", first.receipt.journalCursor, baseline, 1);
+    await prepare(f, [stale.op]);
+    expect(stale.op).toMatchObject({ settlementAdmission: { status: "refused" } });
+    expect(refusedChecks()).toEqual(["prepare predecessor-markdown"]);
+    const next = publication(f, "next", first.receipt.journalCursor, first.markdownSha, 1);
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op])).toMatchObject({ inserted: 1 });
+    expect(next.op).toMatchObject({ settlementAdmission: { status: "accepted" } });
+    expect(refusedChecks()).toEqual(["prepare predecessor-markdown"]);
+  } finally {
+    f.close();
+  }
+});
+// owner_publication exports these states and the outgoing preimage. The relay
+// assigns its own journal coordinates and authorship to the same updates.
+const handoverEvidence = process.env.DOHC_HANDOVER_PUBLICATION_EVIDENCE;
+it.each([false,true])("settles the cut before a receipt in the adoption pass, restart=%s", async restart => {
+  const f = registered();
+  const history = createLiveJournalHistoryAuthority({namespace: "handover-test",reconciled: true});
+  attachLiveJournalHistory(f.storage as StorageContext,history);
+  try {
+    f.write(db => db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES ('sync_relay_live_update_journal',6)").run());
+    const first = publication(f,"handover");
+    await prepare(f,[first.op]);
+    expect(append(f,[first.op]).settlementRefusals).toBeUndefined();
+    expect(first.receipt.journalCursor).toBe(7);
+    let fileDigest = f.input.evidence.projectedMarkdownSha256, terminal = first.receipt, requestId = 0;
+    let next: ReturnType<typeof publication> | undefined, failSettle = restart, cutSettled = false;
+    const methods: string[] = [];
+    const client = {
+      async sendRequest(input: Parameters<EngineClient["sendRequest"]>[0]) {
+        methods.push(input.method);
+        if(input.method === "liveApplication.register")return {id: input.id,result: {registrationId: 1}};
+        if(input.method === "liveApplication.ownerState")return {id: input.id,result: {
+          adoptionId: "handover",expectedLocalSequence: 1,throughCursor: null,sessionId: "session"}};
+        if(input.method === "liveApplication.ownerOutbox") {
+          // A collaborator keeps typing while this delivery pass drains the
+          // outbox. The pass reads the empty queue once before the cut, too.
+          if(cutSettled) next ??= publication(f,"typed-through-handover",7,fileDigest,1);
+          return {id: input.id,result: {outboxId: null,pendingBytes: 0,state: "active",retryDeliveryId: null}};
+        }
+        expect(input.method).toBe("liveApplication.settle");
+        if(failSettle){failSettle = false;throw new Error("relay restarted before empty settle");}
+        const empty = terminal.journalCursor === 7;
+        fileDigest = empty ? first.markdownSha : next!.markdownSha;
+        cutSettled = true;
+        return {id: input.id,result: {status: "settled",settlement: {
+          settlementId: empty ? null : next!.record.settlementId,previousCursor: 7,terminalCursor: terminal.journalCursor,
+          applicationCount: empty ? 0 : 1,localYDocSequence: empty ? 1 : 2,momentId: empty ? "cut" : "typed-through-handover",
+          markdownDigest: fileDigest,materialized: true,collectionReconcileRequired: false,
+        }}};
+      },
+      async sendLiveOwnerAdoption(input: Parameters<EngineClient["sendLiveOwnerAdoption"]>[0]) {
+        return {id: input.id,result: {status: "adopted",adoption: {
+          adoptionId: "handover",localYDocSequence: 1,terminalCursor: 7,adoptionReplayed: false,
+        }}};
+      },
+      async sendLiveApplication(input: Parameters<EngineClient["sendLiveApplication"]>[0],event: Parameters<EngineClient["sendLiveApplication"]>[1]) {
+        terminal = event.metadata.accepted.receipt;
+        return {id: input.id,result: {status: "applied",ack: {...terminal,localYDocSequence: 2,applicationReplayed: false}}};
+      },
+    } as unknown as EngineClient;
+    const consumer = () => new OwnerCommittedDelivery(f.storage,history,{
+      client,workspace: "handle",host: f.input.host,deadlineMs: 1000,nextRequestId: () => ++requestId,
+      bounds: {maxBytes: 1_000_000,maxEvents: 100},
+      ownerAdmission: {trustedAccount: () => ({accountId: "owner",name: "Owner"}),shares: new Map([["workspace","share"]]),
+        maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),validate: () => {throw new Error("Empty outbox");}},
+    });
+    let delivery = consumer();
+    if(restart) {
+      await expect(delivery.drain(f.input.evidence.document)).rejects.toThrow("relay restarted");
+      // Only the seed check read the queue; the pass drained nothing.
+      expect(methods.filter(method => method === "liveApplication.ownerOutbox")).toHaveLength(1);
+      expect(methods.at(-1)).toBe("liveApplication.settle");
+      delivery = consumer();
+    }
+    expect(await delivery.drain(f.input.evidence.document)).toMatchObject({kind: "done",terminalReceipt: {journalCursor: 8}});
+    // A seedless adoption still settles its cut, between the seed check and the drain.
+    const settledAt = methods.lastIndexOf("liveApplication.settle");
+    expect(methods[settledAt - 1]).toBe("liveApplication.ownerOutbox");
+    expect(methods.slice(settledAt + 1)).toContain("liveApplication.ownerOutbox");
+    expect(next!.payload.payloadBeforeBlobSha256).toBe(first.markdownSha);
+    await delivery.settle(f.input.evidence.document);
+    await prepare(f,[next!.op]);
+    expect(append(f,[next!.op]).settlementRefusals).toBeUndefined();
+    expect(next!.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(f.doc.getMap("frontmatter").get("title")).toBe("typed-through-handover");
+    expect(refusedChecks()).toEqual([]);
+  } finally {f.close();}
+});
+it.skipIf(!handoverEvidence).each(["changed", "unchanged", "changed-preserved", "unchanged-preserved", "changed-html",
+  "changed-refused", "unchanged-refused", "changed-preserved-refused", "unchanged-preserved-refused"])("accepts the engine's %s handover preimage after a reload", async variant => {
+  const evidence = JSON.parse(readFileSync(join(handoverEvidence!, `${variant}.json`), "utf8")) as {
+    baselineBytes: number[]; handoverBytes: number[]; nextBytes: number[]; intermediateBytes?: number[];
+    payload: {payloadBeforeBlobSha256: string; payloadAfterBlobSha256: string};
+  };
+  const f = registered({deployment: true, baselineBytes: Uint8Array.from(evidence.baselineBytes)});
+  try {
+    f.write(db => {
+      db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES ('sync_relay_live_update_journal',6)").run();
+    });
+    f.doc.gc = false;
+    const handover = Uint8Array.from(evidence.handoverBytes);
+    applyUpdate(f.doc, handover);
+    const first = publication(f, "handover", 0, undefined, 0, undefined, handover, "trip", true);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op])).toMatchObject({inserted: 1});
+    expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(first.receipt.journalCursor).toBe(7);
+    expect(first.markdownSha).toBe(evidence.payload.payloadBeforeBlobSha256);
+    if (evidence.intermediateBytes) {
+      const intermediate = Uint8Array.from(evidence.intermediateBytes);
+      applyUpdate(f.doc, intermediate);
+      const refused = publication(f, "refused", 7, first.markdownSha, 1, undefined, intermediate, "trip", true);
+      expect(refused.receipt.journalCursor).toBe(8);
+      refused.payload.settlementReference.recordDigest = "0".repeat(64);
+      refused.op.payloadJson = stableJsonStringify(refused.payload);
+      await prepare(f, [refused.op]);
+      expect(append(f, [refused.op]).settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual(["prepare record-digest"]);
+      logged.mockClear();
+    }
+    const nextState = Uint8Array.from(evidence.nextBytes);
+    applyUpdate(f.doc, nextState);
+    const next = publication(f, "next", first.receipt.journalCursor, evidence.payload.payloadBeforeBlobSha256, evidence.intermediateBytes ? 2 : 1, undefined, nextState, "trip", true);
+    expect(next.receipt.journalCursor).toBe(evidence.intermediateBytes ? 9 : 8);
+    expect(next.markdownSha).toBe(evidence.payload.payloadAfterBlobSha256);
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op])).toMatchObject({inserted: 1});
+    expect(next.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(refusedChecks()).toEqual([]);
+  } finally {
+    f.close();
+  }
+});
 it("refuses a changed retry of an accepted proof after stripping its client authors", async () => {
   const f = registered({deployment:true});
   try {
@@ -360,26 +537,28 @@ it("refuses a changed retry of an accepted proof after stripping its client auth
   } finally {f.close();}
 });
 it.each([
-  "before",
-  "state",
-  "scope",
-  "moment",
-  "authors",
-  "automation-authors",
-  "automation-presser",
-  "automation-claim",
-  "mixed-authors",
-  "human-authors",
-  "mixed-forged-human",
-  "replay",
-  "copied-ref",
-  "fence",
-  "future-cursor",
-  "after-path",
-  "operation",
+  ["before", "first-baseline-markdown"],
+  ["binding", "record-binding"],
+  ["previous-cursor", "record-previous-cursor"],
+  ["state", "state-digest"],
+  ["scope", "record-namespace"],
+  ["moment", "moment-payload"],
+  ["authors", "client-authors"],
+  ["automation-authors", "client-authors"],
+  ["automation-presser", "client-authors"],
+  ["automation-claim", "client-authors"],
+  ["mixed-authors", "client-authors"],
+  ["human-authors", "client-authors"],
+  ["mixed-forged-human", "client-authors"],
+  ["replay", "predecessor-published-past"],
+  ["copied-ref", "predecessor-published-past"],
+  ["fence", "accepted-event-binding"],
+  ["future-cursor", "journal-endpoint"],
+  ["after-path", "moment-payload"],
+  ["operation", "moment-payload"],
 ])(
   "consumes forged %s proof without changing current content",
-  async (field) => {
+  async (field, check) => {
     const f = registered({ deployment: true });
     try {
       const first = publication(f, "first", 0, f.input.evidence.projectedMarkdownSha256, 0,
@@ -395,6 +574,8 @@ it.each([
           record: Record<string, unknown>;
           recordDigest: string;
         };
+      if (field === "binding") reference.record.binding = {...first.record.binding, selectorPaths: []};
+      if (field === "previous-cursor") reference.record.previousCursor = -1;
       if (field === "before") payload.payloadBeforeBlobSha256 = "a".repeat(64);
       if (field === "state") {
         reference.record.acceptedStateBlobSha256 =
@@ -448,11 +629,14 @@ it.each([
           ...first.record.binding,
           restoreFenceGeneration: 99,
         };
-      reference.recordDigest = hash(stableJsonStringify(reference.record));
+      // Each forgery names its own settlement, so only the proof it changes refuses it.
+      reference.record.settlementId = nativeSettlementId(reference.record);
+      reference.recordDigest = settlementRecordDigest(reference.record);
       first.op.payloadJson = stableJsonStringify(payload);
       await prepare(f, [first.op]);
       const result = append(f, [first.op]);
       expect(result.settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual([`prepare ${check}`]);
       expect(
         f.raw
           .prepare(
@@ -477,6 +661,28 @@ it("exhausts the shared per-push budget retryably without consuming a coordinate
     f.close();
   }
 });
+// Proves: a worker that runs out of heap normalizing a single push's state
+// would on every retry, so the push is refused and the device's next op lands
+// behind it. A batch still answers retryably, so its host halves it.
+it("refuses a single push whose normalization runs its worker out of memory", async () => {
+  const f = registered({ deployment: true }), normalize = vi.spyOn(liveValidation, "normalizeSettlement");
+  const outOfMemory = Object.assign(new Error("The worker reached its memory limit."), { code: "ERR_WORKER_OUT_OF_MEMORY" });
+  try {
+    const first = publication(f, "first"), opaque = (originSeq: number) => ({originSeq,opKind:"opaque",payloadJson:"{}",recordedAtMs:1});
+    normalize.mockRejectedValueOnce(outOfMemory);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op])).toMatchObject({ inserted: 1, settlementRefusals: [{ originSeq: 0, momentId: "first" }] });
+    await prepare(f, [opaque(1)]);
+    expect(append(f, [opaque(1)])).toMatchObject({ inserted: 1, currentMaxOriginSeq: 1 });
+    const second = publication(f, "second", 0, undefined, 2);
+    normalize.mockRejectedValueOnce(outOfMemory);
+    await expect(prepare(f, [second.op, opaque(3)])).rejects.toMatchObject({ code: "settlement_proof_budget" });
+    expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(1);
+  } finally {
+    normalize.mockRestore();
+    f.close();
+  }
+});
 it("rechecks fence after worker proof and consumes stale proof instead of wedging the batch", async () => {
   const f = registered({ deployment: true });
   try {
@@ -490,6 +696,7 @@ it("rechecks fence after worker proof and consumes stale proof instead of wedgin
         .run(),
     );
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["commit restore-fence"]);
   } finally {
     f.close();
   }
@@ -571,12 +778,11 @@ it("rejects altered full content with the same CRDT clocks", async () => {
       createdAtMs: 1,
     });
     first.record.acceptedStateBlobSha256 = sha;
-    first.payload.settlementReference.recordDigest = hash(
-      stableJsonStringify(first.record),
-    );
+    first.payload.settlementReference.recordDigest = settlementRecordDigest(first.record);
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["prepare state-digest"]);
   } finally {
     f.close();
   }
@@ -590,6 +796,7 @@ it.each(["bytes", "events"])("acknowledges a singleton over the %s budget and pu
     await prepare(f, [first.op], budget);
     expect(append(f, [first.op])).toMatchObject({currentMaxOriginSeq:0,
       settlementRefusals:[{originSeq:0, momentId:"oversized", settlementId:first.record.settlementId}]});
+    expect(refusedChecks()).toEqual(["prepare proof-budget"]);
     const fallback = {...first.payload, attributionUnavailable:{settlementId:first.record.settlementId,reason:"authorship-mismatch"}};
     delete (fallback as Record<string,unknown>).settlementReference;
     const ops = [{originSeq:1,opKind:"moment.append",payloadJson:stableJsonStringify(fallback),recordedAtMs:1},
@@ -627,10 +834,11 @@ it("refuses a different full CRDT state even when its Markdown projection is unc
     const sha = hash(bytes);
     f.storage.putBlob({workspaceId:"workspace",sha256:sha,content:bytes,createdAtMs:1});
     first.record.acceptedStateBlobSha256 = sha;
-    first.payload.settlementReference.recordDigest = hash(stableJsonStringify(first.record));
+    first.payload.settlementReference.recordDigest = settlementRecordDigest(first.record);
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["prepare state-digest"]);
   } finally { f.close(); }
 });
 
@@ -647,11 +855,12 @@ it("publishes admitted automation declaration without inferring its presser as a
     const forged = structuredClone(first.payload);
     forged.momentId = "copied-automation";
     forged.settlementReference.record.momentId = forged.momentId;
-    forged.settlementReference.record.settlementId = "copied-automation";
-    forged.settlementReference.recordDigest = hash(stableJsonStringify(forged.settlementReference.record));
+    forged.settlementReference.record.settlementId = nativeSettlementId(forged.settlementReference.record);
+    forged.settlementReference.recordDigest = settlementRecordDigest(forged.settlementReference.record);
     const copied = {...first.op, originSeq: 1, payloadJson: stableJsonStringify(forged)};
     await prepare(f, [copied]);
     expect(append(f, [copied]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["prepare predecessor-published-past"]);
   } finally {f.close();}
 });
 
@@ -686,7 +895,10 @@ it.each(["transition", "skipped-base"])("anchors a changed full selector binding
       expect(result.settlementRefusals).toBeUndefined();
       const later=publication(f,"later-selector",next.receipt.journalCursor,next.markdownSha,2);
       await prepare(f,[later.op]);expect(append(f,[later.op]).settlementRefusals).toBeUndefined();
-    } else expect(result.settlementRefusals).toHaveLength(1);
+    } else {
+      expect(result.settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual(["prepare base-binding-change"]);
+    }
   } finally {f.close();}
 });
 
@@ -713,8 +925,13 @@ it.each([false, true])("anchors a projection-neutral accepted gap with same-push
   } finally { f.close(); }
 });
 
-it.each(["changed-markdown", "missing-cut", "wrong-document", "selector", "path", "fence", "namespace", "restore", "backwards"])(
-  "refuses an advanced publication anchor with %s", async variant => {
+it.each([
+  ["changed-markdown", "predecessor-unchanged-gap"], ["missing-cut", "predecessor-unchanged-gap"],
+  ["wrong-document", "journal-endpoint"], ["selector", "predecessor-unchanged-gap"], ["path", "predecessor-unchanged-gap"],
+  ["fence", "predecessor-unchanged-gap"], ["namespace", "predecessor-unchanged-gap"], ["restore", "predecessor-unchanged-gap"],
+  ["backwards", "predecessor-published-past"],
+])(
+  "refuses an advanced publication anchor with %s", async (variant, check) => {
     const f = registered({deployment: true});
     try {
       const first = publication(f, "first"); await prepare(f, [first.op]); append(f, [first.op]);
@@ -752,6 +969,7 @@ it.each(["changed-markdown", "missing-cut", "wrong-document", "selector", "path"
       });
       await prepare(f, [next.op]);
       expect(append(f, [next.op]).settlementRefusals).toHaveLength(1);
+      expect(refusedChecks()).toEqual([`prepare ${check}`]);
       expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(1);
     } finally { f.close(); }
   });
@@ -767,6 +985,7 @@ it("rechecks an unchanged publication anchor at commit", async () => {
     f.write(db => db.prepare("UPDATE sync_relay_live_settlement_cuts SET markdown_sha256=? WHERE journal_cursor=?")
       .run("f".repeat(64), neutral.receipt.journalCursor));
     expect(append(f, [next.op]).settlementRefusals).toHaveLength(1);
+    expect(refusedChecks()).toEqual(["commit predecessor-unchanged-gap"]);
     expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(1);
     expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(1);
   } finally { f.close(); }

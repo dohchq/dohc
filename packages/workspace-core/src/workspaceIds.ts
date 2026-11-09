@@ -7,6 +7,6 @@ export class ReservedWorkspaceIdError extends Error {
   override name = "ReservedWorkspaceIdError";
 
   constructor(workspaceId: string) {
-    super(`Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`);
+    super(`This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`);
   }
 }

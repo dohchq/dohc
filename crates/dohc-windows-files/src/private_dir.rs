@@ -54,12 +54,13 @@ pub enum NotPrivateReason {
     /// point that names another item.
     Link,
     NotFolder,
-    /// Another account owns the item, or something in the folder, or this
-    /// user can't open it or change its DACL.
+    /// Another account owns the item, or this user can't open a folder on
+    /// the way at all.
     OtherOwner,
-    /// This user, Administrators or SYSTEM owns the folder, but this user
-    /// can't open it with what dohc needs, such as changing its DACL, as when
-    /// Administrators own it and give this user Modify.
+    /// This user, Administrators or SYSTEM owns the item, or this user can't
+    /// read who does, but this user can't open it with what dohc needs, such
+    /// as changing its DACL, as when Administrators own it and give this user
+    /// Modify.
     NotChangeable,
 }
 
@@ -211,7 +212,7 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
                                 private = None;
                                 continue;
                             }
-                            set => set.map_err(denied_as(&held.shown))?,
+                            set => set.map_err(denied_as(&held.shown, NOT_CHANGEABLE))?,
                         }
                     }
                     security = Some(read);
@@ -242,7 +243,7 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
         let protected = PROTECTED_DACL_SECURITY_INFORMATION;
         match set_security(&folder, protected, private.dacl()?, system) {
             Err(err) if unsupported(&err) => return Ok((folder, false)),
-            set => set.map_err(denied_as(&shown))?,
+            set => set.map_err(denied_as(&shown, NOT_CHANGEABLE))?,
         }
     }
     // Only this user, Administrators and SYSTEM can add an item from here
@@ -403,11 +404,14 @@ fn denied(err: &io::Error) -> bool {
     err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
 }
 
-/// A refusal of the item named `shown` in place of access denied.
-fn denied_as(shown: &str) -> impl FnOnce(io::Error) -> io::Error {
+const NOT_CHANGEABLE: NotPrivateReason = NotPrivateReason::NotChangeable;
+
+/// A refusal of the item named `shown`, for `reason`, in place of access
+/// denied.
+fn denied_as(shown: &str, reason: NotPrivateReason) -> impl FnOnce(io::Error) -> io::Error {
     move |err| {
         if denied(&err) {
-            refused(shown, NotPrivateReason::OtherOwner)
+            refused(shown, reason)
         } else {
             err
         }
@@ -472,7 +476,8 @@ fn take_folder(
         // from a drive another computer used. A link or a file names
         // itself first.
         Err(err) if denied(&err) => {
-            open_folder(path, shown, FILE_READ_ATTRIBUTES).map_err(denied_as(shown))?;
+            let other_owner = denied_as(shown, NotPrivateReason::OtherOwner);
+            open_folder(path, shown, FILE_READ_ATTRIBUTES).map_err(other_owner)?;
             // One of this user's own may still be closed to its DACL.
             let ours = private.is_some_and(|private| {
                 open_folder(path, shown, READ_CONTROL)
@@ -719,8 +724,9 @@ fn inherit_only(item: &File, system: &System) -> io::Result<()> {
 /// Check every item in the folder at `path`, named `shown`, at any depth.
 /// Give an item with entries of its own, a protected DACL, or entries
 /// Windows left from before, only what the folder gives it. Refuse the
-/// folder for an item another account owns, or one this user can't open or
-/// change. A link is checked, not followed, as Windows does not follow one.
+/// folder, by the item's name, for an item another account owns, or one
+/// this user can't open or change. A link is checked, not followed, as
+/// Windows does not follow one.
 fn check_items(
     path: &Path,
     shown: &str,
@@ -730,15 +736,20 @@ fn check_items(
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let item_path = entry.path();
+        let item_shown = format!("{shown}/{}", entry.file_name().to_string_lossy());
         let access = READ_CONTROL | WRITE_DAC;
         let item = match open(&item_path, access, FILE_FLAG_OPEN_REPARSE_POINT) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            item => item.map_err(denied_as(shown))?,
+            Err(err) if denied(&err) => {
+                return Err(closed_item(&item_path, &item_shown, private, system));
+            }
+            item => item?,
         };
         let security = Security::read(&item, system)?;
-        private.check_owner(&security, &item_path, shown, system)?;
+        private.check_owner(&security, &item_path, &item_shown, system)?;
         if !private.is_inherited_only(&security)? {
-            inherit_only(&item, system).map_err(denied_as(shown))?;
+            let not_changeable = denied_as(&item_shown, NOT_CHANGEABLE);
+            inherit_only(&item, system).map_err(not_changeable)?;
             if !private.is_inherited_only(&Security::read(&item, system)?)? {
                 return Err(io::Error::other(
                     "an item in the folder kept its own entries",
@@ -746,10 +757,28 @@ fn check_items(
             }
         }
         if entry.file_type()?.is_dir() {
-            check_items(&item_path, shown, private, system)?;
+            check_items(&item_path, &item_shown, private, system)?;
         }
     }
     Ok(())
+}
+
+/// The refusal of the item at `path`, named `shown`, that this user can't
+/// open to change its DACL: another account's when its owner reads as one,
+/// and otherwise one whose DACL dohc can't change.
+fn closed_item(
+    path: &Path,
+    shown: &str,
+    private: &PrivateDescriptor,
+    system: &System,
+) -> io::Error {
+    let owner = open(path, READ_CONTROL, FILE_FLAG_OPEN_REPARSE_POINT)
+        .and_then(|item| Security::read(&item, system))
+        .and_then(|security| private.check_owner(&security, path, shown, system));
+    match owner {
+        Err(err) if not_private(&err).is_some() => err,
+        _ => refused(shown, NOT_CHANGEABLE),
+    }
 }
 
 /// Memory Windows allocated for the caller, freed once on drop.
@@ -966,6 +995,7 @@ mod tests {
     };
 
     const ENGINE: &str = ".dohc/engine";
+    const DB: &str = ".dohc/engine/engine.db";
 
     /// Users, the stand-in for another account as an owner.
     const USERS: &str = "S-1-5-32-545";
@@ -1381,7 +1411,7 @@ mod tests {
         // The folder stops being private, and an item another account owns
         // turns up.
         icacls(&engine, &["/grant", "*S-1-5-32-545:(OI)(CI)R"]);
-        let other_owner = (ENGINE.into(), NotPrivateReason::OtherOwner);
+        let other_owner = (DB.into(), NotPrivateReason::OtherOwner);
         assert_eq!(refusal(open_engine(&root, &db_is_users)), other_owner);
         assert!(!record(&real, &engine).exists());
         std::fs::write(engine.join("PRIVATE"), b"").expect("planted");
@@ -1530,10 +1560,10 @@ mod tests {
         );
     }
 
-    /// An item another account owns refuses the folder, and leaves it to be
-    /// checked again.
+    /// An item another account owns refuses the folder by the item's own
+    /// path, and leaves it to be checked again.
     #[test]
-    fn an_item_another_account_owns_refuses_the_folder() {
+    fn an_item_another_account_owns_refuses_the_folder_by_its_path() {
         let scratch = ScratchDir::new().expect("scratch");
         let real = system(&scratch);
         let db_is_users = System {
@@ -1543,18 +1573,74 @@ mod tests {
         let (root, engine) = older_workspace(&scratch, "root");
         assert_eq!(
             refusal(open_engine(&root, &db_is_users)),
-            (ENGINE.into(), NotPrivateReason::OtherOwner)
+            (DB.into(), NotPrivateReason::OtherOwner)
         );
         assert!(!record(&real, &engine).exists());
         assert!(open_engine(&root, &real).expect("open"));
     }
 
-    /// Windows skips an item whose DACL this user can't change, and reports
-    /// success, so the folder is refused and left to be checked again.
+    /// A folder deep in the engine's folder, or a file in it, that another
+    /// account owns is refused by its whole path from the workspace's root.
     #[test]
-    fn an_item_this_user_cannot_change_refuses_the_folder() {
+    fn a_nested_item_another_account_owns_is_refused_by_its_whole_path() {
         let scratch = ScratchDir::new().expect("scratch");
         let real = system(&scratch);
+        let folder_is_users = System {
+            owner_of: |path| path.ends_with("worker-0").then_some(USERS),
+            ..system(&scratch)
+        };
+        let file_is_users = System {
+            owner_of: |path| path.ends_with("6a6f62.0").then_some(USERS),
+            ..system(&scratch)
+        };
+        let worker = ".dohc/engine/displaced/worker-0";
+        let file = ".dohc/engine/displaced/worker-0/6a6f62.0";
+        for (name, system, refused) in [
+            ("folder", &folder_is_users, worker),
+            ("file", &file_is_users, file),
+        ] {
+            let (root, engine) = older_workspace(&scratch, name);
+            assert_eq!(
+                refusal(open_engine(&root, system)),
+                (refused.into(), NotPrivateReason::OtherOwner),
+                "{name}"
+            );
+            assert!(!record(&real, &engine).exists(), "{name}");
+        }
+    }
+
+    /// Administrators may own an item in the folder, as one dohc made while
+    /// it ran as an administrator. One this user can change is accepted.
+    #[test]
+    fn an_item_administrators_own_is_accepted() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let real = system(&scratch);
+        let administrators_own = System {
+            owner_of: |path| path.ends_with("engine.db").then_some(ADMINISTRATORS),
+            ..system(&scratch)
+        };
+        let (root, engine) = older_workspace(&scratch, "root");
+        assert!(open_engine(&root, &administrators_own).expect("open"));
+        assert_eq!(sddl(&engine.join("engine.db")), private_dacls(false)[2]);
+        assert!(record(&real, &engine).exists());
+    }
+
+    /// Windows skips an item whose DACL this user can't change, and reports
+    /// success, so the folder is refused by the item's path and left to be
+    /// checked again. This user or Administrators own the item, so the
+    /// refusal is for its permissions, not its owner.
+    #[test]
+    fn an_item_this_user_cannot_change_refuses_the_folder_for_its_permissions() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let real = system(&scratch);
+        let administrators_own = System {
+            owner_of: |path| path.ends_with("engine.db").then_some(ADMINISTRATORS),
+            ..system(&scratch)
+        };
+        let db_is_users = System {
+            owner_of: |path| path.ends_with("engine.db").then_some(USERS),
+            ..system(&scratch)
+        };
         let (root, engine) = older_workspace(&scratch, "root");
         let locked = engine.join("engine.db");
         // Owner rights limited to reading, and a denied right to change the
@@ -1564,9 +1650,19 @@ mod tests {
         let deny = format!("*{}:(WDAC)", current_user().expect("user"));
         icacls(&locked, &["/deny", &deny]);
         icacls(&locked, &["/grant", "*S-1-3-4:(R)"]);
+        let not_changeable = (DB.into(), NotPrivateReason::NotChangeable);
+        for (owner, system) in [("user", &real), ("administrators", &administrators_own)] {
+            assert_eq!(
+                refusal(open_engine(&root, system)),
+                not_changeable,
+                "{owner}"
+            );
+            assert!(!record(&real, &engine).exists(), "{owner}");
+        }
+        // One that another account owns is refused for its owner.
         assert_eq!(
-            refusal(open_engine(&root, &real)),
-            (ENGINE.into(), NotPrivateReason::OtherOwner)
+            refusal(open_engine(&root, &db_is_users)),
+            (DB.into(), NotPrivateReason::OtherOwner)
         );
         assert!(!record(&real, &engine).exists());
     }

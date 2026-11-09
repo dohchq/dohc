@@ -13,7 +13,71 @@ See the [grant transitions](share-grants.md) when changing generations or creden
 Share-web exchanges a link secret for a scoped relay capability. It has no standing
 workspace authority and does not read relay storage directly. Keep generic public
 refusals, origin checks, and credential isolation.
+Every link route, the live routes included, takes that capability as
+`Authorization: LinkCapability <capability>`, so the relay never reads one as
+another kind of credential.
 The [operations reference](../../services/share-web/README.md) defines deployment controls.
+
+## Agents act with their link's access
+
+An agent connection holds no authority beyond its link grant. The relay keeps
+only keyed hashes of its codes, tokens, and MCP address.
+
+An agent signs in through share-web with the standard MCP authorization.
+Share-web sends each step to the relay's agent routes with the exchange key. It
+keeps no client, code, token, or authority, so a restart signs no agent out.
+The relay starts a sign-in only for `<share-web origin>/mcp/s/<secret>` of a
+link it can serve. The consent decision must come from share-web's own
+`Origin` and carry a `__Host-` cookie, set for that one request, that matches
+the form's secret. These checks stop a page on another site from allowing an
+agent through a person's browser. They do not limit who can sign in. The MCP
+address holds the link secret, so anyone who has it can open the consent page,
+allow their own agent, and get the link's full access. Treat the MCP address
+as the link itself.
+
+The consent page sends a `same-origin` referrer policy, so its form's post
+carries the `Origin` the decision checks. Its CSP lets the form post only to
+share-web and follow the redirect to the origin of the redirect URI the relay
+accepted. The sign-in error pages allow no form. The metadata, registration,
+token, and MCP answers allow any origin but no credentials. The consent page
+and its decision send no CORS headers.
+
+Share-web calls the relay's link routes for an agent with
+`Authorization: DohcAgent <access token>`, the MCP address in
+`x-dohc-agent-resource`, and the relay exchange key. The relay refuses an agent
+request that also sends a link profile or a cookie. It refuses a link
+capability that names an MCP address. Every refusal is the response for a link
+that does not exist.
+
+Each read and write checks the access token's expiry, the connection's status,
+the MCP address, the link's current credential and generation, and the current
+access. With this header, an agent reads the share, its files, its discussion,
+and a Group link's messages. It posts to the discussion and writes a Collection
+through an Edit link. Through an Edit link, it also finds a Markdown file and
+opens it as a live document. Agent chat takes the access token and the MCP
+address in its request body and makes the same checks. Other link routes refuse
+an agent.
+
+A live ticket issued to an agent names its connection. Redeeming the ticket
+checks the access token again, with the clock read in that transaction. So does
+every later check of the live session: each wake, read, and edit. Disconnect,
+Reset link, and End link each commit a relay write, which wakes every live
+session, so the agent's session closes. Nothing writes when an access token
+expires, so its session closes at the next check. Each live edit records the
+connection's own link principal, never a link holder's.
+
+On the link routes, a response, blob or JSON, checks again before each chunk.
+Agent chat checks once, before it answers. A write checks again in its
+transaction, with the clock read there. The agent writes as its connection's
+link principal, so pause and block apply to it. Each message and Collection
+write it makes records its agent connection.
+
+The relay keeps a used refresh token for 30 days after its use. Reuse in that
+time ends the connection. After that the token is unknown, and the next refresh
+deletes it.
+See the [agent link tests](../../services/sync-relay/src/linkAgentAuthority.test.ts),
+the [live route tests](../../services/sync-relay/src/namedLiveRoutes.test.ts),
+and the [sign-in tests](../../services/share-web/src/mcpSignIn.test.ts).
 
 ## Live documents have one canonical host
 

@@ -4,7 +4,6 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { datasetColumnFields, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { createRemoteDatasetData, createDatasetAuthorityRouter, createServerCollectionsData, resolveRemoteDatasetRevision, ServerCollectionsUnavailableError } from "./remoteDataset";
 import { CollectionsRefusalError } from "./collectionsHolder";
-import { readServerCollectionsUnavailable } from "../ipc/errorWords";
 import type { OwnerDatasetData } from "./remoteDataset";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -47,7 +46,7 @@ describe("remote Collection authority", () => {
     const next = describeDatasetRevision({ definition: { ...definition, name: "Renamed" }, revision: 2, schemaSql: "SQL", operationSource: "RULES" });
     const value = { workspaceId: "workspace", revision: next, schemaSql: "SQL", operationSource: "RULES", migrationSql: "SELECT 1;", expected: approved.cursor };
     const committed = { revision: next, cursor: { ...approved.cursor, approvedRevisionHash: next.revisionSha256, revision: 1, digest: "a".repeat(64) } };
-    const candidate = { candidateId: id(9), expected: approved.cursor, approvedRevisionHash: next.revisionSha256, checkpointSha256: "f".repeat(64), expiresAtMs: Date.now() + 10000, preview: { tables: [], firstPage: { changes: [], nextCursor: null } } };
+    const candidate = { candidateId: id(9), expected: approved.cursor, approvedRevisionHash: next.revisionSha256, checkpointSha256: "f".repeat(64), changeSha256: "d".repeat(64), expiresAtMs: Date.now() + 10000, preview: { tables: [], firstPage: { changes: [], nextCursor: null } } };
     f.relay.mockResolvedValue(candidate);
     expect(await f.data.prepareMigrationCandidate!(value)).toEqual(candidate);
     expect(f.relay.mock.calls.at(-1)![1]).toBe(`/sync/workspace/datasets/${id(1)}/prepare-migration`);
@@ -165,7 +164,7 @@ it("checks the deletion review scope, token, acknowledgment and returned identit
 it("does not fall back to a transferred local dataset when deletion is unavailable remotely", async () => {
   const local = {deleteDataset:vi.fn(),deletePreview:vi.fn()} as unknown as OwnerDatasetData;
   const remote = {deleteDataset:vi.fn(async()=>{throw Error("offline");}),deletePreview:vi.fn(async()=>{throw Error("offline");})} as unknown as OwnerDatasetData;
-  const data = createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
+  const data = createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),marker:()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
   await expect(data.deletePreview!({datasetId:id(1)})).rejects.toThrow("offline");
   await expect(data.deleteDataset!({datasetId:id(1),expected:approved.cursor,reviewToken:"c".repeat(64),acknowledge:true})).rejects.toThrow("offline");
   expect(local.deletePreview).not.toHaveBeenCalled(); expect(local.deleteDataset).not.toHaveBeenCalled();
@@ -201,7 +200,7 @@ it.each(["delete", "status"])("bounds %s confirmation by timeout even with an ex
 it("omits only confirmed remote deletions from the transfer catalog and keeps failures visible", async () => {
   const local={list:vi.fn(async()=>({datasets:[description],nextCursor:null}))} as unknown as OwnerDatasetData;
   const remote={deletionStatus:vi.fn(async()=>({deleted:true})),describe:vi.fn(async()=>description)} as unknown as OwnerDatasetData;
-  const data=createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
+  const data=createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),marker:()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
   expect(await data.list({})).toEqual({datasets:[],nextCursor:null}); expect(remote.describe).not.toHaveBeenCalled();
   expect(await data.deletionStatus!({datasetId:id(1)})).toEqual({deleted:true});
   vi.mocked(remote.deletionStatus!).mockResolvedValue({deleted:false});
@@ -267,9 +266,9 @@ describe("a workspace's Collections on this computer's server, where another com
     f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
     const failed = await data.list({}).then(() => null, (error: unknown) => error);
     expect(failed).toBeInstanceOf(ServerCollectionsUnavailableError);
-    expect(readServerCollectionsUnavailable(failed)).toEqual({ elsewhere: f.elsewhere.message, computer: "Laptop", failure: "dohc could not reach the server." });
+    expect(failed).toMatchObject({ elsewhere: f.elsewhere, failure: "dohc could not reach the server." });
     f.relay.mockImplementationOnce(async () => { f.switchCredential(); return { kind: "success", body: { datasets: [description], nextCursor: null } }; });
-    expect(readServerCollectionsUnavailable(await data.list({}).catch((error: unknown) => error))?.failure).toBe("Your server session changed. Try again.");
+    expect(await data.list({}).catch((error: unknown) => error)).toMatchObject({ failure: "Your server session changed. Try again." });
     // Only the list carries where the Collections are.
     f.relay.mockRejectedValueOnce(new Error("dohc could not reach the server."));
     await expect(f.create().describe(id(1))).rejects.toThrow(/^dohc could not reach the server\.$/);

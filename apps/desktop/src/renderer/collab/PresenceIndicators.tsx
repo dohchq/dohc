@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { presentationClasses, relayPresentation } from "../workbench/actorPresentation";
+import { relayPresentation } from "../workbench/actorPresentation";
+import { ChatAvatar } from "../workbench/ChatAvatar";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 // MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
@@ -7,15 +8,12 @@ import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 // nothing when nobody else is around (solo stays solo). Presence changes are
 // announced politely (aria-live="polite"), never as a spam of alerts.
 
-function initials(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return "?";
-  const parts = trimmed.split(/\s+/u);
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0]}${parts[parts.length - 1]![0]}`.toUpperCase();
-}
-
 const MAX_FACES = 3;
+
+// An agent publishes presence with `agent: true` in its state.
+function isAgentPeer(peer: PresencePeer): boolean {
+  return (peer.state as { agent?: unknown } | null)?.agent === true;
+}
 
 // `live` false draws the same faces with the same name but no live region,
 // for a second copy beside one that already announces them.
@@ -38,27 +36,25 @@ export function PresenceFaces(props: { others: PresencePeer[]; className?: strin
 
   return (
     <div
-      className={`dohc-presence-faces flex items-center ${props.className ?? ""}`}
+      className={`dohc-presence-faces flex items-center gap-1 ${props.className ?? ""}`}
       {...(props.live === false ? { role: "img" } : { role: "status", "aria-live": "polite" as const })}
       aria-label={label}
       title={names.join(", ")}
     >
-      {shown.map((peer) => {
-        const name = resolvePeerDisplayName(peer);
-        const classes = presentationClasses(relayPresentation(peer.paletteSlot, peer.isSelf));
-        return (
-          <span
-            key={peer.faceToken}
-            className={`-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[10px] font-semibold first:ml-0 ${classes}`}
-            aria-hidden="true"
-          >
-            {initials(name)}
-          </span>
-        );
-      })}
+      {/* Each face as its author draws in the conversation: an agent's mark,
+          a person's initial. Side by side, so none hides another. */}
+      {shown.map((peer) => (
+        <ChatAvatar
+          key={peer.faceToken}
+          name={resolvePeerDisplayName(peer)}
+          kind={isAgentPeer(peer) ? "agent" : "human"}
+          presentation={relayPresentation(peer.paletteSlot, peer.isSelf)}
+          size="strip"
+        />
+      ))}
       {overflow > 0 ? (
         <span
-          className="-ml-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-bg bg-panel px-1 text-[10px] font-semibold text-subtle"
+          className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-line bg-panel px-1 text-[9px] font-semibold text-subtle"
           aria-hidden="true"
         >
           +{overflow}
@@ -82,7 +78,7 @@ export function TypingIndicator(props: { names: string[]; className?: string }) 
   // Reserve nothing when idle — no layout thrash, just a polite live region.
   return (
     <div
-      className={`dohc-typing-indicator text-[11px] italic text-subtle ${props.className ?? ""}`}
+      className={`dohc-typing-indicator text-[11px] italic text-muted ${props.className ?? ""}`}
       role="status"
       aria-live="polite"
       data-testid="presence-typing"

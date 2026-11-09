@@ -469,11 +469,6 @@ export function createShareProposalsIpc<
         if (reconciled.kind !== "settle") {
           throw new Error("Shared file settlement returned an invalid result.");
         }
-        if (reconciled.collisionRecordQuarantined) {
-          throw new Error(
-            "dohc found a damaged shared file recovery record. Refresh shared files. Then send your changes again.",
-          );
-        }
         assertShareChangesJournalable(reconciled.unjournalablePaths);
         // The engine owns the submit: it reads this replica's own journal, so it
         // has to be the process holding the store.

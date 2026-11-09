@@ -328,10 +328,12 @@ export interface ServerDataset {
 export interface CollectionAutomationsOptions {
   /**
    * The dataset Collection with this id on the workspace's server, read now,
-   * or null when it is not there. Asked only for a person: nothing the server
-   * runs is subscribed, claimed or run here.
+   * or null when it is not there. `unfinished` says why its automations run
+   * neither here nor there while its move to the server hasn't finished.
+   * Asked only for a person: nothing the server runs is subscribed, claimed
+   * or run here.
    */
-  serverDataset?(datasetId: string): Promise<ServerDataset | null>;
+  serverDataset?(datasetId: string): Promise<ServerDataset | { unfinished: string } | null>;
   resolveRelayedPress?(hostPressId: string): Promise<RelayedPressAuthority>;
   resolveButtonInspection?(inspectionId: string): Promise<RelayButtonAuthority>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
@@ -372,23 +374,25 @@ export interface CollectionAutomationsOptions {
   /**
    * The relay's last release or take over, read at this host generation,
    * with the handover when a release left it for this computer. Throws when
-   * the relay does not answer.
+   * the relay does not answer, or when `signal` aborts at workspace close.
    */
-  groupRelayRecord(generation: number): Promise<AutomationGroupRelayRecord>;
+  groupRelayRecord(generation: number, signal: AbortSignal): Promise<AutomationGroupRelayRecord>;
   /**
    * The relay's last release or take over, read at this host generation,
    * with the reach verdicts when a release left them for this computer.
-   * Throws when the relay does not answer.
+   * Throws when the relay does not answer, or when `signal` aborts at
+   * workspace close.
    */
-  reachRelayRecord(generation: number): Promise<ReachRelayRecord>;
+  reachRelayRecord(generation: number, signal: AbortSignal): Promise<ReachRelayRecord>;
   /** A server replica without reach history must hold steps in a workspace that was shared. */
   holdUnprovenWithoutHistory?(): Promise<boolean>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
-   * once when a host is named, or after the read that learns one.
+   * once when a host is named, or after the read that learns one, or when
+   * `signal` aborts at workspace close.
    */
-  requestHost(): Promise<unknown>;
+  requestHost(signal: AbortSignal): Promise<unknown>;
   /** Tells the owner, once a day, that Group messages started no automations here, and why. */
   groupMessagesSkipped(reason: GroupMessagesSkipped, atMs: number): Promise<void>;
   /** A message's whole body, for a claim that carried it truncated. */
@@ -479,6 +483,12 @@ type IndexedFile = { file: AutomationsFileParseResult; contentHash: string | nul
 type DatasetAt = (path: string) => IndexedDataset | undefined;
 /** A dataset Collection on the workspace's server, at its folder here. */
 type OnServer = { collectionPath: string; dataset: IndexedDataset; runs: ServerDataset["runs"] };
+/** A dataset Collection whose move to the server hasn't finished, and why its automations can't run. */
+type Unfinished = { datasetId: string; unfinished: string };
+/** Why a dataset Collection this computer hasn't indexed can't run its automations, from what the server answered. */
+function unindexedReason(server: OnServer | Unfinished | null): string {
+  return server !== null && "unfinished" in server ? server.unfinished : DATASET_NOT_APPROVED;
+}
 /**
  * A dataset Collection's approved rules, whether dohc generated its
  * operations, and its data grants, as the reach check reads them.
@@ -1234,8 +1244,10 @@ export class CollectionAutomations {
   private groupSubscriptionsUncertain = true;
   /** The host generation the engine last took Group subscriptions at, from this executor. */
   private watchedGeneration: number | null = null;
-  /** The relay did not answer for a new generation's Group handover: the next sync pull asks again. */
-  private handoverUnread = false;
+  /** A failed Group handover read waits at this generation until the next sync answer or open. */
+  private handoverUnreadAt: number | null = null;
+  /** A failed reach read waits at this generation until the next sync answer or open. */
+  private reachUnreadAt: number | null = null;
   // The newest Group message skip of each kind the owner was told about.
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
@@ -1268,6 +1280,8 @@ export class CollectionAutomations {
   // The next expiry while the workspace stays open.
   private historyTimer: ReturnType<typeof setTimeout> | null = null;
   private runAbort = new AbortController();
+  // Aborts at workspace close, so a relay read does not hold the close up.
+  private readonly relayReads = new AbortController();
   private readonly nowMs: () => number;
   // Claims waiting for their dataset, with its id.
   private readonly datasetWaits = new Map<string, string>();
@@ -1299,6 +1313,8 @@ export class CollectionAutomations {
         await this.options.store.readReachVerdicts();
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
+      this.handoverUnreadAt = null;
+      this.reachUnreadAt = null;
       this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
       this.groupSubscriptionsUncertain = true;
       this.timeouts = timeouts;
@@ -1558,9 +1574,12 @@ export class CollectionAutomations {
       .catch((error: unknown) => this.options.onError("update Group subscriptions for the automation host", error));
   }
 
-  /** A sync pull reached the relay: a Group handover it could not read before is asked for again. */
+  /** A sync pull reached the relay: a failed reach or Group handover read is asked for again. */
   relayAnswered(): void {
-    if (this.handoverUnread || this.reachPending !== null) this.hostChanged();
+    const unread = this.handoverUnreadAt !== null || this.reachUnreadAt !== null;
+    this.handoverUnreadAt = null;
+    this.reachUnreadAt = null;
+    if (unread || this.reachPending !== null) this.hostChanged();
     // Every definition the relay had is on this computer now: hold those,
     // in every version, whether or not this computer indexed them or they
     // can run yet, and judge the ones current editors write from here as
@@ -1659,6 +1678,7 @@ export class CollectionAutomations {
    */
   async dispose(): Promise<void> {
     if (this.state === "disposed") return;
+    this.relayReads.abort();
     this.generation += 1;
     this.stopRuns();
     // Disposed before the drain ends, so it starts no further drain that
@@ -1813,14 +1833,14 @@ export class CollectionAutomations {
     // A dataset whose rules are not approved is not in the index, and neither is one on the server.
     const unapproved = await this.maybeDataset(collectionPath);
     const server = unapproved ? await this.onServer({ folder: collectionPath }) : null;
-    if (server !== null) return await this.serverAutomationsIn(server);
+    if (server !== null && !("unfinished" in server)) return await this.serverAutomationsIn(server);
     const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
     const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
     const roster = await this.options.cachedRoster();
     const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
     if (!indexed || collectionId === null) return { status: "missing", ...you };
     if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
-    const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved);
+    const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved ? unindexedReason(server) : null);
     const collection = collectionNamed(collectionPath);
     const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
       ? [{ automationId: collectionAutomationId(collectionId, entry.automation.id), collectionPath, automation: entry.automation }]
@@ -2023,7 +2043,7 @@ export class CollectionAutomations {
     // A Collection on the server pins against the server's rules.
     const server = await this.onServer({ folder: collectionPath });
     const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    const datasetAt = server === null ? undefined : await this.serverDatasetsFor(server, automations);
+    const datasetAt = server === null || "unfinished" in server ? undefined : await this.serverDatasetsFor(server, automations);
     return automations.map((automation) => this.pinned(collectionPath, automation, held, datasetAt));
   }
 
@@ -2062,7 +2082,7 @@ export class CollectionAutomations {
     const held = new Set(indexed?.file.status === "read"
       ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
       : []);
-    return (await this.reasonsIn(collectionPath, false)).reasonOf(this.pinned(collectionPath, automation, held));
+    return (await this.reasonsIn(collectionPath, null)).reasonOf(this.pinned(collectionPath, automation, held));
   }
 
   /**
@@ -2097,11 +2117,11 @@ export class CollectionAutomations {
    * panel lists it and a draft's check says it: `unsupported`, what keeps
    * it from running anywhere, and `reasonOf`, that or what keeps it from
    * starting here, such as a Group it cannot read or schedules without
-   * sync. `unapproved` is a dataset whose rules are not approved.
+   * sync. `unindexed` is why a dataset the index lacks can't run, or null.
    */
-  private async reasonsIn(collectionPath: string, unapproved: boolean) {
+  private async reasonsIn(collectionPath: string, unindexed: string | null) {
     const unsupported = (automation: Automation) =>
-      unapproved ? DATASET_NOT_APPROVED : this.cannotRun(collectionPath, automation);
+      unindexed ?? this.cannotRun(collectionPath, automation);
     const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
     // Only the computer that keeps a dataset can run its schedules and Group messages.
     const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
@@ -2939,7 +2959,11 @@ export class CollectionAutomations {
    */
   async datasetIn(collectionPath: string): Promise<string | null> {
     await this.indexCollection(collectionPath);
-    return this.datasets.get(collectionPath)?.definition.datasetId ?? (await this.onServer({ folder: collectionPath }))?.dataset.definition.datasetId ?? null;
+    const indexed = this.datasets.get(collectionPath);
+    if (indexed !== undefined) return indexed.definition.datasetId;
+    // A dataset whose move hasn't finished is still a dataset, so a press of its button gives the button's reason.
+    const server = await this.onServer({ folder: collectionPath });
+    return server === null ? null : "unfinished" in server ? server.datasetId : server.dataset.definition.datasetId;
   }
 
   /** Whether the dataset ledger remembers a press by this id, so sending it again answers its claim. */
@@ -2963,10 +2987,10 @@ export class CollectionAutomations {
     const description = await descriptions(datasetId);
     const states: AutomationButtonState[] = [];
     for (const button of buttons) {
-      states.push(server !== null
+      states.push(server !== null && !("unfinished" in server)
         ? await this.serverButton(server, button, description, roster, descriptions)
         : collectionPath === null
-        ? { kind: "disabled", reason: DATASET_NOT_APPROVED }
+        ? { kind: "disabled", reason: unindexedReason(server) }
         : (await this.datasetButton(collectionPath, button, description, roster, descriptions)).state);
     }
     return states;
@@ -2990,7 +3014,7 @@ export class CollectionAutomations {
   ): Promise<CollectionAutomationPress> {
     await this.ready();
     const collectionPath = await this.datasetFolder(input.datasetId);
-    if (collectionPath === null) throw new Error(DATASET_NOT_APPROVED);
+    if (collectionPath === null) throw new Error(unindexedReason(await this.onServer({ datasetId: input.datasetId })));
     const recordId = datasetRecordIdOf(input.recordId);
     if (recordId === null) throw new Error(`This record is not in ${input.table}.`);
     const request = createHash("sha256")
@@ -3095,8 +3119,10 @@ export class CollectionAutomations {
    */
   async datasetCollection(datasetId: string): Promise<{ status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }> {
     await this.ready();
-    const collectionPath = await this.datasetFolder(datasetId) ?? (await this.onServer({ datasetId }))?.collectionPath ?? null;
-    return collectionPath === null ? { status: "cannot-run", reason: DATASET_NOT_APPROVED } : { status: "found", collectionPath };
+    const folder = await this.datasetFolder(datasetId);
+    if (folder !== null) return { status: "found", collectionPath: folder };
+    const server = await this.onServer({ datasetId });
+    return server === null || "unfinished" in server ? { status: "cannot-run", reason: unindexedReason(server) } : { status: "found", collectionPath: server.collectionPath };
   }
 
   /**
@@ -3105,12 +3131,13 @@ export class CollectionAutomations {
    * it, as an indexed dataset's must. A Collection this computer indexed is
    * not on the server. Nothing here subscribes, claims or runs it.
    */
-  private async onServer(place: { datasetId: string } | { folder: string }): Promise<OnServer | null> {
+  private async onServer(place: { datasetId: string } | { folder: string }): Promise<OnServer | Unfinished | null> {
     if (this.options.serverDataset === undefined) return null;
     const datasetId = "datasetId" in place ? place.datasetId : await this.describedDatasetId(place.folder);
     if (datasetId === null || this.collectionPathOf(datasetId) !== null) return null;
     const server = await this.options.serverDataset(datasetId);
     if (server === null) return null;
+    if ("unfinished" in server) return { datasetId, unfinished: server.unfinished };
     const { definition } = server.approved;
     const folder = datasetBaseFolder(definition);
     if (definition.datasetId !== datasetId || folder === "." || ("folder" in place && place.folder !== folder) ||
@@ -3129,7 +3156,7 @@ export class CollectionAutomations {
     const reached = new Set(automations.flatMap((automation) => [...recordStepDestinations(automation, server.collectionPath).values()]));
     const others = [...reached].filter((folder) => !found.has(folder) && !this.collections.has(folder) && !this.datasets.has(folder));
     for (const other of await Promise.all(others.map((folder) => this.onServer({ folder })))) {
-      if (other !== null) found.set(other.collectionPath, other.dataset);
+      if (other !== null && !("unfinished" in other)) found.set(other.collectionPath, other.dataset);
     }
     return (path) => found.get(path) ?? this.datasets.get(path);
   }
@@ -4689,14 +4716,24 @@ export class CollectionAutomations {
       this.clearWaits("roster");
     }
     if (generation === null || generation === 0 || generation === this.reachTakenAt) return true;
+    if (this.reachUnreadAt === generation) return false;
     let record: ReachRelayRecord;
+    let readStarted = false;
     try {
       await this.markHostClaims(generation);
-      record = await this.options.reachRelayRecord(generation);
+      readStarted = true;
+      record = await this.options.reachRelayRecord(generation, this.relayReads.signal);
     } catch (error) {
-      this.options.onError("read the last automation host's reach verdicts", error);
+      // A read that the workspace close stopped is not an error.
+      if (!this.relayReads.signal.aborted) {
+        if (readStarted) this.reachUnreadAt = generation;
+        this.options.onError("read the last automation host's reach verdicts", error);
+      }
       return false;
     }
+    // An answer that arrives after the workspace closed is not taken either:
+    // the next open reads again.
+    if (this.relayReads.signal.aborted) return false;
     await this.updateVerdicts(() => {
       this.reachPending = null;
       this.reachTakenAt = generation;
@@ -4854,13 +4891,19 @@ export class CollectionAutomations {
     // Asked first, so a computer the relay names no host for yet claims it
     // before this decides, and does not drop its Group subscriptions only
     // to add them again. Once a host is named this waits for nothing.
+    const reads = this.relayReads.signal;
     if (this.everyAutomation().some(({ automation }) => automation.enabled && automation.when.kind === "group-message")) {
-      await this.options.requestHost();
+      await this.options.requestHost(reads);
     }
+    // The workspace closed while a relay read was out: change nothing, so
+    // the next open finds the subscriptions and verdicts as they were.
+    if (reads.aborted) return;
     // Only a computer the relay names watches Groups.
     const generation = await this.options.groupHost();
+    if (reads.aborted) return;
     this.groupTriggersHere = generation !== null;
     const verdictsTaken = await this.takeHostVerdicts(generation);
+    if (reads.aborted) return;
     const desired = this.desiredSubscriptions();
     let changed = false;
     for (const [automationId, subscription] of [...this.subscribed]) {
@@ -4921,6 +4964,7 @@ export class CollectionAutomations {
   private async watchEngineGroups(generation: number, wanted: GroupSubscription[]): Promise<void> {
     // A watch may land even when its answer is lost.
     this.groupSubscriptionsUncertain = true;
+    if (this.handoverUnreadAt === generation) return;
     const input = {
       generation,
       subscriptions: wanted.map(({ automationId, groupId, startsWith }) =>
@@ -4930,14 +4974,16 @@ export class CollectionAutomations {
     if (answer?.needsHandover) {
       let relay: AutomationGroupRelayRecord;
       try {
-        relay = await this.options.groupRelayRecord(generation);
+        relay = await this.options.groupRelayRecord(generation, this.relayReads.signal);
       } catch (error) {
-        // Nothing changed in the engine. The next sync pull asks again.
-        this.handoverUnread = true;
+        // Nothing changed in the engine. The next sync pull, or the next
+        // open after a workspace close stopped the read, asks again.
+        if (this.relayReads.signal.aborted) return;
+        this.handoverUnreadAt = generation;
         this.options.onError("read the Group handover", error);
         return;
       }
-      this.handoverUnread = false;
+      this.handoverUnreadAt = null;
       answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups({ ...input, relay }));
     }
     if (answer === null || answer.needsHandover) return;

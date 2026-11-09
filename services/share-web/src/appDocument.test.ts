@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { APP_BUNDLE_CONTENT_TYPES, APP_PAGE_MAX_SCRIPTS, appPageProblem, createAppDocument, type AppDocumentFile, type AppPage } from "@dohc/app-browser/document";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES } from "@dohc/security-contract/app-publication";
 
-const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously" }) => {
+const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new (html: string, options?: { runScripts: "dangerously"; url?: string }) => {
   window: Window & typeof globalThis & { value?: string; log?: string[] };
 } };
 
@@ -21,8 +21,8 @@ describe("compiled app document", () => {
     const output = createAppDocument([file("bundle.js", original)], limits);
     const dom = new JSDOM(output.html, { runScripts: "dangerously" });
     const scripts = [...dom.window.document.querySelectorAll("script")];
-    expect(scripts).toHaveLength(2);
-    expect(scripts[1]!.textContent).toBe(original);
+    expect(scripts).toHaveLength(3);
+    expect(scripts[2]!.textContent).toBe(original);
     for (const node of scripts) {
       const source = `'sha256-${createHash("sha256").update(node.textContent!).digest("base64")}'`;
       expect(output.scriptSources).toContain(source);
@@ -49,6 +49,34 @@ describe("compiled app document", () => {
     for (const inventory of [[altered], [file("../bundle.js", "")], [file("bundle.js", ""), file("bundle.js", "")], [file("bundle.css", "")]]) {
       expect(() => createAppDocument(inventory, limits)).toThrow();
     }
+  });
+
+  it("gives a plain link to another site a new tab's target for its click only, and leaves every other link alone", async () => {
+    const links = '<a id="out" href="https://example.org/page"><b>Out</b></a><a id="top" target="_top" href="https://example.org/top">Top</a>' +
+      '<a id="own" href="/other">Own</a><a id="blank" target="_blank" href="https://example.org/blank">Blank</a>' +
+      '<a id="mail" href="mailto:a@example.org">Mail</a><a id="file" download href="https://example.org/file">File</a>' +
+      '<a id="named" href="https://example.org/report">Report</a>';
+    const output = createAppDocument([file("bundle.js", `document.getElementById("root").innerHTML=${JSON.stringify(links)};` +
+      'document.getElementById("named").addEventListener("click",e=>{e.preventDefault();e.currentTarget.target="report";});')], limits);
+    const dom = new JSDOM(output.html, { runScripts: "dangerously", url: "https://app.example.net/bootstrap" });
+    // The browser follows a link with the target it has when the click ends. The test reads that, then keeps jsdom from navigating.
+    let target: string | null = null;
+    dom.window.addEventListener("click", event => { target = (event.target as Element).closest("a")!.getAttribute("target"); event.preventDefault(); });
+    const click = async (selector: string, init: MouseEventInit = {}) => {
+      dom.window.document.querySelector(selector)!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
+      const during = target;
+      await new Promise(resolve => dom.window.setTimeout(resolve));
+      return [during, dom.window.document.querySelector(selector)!.closest("a")!.getAttribute("target")];
+    };
+    expect(await click("#out b")).toEqual(["_blank", null]);
+    expect(await click("#top")).toEqual(["_blank", "_top"]);
+    for (const selector of ["#own", "#mail", "#file"]) expect(await click(selector)).toEqual([null, null]);
+    expect(await click("#blank")).toEqual(["_blank", "_blank"]);
+    expect(await click("#out", { ctrlKey: true })).toEqual([null, null]);
+    expect(await click("#out", { button: 1 })).toEqual([null, null]);
+    // A target the app sets during the click stays.
+    expect(await click("#named")).toEqual(["report", "report"]);
+    dom.window.close();
   });
 
   it("bounds original and rendered bytes independently", () => {
@@ -85,14 +113,14 @@ describe("compiled app document", () => {
 
     it("lets the browser parse the page after the policy and bundle.js, pinning every script by hash", () => {
       const output = build(page());
-      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>window\.registry = true;<\/script><title>Trip<\/title>/);
+      expect(output.html).toMatch(/^<!doctype html><html lang="fr" data-note="a &quot;quoted&quot; &amp; value"><head><meta charset="utf-8">.*<meta http-equiv="Content-Security-Policy" content="[^"]*"><script>addEventListener\("click"[^<]*<\/script><script>window\.registry = true;<\/script><title>Trip<\/title>/);
       const dom = new JSDOM(output.html, { runScripts: "dangerously" });
       expect(dom.window.document.documentElement.getAttribute("data-note")).toBe('a "quoted" & value');
       expect(dom.window.document.title).toBe("Trip");
       expect(dom.window.document.body.className).toBe("trip");
       expect(dom.window.log).toEqual(["head:false", "box:box:false", "last:true"]);
       for (const text of [...scripts, "window.registry = true;"]) expect(output.scriptSources).toContain(`'sha256-${createHash("sha256").update(text).digest("base64")}'`);
-      expect(output.scriptSources).toHaveLength(5);
+      expect(output.scriptSources).toHaveLength(6);
       dom.window.close();
     });
 

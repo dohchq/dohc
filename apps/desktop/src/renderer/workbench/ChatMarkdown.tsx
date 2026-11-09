@@ -14,13 +14,12 @@ import {
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import type { Root as HastRoot } from "hast";
 import { toJsxRuntime, type Components, type ExtraProps } from "hast-util-to-jsx-runtime";
-import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import { activateReadOnlyLinkHref } from "../linkActivation";
 import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
 import { Ref } from "../ui/Ref";
-import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import {
   chatChips,
   chatMarkdownWeight,

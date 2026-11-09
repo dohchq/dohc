@@ -16,6 +16,12 @@ function holdMenuOpen(root: HTMLElement): () => void {
   };
 }
 
+/**
+ * Presses that closed a menu. One press closes one surface, so a dialog
+ * under such a press stays open.
+ */
+export const menuClosingPresses = new WeakSet<Event>();
+
 /** Why a menu closed, for an owner that returns focus itself. */
 export type DismissReason = "escape" | "press" | "focus" | "blur";
 
@@ -51,6 +57,7 @@ export function listenForDismiss(options: {
   };
   function onPointerDown(event: PointerEvent) {
     if (event.composedPath().some(inside)) return;
+    menuClosingPresses.add(event);
     onClose("press");
     // A press on blank space takes focus to the page, or to the
     // workspace's frame, after the close has returned it. When the press

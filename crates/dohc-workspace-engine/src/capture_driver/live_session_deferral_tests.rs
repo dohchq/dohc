@@ -179,6 +179,7 @@ fn apply_context<'a>(
         events: EngineEvents::default(),
         apply_probe: None,
         import_priority: None,
+        layer_rules: None,
     }
 }
 
@@ -276,15 +277,27 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
             .acquire(&elsewhere)
             .expect("another workspace's session"),
     );
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     assert!(!files.handle().stats().await.expect("stats").dirty);
 
     // The session closes without an edit. Nothing on disk changes, and the
     // release alone brings the file back to capture.
     drop(lease);
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
         .await
         .expect("reconcile after release");
@@ -959,6 +972,7 @@ async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
 
     drop(lease);
     offer_unrecorded_after_release(
+        &harness.actor,
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
@@ -1032,6 +1046,7 @@ async fn a_held_file_deleted_between_scan_and_apply_is_retired_once_released() {
 
     drop(lease);
     offer_unrecorded_after_release(
+        &harness.actor,
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
@@ -1040,6 +1055,301 @@ async fn a_held_file_deleted_between_scan_and_apply_is_retired_once_released() {
     .await;
     assert!(harness.capture(&files.handle()).await);
     assert_eq!(head_count(&harness.db, path), 0, "retired once released");
+
+    files.close().await;
+    harness.close();
+}
+
+/// A document session's settle records `path` before capture sees its file.
+async fn settle_new_document(harness: &Harness, path: &str) -> DocKey {
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: object_id.clone(),
+                path: path.to_owned(),
+                text: SEED.to_owned(),
+                moment_id: "moment-settled".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the session's settle writes the head");
+    harness.key(&object_id)
+}
+
+// dohc#2360. A session settles a new document, and its file is deleted before
+// any scan sees it. Capture has no entry for the path, so no scan plans a
+// retire. Once the session releases, the next scan retires the record without
+// a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_file_deleted_before_any_scan_is_retired_once_released() {
+    let harness = Harness::new();
+    let key = settle_new_document(&harness, NEW_FILE).await;
+    let lease = harness
+        .leases
+        .acquire(&key)
+        .expect("the editor still holds the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    std::fs::write(harness.root.join(NEW_FILE), SEED).expect("artifact");
+    std::fs::remove_file(harness.root.join(NEW_FILE)).expect("deleted before any scan");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, NEW_FILE), 1, "no scan saw the file");
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.actor,
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        files.handle().stats().await.expect("stats").dirty,
+        "the release asks for a scan"
+    );
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        0,
+        "retired without a restart"
+    );
+
+    files.close().await;
+    harness.close();
+}
+
+// dohc#2360. A settled document too large for capture to track keeps its
+// record, and capture forgets the path. Once the session releases and the file
+// is deleted, the record retires like any other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_cap_settled_file_is_retired_once_deleted() {
+    let harness = Harness::new();
+    let key = settle_new_document(&harness, NEW_FILE).await;
+    let over_cap = vec![b'x'; (dohc_engine_files::MAX_CAPTURE_TEXT_BYTES + 1) as usize];
+    std::fs::write(harness.root.join(NEW_FILE), over_cap).expect("over-cap artifact");
+    let lease = harness
+        .leases
+        .acquire(&key)
+        .expect("the editor still holds the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "capture spares the settled record"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.actor,
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "the file is still there"
+    );
+
+    std::fs::remove_file(harness.root.join(NEW_FILE)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        0,
+        "retired once its file is gone"
+    );
+
+    files.close().await;
+    harness.close();
+}
+
+// dohc#2360. A release offers plaintext records only. A secret tip's retire
+// does not wait for a version switch to place its file.
+#[test]
+fn a_release_offers_no_secret_tips() {
+    use dohc_engine_domain::{CaptureManifestSeedEntry, SECRET_SEED_SENTINEL_SHA};
+    let entry = |path: &str, sha256: &str| CaptureManifestSeedEntry {
+        path: path.to_owned(),
+        size: 1,
+        sha256: sha256.to_owned(),
+    };
+    assert_eq!(
+        release_offer_paths(vec![
+            entry("notes/plain.md", "abc"),
+            entry("keys.secret", SECRET_SEED_SENTINEL_SHA),
+        ]),
+        ["notes/plain.md"]
+    );
+}
+
+/// The status of the version switch's write job for `path`.
+fn switch_write_status(db: &Path, path: &str) -> String {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE workspace_id = ?1 AND target_path = ?2 AND operation = 'write' \
+             AND job_id GLOB 'version-switch-mat_*'",
+            [WORKSPACE_ID, path],
+            |row| row.get(0),
+        )
+        .expect("read the switch write job")
+}
+
+// dohc#2360. A switch to a version whose only file it fails to place leaves
+// that file's write pending. A restart's seed leaves that head out while the
+// write has no file to replace (dohc#3104), so a later release doesn't offer it.
+// Offered anyway, the scan finds no file, but the head waits for its write
+// instead of retiring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_target_head_waiting_for_placement_survives_a_release() {
+    let harness = Harness::new();
+    harness
+        .actor
+        .ensure_main_version(
+            WORKSPACE_ID.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    harness
+        .actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "Feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature");
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "feature", NEW_FILE);
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "feature".to_owned(),
+                object_id: object_id.clone(),
+                path: NEW_FILE.to_owned(),
+                text: SEED.to_owned(),
+                moment_id: "moment-feature-only".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("feature-only file");
+    let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+        dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
+    );
+    let switched = harness
+        .actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: "feature".to_owned(),
+                root_dir: harness.root.clone(),
+                self_writes: Arc::new(harness.self_writes.scoped(&harness.root)),
+                now_ms: 4,
+            },
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(
+            switched,
+            Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+        ),
+        "the placement fails: {switched:?}"
+    );
+    assert!(faults.fired());
+    assert_eq!(switch_write_status(&harness.db, NEW_FILE), "pending");
+    assert!(!harness.root.join(NEW_FILE).exists());
+
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    harness.capture(&files.handle()).await;
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    let key = DocKey::new(WORKSPACE_ID, "feature", &object_id).expect("document key");
+    drop(harness.leases.acquire(&key).expect("a session opens"));
+    offer_unrecorded_after_release(
+        &harness.actor,
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    let seed = harness
+        .actor
+        .capture_manifest_seed(WORKSPACE_ID.to_owned(), "feature".to_owned())
+        .await
+        .expect("seed");
+    assert!(
+        seed.iter().all(|entry| entry.path != NEW_FILE),
+        "the release has no unplaced path to offer"
+    );
+    files
+        .handle()
+        .offer_retire_candidates(vec![NEW_FILE.to_owned()])
+        .await
+        .expect("offer the unplaced path");
+    assert!(
+        files.handle().stats().await.expect("stats").dirty,
+        "the offer asks for a scan"
+    );
+    harness.capture(&files.handle()).await;
+    assert_eq!(
+        head_count(&harness.db, NEW_FILE),
+        1,
+        "the head waits for its write"
+    );
+    assert_eq!(switch_write_status(&harness.db, NEW_FILE), "pending");
 
     files.close().await;
     harness.close();
@@ -2435,6 +2745,7 @@ async fn a_lease_release_reoffers_deferred_outside_writes() {
     let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
     drop(lease);
     offer_unrecorded_after_release(
+        &harness.actor,
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
@@ -2596,6 +2907,7 @@ async fn recorded_outside_write_after_release(restart: bool) {
         files.close().await;
     } else {
         offer_unrecorded_after_release(
+            &harness.actor,
             &harness.leases,
             WORKSPACE_ID,
             &mut releases_seen,
@@ -2705,8 +3017,14 @@ async fn respelled_file_waits_for_its_lease(quarantine: bool) {
     assert_eq!(head_count(&db, "Notes.md"), 0, "the new spelling waits");
 
     drop(lease);
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     assert!(files.handle().stats().await.expect("offered stats").dirty);
     pass().await;
     assert_eq!(head_count(&db, "notes.md"), 0);
@@ -2891,8 +3209,14 @@ async fn a_respelled_folder_sends_no_delete_after_its_write() {
     files.handle().request_rescan();
     pass().await;
     drop(lease);
-    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
-        .await;
+    offer_unrecorded_after_release(
+        &actor,
+        &leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
     files.handle().request_rescan();
     pass().await;
     let deletes: Vec<String> = rusqlite::Connection::open(&db)
@@ -2907,4 +3231,249 @@ async fn a_respelled_folder_sends_no_delete_after_its_write() {
 
     files.close().await;
     supervisor.close(&db).expect("close actor");
+}
+
+/// A driver over `root` with a started layer, its first run applied.
+async fn started_env(
+    root: &Path,
+    actor: &ActorHandle,
+    leases: &LeaseRegistry,
+    carried: Option<Arc<CarriedPass>>,
+) -> (RealEnv, FilesLayer) {
+    use std::sync::atomic::AtomicU64;
+    let events = EngineEvents::default();
+    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
+    let status = Arc::new(DriverStatus::default());
+    status.mark_initial_ready();
+    let mut env = RealEnv {
+        observation: crate::file_observation::FileObservation::new(
+            events.clone(),
+            WORKSPACE_ID.into(),
+        ),
+        root: root.to_path_buf(),
+        initial_links_hold: None,
+        actor: actor.clone(),
+        lease_releases_seen: leases.release_generation(WORKSPACE_ID),
+        workspace_id: WORKSPACE_ID.into(),
+        leases: leases.clone(),
+        status,
+        author_json: Arc::new(Mutex::new(None)),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        store_freshly_created: false,
+        open_ready_tx,
+        refresh_epoch: Arc::new(AtomicU64::new(0)),
+        events,
+        apply_probe: None,
+        scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
+        no_atomic_placement_announced: false,
+        first_import: None,
+        carried,
+        rules: None,
+    };
+    let cancel = CancellationToken::new();
+    env.observation
+        .start(env.root.clone())
+        .expect("observation");
+    let (layer, initial) = FilesLayer::start_with_fingerprint(
+        &env.root,
+        &cancel,
+        None,
+        policy_fingerprint(&env.root),
+        0,
+        &env.scan,
+        &env.observation,
+    )
+    .await
+    .expect("layer");
+    let applied = apply_run(env.apply_context(), &layer.files.handle(), initial, &cancel).await;
+    after_pass(&mut env.carried, &mut env.rules, &applied);
+    (env, layer)
+}
+
+/// Tick until the layer converges. A watcher event from the first scan may
+/// cost one more clean pass first.
+async fn tick_until_converged(env: &mut RealEnv, layer: &FilesLayer) {
+    let cancel = CancellationToken::new();
+    for _ in 0..10 {
+        match env.tick(layer, &cancel).await {
+            TickIo::Converged => return,
+            TickIo::Applied { clean: true } => {}
+            other => panic!("expected a clean tick, got {other:?}"),
+        }
+    }
+    panic!("the layer never converged");
+}
+
+fn moment_label(db: &Path, path: &str) -> (Option<String>, Option<String>) {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT metadata_summary, metadata_correlation_id FROM moments \
+             WHERE workspace_id = ?1 AND path = ?2 ORDER BY moment_order DESC LIMIT 1",
+            [WORKSPACE_ID, path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the file's moment")
+}
+
+async fn close_env(env: RealEnv, layer: FilesLayer, supervisor: WorkspaceSupervisor, db: PathBuf) {
+    layer.stop().await;
+    drop(env);
+    tokio::task::spawn_blocking(move || supervisor.close(&db))
+        .await
+        .expect("join")
+        .expect("close actor");
+}
+
+// A rescan found a new file while the person's editor held it. The session
+// keeps the file out of capture and nothing else is dirty, so the layer
+// converges. The file stays carried until the session lets it go, then
+// records with the rescan's label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rescan_keeps_carrying_a_file_a_live_session_holds() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    std::fs::write(root.join(NEW_FILE), b"").expect("write file");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE),
+    )
+    .expect("new file key");
+    let lease = leases
+        .acquire(&key)
+        .expect("the editor's session holds the new file");
+    let carried = Arc::new(CarriedPass {
+        summary: Some(RESCAN_SUMMARY.to_owned()),
+        correlation_id: Some("reconcile-held".to_owned()),
+        paths: BTreeSet::from([NEW_FILE.to_owned()]),
+    });
+    let (mut env, layer) = started_env(&root, &actor, &leases, Some(carried)).await;
+    assert_eq!(
+        layer.files.handle().stats().await.expect("stats").deferred,
+        1
+    );
+
+    tick_until_converged(&mut env, &layer).await;
+    assert_eq!(
+        env.carried.as_ref().map(|pass| pass.paths.clone()),
+        Some(BTreeSet::from([NEW_FILE.to_owned()])),
+        "a converged tick must not drop a file the session still holds"
+    );
+
+    drop(lease);
+    assert_eq!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { clean: true }
+    );
+    assert!(env.carried.is_none(), "the release recorded the file");
+    assert_eq!(
+        moment_label(&db, NEW_FILE),
+        (
+            Some(RESCAN_SUMMARY.to_owned()),
+            Some("reconcile-held".to_owned())
+        )
+    );
+    close_env(env, layer, supervisor, db).await;
+}
+
+// The rules a layer started with can come from a read that hit a lock. The
+// first pass under the readable rules records as a rescan, and the passes
+// after it compare against those rules, so they record as ordinary edits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_first_pass_under_changed_rules_records_as_a_rescan() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let (mut env, layer) = started_env(&root, &actor, &leases, None).await;
+    env.rules = Some(Arc::new(PolicyState::Unavailable));
+
+    for (path, rescan) in [("notes/first.md", true), ("notes/second.md", false)] {
+        std::fs::write(root.join(path), b"text").expect("write file");
+        layer.files.handle().request_rescan();
+        assert_eq!(
+            env.tick(&layer, &CancellationToken::new()).await,
+            TickIo::Applied { clean: true }
+        );
+        let (summary, _) = moment_label(&db, path);
+        assert_eq!(
+            summary.as_deref() == Some(RESCAN_SUMMARY),
+            rescan,
+            "{path} recorded with {summary:?}"
+        );
+    }
+    close_env(env, layer, supervisor, db).await;
+}
+
+// The first pass under changed rules found two files while the person's
+// editor held one. It records the other as a rescan. The held file keeps
+// that pass's label and group until the session lets it go, though the
+// passes after it compare against the new rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_the_first_pass_under_changed_rules_left_keeps_its_label() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE),
+    )
+    .expect("new file key");
+    let lease = leases
+        .acquire(&key)
+        .expect("the editor's session holds the new file");
+    let (mut env, layer) = started_env(&root, &actor, &leases, None).await;
+    env.rules = Some(Arc::new(PolicyState::Unavailable));
+
+    std::fs::write(root.join("notes/first.md"), b"text").expect("write file");
+    std::fs::write(root.join(NEW_FILE), b"text").expect("write file");
+    layer.files.handle().request_rescan();
+    assert!(matches!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { .. }
+    ));
+    let (summary, group) = moment_label(&db, "notes/first.md");
+    assert_eq!(summary.as_deref(), Some(RESCAN_SUMMARY));
+    assert!(
+        group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile"))
+    );
+    assert_eq!(
+        layer.files.handle().stats().await.expect("stats").deferred,
+        1
+    );
+
+    tick_until_converged(&mut env, &layer).await;
+    drop(lease);
+    assert_eq!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { clean: true }
+    );
+    assert_eq!(
+        moment_label(&db, NEW_FILE),
+        (Some(RESCAN_SUMMARY.to_owned()), group),
+        "the held file records with the rescan that found it"
+    );
+    assert!(env.carried.is_none(), "the release recorded the file");
+    close_env(env, layer, supervisor, db).await;
 }

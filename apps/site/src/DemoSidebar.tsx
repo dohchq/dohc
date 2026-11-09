@@ -7,10 +7,12 @@ import { ChatsView } from "../../desktop/src/renderer/workbench/ChatsView";
 import { ReactionStoreProvider } from "../../desktop/src/renderer/workbench/reactionStore";
 import { EngineHistoryView } from "../../desktop/src/renderer/workbench/EngineHistory";
 import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
+import { ExplorerModeSwitch } from "../../desktop/src/renderer/workbench/ExplorerModeSwitch";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
 import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
 import { VIEW_IDENTITY } from "../../desktop/src/renderer/workbench/viewIdentity";
+import type { ExplorerMode } from "../../desktop/src/renderer/workbench/workbenchState";
 
 // The demo has no engine, so no folder is a collection.
 const emptyCollectionFolders: ReadonlySet<string> = new Set();
@@ -24,6 +26,9 @@ import type { DemoPanelId } from "./demoPanels";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
+// The demo bridge changes the documents before it answers, so the one listing
+// the Explorer sees is always current and settles each answered change.
+const DEMO_LISTING = 0;
 export const DEMO_EDITOR_GROUP_ID = "demo-editor-group";
 
 export type DemoWorkspaceDocument = {
@@ -89,6 +94,7 @@ export function DemoSidebar(props: {
 }) {
   const [width, setWidth] = useState(305);
   const [openEditorsHeight, setOpenEditorsHeight] = useState(180);
+  const [explorerMode, setExplorerMode] = useState<ExplorerMode>("home");
   const [expandedFolders, setExpandedFolders] = useState<string[]>([
     "notes",
     "projects",
@@ -155,15 +161,22 @@ export function DemoSidebar(props: {
   return (
     <SidePanel
       title={VIEW_IDENTITY[props.activePanel].label}
+      heading={
+        props.activePanel === "explorer" ? <ExplorerModeSwitch mode={explorerMode} onChange={setExplorerMode} /> : undefined
+      }
       width={width}
       onWidthChange={setWidth}
     >
       {props.activePanel === "explorer" ? (
         <Explorer
           workspaceId="marketing-demo"
+          mode={explorerMode}
+          onModeChange={setExplorerMode}
+          listed
           shareView={null}
           files={files}
           folders={folders}
+          listingRequest={DEMO_LISTING}
           collectionFolders={emptyCollectionFolders}
           onOpenCollection={noopOpenCollection}
           onNewCollection={noopOpenCollection}
@@ -188,7 +201,6 @@ export function DemoSidebar(props: {
           onActivateTab={(_groupId, path) => props.onOpenDocument(path)}
           onCloseTab={(_groupId, path) => props.onCloseTab(path)}
           onCloseAllTabs={props.onCloseAllTabs}
-          onNewUntitledTextFile={props.onCreateDocument}
           onCollapseFolders={() => setExpandedFolders([])}
           onSetFolderExpanded={(path, expanded) =>
             setExpandedFolders((current) =>
@@ -219,8 +231,10 @@ export function DemoSidebar(props: {
           onRefreshShareMounts={() => undefined}
           onUnmountShare={() => undefined}
           onShare={() => undefined}
-          onRefresh={() => undefined}
+          onRefresh={() => DEMO_LISTING}
           onError={props.onError}
+          // The demo records no History operations, so it has nothing to undo.
+          onNotice={() => undefined}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

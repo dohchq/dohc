@@ -82,13 +82,41 @@ export async function resolveDatasetAddress(adapter: Adapter, workspaceId: strin
   return id;
 }
 
-export async function addressDatasets(adapter: Adapter, workspaceId: string, datasets: DatasetDescription[], signal: AbortSignal) {
+/** `datasetPaths`: the dataset.json files to fix before the Collection can open. */
+export type DatasetAddress =
+  | { datasetPath: string; datasetAddressStatus: "available" }
+  | { datasetPath: null; datasetAddressStatus: "ambiguous" | "unreadable"; datasetPaths: string[] }
+  | { datasetPath: null; datasetAddressStatus: "missing" };
+
+/**
+ * With `approvedFolder`, which names the folder of a dataset's approved
+ * revision, a dataset whose dataset.json is gone is left out: its Collection
+ * was deleted, and putting the file back brings it back. A dataset.json still
+ * in that folder that names no Collection makes it unreadable.
+ */
+export async function addressDatasets<T extends DatasetDescription>(adapter: Adapter, workspaceId: string, datasets: T[], signal: AbortSignal,
+  approvedFolder?: (datasetId: string) => Promise<string>): Promise<Array<T & DatasetAddress>> {
   if (!datasets.length) return [];
   const catalog = await addresses(adapter, workspaceId, "main", signal);
   signal.throwIfAborted();
-  const paths = new Map<string, string | null>();
+  const named = new Map<string, string[]>(), unnamed = new Set<string>();
   for (const [path, value] of catalog) {
-    if (value.datasetId) paths.set(value.datasetId, paths.has(value.datasetId) ? null : path);
+    if (value.datasetId) named.set(value.datasetId, [...named.get(value.datasetId) ?? [], path]);
+    else unnamed.add(path);
   }
-  return datasets.map(dataset => ({ ...dataset, datasetPath: paths.get(dataset.datasetId) ?? null, datasetAddressStatus: paths.get(dataset.datasetId) === null ? "ambiguous" as const : paths.has(dataset.datasetId) ? "available" as const : "missing" as const }));
+  const addressed: Array<T & DatasetAddress> = [];
+  for (const dataset of datasets) {
+    const paths = (named.get(dataset.datasetId) ?? []).sort();
+    if (paths.length === 1) addressed.push({ ...dataset, datasetPath: paths[0]!, datasetAddressStatus: "available" });
+    else if (paths.length) addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: paths });
+    else if (!approvedFolder) addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "missing" });
+    else if (unnamed.size) {
+      // Without its approved folder, dohc can't name a file to fix, so the Collection stays out.
+      const folder = await approvedFolder(dataset.datasetId).catch(() => null);
+      signal.throwIfAborted();
+      const path = folder === null ? null : folder === "." ? "dataset.json" : `${folder}/dataset.json`;
+      if (path !== null && unnamed.has(path)) addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: [path] });
+    }
+  }
+  return addressed;
 }

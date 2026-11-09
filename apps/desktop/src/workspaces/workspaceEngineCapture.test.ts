@@ -9,8 +9,8 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { existsSync, type PathLike } from "node:fs";
+import { lstat, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +28,7 @@ import {
   createWorkspaceEngineCapture,
   isVolumeSharesNewFilesCause,
   isYDocPathNotInVersionError,
+  MergeStoppedPartwayError,
   probeEngineStoreRefusal,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
@@ -49,6 +50,7 @@ import {
   type JsonValue,
   type Request,
   type Response,
+  type YdocDeliveredHead,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions, EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
@@ -70,6 +72,7 @@ import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
 
 vi.mock("node:timers/promises", { spy: true });
+vi.mock("node:fs/promises", { spy: true });
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -324,6 +327,46 @@ describe("merge materialization order", () => {
 
       await engine.mergeVersionIntoMain(draftId);
       expect(merged).toEqual(order);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it.each([
+    ["names a failure after a file reached Main as stopped partway", 2, true],
+    ["passes on a failure before any file reached Main", 1, false],
+  ])("%s", async (_name, failAt, partway) => {
+    const root = await createTestScratch("dohc-merge-partway-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    let merges = 0;
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge && ++merges === failAt) throw new Error("disk full");
+      return await send(request);
+    });
+    for (const path of ["a.md", "b.md"]) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old\n" });
+      await write(root, path, "old\n");
+    }
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const path of ["a.md", "b.md"]) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new\n" });
+      }
+      await engine.switchVersion("main");
+
+      const failure = await engine.mergeVersionIntoMain(draftId).then(() => null, (error: unknown) => error);
+      expect(failure).toMatchObject({ message: expect.stringContaining("disk full") });
+      expect(failure instanceof MergeStoppedPartwayError).toBe(partway);
     } finally {
       await engine.stop();
     }
@@ -1820,6 +1863,39 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps saves accepted before shutdown and refuses other waiting work and later saves", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const admitted = deferred<void>();
+    const release = deferred<void>();
+    try {
+      const kept = engine.writeAuthoredFile(join(root, "kept.md"), "kept\n", person, {
+        beforeWrite: async () => {
+          admitted.resolve();
+          await release.promise;
+        },
+      }).catch((error: unknown) => error);
+      await admitted.promise;
+      // Both wait behind the running save when quit starts.
+      const count = engine.compareVersionsChangedCount("main").catch((error: unknown) => error);
+      const queued = engine.writeAuthoredFile(join(root, "queued.md"), "queued\n", person).catch((error: unknown) => error);
+      engine.beginShutdown();
+      const late = engine.writeAuthoredFile(join(root, "late.md"), "late\n", person).catch((error: unknown) => error);
+      release.resolve();
+      expect(await kept).toMatchObject({ materializeOutcome: "applied" });
+      expect(await count, "Work that isn't a save still stops at quit").toMatchObject({ name: "AbortError" });
+      expect(await queued, "A save queued before quit still lands").toMatchObject({ materializeOutcome: "applied" });
+      expect(await late).toMatchObject({ name: "AbortError" });
+      expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+      expect(await readFile(join(root, "queued.md"), "utf8")).toBe("queued\n");
+      expect(existsSync(join(root, "late.md"))).toBe(false);
+    } finally {
+      release.resolve();
+      await engine.stop();
+    }
+  });
+
   it("closes both daemon stores without restarting convergence after shutdown begins", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
@@ -1986,6 +2062,45 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(rendererDoc.getText("content").toString()).toBe("base+remote");
     expect(forwarded).toEqual([bufferedUpdate]);
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("forgets the renderer's head when a generation comes back with its head unknown and nothing new", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "note.md", text: "seed" });
+    const seed = new Y.Doc();
+    seed.getText("plainText").insert(0, "seed");
+    const state = Y.encodeStateAsUpdate(seed);
+    const opened: EngineYdocProviderSessionOptions[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        opened.push(options);
+        const doc = new Y.Doc();
+        Y.applyUpdate(doc, state);
+        return {
+          doc, initialUpdate: state, contentKind: "plaintext", path: options.path,
+          head: "present", lineage: "existing", unsettled: false,
+          headSha256: opened.length === 1 ? "a".repeat(64) : undefined,
+          evict: async () => undefined, applyLocalUpdate: async () => undefined,
+          settleNow: async () => undefined, close: async () => undefined,
+        } as EngineYdocProviderSession;
+      },
+    });
+    const delivered: { update: Uint8Array; head?: YdocDeliveredHead }[] = [];
+    const session = await engine.openYDocSession({
+      path: "note.md",
+      onRemoteUpdate: (update, head) => delivered.push({ update, head }),
+    });
+    opened[0]?.onSessionError?.(Object.assign(new Error("daemon exited"), { code: "transport-error" }));
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    expect(opened).toHaveLength(2);
+    expect(
+      delivered,
+      "return undefined from `installedHead` for an unknown head -> the renderer keeps the old generation's head",
+    ).toEqual([{ update: new Uint8Array([0, 0]), head: {} }]);
     await session.close({ settle: false });
     await engine.stop();
   });
@@ -3393,7 +3508,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path: `${index}.md`, text: "recorded before pull" });
       await write(root, `${index}.md`, "recorded before pull");
     }
-    // Like sync.pull, record the entire page before its disk projection.
+    // Like sync.applyPull, record the entire page before its disk projection.
     for (let index = 0; index < 500; index++) {
       const path = `${index}.md`;
       if (index < writeCount) loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path, text: "incoming", origin: "sync" });
@@ -3433,8 +3548,10 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
     const loopback = new VersionedLoopbackEngine();
     const changes: RelayMaterializedPath[] = [];
+    // Linux allows 255 bytes in one name, so each path's 540 bytes span three folders.
+    const segment = "\u6587".repeat(60);
     for (let index = 0; index < 90; index++) {
-      const path = `${"\u6587".repeat(180)}${index}.md`;
+      const path = `${segment}/${segment}/${segment}${index}.md`;
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `unicode-${index}`, path, text: "recorded" });
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `unicode-${index}`, path, text: "incoming" });
       await write(root, path, "recorded");
@@ -3454,7 +3571,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
         expect(Buffer.byteLength(JSON.stringify(params.targets))).toBeLessThanOrEqual(48 * 1024);
       }
       expect(notice).not.toHaveBeenCalled();
-      expect((await readdir(root)).some(name => name.includes("(kept copy"))).toBe(false);
+      expect((await readdir(root, { recursive: true })).some(name => name.includes("(kept copy"))).toBe(false);
     } finally { await engine.stop(); }
   });
 
@@ -3482,6 +3599,23 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       expect(existsSync(join(root, "n (kept copy).md"))).toBe(allHidden);
       if (allHidden) expect(await readFile(join(root, "n (kept copy).md"), "utf8")).toBe("recorded");
       expect(notice).toHaveBeenCalledTimes(allHidden ? 1 : 0);
+    } finally { await engine.stop(); }
+  });
+
+  it("applies a pulled delete after this device's folder was removed", async () => {
+    const root = await createTestScratch("relay-delete-missing-folder-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: "page", path: "notes/page.md", text: "recorded" });
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.deleteTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/page.md", metadata: { origin: "sync" } });
+    const notice = vi.fn();
+    const engine = capture(root, { store, rustEngineSessions: sessions, onOutsideWriteCopies: notice });
+    try {
+      await engine.runRelaySync(page => page([{ versionId: "main", path: "notes/page.md", operation: "delete", contentKind: "text" }]));
+      expect(existsSync(join(root, "notes"))).toBe(false);
+      expect(notice).not.toHaveBeenCalled();
     } finally { await engine.stop(); }
   });
 
@@ -4438,6 +4572,91 @@ describe("createDefaultDiskWriter symlink containment", () => {
     await writer.deletePath(join(root, "gone.md"));
     expect(existsSync(join(root, "gone.md"))).toBe(false);
     expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
+
+  it("deletes a link whose target is missing", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await mkdir(join(root, "notes"));
+    await symlink(join(root, "nowhere.md"), join(root, "notes", "dangling.md"));
+    await createDefaultDiskWriter(root).deletePath(join(root, "notes", "dangling.md"));
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  // A device that never had the folder still receives the delete: a late join
+  // after a rename, or a folder removed on this device.
+  it("deletes under an absent folder chain without creating it, twice", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const writer = createDefaultDiskWriter(root);
+    for (const path of [join(root, "notes", "before.md"), join(root, "a", "b", "c", "deep.md")]) {
+      await writer.deletePath(path);
+      await writer.deletePath(path);
+    }
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  // The folder the check found absent can appear before a delete would run,
+  // even as a link out of the workspace. Nothing was there, so the delete
+  // removes nothing.
+  it("removes nothing under a folder that was absent when the delete was checked", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    const folder = join(root, "notes");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(lstat).mockImplementationOnce((async (path: PathLike) => {
+      try {
+        return await actual.lstat(path);
+      } finally {
+        await symlink(outside, folder, "dir");
+      }
+    }) as typeof lstat);
+    vi.mocked(rm).mockClear();
+    await createDefaultDiskWriter(root).deletePath(join(folder, "keep.md"));
+    expect((await actual.lstat(folder)).isSymbolicLink(), "the folder appeared as a link after the check").toBe(true);
+    expect(rm).not.toHaveBeenCalled();
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
+
+  it("refuses a delete through an ancestor link that leaves the workspace", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    await symlink(outside, join(root, "escape"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    for (const path of [join(root, "escape", "keep.md"), join(root, "escape", "missing", "keep.md")]) {
+      await expect(writer.deletePath(path)).rejects.toThrow(/Engine delete path escapes the workspace/);
+    }
+    expect(await readdir(outside)).toEqual(["keep.md"]);
+  });
+
+  it("refuses a delete through an alias of .dohc", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, ".dohc/settings.json", "{}\n");
+    await symlink(join(root, ".dohc"), join(root, "meta"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    for (const path of [join(root, "meta", "settings.json"), join(root, "meta", "absent", "x.md")]) {
+      await expect(writer.deletePath(path)).rejects.toThrow(/Engine delete path leads to a reserved area/);
+    }
+    expect(await readdir(join(root, ".dohc"))).toEqual(["settings.json"]);
+  });
+
+  it("refuses a delete under a dangling or looping ancestor link", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await symlink(join(root, "nowhere"), join(root, "dangling"), "dir");
+    await symlink(join(root, "loop-b"), join(root, "loop-a"), "dir");
+    await symlink(join(root, "loop-a"), join(root, "loop-b"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    await expect(writer.deletePath(join(root, "dangling", "x.md"))).rejects.toThrow(/symlink with no target/);
+    await expect(writer.deletePath(join(root, "loop-a", "x.md"))).rejects.toThrow(/symlink dohc cannot resolve/);
+    expect(existsSync(join(root, "nowhere"))).toBe(false);
+  });
+
+  it("refuses a delete when the workspace folder is gone", async () => {
+    const root = join(await createTestScratch("dohc-engine-capture-"), "workspace");
+    await expect(
+      createDefaultDiskWriter(root).deletePath(join(root, "notes", "page.md")),
+    ).rejects.toThrow(/could not read the workspace folder/);
+    expect(existsSync(root)).toBe(false);
   });
 });
 

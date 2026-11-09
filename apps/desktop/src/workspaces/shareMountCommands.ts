@@ -22,12 +22,14 @@ import {
 import { receivedReferencePin, refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
+  SetAsideRefreshError,
   ShareViewMountRollbackError,
   type PreparedShareViewFilesMount,
   type ShareViewFiles,
   type ShareViewFilesDependencies,
 } from "./shareViewFiles";
 import { assertActiveShareViewFilesOwner } from "./shareViewFilesOwner";
+import { isCollisionRecordRefusal } from "./sharedView";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
 import { parseShareCode, relayUrlsMatch } from "./syncCode";
 
@@ -102,7 +104,7 @@ export interface ShareMountCommands<WorkspaceSummary> {
   refresh(input: {
     workspace: ShareMountCommandWorkspace;
     assertCurrent(): void;
-  }): Promise<{ results: ShareMountStatusRow[] }>;
+  }): Promise<{ results: ShareMountStatusRow[]; abortMessage?: string }>;
   unmount(input: {
     workspace: ShareMountCommandWorkspace;
     shareId: string;
@@ -463,6 +465,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           mount: unknown,
           status: ShareMountStatusRow["status"],
           changedPaths: number,
+          collisionRecord?: Pick<ShareMountStatusRow, "errorKind" | "collisionRecordQuarantined" | "unjournalablePaths">,
         ): void => {
           if (!record(mount)) return;
           const row = shareMountResultRow({
@@ -470,6 +473,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             label: mount.label,
             status,
             changedPaths,
+            ...collisionRecord,
           });
           if (row) results.push(row);
         };
@@ -522,17 +526,34 @@ export function createShareMountCommands<WorkspaceSummary>(
                 mount,
                 reconciled.outcome.status,
                 reconciled.outcome.changedPaths,
+                {
+                  ...(reconciled.outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
+                  unjournalablePaths: reconciled.outcome.unjournalablePaths,
+                },
               );
-            } catch (error) {
+            } catch (thrown) {
+              // A refresh that set the record aside before it failed says so
+              // on its row.
+              const setAside = thrown instanceof SetAsideRefreshError;
+              const error = setAside ? thrown.failure : thrown;
+              const setAsideRow = setAside ? { collisionRecordQuarantined: true as const } : {};
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
-                throw new Error(verdict.message);
+                // The refresh stops here, and its rows still say which
+                // records it set aside.
+                pushResult(mount, "failed", 0, setAsideRow);
+                return { results, abortMessage: verdict.message };
               }
               reportFailure(
                 `share-mount refresh failed for ${mount.label}:`,
                 error,
               );
-              pushResult(mount, verdict.status, 0);
+              pushResult(mount, verdict.status, 0, {
+                ...(verdict.status === "failed" && isCollisionRecordRefusal(error)
+                  ? { errorKind: "collision-record" as const }
+                  : {}),
+                ...setAsideRow,
+              });
             }
           }
           return { results };

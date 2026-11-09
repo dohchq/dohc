@@ -7,11 +7,20 @@ import type { ProbeOutput } from "./agentToolProbe";
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_OUTPUT_LIMIT = 64 * 1024;
 // agentProbeOwner.cs accepts the same bound.
-const MAX_ADMISSION_BYTES = 16 * 1024 * 1024;
+export const MAX_ADMISSION_BYTES = 16 * 1024 * 1024;
 
 export interface ProbeCommand { command: string; args: readonly string[]; windowsVerbatimArguments?: boolean }
 /** Installed paths chosen by Electron main, never by a workspace or renderer. */
 export interface WindowsProbeOwner { root: string; executable: string; relay: string; node: string }
+
+// No NODE_OPTIONS, NODE_PATH or credentials reach the owner or relay.
+export function ownerEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of ["SystemRoot", "WINDIR", "TEMP", "TMP"]) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  return environment;
+}
 
 // The relay runs on the Node staged with the app compiler. Without these
 // trusted assets, detection fails instead of starting an unowned command.
@@ -49,13 +58,8 @@ export function runProbeProcess(command: ProbeCommand, signal: AbortSignal, owne
         windowsVerbatimArguments: command.windowsVerbatimArguments ?? false, cwd: homedir(), env: process.env,
       }));
       if (admission.byteLength > MAX_ADMISSION_BYTES) throw new Error("The agent probe environment is too large.");
-      // No NODE_OPTIONS, NODE_PATH or credentials reach the owner or relay.
-      const environment: NodeJS.ProcessEnv = {};
-      for (const name of ["SystemRoot", "WINDIR", "TEMP", "TMP"]) {
-        if (process.env[name] !== undefined) environment[name] = process.env[name];
-      }
       child = spawn(owner.executable, [owner.node, owner.relay, String(admission.byteLength)], {
-        cwd: owner.root, env: environment, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+        cwd: owner.root, env: ownerEnvironment(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
       });
     } else {
       // Node can return a child without pipes and report its spawn failure later.

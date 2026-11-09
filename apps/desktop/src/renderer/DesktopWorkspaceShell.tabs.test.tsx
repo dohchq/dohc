@@ -8,6 +8,7 @@ import {
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  VERSIONS_TAB_PATH,
   chatTabPath,
   collectionTabPath,
   momentDiffTabPath,
@@ -56,6 +57,9 @@ vi.mock("./workbench/WorkspaceVersions", async (importOriginal) => ({
   ...await importOriginal<typeof import("./workbench/WorkspaceVersions")>(),
   VersionComparePage: (props: { versionId: string }) => <div data-testid="version-compare-page" data-version={props.versionId} />,
 }));
+vi.mock("./workbench/VersionsPage", () => ({
+  VersionsPage: () => <div data-testid="versions-page" />,
+}));
 vi.mock("./workbench/EngineMomentDiffPage", () => ({
   EngineMomentDiffPage: (props: { tabPath: string }) => <div data-testid="engine-moment-diff-page" data-path={props.tabPath} />,
 }));
@@ -71,11 +75,18 @@ vi.mock("./ConnectedTransactionalCollection", () => ({
   ),
 }));
 
+// The page of the app a group shows. It lies over the group's slot, outside the group's element.
+function shownAppPage(groupId: string): HTMLElement | null {
+  const page = document.querySelector<HTMLElement>(`[data-app-group-id="${groupId}"]:not(.hidden)`);
+  return page?.querySelector<HTMLElement>('[data-testid="site-preview-page"]') ?? null;
+}
+
 const tableId = "00000000-0000-4000-8000-000000000002";
 const cases = [
   { name: "file", path: "notes.txt", surface: "file-inspector", attributes: { "data-path": "notes.txt" } },
   { name: "graph", path: GRAPH_TAB_PATH, surface: "graph-view" },
   { name: "history", path: HISTORY_TAB_PATH, surface: "history-page" },
+  { name: "versions", path: VERSIONS_TAB_PATH, surface: "versions-page" },
   ...[
     CHATS_TAB_PATH,
     chatTabPath({ kind: "new" }),
@@ -106,10 +117,15 @@ describe("shell tab surfaces", () => {
     requested.path = path;
     fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
     const pane = within(screen.getByTestId("editor-group-primary"));
-    const view = await pane.findByTestId(surface);
+    const shown = (testId: string) => testId === "site-preview-page" ? shownAppPage("primary") : pane.queryByTestId(testId);
+    const view = await waitFor(() => {
+      const found = shown(surface);
+      expect(found).not.toBeNull();
+      return found!;
+    });
     for (const [key, value] of Object.entries(attributes ?? {})) expect(view.getAttribute(key)).toBe(value);
     for (const other of new Set(cases.map(test => test.surface))) {
-      if (other !== surface) expect(pane.queryByTestId(other)).toBeNull();
+      if (other !== surface) expect(shown(other)).toBeNull();
     }
   });
 
@@ -144,13 +160,36 @@ describe("shell tab surfaces", () => {
         expect(view.getAttribute("data-version")).toBe("main");
         expect(pane.getByTestId(editorTabTestId(path))).toBeTruthy();
       }
-      expect(pane.queryByTestId("site-preview-page")).toBeNull();
+      expect(screen.queryByTestId("site-preview-page")).toBeNull();
       expect(pane.queryByTestId("collection-page")).toBeNull();
       expect(pane.queryByTestId("file-inspector")).toBeNull();
     } finally {
       requested.seedInvalidApp = false;
       error.mockRestore();
     }
+  });
+
+  it("keeps an app mounted while another tab is shown", async () => {
+    renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+    const open = async (path: string) => {
+      requested.path = path;
+      fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
+    };
+    await open(siteTabPath("apps/trip"));
+    const app = await screen.findByTestId("site-preview-page");
+    expect(shownAppPage("primary")).toBe(app);
+    expect(pane.getByTestId("app-slot")).toBeTruthy();
+    await open("notes.txt");
+    await pane.findByTestId("file-inspector");
+    expect(screen.getByTestId("site-preview-page")).toBe(app);
+    expect(app.parentElement?.className).toBe("hidden");
+    expect(pane.queryByTestId("app-slot")).toBeNull();
+    await open(siteTabPath("apps/trip"));
+    await waitFor(() => expect(pane.queryByTestId("file-inspector")).toBeNull());
+    expect(screen.getByTestId("site-preview-page")).toBe(app);
+    expect(shownAppPage("primary")).toBe(app);
   });
 
   it("keeps the empty editor state when no tab is open", async () => {

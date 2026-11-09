@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, FileCode2, History as HistoryIcon, X } from "lucide-react";
+import { AlertTriangle, Clock, FileCode2, History as HistoryIcon, Save, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ListCollectionAutomationsResult, SwitchCollectionAutomationResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -238,12 +238,14 @@ export function SharedAutomationsPanel(props: {
         {file.status === "missing" || (file.status === "read" && entries.length === 0) ? (
           <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection has no automations.</p>
         ) : file.status === "unreadable" ? (
-          <div className="px-3 py-3 text-[12px] text-muted">
-            <p className="m-0">dohc cannot read {AUTOMATIONS_FILE}.</p>
-            <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
-              {file.diagnostic.code}{file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
-            </p>
-            <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+          <div className="px-3 pb-3 pt-2">
+            <StatusLine tone="danger" icon={AlertTriangle} label="Cannot read">
+              <p className="m-0">dohc cannot read {AUTOMATIONS_FILE}.</p>
+              <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
+                {file.diagnostic.code}{file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
+              </p>
+              <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+            </StatusLine>
           </div>
         ) : (
           <>
@@ -321,6 +323,7 @@ export function SharedAutomationsPanel(props: {
       </div>
       {reformat && !props.readOnly ? (
         <ConfirmDialog
+          icon={Save}
           title={`Save ${AUTOMATIONS_FILE} in dohc's layout?`}
           confirmLabel="Save"
           testId="automations-reformat"
@@ -333,7 +336,7 @@ export function SharedAutomationsPanel(props: {
             agreed();
           }}
         >
-          <p className="m-0 mt-2 text-[13px] text-muted">
+          <p>
             dohc rewrites the whole file when it saves, so you lose its comments and hand formatting.
           </p>
         </ConfirmDialog>

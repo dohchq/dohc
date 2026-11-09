@@ -9,6 +9,7 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { harnessBridge } from "./collab/engineDocSaveStateTestHarness";
 import { FileInspector } from "./FileInspector";
 import { REPLACED_HISTORY_DRAFT_NOTICE } from "./fileInspectorUi";
+import { REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
 import { resetOrphanedDraftsAndSettle, settleAfterUnmount, TEST_CONTENT_HASH } from "./FileInspector.draft-fixture";
 import { stubEditorGlobals } from "./FileInspector.editor-fixture";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
@@ -20,9 +21,6 @@ import { useShellError } from "./shell/useShellError";
 setupFileInspectorTests();
 
 const PATH = "notes/big.md";
-// What the frozen chip says in either editor when storage refuses the earlier
-// edits (FileInspector.excalidraw.test.tsx says it for the drawing).
-const REPLACEMENT_REFUSED_TITLE = "dohc could not finish replacing this document. Storage refused the earlier edits.";
 let harness: ReturnType<typeof harnessBridge>;
 
 // The shell's toast and Notices for the active workspace, beside an editor
@@ -37,7 +35,7 @@ function Shell(props: { workspaceId: string; children: ReactNode }) {
           id: error.id,
           ...(error.title ? { title: error.title } : {}),
           message: error.message,
-          details: errorDetails(error.details ?? []),
+          copy: { report: errorDetails(error.details ?? []) },
           atMs: error.atMs,
           canRetry: error.retry !== null,
           seen: error.seen,
@@ -105,7 +103,7 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   render(surface("ws-1"));
   const { setItem } = await failReplacement();
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_UNSAVED);
-  expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(REPLACEMENT_REFUSED_TITLE);
+  expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(REPLACEMENT_FAILED_REASON);
   expect(screen.getByTestId("orphaned-draft-notice").textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
   await user.click(screen.getByTestId("notice-center-toggle"));
   await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Dismiss notice" }));
@@ -119,6 +117,19 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   expect(loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.path)).toEqual([PATH]);
   // Storage kept the edits, so the document's row no longer asks for a copy to keep them.
   expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
+});
+
+it("says the replacement did not finish beside the edit it set aside", async () => {
+  const user = userEvent.setup();
+  render(surface("ws-1"));
+  await failReplacement();
+  // This session's own row keeps the earlier edits but does not say why.
+  expect(screen.getByTestId("orphaned-draft-notice").textContent).not.toContain(REPLACEMENT_FAILED_REASON);
+  expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(REPLACEMENT_FAILED_REASON);
+
+  await user.click(screen.getByTestId("markdown-source-toggle"));
+  const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+  expect(strip?.textContent).toBe(REPLACEMENT_FAILED_REASON);
 });
 
 it("offers Try again on the frozen editor when it failed while another workspace was active", async () => {

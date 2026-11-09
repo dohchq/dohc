@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn public_file_upsert_remains_conservative_delete_first() {
         let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
-        let conn = Connection::open_in_memory().expect("open memory database");
+        let mut conn = Connection::open_in_memory().expect("open memory database");
         conn.execute_batch(
             "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
                  workspace_id UNINDEXED, version_id UNINDEXED, \

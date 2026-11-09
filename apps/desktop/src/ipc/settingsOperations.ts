@@ -2,7 +2,7 @@ import { z } from "zod";
 import {
   SetAgentColorPayload, DesktopUserSettingsResult, OrderAgentsPayload, SetAppPinnedPayload, SetUserSettingsPayload,
   WorkspaceSettingsPayload, SetWorkspaceSettingsPayload, WorkspaceSettingsResult,
-  WorkspaceIdPayload, GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload,
+  WorkspaceIdPayload, GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload, OpenWorkspacePolicyFilePayload,
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
 
@@ -62,6 +62,15 @@ export const settingsOperations = {
       reason: "Only path resolution holds the workspace operation; the system editor opens after it ends.",
     },
     payload: WorkspaceSettingsPayload,
+  },
+  openWorkspacePolicyFile: {
+    capabilityId: "history.rules.file.open", channel: "desktop:open-workspace-policy-file",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: {
+      check: "withRendererWorkspaceOperation",
+      reason: "Only path resolution holds the workspace operation; the system editor opens after it ends.",
+    },
+    payload: OpenWorkspacePolicyFilePayload,
   },
   getWorkspaceSettings: {
     capabilityId: "settings.workspace.read", channel: "desktop:get-workspace-settings",

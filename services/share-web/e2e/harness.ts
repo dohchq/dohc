@@ -1,11 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { access, mkdtemp, rm } from "node:fs/promises";
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer, request as httpRequest, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test as base } from "@playwright/test";
+import { ensureLocalhostTls } from "../src/testing/device-control/localhostTls.js";
 import { buildHarnessEnvironment } from "./harnessEnvironment";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -24,6 +26,8 @@ interface ServiceProcess {
 }
 
 export interface RunningStack {
+  /** share-web behind HTTPS, as the relay names it, when the spec asked for `httpsFront`; otherwise null. */
+  httpsUrl: string | null;
   relayDbPath: string;
   relayUrl: string;
   shareWebUrl: string;
@@ -256,7 +260,48 @@ async function allocatePort(): Promise<number> {
   return port;
 }
 
-async function startStack(): Promise<RunningStack> {
+// A TLS proxy in front of share-web, as a deployment has. share-web names its
+// agent sign-in addresses https://<Host>, so the MCP sign-in needs one. The
+// proxy keeps the Host header.
+async function startHttpsFront(shareWebPort: number): Promise<{ server: HttpsServer; url: string }> {
+  const tls = await ensureLocalhostTls();
+  const server = createHttpsServer(
+    { key: await readFile(tls.key), cert: await readFile(tls.certificate) },
+    (incoming, outgoing) => {
+      const forwarded = httpRequest(
+        {
+          hostname: LOOPBACK_HOST,
+          port: shareWebPort,
+          method: incoming.method,
+          path: incoming.url,
+          headers: incoming.headers,
+        },
+        (answer) => {
+          outgoing.writeHead(answer.statusCode ?? 502, answer.headers);
+          answer.pipe(outgoing);
+        },
+      );
+      forwarded.once("error", () => outgoing.destroy());
+      incoming.pipe(forwarded);
+    },
+  );
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    server.once("error", onError);
+    server.listen(0, LOOPBACK_HOST, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("HTTPS front did not bind a loopback TCP port");
+  }
+  return { server, url: `https://${LOOPBACK_HOST}:${String(address.port)}` };
+}
+
+async function startStack(options: { httpsFront: boolean }): Promise<RunningStack> {
   const roots = packageRoots();
   const viewerIndex = join(roots.shareWeb, "viewer", "dist", "index.html");
   try {
@@ -295,11 +340,19 @@ async function startStack(): Promise<RunningStack> {
   });
 
   const services: ServiceProcess[] = [];
+  let httpsFront: { server: HttpsServer; url: string } | null = null;
   let stopped = false;
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
     const failures: unknown[] = [];
+    if (httpsFront) {
+      try {
+        await stopServer(httpsFront.server);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
     for (const service of [...services].reverse()) {
       try {
         await stopService(service);
@@ -318,6 +371,12 @@ async function startStack(): Promise<RunningStack> {
   };
 
   try {
+    if (options.httpsFront) {
+      httpsFront = await startHttpsFront(shareWebPort);
+      relayEnv.DOHC_RELAY_SHARE_WEB_ORIGIN = httpsFront.url;
+      shareWebEnv.DOHC_SHARE_WEB_PUBLIC_HOSTS =
+        `${LOOPBACK_HOST}:${String(shareWebPort)},${new URL(httpsFront.url).host}`;
+    }
     const relay = spawnService(
       "sync relay",
       new URL("../../sync-relay/src/main.ts", import.meta.url),
@@ -353,6 +412,7 @@ async function startStack(): Promise<RunningStack> {
     }
 
     return {
+      httpsUrl: httpsFront?.url ?? null,
       relayDbPath,
       relayUrl,
       shareWebUrl,
@@ -626,7 +686,7 @@ async function listenProbe(
   return { port: address.port, server };
 }
 
-async function stopServer(server: Server): Promise<void> {
+export async function stopServer(server: Server | HttpsServer): Promise<void> {
   if (!server.listening) return;
   server.closeAllConnections();
   await new Promise<void>((resolve, reject) => {
@@ -657,13 +717,16 @@ async function startProbe(): Promise<RunningProbe> {
 }
 
 interface ShareWebFixtures {
+  /** Puts share-web behind an HTTPS front and names that origin to the relay. Set with `test.use`. */
+  httpsFront: boolean;
   probe: RunningProbe;
   stack: RunningStack;
 }
 
 export const test = base.extend<ShareWebFixtures>({
-  stack: async ({}, use) => {
-    const stack = await startStack();
+  httpsFront: [false, { option: true }],
+  stack: async ({ httpsFront }, use) => {
+    const stack = await startStack({ httpsFront });
     try {
       await use(stack);
     } finally {

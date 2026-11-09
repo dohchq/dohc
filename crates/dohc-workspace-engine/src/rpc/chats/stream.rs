@@ -4,6 +4,7 @@ use crate::rpc::chats::channels::ChannelWire;
 use crate::rpc::chats::messages::AuthorWire;
 use crate::rpc::chats::messages::MessageWire;
 use crate::rpc::chats::messages::ReactionWire;
+use crate::rpc::chats::messages::decision_json;
 use crate::rpc::chats::threads::ChatThreadParams;
 use crate::rpc::chats::threads::ThreadB2Wire;
 use crate::rpc::request::OperationCancellation;
@@ -103,6 +104,8 @@ struct StreamPostWire<'a> {
 struct StreamItemWire<'a> {
     position: StreamPositionWire<'a>,
     message: MessageWire<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<Value>,
     reactions: Vec<ReactionWire<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     post: Option<StreamPostWire<'a>>,
@@ -154,6 +157,7 @@ fn stream_item_json(item: &StreamItem) -> Value {
     let mut value = json!(StreamItemWire {
         position: StreamPositionWire::from(&item.position),
         message: MessageWire::from(&item.message),
+        decision: item.decision.as_ref().map(decision_json),
         reactions: item.reactions.iter().map(ReactionWire::from).collect(),
         post: item.post.as_ref().map(|post| StreamPostWire {
             reply_count: post.reply_count,

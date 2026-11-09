@@ -6,12 +6,16 @@ import { collectionTabPath, siteTabPath, versionCompareTabPath } from "./workben
 // ids. The compare tab regressed to its raw `version_<id>` leaf until the
 // PR 0M manual drive caught it.
 describe("editorTitle", () => {
-  it.each([
-    [siteTabPath("apps/trip"), "trip"],
-    [collectionTabPath("notes/旅"), "旅"],
-  ])("keeps the Explorer title for %s", (path, title) => {
-    expect(editorTitle(path)).toBe(title);
-    expect(editorTitle(path, "Discovered name")).toBe(title);
+  it("keeps the Explorer title for a collection", () => {
+    const path = collectionTabPath("notes/旅");
+    expect(editorTitle(path)).toBe("旅");
+    expect(editorTitle(path, "Discovered name")).toBe("旅");
+  });
+
+  it("names an app as its tab does: its folder until its page reads the app's title", () => {
+    const path = siteTabPath("apps/trip");
+    expect(editorTitle(path)).toBe("trip");
+    expect(editorTitle(path, "Trip planner")).toBe("Trip planner");
   });
 
   it("names the version compare tab instead of leaking the version id", () => {

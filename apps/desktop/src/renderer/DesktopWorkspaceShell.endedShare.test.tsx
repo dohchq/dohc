@@ -2,11 +2,13 @@
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useShellError } from "./shell/useShellError";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
+import { sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { collectionTabPath } from "./workbench/workbenchState";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
@@ -82,6 +84,15 @@ function RegistryShell({ bridge, workspace }: { bridge: ReturnType<typeof collec
 
 function shell(bridge: ReturnType<typeof collectionBridge>, workspace: Workspace) {
   return <RegistryShell bridge={bridge} workspace={workspace} />;
+}
+
+// Opens a notice's Details unless it is open, then copies its report. A
+// plain click moves no pointer, so copying a row doesn't read it and close
+// its toast.
+async function copyDetails(notice: HTMLElement) {
+  const closed = within(notice).queryByRole("button", { name: "Details" });
+  if (closed) await act(async () => { fireEvent.click(closed); });
+  await act(async () => { fireEvent.click(within(notice).getByRole("button", { name: "Copy details" })); });
 }
 
 function focusAfterMinimum() {
@@ -223,6 +234,8 @@ describe("ended Edit Collection shares", () => {
       datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "remote/dataset.json", name: "Remote", revision: 1,
       revisionSha256: "a".repeat(64), operations: [], tables: [{ tableId: "00000000-0000-4000-8000-000000000002", name: "Remote table", fields: [] }],
     }], nextCursor: null });
+    // Home lists the Collections.
+    bridge.getWorkspaceUiState.mockResolvedValue({ ...storedStateWithTabs([collectionTabPath("tasks")]), explorerMode: "home" });
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
     await screen.findByText("Remote table");
@@ -520,7 +533,7 @@ describe("ended Edit Collection shares", () => {
       fireEvent.click(screen.getByRole("button", { name: "Open Retained task" }));
       const edit = await screen.findByTestId("markdown-edit-toggle");
       await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
-      expect(edit.hasAttribute("disabled")).toBe(true);
+      expect(edit.hasAttribute("disabled") || edit.getAttribute("aria-disabled") === "true").toBe(true);
       act(() => bridge.emitMenuCommand("command-palette"));
       expect(screen.queryByText("New collection")).toBeNull();
     },
@@ -843,6 +856,74 @@ describe("ended Edit Collection shares", () => {
     expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
     expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "manual" });
     view.unmount();
+  });
+
+  it.each(["no file open", "docs/shared.md open"])("keeps one toast and one row when a background refresh refuses with %s", async openFile => {
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
+    const bridge = collectionBridge();
+    bridge.getWorkspaceUiState.mockResolvedValue(storedStateWithTabs(openFile === "no file open" ? [] : ["docs/shared.md"]));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
+      files: [{ path: "docs/shared.md", kind: "file" }], folders: ["docs"] });
+    const refused = { ok: false as const, probed: true as const, changedPaths: 0,
+      errorKind: "collision-record" as const, errorMessage: sharedViewRefusalWords };
+    const cause = "EBUSY: resource busy or locked";
+    bridge.refreshSharedView.mockResolvedValueOnce({ ...refused, errorCause: cause }).mockResolvedValue(refused);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByTestId("workspace-shell-error");
+    if (openFile !== "no file open") await screen.findByTestId("tab-docs/shared.md");
+    await act(async () => undefined);
+    const checkCopy = (text: string, cause?: string) => {
+      const lines = text.split("\n");
+      expect(lines[0], "Copy starts with the refusal").toBe(`Error: ${sharedViewRefusalWords}`);
+      for (const line of lines) {
+        expect(line, "Each copied line is one fact").toMatch(/^[^:]+: .+$/);
+        expect(line, "Copied facts omit the wire code").not.toContain("[share-collision-record]");
+        expect(line, "Copied facts omit the capture class").not.toContain("CapturePartialFailureError");
+      }
+      for (const line of lines.slice(1)) expect(line, "Copied facts do not repeat the refusal").not.toContain(sharedViewRefusalWords);
+      expect(lines.filter(line => line.startsWith("Cause:")), "Copy keeps only the latest refresh's filesystem cause").toEqual(cause ? [`Cause: ${cause}`] : []);
+    };
+    const copyToast = async () => {
+      await navigator.clipboard.writeText("");
+      await copyDetails(screen.getByTestId("workspace-shell-error"));
+      return navigator.clipboard.readText();
+    };
+    const copyBoth = async (cause?: string) => {
+      expect(screen.getAllByTestId("workspace-shell-error"), "The refusal has one toast").toHaveLength(1);
+      const toastCopy = await copyToast();
+      checkCopy(toastCopy, cause);
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notices = await screen.findByTestId("notice-center");
+      expect(notices.querySelectorAll("[data-notice-row]"), "The refusal has one Notices row").toHaveLength(1);
+      const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+      expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+      await navigator.clipboard.writeText("");
+      await copyDetails(row);
+      const rowCopy = await navigator.clipboard.readText();
+      checkCopy(rowCopy, cause);
+      expect(rowCopy).toBe(toastCopy);
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    };
+    await copyBoth(cause);
+    const before = bridge.refreshSharedView.mock.calls.length;
+    try {
+      expect(screen.getAllByTestId("workspace-shell-error"), "The first toast is still open before the background refresh").toHaveLength(1);
+      act(() => focusAfterMinimum());
+      await waitFor(() => expect(bridge.refreshSharedView.mock.calls.length, "Focus starts a background refresh").toBeGreaterThan(before));
+      expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
+      await waitFor(async () => {
+        const copy = await copyToast();
+        expect(copy, "The toast copies the refusal").toContain(`Error: ${sharedViewRefusalWords}`);
+        expect(copy, "A background refusal with no filesystem cause drops the Cause").not.toContain("Cause:");
+      });
+      await copyBoth();
+    } finally {
+      view.unmount();
+      vi.restoreAllMocks();
+    }
   });
 
   it("shows a persistent background failure on the existing Notice surface after three attempts", async () => {

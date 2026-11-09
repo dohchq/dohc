@@ -4,9 +4,12 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { openSyncRelayStorage, type OpenSyncRelayStorageOptions } from "./storage.js";
+import { openSyncRelayStorage, type OpenSyncRelayStorageOptions, type SyncRelayStorage } from "./storage.js";
+import type { SetServiceHostEnrollmentEnabledInput } from "./storage/serviceHostEnrollment.js";
 import type { StorageContext } from "./storage/context.js";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
+import { hashAgentCredential } from "./linkSecurity.js";
+import { createLinkAuthorityResolver } from "./linkAuthority.js";
 
 export const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 export const scope = { kind: "named" as const, workspaceId: "workspace-1", shareId: "share-1", grantId: "edit-1", userId: "reader-1" };
@@ -15,10 +18,73 @@ const bytes = new Uint8Array([0, 0]);
 export const binding = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",
   lineageClaimId: createHash("sha256").update(bytes).digest("hex"), currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 };
 export const report = { connection: host, binding };
+/** Stored metadata of a retained service activation of `binding`. Native activation is covered by the engine integration suite. */
+export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, namespace: string, completed = false): string {
+  const activationId = `ordinary-activation-${"a".repeat(64)}`;
+  const source = {version: 1, relayDatabaseNamespace: namespace, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: binding.objectId,
+    lineageClaimId: binding.lineageClaimId, currentPath: binding.currentPath, replicationEpoch: "epoch", streamIdentity: "stream", committedCursor: 1,
+    baseOriginId: "origin", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1", sourceDigest: "b".repeat(64), sourceByteLength: 1,
+    nativeHeadSequence: 0, fullStateDigest: binding.lineageClaimId, fullStateByteLength: 2};
+  raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,x'0000','owner-1',?,?,1)`)
+    .run(namespace, activationId, scope.workspaceId, "main", binding.objectId, binding.lineageClaimId,
+      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, scope.shareId, completed ? "{}" : null);
+  return activationId;
+}
+/**
+ * The owner's Stop as a running service host fences it once its engine
+ * prepared the document's activation, for tests of what follows Stop. The
+ * host's own preparation is tested in `serviceLiveHost.test.ts`.
+ */
+export function preparedStop(storage: SyncRelayStorage, input: SetServiceHostEnrollmentEnabledInput) {
+  const objectId = input.objectId ?? storage.readServiceHostEnrollment(input.workspaceId, input.path)?.objectId;
+  const candidate = objectId === undefined ? null : storage.retirableServiceActivation({workspaceId: input.workspaceId, objectId});
+  return storage.setServiceHostEnrollmentEnabled({...input, ...(candidate ? {prepared: {...candidate, assertCurrent() {}}} : {})});
+}
 export const audience = "https://share.example.test";
 export const key = new Uint8Array(32).fill(13);
+/**
+ * An active agent connection on a link grant, committed straight in storage
+ * as its sign-in commits it. The sign-in itself is tested in
+ * `linkAgentAuthority.test.ts`. Pass a raw connection, or a storage
+ * transaction's own database when the raw one is read-only.
+ */
+export function seedLinkAgent(raw: {prepare(sql: string): {run(...params: unknown[]): unknown}}, input: {connectionId: string; workspaceId: string; shareId: string;
+  grantId: string; generation: number; expiresAtMs: number}) {
+  const accessToken = createHash("sha256").update(input.connectionId).digest("base64url");
+  const resource = `${audience}/mcp/s/${input.connectionId}`;
+  const principalId = `${input.connectionId}-principal`, credentialId = `${input.grantId}-credential`;
+  const accessTokenHash = hashAgentCredential("access", accessToken, key), resourceHash = hashAgentCredential("resource", resource, key);
+  raw.prepare(`INSERT OR IGNORE INTO sync_relay_link_credentials (credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms)
+    VALUES (?, ?, ?, ?, 0, NULL)`).run(credentialId, input.grantId, `${input.grantId}-secret-hash`, input.generation);
+  raw.prepare(`INSERT INTO sync_relay_link_principals (principal_id, grant_id, mint_generation, profile_token_hash, display_name,
+    created_at_ms, blocked_at_ms, discussion_revision, storage_bytes) VALUES (?, ?, ?, ?, NULL, 0, NULL, 0, 1)`)
+    .run(principalId, input.grantId, input.generation, `agent:${input.connectionId}`);
+  raw.prepare(`INSERT INTO sync_relay_agent_connections (connection_id, workspace_id, share_id, grant_id, credential_id, generation,
+    principal_id, client_id, reported_name, resource_hash, connected_at_ms, last_action_at_ms, status, ended_at_ms, start_seq)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'agent-client', NULL, ?, 1000, NULL, 'active', NULL, 0)`)
+    .run(input.connectionId, input.workspaceId, input.shareId, input.grantId, credentialId, input.generation, principalId, resourceHash);
+  raw.prepare(`INSERT INTO sync_relay_agent_tokens (token_hash, connection_id, kind, issued_at_ms, expires_at_ms, used_at_ms)
+    VALUES (?, ?, 'access', 1000, ?, NULL)`).run(accessTokenHash, input.connectionId, input.expiresAtMs);
+  return {...input, principalId, resource,
+    /** What share-web sends for the agent, besides the exchange key. */
+    headers: {authorization: `DohcAgent ${accessToken}`, "x-dohc-agent-resource": resource} as Record<string, string>,
+    actor: {kind: "link" as const, workspaceId: input.workspaceId, grantId: input.grantId, agentConnectionId: input.connectionId,
+      accessTokenHash, resourceHash}};
+}
+/**
+ * The link resolver the live routes take, for tests whose callers are link
+ * holders. A holder's capability resolves in the live resolver itself, so
+ * the holder checks here throw if reached.
+ */
+export function holderLinkAuthority(storage: Parameters<typeof createLinkAuthorityResolver>[0]["storage"], linkKey: string | Uint8Array, exchangeKey: string) {
+  const holderOnly = () => { throw new Error("A link holder never reaches the agent resolver."); };
+  return createLinkAuthorityResolver({storage, linkKey, publicEditRelease: {version: 1}, relayExchangeKeyConfigured: true,
+    hasValidRelayExchangeKey: request => request.headers.get("x-dohc-relay-exchange-key") === exchangeKey, nowMs: () => Date.now(),
+    requireLinkCapability: holderOnly, requireFreshLinkRead: holderOnly});
+}
 export const table = "sync_relay_live_session_tickets";
-export const marker = "live-session-tickets-v1";
+export const marker = "live-session-tickets-v2";
 const defaultScope = scope, defaultBinding = binding;
 export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: {userId: string; grantId: string; objectId: string; workspaceId?: string; shareId?: string}, population?: {people: number; documents: number}) {
   const scope = {...defaultScope, ...(identity ? {shareId: identity.shareId ?? defaultScope.shareId, userId: identity.userId, grantId: identity.grantId, workspaceId: identity.workspaceId ?? defaultScope.workspaceId} : {})};

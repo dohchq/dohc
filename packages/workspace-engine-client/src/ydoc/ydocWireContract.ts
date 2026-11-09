@@ -34,6 +34,7 @@ export type JsonObject = { [key: string]: JsonValue | undefined };
 export type ArtifactAssetDescriptor = typeof ArtifactAssetDescriptorSchema.Type;
 
 export type YdocOpenParams = JsonObject & {
+  allowLossySourceSha256?: string;
   versionId: string;
   path: string;
   // The document this open continues. The engine refuses the open when the
@@ -49,14 +50,16 @@ export type YdocOpenParams = JsonObject & {
 
 // Declared write provenance beside the actor origin: the kind of actor that
 // wrote (a human, an agent, or an automation), the principal it acted for,
-// its automation-chain depth, and for an automation the run that wrote it.
-// Optional provenance, never a second authority; the engine records it on
-// every history row the apply derives, and replicates it with the update.
+// its automation-chain depth, for an automation the run that wrote it, and
+// for an agent the run it made the change in. Optional provenance, never a
+// second authority; the engine records it on every history row the apply
+// derives, and replicates it to the owner's devices with the update.
 export type ChangeAttributionWire = JsonObject & {
   actorKind: "human" | "agent" | "automation";
   onBehalfOf?: string;
   depth?: number;
   run?: AutomationRunAttribution;
+  agentRunId?: string;
 };
 
 export type YdocRecordUpdateParams = JsonObject & {
@@ -82,6 +85,7 @@ export type YdocRecordUpdateParams = JsonObject & {
 export type YdocRecordUpdateResult = typeof RecordUpdateResultSchema.Type;
 
 export type YdocSettleParams = JsonObject & {
+  allowLossySourceSha256?: string;
   sessionId: string;
   summary?: string;
 };
@@ -197,6 +201,7 @@ const ArtifactAssetDescriptorSchema = mutableStruct({
   version: Schema.optionalKey(Schema.Int),
 });
 const OpenResultSchema = mutableStruct({
+  headSha256: Schema.NullOr(Schema.String),
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   sessionId: Schema.String,
   objectId: Schema.String,
@@ -232,6 +237,7 @@ const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   ownerDraft: mutableStruct(OwnerAppendFields),
 })]);
 const ResyncResultSchema = mutableStruct({
+  headSha256: Schema.NullOr(Schema.String),
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
   lineageClaimId: Schema.NullOr(Schema.String),
   lineageOriginatedHere: Schema.Boolean,
@@ -258,6 +264,7 @@ const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = Schema.Union([
   mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),
   mutableStruct({sessionId: Schema.String, resyncRequired: Schema.Literal(true)}),
+  mutableStruct({sessionId: Schema.String, settlementWanted: Schema.Literal(true)}),
 ]);
 
 const YdocResultSchemas = {

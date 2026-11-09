@@ -9,6 +9,7 @@ import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/d
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
+import { dirnameOf } from "./path";
 import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { transactionalDescription } from "./transactionalCollectionModel";
 import { CollectionActionDialog } from "./CollectionActionDialog";
@@ -17,7 +18,7 @@ import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
-import { KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, USE_THIS_COMPUTER, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { KEEPABLE_COLLECTIONS_REFUSALS, namingCollectionMove, readCollectionServerUnreachable, readCollectionsRefusal, USE_THIS_COMPUTER, waitedForCollectionMove, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -58,9 +59,19 @@ export interface ConnectedTransactionalCollectionProps {
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
+  // A request that only waited for this Collection's move, which stopped,
+  // files a quiet row, and the row names the Collection.
+  const described = useRef(dataset);
+  described.current = dataset;
+  const onError = useCallback((...report: Parameters<typeof reportError>) => {
+    const [fallback, error, ...rest] = report;
+    reportError(fallback, described.current && waitedForCollectionMove(error) ? namingCollectionMove(error, described.current.name) : error, ...rest);
+  }, [reportError]);
+  // One row in Notices for this page's failed reads of the Collection; a read that succeeds removes it.
+  const openIdentity = `collection-open:${datasetPath}`;
   const addressInput = <T extends { datasetId: string },>(input: T) => {
     const { datasetId: expectedDatasetId, ...fields } = input;
     return { ...fields, datasetPath, expectedDatasetId };
@@ -71,6 +82,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
   const [loading, setLoading] = useState(true);
   // Why this computer cannot use the workspace's Collections; the page says so in place.
   const [refusal, setRefusal] = useState<{ kind: CollectionsRefusalKind; words: string } | null>(null);
+  // Why the page shows no records: its server is out of reach and this computer has no saved copy.
+  const [unreachable, setUnreachable] = useState<string | null>(null);
   const [creatingForm, setCreatingForm] = useState(false);
   const [reviewingSchema, setReviewingSchema] = useState(false);
   const [historyRestore, setHistoryRestore] = useState<DatasetMigrationPreparation | undefined>();
@@ -109,20 +122,23 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
       if (sequence !== request.current) return;
       if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
       describedId.current = result.dataset.datasetId;
+      onSettled?.(openIdentity);
       setRefusal(null);
+      setUnreachable(null);
       setDataset(result.dataset);
       setCopy(result.copy);
       setRecordsVersion(value => value + 1);
     } catch (error) {
       if (sequence !== request.current) return;
       setRecordsVersion(value => value + 1);
-      const refused = readCollectionsRefusal(error);
+      const refused = readCollectionsRefusal(error), away = refused ? null : readCollectionServerUnreachable(error);
       setRefusal(refused);
-      // Collections this computer cannot use any more stop showing, in place.
-      if (refused) setDataset(null);
-      else onError("Could not open this Collection.", error, () => { void refresh(); });
+      setUnreachable(away);
+      // Collections this computer cannot use any more, or cannot reach, stop showing, in place.
+      if (refused || away) setDataset(null);
+      else onError("Could not open this Collection.", error, () => { void refresh(); }, openIdentity);
     } finally { if (sequence === request.current) setLoading(false); }
-  }, [workspaceId, datasetPath, onError, owner]);
+  }, [workspaceId, datasetPath, onError, onSettled, openIdentity, owner]);
   useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
   const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
     signal.throwIfAborted();
@@ -154,6 +170,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
   // A run or its Undo changes records without touching a file, whether a press, a record change, or a schedule
   // started it, so the table reads them again when runs end.
   useEffect(() => bridge().onAutomationRunsChanged(event => { if (event.workspaceId === workspaceId) setRecordsChanged(value => value + 1); }), [workspaceId]);
+  // A change to this Collection's fields applied, as from a chat's change card, so the page reads it again.
+  useEffect(() => bridge().onCollectionRulesChanged(event => {
+    if (event.workspaceId === workspaceId && event.datasetId === describedId.current) void refresh();
+  }), [workspaceId, refresh]);
   const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
     fields: buttonFields,
     // A dataset record's id goes to main as JSON, since the table's key can be a number.
@@ -198,7 +218,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     </EmptyState>;
   }
   if (!dataset || !columns) return loading ? <SkeletonRows inSlot layout="panel" label="Opening collection…" /> : <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-    <span className="text-sm text-muted">Open this collection to see its records.</span>
+    <span className="text-sm text-muted">{unreachable ?? "Open this Collection to see its records."}</span>
     <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>
   </div>;
   async function restore() {
@@ -215,11 +235,11 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
   if (dataset.archived) return <><div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
     <h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2>
     <p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>
-    {copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · Connect to restore this Collection.</p>}
+    {copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}</p>}
     {owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}
     <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>Refresh</SecondaryButton>
     {owner && !copy?.offline && <SecondaryButton className="text-danger" disabled={loading || restoring} onClick={() => setDeletingCollection(true)}>Delete permanently…</SecondaryButton>}
-  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name}
+  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} folder={dirnameOf(datasetPath)}
     onClose={() => setDeletingCollection(false)} onError={onError} onExport={exportRecovery} onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
     onDeleted={() => { request.current++; setDeletingCollection(false); setDeleted(true); onLifecycleChanged?.(); onNotice?.("Collection deleted"); }}
     onLoad={async (input, signal) => {
@@ -236,7 +256,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
       return result;
     }} />}</>;
   // The ⚡ panel docks at the right of the table.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled} onNotice={onNotice}
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><div className="flex min-w-0 px-1"><button type="button" className="min-w-0 truncate rounded-md px-3 py-1 text-left font-mono text-[12px] text-muted hover:bg-hover hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button></div><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled} onNotice={onNotice}
     buttons={buttonColumns}
     automationsButton={automations.button}
     fieldMarks={automations.fieldMarks}
@@ -362,7 +382,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
         if (sequence !== request.current) throw Error("The workspace changed while saving this file.");
         return result;
       }} />}
-    {managingAccess && <CollectionPermissionsDialog datasetPath={datasetPath} workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} />}
+    {managingAccess && <CollectionPermissionsDialog datasetPath={datasetPath} workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} onSettled={onSettled} onMoved={() => void refresh()} />}
     {exportingRecovery && owner && !copy?.offline && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
       onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
       onExport={exportRecovery} />}
@@ -451,11 +471,11 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
       }}
       onApproveChoices={async (input, signal) => {
         signal.throwIfAborted();
-        const sequence = request.current;
         const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        signal.throwIfAborted();
-        if (sequence !== request.current) throw Error("The Collection changed. Refresh to check its choices.");
         if (result.kind !== "migrated") throw Error("dohc could not confirm these choices. Refresh the Collection.");
+        // The choices are approved even if the page read the Collection again
+        // meanwhile, as it does when they apply, so what follows still happens.
+        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
         setCreatingForm(false);
         await refresh();
       }}

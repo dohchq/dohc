@@ -7,7 +7,7 @@ import { decodeStateVector } from "yjs";
 import type { CaptureRecoveryImportParams, CaptureRecoveryImportResult } from "@dohc/workspace-engine-client";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 
-const attribution = z.object({actorKind: z.enum(["human", "agent", "automation"]), onBehalfOf: z.string().optional(), depth: z.number().int().nonnegative().optional(), run: z.object({claimId: z.string(), automationName: z.string()}).strict().optional()}).strict();
+const attribution = z.object({actorKind: z.enum(["human", "agent", "automation"]), onBehalfOf: z.string().optional(), depth: z.number().int().nonnegative().optional(), run: z.object({claimId: z.string(), automationName: z.string()}).strict().optional(), agentRunId: z.string().optional()}).strict();
 const checkpointSchema = z.object({version: z.literal(2), checkpointId: z.string().min(1), workspaceId: z.string().min(1), versionId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1), expectedClaimId: z.string().nullable(), expectedStateVectorSha256: z.string().regex(/^[a-f0-9]{64}$/), expectedDiskSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), text: z.string(), updateBase64: z.string(), admittedBaseBase64: z.string(), updates: z.array(z.object({requestId: z.string().min(1), updateBase64: z.string(), actorOriginId: z.string().optional(), attribution: attribution.optional()}).strict()).max(4096)}).strict();
 export type OutageTypingCheckpoint = z.infer<typeof checkpointSchema>;
 export type TypingRecoveryFailure = {kind: "checkpoint" | "import"; path: string; detail: string; checkpointId?: string; reason?: "author-refused" | "invalid-author" | "history-missing" | "drawing-unavailable"; retryable?: boolean};

@@ -1,8 +1,13 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo, type Socket } from "node:net";
 import { toNodeHandler } from "better-auth/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CRASH_REPORT_DRAIN_MAX_BYTES,
+  CRASH_REPORT_DRAIN_MAX_MS,
+  CRASH_REPORT_DRAIN_MAX_READS,
+  CRASH_REPORT_DRAINS_MAX,
   CRASH_REPORT_MAX_BYTES,
   CRASH_REPORT_PATH,
   CRASH_REPORTS_PER_CLIENT_PER_HOUR,
@@ -45,6 +50,30 @@ function post(body: BodyInit | null, headers: Record<string, string> = {}): Requ
     headers: { "content-type": "text/plain; charset=utf-8", "x-dohc-auth-client-ip": "203.0.113.7", ...headers },
     body,
   });
+}
+
+function streamPost(body: ReadableStream<Uint8Array>, headers: Record<string, string> = {}): Request {
+  return new Request(`https://api.example.test${CRASH_REPORT_PATH}`, {
+    method: "POST",
+    headers: { "content-type": "text/plain; charset=utf-8", "x-dohc-auth-client-ip": "203.0.113.7", ...headers },
+    body,
+    duplex: "half",
+  } as RequestInit);
+}
+
+// Sends `size` bytes in 16 KiB chunks, or without end when `size` is
+// Infinity, and counts what the server read.
+function upload(size: number) {
+  const counted = { pulled: 0 };
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (counted.pulled >= size) return controller.close();
+      const chunk = new Uint8Array(Math.min(16 * 1024, size - counted.pulled));
+      counted.pulled += chunk.byteLength;
+      controller.enqueue(chunk);
+    },
+  }, { highWaterMark: 0 });
+  return { body, counted };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -187,6 +216,128 @@ describe("crash report intake", () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("reads a declared oversized upload to its end before answering 413, unless it is past the drain limit", async () => {
+    const { rows, store } = memoryStore();
+    const intake = createCrashReportIntake({ store });
+    const within = upload(2 * CRASH_REPORT_MAX_BYTES);
+    const answer = await intake(streamPost(within.body, { "content-length": String(2 * CRASH_REPORT_MAX_BYTES) }));
+    expect(answer).toEqual({ status: 413, body: { ok: false, error: "the report is too large" }, headers: { connection: "close" } });
+    expect(within.counted.pulled).toBe(2 * CRASH_REPORT_MAX_BYTES);
+
+    const past = upload(CRASH_REPORT_DRAIN_MAX_BYTES + 1);
+    const refused = await intake(streamPost(past.body, { "content-length": String(CRASH_REPORT_DRAIN_MAX_BYTES + 1) }));
+    expect(refused.status).toBe(413);
+    expect(past.counted.pulled).toBe(0);
+    expect(rows).toEqual([]);
+  });
+
+  it("stops reading an oversized upload past the drain limit", async () => {
+    const { store } = memoryStore();
+    const endless = upload(Infinity);
+    expect((await createCrashReportIntake({ store })(streamPost(endless.body))).status).toBe(413);
+    // It starts no read once it has the limit, so it stops within the chunk that reaches it.
+    expect(endless.counted.pulled).toBeGreaterThanOrEqual(CRASH_REPORT_DRAIN_MAX_BYTES);
+    expect(endless.counted.pulled).toBeLessThan(CRASH_REPORT_DRAIN_MAX_BYTES + 16 * 1024);
+  });
+
+  it("stops a drain after its most reads", async () => {
+    const { store } = memoryStore();
+    let reads = 0;
+    // One byte per read, without end.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        controller.enqueue(new Uint8Array(1));
+      },
+    }, { highWaterMark: 0 });
+    const answer = await createCrashReportIntake({ store })(streamPost(body, { "content-length": String(2 * CRASH_REPORT_MAX_BYTES) }));
+    expect(answer.status).toBe(413);
+    expect(reads).toBe(CRASH_REPORT_DRAIN_MAX_READS);
+  });
+
+  it("answers 413 without a drain while the most drains run at once, and drains again after", async () => {
+    const { store } = memoryStore();
+    const intake = createCrashReportIntake({ store });
+    const declared = { "content-length": String(2 * CRASH_REPORT_MAX_BYTES) };
+    // Uploads that send nothing until the test ends them.
+    const stalled = Array.from({ length: CRASH_REPORT_DRAINS_MAX }, () => {
+      let end!: () => void;
+      let reading!: () => void;
+      const read = new Promise<void>((resolve) => (reading = resolve));
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          end = () => controller.close();
+        },
+        pull() {
+          reading();
+        },
+      }, { highWaterMark: 0 });
+      return { answer: intake(streamPost(body, declared)), read, end };
+    });
+    await Promise.all(stalled.map((stall) => stall.read));
+
+    const extra = upload(2 * CRASH_REPORT_MAX_BYTES);
+    expect((await intake(streamPost(extra.body, declared))).status).toBe(413);
+    expect(extra.counted.pulled).toBe(0);
+
+    for (const stall of stalled) stall.end();
+    for (const stall of stalled) expect((await stall.answer).status).toBe(413);
+    const after = upload(2 * CRASH_REPORT_MAX_BYTES);
+    expect((await intake(streamPost(after.body, declared))).status).toBe(413);
+    expect(after.counted.pulled).toBe(2 * CRASH_REPORT_MAX_BYTES);
+  });
+
+  it.each([
+    ["with no declared length", "transfer-encoding: chunked", `${(CRASH_REPORT_MAX_BYTES + 1).toString(16)}\r\n${"x".repeat(CRASH_REPORT_MAX_BYTES + 1)}\r\n3\r\nabc\r\n`],
+    ["with a declared length", `content-length: ${2 * CRASH_REPORT_MAX_BYTES}`, `${"x".repeat(CRASH_REPORT_MAX_BYTES + 1)}abc`],
+  ])("answers 413 and closes a stalled oversized upload %s when the drain runs out of time", async (_name, framing, sent) => {
+    const { rows, store } = memoryStore();
+    const intake = createCrashReportIntake({ store, drainMaxMs: 50 });
+    const handler = toNodeHandler(async (request: Request) => {
+      const answer = await intake(request);
+      return Response.json(answer.body, { status: answer.status, headers: answer.headers ?? {} });
+    });
+    const server = createServer((request, response) => {
+      request.headers["x-dohc-auth-client-ip"] = "203.0.113.10";
+      void handler(request, response);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    let client: Socket | undefined;
+    try {
+      const { port } = server.address() as AddressInfo;
+      const socket = connect(port, "127.0.0.1");
+      client = socket;
+      let answer = "";
+      socket.setEncoding("latin1");
+      socket.on("data", (text: string) => { answer += text; });
+      const closed = new Promise<void>((resolve) => socket.on("close", () => resolve()));
+      // Past the size limit, then a few bytes more, then nothing and no end.
+      const started = Date.now();
+      socket.write(`POST ${CRASH_REPORT_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: text/plain; charset=utf-8\r\n${framing}\r\n\r\n`);
+      socket.write(sent);
+      await closed;
+      // The drain's 50 ms, with room for a loaded machine. A drain that kept
+      // the default 10 s fails here, and one with no time limit would hold the
+      // connection until Node's request timeout, past this test's own.
+      expect(Date.now() - started).toBeLessThan(CRASH_REPORT_DRAIN_MAX_MS / 2);
+      expect(answer).toMatch(/^HTTP\/1\.1 413 /);
+      expect(answer.toLowerCase()).toContain("\r\nconnection: close\r\n");
+      expect(rows).toEqual([]);
+    } finally {
+      client?.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("caps a report at the desktop's limit, so the desktop never gets a 413", () => {
+    const desktop = readFileSync(new URL("../../../apps/desktop/src/ipc/bridgeContract.ts", import.meta.url), "utf8");
+    const chars = /export const CRASH_REPORT_MAX_CHARS = ([\d_]+);/.exec(desktop)?.[1];
+    expect(chars).toBeDefined();
+    // The desktop counts UTF-16 code units, and each is at most three bytes of UTF-8.
+    expect(Number(chars!.replaceAll("_", "")) * 3).toBe(CRASH_REPORT_MAX_BYTES);
   });
 
   it("answers 503 when storage is full", async () => {

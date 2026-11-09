@@ -143,7 +143,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
 
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     // A synced workspace: presence WORKSPACE scope only resolves for a
     // relay-claimed workspace on the signed-in server, and the sync engine
@@ -184,6 +184,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
 
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill("launch");
+    await page.getByTestId("chats-new-channel-type-posts").click();
     await page.getByTestId("chats-new-channel-name").press("Enter");
     // createChannel opens the new channel directly.
     await expect(page.getByTestId("chats-channel-view")).toBeVisible();
@@ -211,6 +212,9 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await page.getByTestId("chats-share-submit").click();
     // The grant lands (a member row appears in the panel).
     await expect(page.getByTestId("chats-share-member")).toContainText(RECIPIENT_EMAIL);
+    // Members is a dialog; close it before working in the channel again.
+    await page.getByTestId("chats-share-close").click();
+    await expect(page.getByTestId("chats-share-panel")).toHaveCount(0);
 
     const { shareId, channelWireId } = await grantedShare(page, workspaceId);
     expect(channelWireId.length).toBeGreaterThan(0);

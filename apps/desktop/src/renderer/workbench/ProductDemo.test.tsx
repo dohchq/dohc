@@ -29,7 +29,10 @@ it("offers only the five working demo panels, then Notices, each titled as in th
     const button = rail.getByRole("button", { name });
     fireEvent.click(button);
     expect(button.getAttribute("aria-current")).toBe("page");
-    expect(container.querySelector('[data-testid="side-panel"] > header > .dohc-section-label')?.textContent).toBe(name);
+    // The Explorer's header is its Home | Files switch.
+    const header = container.querySelector('[data-testid="side-panel"] > header');
+    if (name === "Explorer") expect(within(header as HTMLElement).getByRole("tablist", { name: "Explorer" })).toBeTruthy();
+    else expect(header?.querySelector(".dohc-section-label")?.textContent).toBe(name);
   }
 });
 
@@ -41,6 +44,7 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
   shadow.append(container);
   render(<ProductDemo />, { container });
   const demo = within(container);
+  fireEvent.click(demo.getByRole("tab", { name: "Files" }));
   fireEvent.click(demo.getByRole("button", { name: "New folder" }));
   const input = demo.getByTestId("tree-edit-input");
   fireEvent.change(input, { target: { value: "welcome.md" } });
@@ -48,14 +52,14 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
 
   const toast = await demo.findByTestId("workspace-shell-error");
   expect(toast.textContent).toContain("A folder already exists at welcome.md");
-  expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+  expect(within(toast).getByRole("button", { name: "Copy details" })).toBeTruthy();
   fireEvent.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
   expect(demo.queryByTestId("workspace-shell-error")).toBeNull();
   fireEvent.click(demo.getByRole("button", { name: "Notices, 1 unread" }));
   expect(demo.getByText("A folder already exists at welcome.md")).toBeTruthy();
-  const copy = demo.getByRole("button", { name: "Copy error details" });
+  const copy = demo.getByRole("button", { name: "Copy details" });
   fireEvent.pointerDown(copy, { bubbles: true, composed: true });
-  expect(demo.getByRole("button", { name: "Copy error details" })).toBe(copy);
+  expect(demo.getByRole("button", { name: "Copy details" })).toBe(copy);
   fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), { bubbles: true, composed: true });
   expect(demo.queryByTestId("notice-center")).toBeNull();
   fireEvent.click(demo.getByRole("button", { name: "Notices, 1 unread" }));

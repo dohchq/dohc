@@ -59,7 +59,8 @@ fn start(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: at_ms,
                 request_id: None,
             },
@@ -111,7 +112,8 @@ fn send_with(
                 options: Vec::new(),
                 attachments,
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: at_ms,
                 request_id: None,
             },
@@ -658,7 +660,8 @@ fn decision_open_is_atomic_with_start_and_send() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 40,
             request_id: None,
         },
@@ -763,7 +766,8 @@ fn decision_resolution_omits_a_local_only_resolver_from_relay_payload() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: None,
             },
@@ -1017,6 +1021,49 @@ fn channel_summary_uses_earliest_message_and_500_char_snippet() {
 }
 
 #[test]
+fn channel_summary_names_the_agent_that_wrote_the_opening_message() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "opening".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Agent,
+                author_display_name: "Codex".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                origin: None,
+                body: "Done".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: Some("codex".to_owned()),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    let opening = summaries[0]
+        .opening_message
+        .as_ref()
+        .expect("opening message");
+    assert_eq!(opening.author_agent_id.as_deref(), Some("codex"));
+}
+
+#[test]
 fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
@@ -1247,7 +1294,8 @@ fn js_trimmed_author_user_id_matches_person_follow() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: None,
             },
@@ -1304,7 +1352,8 @@ fn lone_bom_display_name_is_invalid_sender() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 20,
             request_id: None,
         },
@@ -1356,7 +1405,8 @@ fn channel_name_and_optional_thread_title_use_js_trim() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: None,
             },
@@ -1404,7 +1454,8 @@ fn optional_thread_title_caps_utf16_units_before_journaling() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 20,
             request_id: None,
         },
@@ -1430,7 +1481,8 @@ fn optional_thread_title_caps_utf16_units_before_journaling() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 21,
             request_id: None,
         },
@@ -1494,7 +1546,8 @@ fn channel_sender_and_author_caps_use_utf16_units() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 20,
             request_id: None,
         },
@@ -1520,7 +1573,8 @@ fn channel_sender_and_author_caps_use_utf16_units() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 21,
             request_id: None,
         },
@@ -1546,7 +1600,8 @@ fn channel_sender_and_author_caps_use_utf16_units() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: 22,
             request_id: None,
         },
@@ -1586,7 +1641,8 @@ fn thread_mutations_reject_negative_timestamps_before_journaling() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: -1,
             request_id: None,
         },
@@ -1647,7 +1703,8 @@ fn thread_mutations_reject_timestamps_above_the_wire_integer_max() {
             options: Vec::new(),
             attachments: Vec::new(),
             author_agent_id: None,
-            named_agent_ids: Vec::new(),
+            author_reported: None,
+            wake_agent_ids: Vec::new(),
             now_ms: above_max,
             request_id: None,
         },
@@ -1729,7 +1786,8 @@ fn channel_thread_start_refuses_unreplicable_stored_channel_identity() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
-                named_agent_ids: Vec::new(),
+                author_reported: None,
+                wake_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: None,
             },
@@ -1763,7 +1821,16 @@ fn agent_read_negative_coordinate_noops_without_revision() {
     seed_channel(&mut store);
     start(&mut store, "thread", "opening", 20, false);
     let state = LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(WS, None, "thread", -1, "before", None, 30, &NO_FAULTS)
+        .mark_thread_read_by_agent(
+            WS,
+            &dohc_engine_domain::AgentReader::Unnamed,
+            "thread",
+            -1,
+            "before",
+            None,
+            30,
+            &NO_FAULTS,
+        )
         .expect("negative coordinate");
     assert_eq!(
         state.last_read_created_at_ms, 0,

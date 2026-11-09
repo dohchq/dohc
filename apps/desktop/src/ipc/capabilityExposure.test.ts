@@ -66,14 +66,14 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
-  it("records the 15 settings operations", () => {
+  it("records the 16 settings operations", () => {
     const channels = [
       "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned", "order-agents", "set-agent-color",
       "reset-user-settings", "get-user-settings-file-path", "open-user-settings-file",
-      "open-workspace-settings-file", "get-workspace-settings", "set-workspace-settings",
+      "open-workspace-settings-file", "open-workspace-policy-file", "get-workspace-settings", "set-workspace-settings",
       "reset-workspace-settings", "get-workspace-ui-state", "set-workspace-ui-state",
     ].map(name => `desktop:${name}`);
-    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(15);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(16);
   });
   it("records all 23 chat operations with their sender-workspace admission", () => {
     const channels = [
@@ -146,7 +146,7 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
-  it("records the 19 owner relay operations with their existing admission", () => {
+  it("records the 21 owner relay operations with their existing admission", () => {
     const channels = [
       "desktop:list-owner-live-documents",
       "desktop:list-owner-live-refusals",
@@ -158,6 +158,8 @@ describe("main inventories", () => {
       "desktop:retune-relay-share-link",
       "desktop:rotate-relay-share-link",
       "desktop:revoke-relay-share-link",
+      "desktop:list-relay-share-link-agents",
+      "desktop:disconnect-relay-share-link-agent",
       "desktop:list-relay-share-discussion",
       "desktop:append-relay-share-discussion",
       "desktop:delete-relay-share-discussion-message",
@@ -280,7 +282,7 @@ describe("capability identities and exposure", () => {
     expect(row.payload).toBe(DatasetRequest);
     expect(row.result).toBe(DatasetResult);
     expect(Object.keys(row.capabilityIdsByAction!).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
-    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(34);
+    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(35);
     assertAdmission(row);
   });
 

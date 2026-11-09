@@ -29,11 +29,14 @@ import {
 // while the agent's edit arrives.
 
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
+// A verb's arguments without cwd and actor, kept apart for each form, such as
+// chat's by thread and by group.
+type AgentArgs<Args> = Args extends unknown ? Omit<Args, "cwd" | "actor"> : never;
 
 async function agentCli<Verb extends CliVerb>(
   temp: TempWorkspace,
   verb: Verb,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+  args: AgentArgs<Extract<CliRequestWithoutToken, { verb: Verb }>["args"]>,
 ): Promise<CliResultByVerb[Verb]> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -295,10 +298,10 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       }, { timeout: 30_000 })
       .toBe(true);
 
-    // The engine records the agent's update under the name it gave, and the
-    // person's typing as a person's.
+    // The engine records the agent's update as the unnamed agent's, since no
+    // dohc run started it, and the person's typing as a person's.
     const authors = ydocUpdateAuthors(temp.rootPath);
-    expect(authors).toContainEqual({ actorOriginId: "e2e-agent", actorKind: "agent" });
+    expect(authors).toContainEqual({ actorOriginId: "dohc-mcp", actorKind: "agent" });
     expect(authors.some((author) => author.actorKind === "human")).toBe(true);
 
     // With no editor open, the edit opens a session of its own, settles, and

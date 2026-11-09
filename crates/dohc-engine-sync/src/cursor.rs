@@ -148,7 +148,7 @@ pub fn commit_relay_cursor(
             }
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
-            let mut writer_cache_changed = cursor.settlement_report_id.is_some();
+            let mut writer_cache_changed = false;
             let sharing_declined = if passive {
                 Vec::new()
             } else if was_enrolled {
@@ -173,8 +173,10 @@ pub fn commit_relay_cursor(
                     now_ms,
                 )?
             };
+            // Drain reports alone change nothing a cached document reads.
             if let Some(report_id) = &cursor.settlement_report_id {
-                release_settlement_report_in_tx(tx, workspace_id, report_id)?;
+                writer_cache_changed |=
+                    release_settlement_report_in_tx(tx, workspace_id, report_id)?;
             }
             // Only the latest pass, under the identity it pulled with, finishes.
             if let Some(OrdinaryPullCompletion {
@@ -266,24 +268,28 @@ pub fn ordinary_pull_unfinished_in(
     .map_err(SyncError::corrupt)
 }
 
-/// Drop the deferred work and applied settlements a committed pass reported.
+/// Drop the deferred work, applied settlements and drain reports a committed
+/// pass reported, and answer whether any deferred work or settlement went.
 pub(crate) fn release_settlement_report_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     report_id: &str,
-) -> Result<(), SyncError> {
-    tx.execute(
-        "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
-        params![workspace_id, report_id],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "DELETE FROM owner_pending_settlements \
-         WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
-        params![workspace_id, report_id],
-    )
-    .map_err(SyncError::persist)?;
-    Ok(())
+) -> Result<bool, SyncError> {
+    crate::drain_report::release_in_tx(tx, workspace_id, report_id)?;
+    let deferred = tx
+        .execute(
+            "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
+            params![workspace_id, report_id],
+        )
+        .map_err(SyncError::persist)?;
+    let settled = tx
+        .execute(
+            "DELETE FROM owner_pending_settlements \
+             WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
+            params![workspace_id, report_id],
+        )
+        .map_err(SyncError::persist)?;
+    Ok(deferred + settled > 0)
 }
 
 fn parse_relay_cursor(value: &str) -> Result<i64, SyncError> {

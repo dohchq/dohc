@@ -24,7 +24,7 @@ export type HistoryPage = {
 
 // Why there is no page. A null timeline is not "no changes": it is also a
 // first read still in flight, a read that failed, and a page dropped as stale
-// and asked again. "No changes yet" is an assertion about the WORKSPACE, so
+// and asked again. "No changes yet." is an assertion about the WORKSPACE, so
 // only a read that answered may reach it. This says whether the newest read
 // answered at all. A commit only ends `updating`, because its read did
 // answer, and a retraction never touches it: the page and the read state
@@ -55,23 +55,19 @@ function waitForHistoryRetry(delayMs: number): Promise<void> {
 // The order of the engine's newest file moment, which tells the shell an
 // open file may have changed, or null while History's rules hide it (the
 // page read on the same refresh shows that). An `updating` answer is retried
-// on the page's ladder while `current` holds. Capture that is still working
-// is not a failure: a ladder that ends still updating answers null, and the
-// activity capture sends when it settles reads again. It rejects only while
-// `captureFailed` holds, so the caller can say so and offer Try again.
+// on the page's ladder while `current` holds. A ladder that ends still
+// updating is not a failure and answers null. The activity capture sends when
+// it settles reads again, and a capture that failed has its own History
+// paused row with Try again.
 export async function readNewestMomentOrder(
   workspaceId: string,
   current: () => boolean,
-  captureFailed: () => boolean,
 ): Promise<number | null> {
   for (let attempt = 0; ; attempt += 1) {
     const answer = await bridge().listEngineMoments({ workspaceId, limit: 1 });
     if (!("status" in answer)) return answer.latestMomentOrder;
     if (answer.status === "policy-unreadable" || !current()) return null;
-    if (attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length) {
-      if (!captureFailed()) return null;
-      throw new Error("Recent changes are still being added to History.");
-    }
+    if (attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length) return null;
     await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]);
     if (!current()) return null;
   }

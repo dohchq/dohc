@@ -9,6 +9,9 @@ import {
 import { z } from "zod";
 import {FirstOpenOwnerStatus} from "@dohc/workspace-contracts/first-open-wire";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
+import {
+  DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult, ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
+} from "@dohc/workspace-contracts/share-link-agents";
 import { AccessAnswer, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
@@ -35,21 +38,43 @@ const requestBase = {
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
   // Caller-reported, unverified attribution; grants no authority.
   door: z.enum(["cli", "mcp"]).optional(),
+  // The secret of the run dohc started this caller in (DOHC_RUN_SECRET). Only
+  // a request that carries it is that run's.
+  runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 };
+
+// An agent you run, by its id in Settings › Agents. The desktop refuses an
+// id its settings don't list as one.
+export const cliAgentIdSchema = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/);
 
 const argsBase = {
   cwd: z.string().min(1),
   actor: cliActorSchema,
+  agentId: cliAgentIdSchema.optional(),
 };
 
 const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
-const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: z.string().min(1).max(200).optional() }).strict();
+// A name the calling agent gives itself, recorded as the author of its edits
+// and messages. A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
+const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
 const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
+export const CHAT_WATCH_TIMEOUT_MS = 25_000;
+export const CHAT_WATCH_MAX_TIMEOUT_MS = 25_000;
+export const chatWatchInputSchema = z.object({
+  cursor: z.string().min(1).max(1_048_576).optional(),
+  group: z.string().min(1).max(500).optional(),
+  thread: z.string().min(1).max(500).optional(),
+  timeoutMs: z.number().int().min(0).max(CHAT_WATCH_MAX_TIMEOUT_MS).optional(),
+}).strict();
+const watchArgsSchema = chatWatchInputSchema.extend(argsBase).strict();
 // Where a group's stream page ends: an item's time, lane and id.
 const streamPositionSchema = z
   .object({
@@ -67,22 +92,49 @@ const streamPageArgs = {
 const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
+// One part of what an agent reports about itself: printable text with no
+// surrounding space.
+export const MAX_REPORTED_AGENT_CHARS = 64;
+export const reportedAgentPartSchema = z
+  .string()
+  .min(1)
+  .max(MAX_REPORTED_AGENT_CHARS)
+  .refine((value) => value.trim() === value && !/\p{Cc}/u.test(value), {
+    message: "Use printable text with no space at either end.",
+  });
+// What an agent reports about itself: its MCP client's product and version
+// from the handshake, and the model the agent states. dohc shows it only as
+// reported. A version comes with its product.
+export const chatReportedAgentSchema = z
+  .object({
+    product: reportedAgentPartSchema.optional(),
+    version: reportedAgentPartSchema.optional(),
+    model: reportedAgentPartSchema.optional(),
+  })
+  .strict()
+  .refine((reported) => reported.version === undefined || reported.product !== undefined, {
+    message: "A reported version needs its product.",
+  });
+export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
 const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
+    reported: chatReportedAgentSchema.optional(),
     group: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
     needsDecision: z.boolean(),
     options: z.array(z.string().min(1)).max(12).optional(),
     body: z.string().min(1),
+    agent: documentAgentNameSchema.optional(),
   })
   .strict();
 const replyArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
+    reported: chatReportedAgentSchema.optional(),
     thread: z.string().min(1),
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -91,6 +143,7 @@ const replyArgsSchema = z
     resolve: z.string().min(1).optional(),
     choose: z.string().min(1).optional(),
     body: z.string().min(1),
+    agent: documentAgentNameSchema.optional(),
   })
   .strict();
 const reactArgsSchema = z
@@ -165,11 +218,6 @@ export const documentEditTextSchema = z
   .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
     message: "Document edit text is at most 256 KiB as UTF-8.",
   });
-// A name the calling agent gives itself, recorded as the author of its edits.
-// A slash is refused so no name can pass for an automation's id.
-export const documentAgentNameSchema = z
-  .string()
-  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
 const documentReadArgsSchema = z
   .object({ ...argsBase, path: documentPathArg })
   .strict();
@@ -273,6 +321,7 @@ const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
 const documentEditArgsSchema = z
   .object({
+    allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
     requestId: requestIdSchema.optional(),
@@ -294,6 +343,7 @@ const fileChatStartArgsSchema = z
   .object({
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
+    reported: chatReportedAgentSchema.optional(),
     requestId: requestIdSchema.optional(),
     runId: z.string().min(1).optional(),
     path: documentPathArg,
@@ -484,6 +534,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("shareAgents"), args: ShareLinkAgentsInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("shareDisconnect"), args: ShareLinkAgentDisconnectInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessRefresh"), args: z.object(argsBase).strict() }).strict(),
@@ -495,6 +547,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
@@ -573,6 +626,7 @@ export type CliVerb = CliRequest["verb"];
 export const APP_PUBLICATION_CAPABILITIES = {
   createLink: "app.link.create",
   listLocal: "app.local.list",
+  checkLocal: "app.local.check",
   prepareLocal: "app.local.prepare",
   launchLocal: "app.local.launch",
   list: "app.publication.list",
@@ -597,6 +651,8 @@ export const CLI_CAPABILITIES = {
   linksIn: ["links.in"],
   linksResolve: ["links.resolve"],
   shareCopy: ["share.copy.read"],
+  shareAgents: ["share.link.agents.list"],
+  shareDisconnect: ["share.link.agent.disconnect"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
   accessRefresh: ["access.refresh"],
@@ -604,6 +660,7 @@ export const CLI_CAPABILITIES = {
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
   threads: ["chat.threads.list"],
+  watch: ["chat.inbox.read"],
   inbox: ["chat.inbox.read"],
   show: ["chat.show"],
   post: ["chat.post"],
@@ -746,6 +803,7 @@ const cliShowMessageSchema = z
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -1051,6 +1109,7 @@ const rawChatMessageSchema = z
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z
@@ -1271,6 +1330,7 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
 
 // A workspace's versions and the active one, whose files the folder shows.
 // canMergeIntoMain is false for a version made from another version.
+// madeFromVersionId is the version it was made from. Main has none.
 const versionListResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
@@ -1280,6 +1340,7 @@ const versionListResultSchema = z.discriminatedUnion("ok", [
       kind: z.enum(["main", "named"]),
       createdAtMs: z.number(),
       canMergeIntoMain: z.boolean(),
+      madeFromVersionId: z.string().min(1).optional(),
     }).strict()),
     activeVersionId: z.string().min(1),
   }).strict(),
@@ -1328,6 +1389,15 @@ const versionConflictsPage = {
     currentBinary: conflictBinarySchema.optional(),
     incomingBinary: conflictBinarySchema.optional(),
     baseBinary: conflictBinarySchema.optional(),
+    // Another computer saved a newer version, which dohc holds until this
+    // conflict is resolved. The rest are technical details.
+    waiting: z.object({
+      code: z.literal("resolve-existing-conflict"),
+      message: z.string().min(1),
+      objectId: z.string().min(1),
+      originId: z.string().min(1),
+      originSeq: z.number().int().nonnegative(),
+    }).strict().optional(),
   }).strict()),
   nextAfterConflictId: z.string().min(1).nullable(),
 };
@@ -1735,6 +1805,8 @@ export const cliResultSchemas = {
   linksIn: LinksInResult,
   linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
+  shareAgents: ListRelayShareLinkAgentsResult,
+  shareDisconnect: DisconnectRelayShareLinkAgentResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,
   accessRefresh: AccessRefreshResult,
@@ -1759,6 +1831,7 @@ export const cliResultSchemas = {
   ownerAppResponses: OwnerAppResponsesResult,
   groups: groupsResultSchema,
   threads: threadsResultSchema,
+  watch: z.object({ messages: z.array(cliInboxMentionSchema), cursor: z.string().min(1).max(1_048_576) }).strict(),
   inbox: inboxResultSchema,
   show: showResultSchema,
   post: postResultSchema,

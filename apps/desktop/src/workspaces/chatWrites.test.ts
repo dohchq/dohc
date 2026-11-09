@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { isConnectedAgentId } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
 import { createChatWrites, type ChatWriter, type PersonWriter, type ChatWriteStore } from "./chatWrites";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
@@ -106,10 +107,14 @@ function fixture() {
     currentCredentials: () => credentials,
     currentCredentialGeneration: () => generation,
     localUserDisplayName: () => displayName,
-    agentDisplayName: async (agentId?: string) => agentId === "codex" ? "Codex" : "Nova",
-    // The person's agents: Nova, the default, and Codex.
-    agentIdsNamedIn: async (body: string) => Object.entries({ default: "@nova", codex: "@codex" })
-      .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
+    agentDisplayName: async (agentId?: string) => agentId === "codex" ? "Codex" : agentId === "terminal" ? "Terminal" : "Nova",
+    // The person's agents: Nova, the default, and Codex, which dohc starts,
+    // and Terminal, which they run.
+    agentIdsToWake: async (body: string, dmAgentId: string | null) => [...new Set([
+      ...(dmAgentId !== null && dmAgentId !== "terminal" ? [dmAgentId] : []),
+      ...Object.entries({ default: "@nova", codex: "@codex" })
+        .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
+    ])],
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
@@ -245,7 +250,7 @@ describe("chat writes", () => {
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { threadId: "thread" });
   });
 
-  it("writes an agent's thread under its own name, its owner, and the CLI origin", async () => {
+  it("writes an unnamed agent's thread as Agent, with its owner and the CLI origin", async () => {
     const test = fixture();
     await test.writes.startThread(test.place, {
       writer: AGENT, channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
@@ -253,7 +258,7 @@ describe("chat writes", () => {
     });
     expect(test.store.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace", channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
-      author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Sam",
+      author: { kind: "agent", displayName: "Agent" }, authorOwnerDisplayName: "Sam",
       authorUserId: "user-1", origin: "cli", needsDecision: true, options: ["A", "B"],
     }));
     expect(test.effects.projectChatBookmarks).toHaveBeenCalledWith("workspace");
@@ -266,7 +271,7 @@ describe("chat writes", () => {
     await test.writes.sendMessage(test.place, {
       writer: PERSON, threadId: "thread", body: "@Codex and @nova, plan the day", resolveAttachments: async () => [],
     });
-    expect(test.store.sendMessage.mock.calls[0]![0].namedAgentIds).toEqual(["default", "codex"]);
+    expect(test.store.sendMessage.mock.calls[0]![0].wakeAgentIds).toEqual(["default", "codex"]);
     await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "human" }, threadId: "thread", body: "@Codex plan", resolveAttachments: async () => [],
     });
@@ -276,7 +281,29 @@ describe("chat writes", () => {
     await test.writes.sendMessage(test.place, {
       writer: PERSON, threadId: "thread", body: "No one named", resolveAttachments: async () => [],
     });
-    for (const [input] of test.store.sendMessage.mock.calls.slice(1)) expect(input).not.toHaveProperty("namedAgentIds");
+    for (const [input] of test.store.sendMessage.mock.calls.slice(1)) expect(input).not.toHaveProperty("wakeAgentIds");
+  });
+
+  it("wakes the agent of the DM a person writes in, unless they run it", async () => {
+    const test = fixture();
+    const send = (wireId: string) => {
+      test.store.getChannelWireId.mockResolvedValueOnce(wireId);
+      return test.writes.sendMessage(test.place, {
+        writer: PERSON, threadId: "thread", body: "Plan the day", resolveAttachments: async () => [],
+      });
+    };
+    await send("channel_wire_agent_v1_codex");
+    await send("channel_wire_agent_v1");
+    await send("channel_wire_agent_v1_terminal");
+    const woken = test.store.sendMessage.mock.calls.map(([input]) => input.wakeAgentIds);
+    expect(woken).toEqual([["codex"], ["default"], undefined]);
+    // An agent's reply looks up no DM and wakes nobody.
+    test.store.getChannelWireId.mockClear();
+    await test.writes.sendMessage(test.place, {
+      writer: AGENT, threadId: "thread", body: "Done", resolveAttachments: async () => [],
+    });
+    expect(test.store.getChannelWireId).not.toHaveBeenCalled();
+    expect(test.store.sendMessage.mock.calls[3]![0]).not.toHaveProperty("wakeAgentIds");
   });
 
   it("writes a dispatched run's reply as its agent, by id and settings name", async () => {
@@ -359,12 +386,16 @@ describe("chat writes", () => {
     expect(test.store.sendMessage.mock.calls[0]![0]).not.toHaveProperty("authorUserId");
   });
 
-  it("resolves the target's wire id once, and not at all without joined channels", async () => {
+  it("resolves the target's wire id once, and for a reaction only with joined channels", async () => {
     const test = fixture();
-    await test.writeEach.send();
     await test.writeEach.toggle();
+    await test.writeEach.start();
     expect(test.store.findThreadChannelId).not.toHaveBeenCalled();
     expect(test.store.getChannelWireId).not.toHaveBeenCalled();
+    // A person's message finds its DM's agent from the wire id.
+    test.events.length = 0;
+    await test.writeEach.send();
+    expect(test.events).toEqual(["warm", "channel", "wire", "attachments", "write"]);
     test.row.sharedChannels = [joined];
     test.events.length = 0;
     await test.writeEach.send();
@@ -467,13 +498,16 @@ describe("chat writes", () => {
 
     // Admission skipped the wire id lookup because nothing was joined. A join
     // before the row makes the lookup necessary, and the write does it then.
+    // An agent's message, unlike a person's, has no DM lookup that finds it first.
     it("writes to a local thread when an unrelated channel is joined mid-write", async () => {
       const test = fixture();
       test.attachments.mockImplementationOnce(async () => {
         test.row.sharedChannels = [{ ...joined, channelWireId: "elsewhere", access: "read-only" }];
         return [];
       });
-      await expect(test.writeEach.send()).resolves.toMatchObject({ authorUserId: "user-1" });
+      await expect(test.writes.sendMessage(test.place, {
+        writer: AGENT, threadId: "thread", body: "Hi", resolveAttachments: test.attachments,
+      })).resolves.toMatchObject({ authorUserId: "user-1" });
       expect(test.events).toEqual(["warm", "channel", "wire", "write"]);
     });
 
@@ -540,7 +574,7 @@ describe("chat writes", () => {
       test.events.push("scan");
     });
     const answered = await test.writeEach.answer();
-    expect(test.events).toEqual(["warm", "attachments", "hold", "write", "resolve", "release", "scan"]);
+    expect(test.events).toEqual(["warm", "channel", "wire", "attachments", "hold", "write", "resolve", "release", "scan"]);
     expect(test.store.resolveChatDecision).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "question",
       resolvedByMessageId: "message", chosenOption: "Monday",
@@ -623,7 +657,7 @@ describe("chat writes", () => {
     });
     expect(test.store.setReaction).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
-      author: { authorId: "user-1", kind: "agent", displayName: "Nova" }, replicationAuthorId: "user-1",
+      author: { authorId: "user-1", kind: "agent", displayName: "Agent" }, replicationAuthorId: "user-1",
     });
   });
 
@@ -687,17 +721,55 @@ describe("ActorKey local admission", () => {
     expect(parseActorKey(switched.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-2" });
   });
 
-  it.each([undefined, " Opus "])("records the actual handshake claim (%s), matching History", async (agentName) => {
+  // "default" and "codex" are the person's agents' ids, and Nova is one of their
+  // names. Outside a run dohc dispatched, any name is only a claim: the message
+  // shows it, under the unnamed agent's key, as History records the agent's edits.
+  it.each([undefined, " Opus ", "Nova", "default", "codex"])("keys an agent's message outside a run as the unnamed agent, showing its name (%s)", async (agentName) => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
     });
-    const history = deriveMomentActor({ kind: "agent", agentId: agentName ?? "dohc-mcp", onBehalfOf: "user-1" }, {
+    const history = deriveMomentActor({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "user-1" }, {
       source: "own-store", origin: "cli", workspaceId: "workspace",
       identity: { installationId: "local-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "user-1" } },
     }, "Agent");
     expect(parseActorKey(sent.authorActorKey!)).toEqual(history.key);
-    expect(sent.author.displayName).toBe(agentName ?? "Nova");
+    expect(sent.author.displayName).toBe(agentName ?? "Agent");
+    expect(sent.authorAgentId).toBeUndefined();
+  });
+
+  // An agent you run is the person's own agent: its id is no claim, so its
+  // message is keyed by that id and never shows as a connected agent.
+  it("keys an agent you run's message by its id and settings name, not as a connected agent", async () => {
+    const test = fixture();
+    const sent = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentId: "terminal" }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    expect(sent.author.displayName).toBe("Terminal");
+    expect(sent.authorAgentId).toBe("terminal");
+    expect(parseActorKey(sent.authorActorKey!)).toMatchObject({ kind: "agent", claimedName: "terminal" });
+    expect(isConnectedAgentId(sent.authorAgentId)).toBe(false);
+  });
+
+  it("keeps what an agent reported beside its name, and never on a person's message", async () => {
+    const test = fixture();
+    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const agent = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName: "Nova", reported }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(agent.author.displayName).toBe("Nova");
+    expect(agent.authorReported).toEqual(reported);
+    const unreported = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName: "Nova" }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(unreported).not.toHaveProperty("authorReported");
+    const person = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "human", reported }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(person).not.toHaveProperty("authorReported");
   });
 
   it("stores CLI human origin and automation definition identity locally", async () => {

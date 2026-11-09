@@ -264,7 +264,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const socketHome = await createTestScratch("cli-");
     server = await startCliServer({ stateDir: socketHome, listWorkspaces: () => [workspace], openWorkspace: async () => context,
       chatWrites: {} as CliServerOptions["chatWrites"], localUserDisplayName: () => "Test", localPersonId: () => person.humanId,
-      agentRunDepth: () => 0, dispatchedAgent: () => null, dispatchedRunId: () => null, agentRunWorkspace: () => undefined });
+      agentRunDepth: () => 0, dispatchedAgent: () => null, dispatchedRunId: () => null, dispatchedRunSecret: () => null, agentWriteRunId: () => null, agentRunWorkspace: () => undefined, connectedAgent: async () => null });
     const token = (await readFile(server.tokenPath, "utf8")).trim();
     const request = async (verb: "fileMove" | "historyUndo", args: object) => {
       const socket = createConnection(server!.socketPath); socket.setEncoding("utf8");
@@ -307,6 +307,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     }
     expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
     expect(await readFile(join(rootPath, "folder/tracked.txt"), "utf8")).toBe("typed after move\n");
+    // The MCP Undo above gave the name "dohc-mcp". The same agent without a name is the same author.
     const replay = await history.undoHistoryOperation({ workspaceId: workspace.workspaceId, operationId, requestId: `move-undo:${operationId}`,
       author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId } });
     expect(replay).toMatchObject({ deduped: true, momentCount: 4 });
@@ -315,8 +316,9 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     const folderReason = "Undo for a folder move isn't available yet. Move it back yourself.";
     expect(folder).toMatchObject({ ok: true, undo: { available: false, reason: folderReason, paths: [] } });
     const folderId = (folder as { operationId: string }).operationId;
-    expect(await request("historyUndo", { operationId: folderId })).toEqual({ ok: false, reason: folderReason });
-    expect(await owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId: folderId })).toEqual({ ok: false, reason: folderReason });
+    const refused = { ok: false, reason: folderReason, refusal: { code: "unexplained" } };
+    expect(await request("historyUndo", { operationId: folderId })).toEqual(refused);
+    expect(await owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId: folderId })).toEqual(refused);
     expect(await capture.fileObjectIdForPath("archive/folder/tracked.txt")).toBe(object);
     await expect(stat(join(rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
   } finally {

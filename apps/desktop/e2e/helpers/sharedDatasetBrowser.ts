@@ -1,10 +1,14 @@
 import https from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
+import { createLiveBufferBudget } from "@dohc/live-session-contract/live-connection";
+import { createLiveGateway } from "../../../../services/share-web/src/liveGateway";
 import { createShareWebApplication } from "../../../../services/share-web/src/server";
+import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHostLiveProfile";
 import { desktopRoot } from "./desktopApp";
 
 export const sharedDatasetViewerOrigin = "https://viewer.example.com";
@@ -31,11 +35,12 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
   const { tls, cert } = testCertificate();
   const spki = createHash("sha256").update(cert.publicKey.export({ type: "spki", format: "der" })).digest("base64");
   const failures: string[] = [];
-  const application = createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
+  const createApplication = () => createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
     relayExchangeKey: input.exchangeKey, publicHosts: new Set(["viewer.example.com"]),
     viewerAssetsDir,
     appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
     ...(input.editLinks ? editLinkOptions : {}) });
+  let application = createApplication();
   const server = https.createServer(tls, async (request, response) => {
     try {
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -48,27 +53,46 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
       response.end(Buffer.from(await result.arrayBuffer()));
     } catch (error) { failures.push(String(error)); response.writeHead(500); response.end(); }
   });
+  // The live editor's socket, built as share-web's main.ts builds it, with a self-hosted server's limits.
+  const limits = selfHostLiveProfile().gateway;
+  const createLinkGateway = () => application.linkLive ? createLiveGateway({ bufferBudget: createLiveBufferBudget(limits.maxBufferedBytes),
+    publicHosts: new Set(["viewer.example.com"]), publicOrigin: sharedDatasetViewerOrigin, path: "/api/live/link", limits,
+    resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute }) : undefined;
+  let linkGateway = createLinkGateway();
+  if (linkGateway) server.on("upgrade", (request, socket, head) => {
+    if (request.url?.startsWith("/api/live/link?") && linkGateway) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
+  });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw Error("No TLS listener.");
-  const closeServer = async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
+  const closeServer = async () => { linkGateway?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
   try {
     const browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${spki}`,
       `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`, "--no-proxy-server"] });
-    return { browser, failures, handle: application.handle, async close() { try { await browser.close(); } finally { await closeServer(); } } };
+    return { browser, failures,
+      // Always the running share-web, so a handle taken before restart() reaches the new one.
+      handle: (request: Request) => application.handle(request),
+      // A share-web restart: a new process's memory behind the same address. The relay keeps what lasts.
+      restart() { linkGateway?.close(); application = createApplication(); linkGateway = createLinkGateway(); },
+      async close() { try { await browser.close(); } finally { await closeServer(); } } };
   } catch (error) { await closeServer(); throw error; }
 }
 
 /** A certificate for the viewer and app hosts. Windows makes it with PowerShell, other hosts with OpenSSL. */
 function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
   if (process.platform !== "win32") {
-    const config = "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
-      "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n";
-    const pem = execFileSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-      "-config", "/dev/stdin", "-keyout", "/dev/stdout", "-out", "/dev/stdout"], { input: config, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-    const key = /-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----/u.exec(pem)?.[0];
-    const certPem = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/u.exec(pem)?.[0];
-    if (!key || !certPem) throw new Error("OpenSSL did not print a key and certificate.");
-    return { tls: { key, cert: certPem }, cert: new X509Certificate(certPem) };
+    // Files, not /dev/stdin and /dev/stdout: on Linux a child's stdio is a socket, which those can't open.
+    const dir = mkdtempSync(join(tmpdir(), "dohc-dataset-cert-"));
+    try {
+      const [config, keyPath, certPath] = [join(dir, "req.cnf"), join(dir, "key.pem"), join(dir, "cert.pem")];
+      writeFileSync(config, "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
+        "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n");
+      execFileSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        "-config", config, "-keyout", keyPath, "-out", certPath], { stdio: ["ignore", "pipe", "pipe"] });
+      const certPem = readFileSync(certPath, "utf8");
+      return { tls: { key: readFileSync(keyPath, "utf8"), cert: certPem }, cert: new X509Certificate(certPem) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
   const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
 $req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-dataset-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)

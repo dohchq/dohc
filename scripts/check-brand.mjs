@@ -41,6 +41,8 @@ const forbidden = [
 ]
 
 const violations = []
+// A stray Windows-1252 byte, such as 0x85 for an ellipsis, can show as a broken character.
+const utf8 = new TextDecoder('utf-8', { fatal: true })
 const trackedFiles = execFileSync('git', ['ls-files', '-z'], {
   cwd: root,
   encoding: 'utf8',
@@ -63,7 +65,14 @@ for (const path of trackedFiles) {
     violations.push(`${path}: contains a NUL byte`)
     continue
   }
-  const lines = body.toString('utf8').split(/\r?\n/)
+  let text
+  try {
+    text = utf8.decode(body)
+  } catch {
+    violations.push(`${path}: is not valid UTF-8`)
+    continue
+  }
+  const lines = text.split(/\r?\n/)
   for (let index = 0; index < lines.length; index += 1) {
     for (const pattern of forbidden) {
       if (pattern.regex.test(lines[index])) {

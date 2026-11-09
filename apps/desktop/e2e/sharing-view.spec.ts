@@ -35,7 +35,7 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
     await writeWorkspaceFiles(temp, [{ path: "docs/plan.md", contents: "# Plan\n\nShare me.\n" }]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [
       { workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" } },
@@ -53,7 +53,6 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
       env: {
         DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
         DOHC_TEST_SYNC_BACKOFF_MS: "250",
-        DOHC_TEST_EXPLORER_MENU_CHOICE: "share",
       },
     });
     const page = desktop.page;
@@ -61,6 +60,7 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
 
     await revealExplorerPath(page, "docs/plan.md");
     await explorerRow(page, "docs/plan.md").click({ button: "right" });
+    await page.getByTestId("explorer-menu-item-share").click();
     const dialog = page.getByTestId("share-dialog");
     await dialog.getByTestId("share-email").fill(RECIPIENT_EMAIL);
     await dialog.getByTestId("share-create").click();
@@ -79,10 +79,10 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await expect(view).toBeVisible();
     await expect(page.getByTestId(activityPin("sharing"))).toHaveAttribute("aria-current", "page");
 
-    // Shared by me lists the grant with what it covers and who has it, focused.
+    // Shared by me lists the grant with what it covers and who can do what, focused.
     const row = view.getByTestId("sharing-granted-row").filter({ hasText: "plan.md" });
     await expect(row).toBeVisible();
-    await expect(row).toContainText("docs/");
+    await expect(row.getByTestId("sharing-row-who")).toHaveText(`${RECIPIENT_EMAIL} can view`);
     await expect(row).toHaveAttribute("data-status", "active");
     await expect(row.locator("[data-sharing-row-focus]")).toBeFocused();
 
@@ -141,7 +141,7 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
       { path: "docs/plan.md", contents: "# Plan\n" },
       { path: "shared-with-me/notes/notes.md", contents: "# Notes\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [{
       workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" },
@@ -170,20 +170,20 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     const row = page.locator(`[data-testid="sharing-received-row"][data-share-id="${shareId}"]`);
     await expect(row).toHaveAttribute("data-status", "removed");
     await expect(row).toContainText("notes");
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("removed");
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("Removed");
 
     // Dismiss hides the skipped changes; the record stays, so the menu shows them again.
     const skipped = page.getByTestId("sharing-skipped");
     await expect(skipped).toHaveCount(1);
     await page.getByTestId("sharing-skipped-dismiss").click();
     await expect(skipped).toHaveCount(0);
-    await row.hover();
+    await row.locator("[data-sharing-row-focus]").hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "Show skipped changes" }).click();
     await expect(skipped).toHaveCount(1);
 
     // Remove takes the share off this computer.
-    await row.hover();
+    await row.locator("[data-sharing-row-focus]").hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "Remove from workspace" }).click();
     await expect(row).toHaveCount(0);

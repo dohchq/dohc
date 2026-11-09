@@ -99,13 +99,16 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // Without control characters, quotes and backslashes take at most 2 bytes.
-// The largest live entry is a declared agent: a 71-byte skeleton + 3 * 2 * 512
-// bytes for its id, name and principal = 3,143 bytes. The largest two-field
+// The largest live entry is an agent in a run on the owner's devices: a
+// 72-byte skeleton + 3 * 2 * 512 bytes for its id, run and principal = 3,144
+// bytes. A declared agent's name takes one byte less. The largest two-field
 // entries, an 80-byte Edit link at the largest grant generation and a 66-byte
 // automation, take 2,128 and 2,114 bytes.
 pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
-    r#"{"agentId":"","agentName":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len()
-        + 3 * 2 * MAX_AUTHOR_FIELD_BYTES,
+    larger(
+        r#"{"agentId":"","agentRunId":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len(),
+        r#"{"agentId":"","agentName":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len(),
+    ) + 3 * 2 * MAX_AUTHOR_FIELD_BYTES,
     larger(
         r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len(),
         r#"{"grantGeneration":9007199254740991,"grantId":"","kind":"link","principalId":""}"#.len(),
@@ -1476,6 +1479,7 @@ pub fn validate_moment_metadata(
         };
         for field in [
             "agentId",
+            "agentName",
             "automationId",
             "humanId",
             "onBehalfOf",

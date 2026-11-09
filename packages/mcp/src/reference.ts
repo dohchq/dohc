@@ -43,7 +43,7 @@ type AppKind = OwnerAppPublicationResult["kind"];
 // The result kinds the desktop answers each `dohc dataset` verb with
 // (apps/desktop/src/ipc/datasetIpc.ts). A new action fails typecheck here.
 export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
-  list: ["list"],
+  list: ["list", "collections-refused"],
   describe: ["description"],
   history: ["history"],
   historyRevision: ["history-revision"],
@@ -72,6 +72,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   approve: ["approved"],
   discard: ["discarded"],
   prepareMigration: ["migration-prepared"],
+  askToApply: ["change-asked"],
   migrationPreviewPage: ["migration-preview-page"],
   prepareSchemaChange: ["migration-prepared"],
   approveMigration: ["migrated"],
@@ -85,9 +86,10 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
 export const APP_RESULTS: Record<AppAction, AppKind[]> = {
   createLink: ["linkCreated", "urlUnavailable"],
   listLocal: ["localListed"],
+  checkLocal: ["localChecked"],
   prepareLocal: ["prepared"],
   launchLocal: ["localLaunched"],
-  list: ["listed"],
+  list: ["listed", "listUnavailable"],
   prepare: ["prepared"],
   approve: ["published"],
   cancel: ["cancelled"],
@@ -116,7 +118,7 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
-const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
+const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy", agents: "shareAgents", disconnect: "shareDisconnect" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
   refresh: "accessRefresh",
@@ -161,12 +163,13 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],
+  watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
   inbox: [["chat", "inbox"]],
   show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
-  post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
+  post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "--as-agent", "--agent", "Scout", "Ship", "it?"]],
   reply: [
     ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
-    ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "Done"],
+    ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
   ],
   react: [["chat", "react", "msg_1", "👍"]],
   grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
@@ -186,6 +189,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_links_in: { cli: "linksIn" },
   dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
+  dohc_list_link_agents: { cli: "shareAgents" },
+  dohc_disconnect_link_agent: { cli: "shareDisconnect" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
@@ -228,6 +233,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_import_data: "`{ ok: true, path, tableName, rowCount }`",
   dohc_query_database: "`{ ok: true, rows }`, with at most 1,000 rows.",
   dohc_list_file_chats: { cli: "fileChats" },
+  dohc_wait_for_messages: { cli: "watch" },
   dohc_read_chat: { cli: "chat" },
   dohc_list_groups: { cli: "groupsFull" },
   dohc_start_group_chat: "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
@@ -407,8 +413,10 @@ export async function mcpToolNames(shareAccess?: ShareAccess): Promise<string[]>
 // does not offer changes the workspace.
 const NOT_SHARED_READS: Record<string, string> = {
   dohc_live_documents: "Live document status requires the owning workspace. Shared profiles do not offer this read.",
+  dohc_wait_for_messages: "The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.",
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_link_agents: "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",
@@ -577,9 +585,9 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Under **You run on this computer**, add an agent you run or pick one, and copy its **MCP config** into your agent's MCP settings. The server works on one workspace. The config ends with \`--agent-id <id>\`, so your agent posts under that agent's name and waits for its own messages.
 - **CLI.** The \`dohc\` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their \`PATH\`.
-- **Share links.** A share link has its own MCP server, \`dohc-share\`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
+- **Share links.** A share link has its own MCP server, \`dohc-share\`, with other tools. This page does not list them. Its address is \`/mcp/s/<secret>\` on the share's server, where \`<secret>\` is the text after \`#\` in the link. Add that address to an MCP client that supports MCP sign-in. The client opens a consent page, and a person selects **Allow**. Anyone who has the address can do this and get the link's full access, so share it only as you share the link. The [share-web README](../../services/share-web/README.md) describes each step.
 
 ## Versions and changes
 

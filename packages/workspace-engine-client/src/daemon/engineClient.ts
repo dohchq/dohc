@@ -10,7 +10,7 @@ import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
 import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type YdocOwnerDraft } from "../ydoc/ydocWireContract";
 import {validateUserWritePath} from "@dohc/workspace-core";
-import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
+import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalEntry, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 import { firstOpenCandidateBinding, firstOpenCandidateUploadBytes, parseFirstOpenCandidateCheck, type FirstOpenCandidateCheck, type FirstOpenCandidateInput } from "./firstOpenCandidateCheck";
 import { keepEngineRunScope } from "./engineRunScope";
@@ -131,6 +131,18 @@ export interface LiveApplicationBootstrap {
   readonly baselineBytes: Uint8Array;
 }
 
+/** The accepted prefix a release kept: its endpoint in the lineage's accepted history. */
+export interface RetainedPrefixBody {
+  readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  readonly eventCount: number;
+  readonly historyEvidenceDigest: string;
+}
+
+/** The released prefix a successor adopts, after its predecessor, the released chain tail. */
+export interface RetainedPrefix extends RetainedPrefixBody {
+  readonly predecessorActivationId: string;
+}
+
 /** Trusted main-process evidence acquired from the authenticated relay journal. */
 export interface LiveOwnerAdoptionCut {
   readonly relayDatabaseNamespace: string;
@@ -142,6 +154,8 @@ export interface LiveOwnerAdoptionCut {
   readonly baselineRegisteredAtMs: number;
   readonly expectedLocalSequence: number;
   readonly terminalReceipt: AdmittedLiveUpdate["metadata"]["accepted"]["receipt"] | null;
+  /** A successor's prefix, with no events after it; null for a lineage's first adoption. */
+  readonly retainedPrefix: RetainedPrefix | null;
   readonly baselineBytes: Uint8Array;
   readonly events: readonly AdmittedLiveUpdate[];
 }
@@ -701,6 +715,9 @@ export interface EngineClientSpawnOptions {
   signal?: AbortSignal;
   onStderr?: (text: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /** Starts the engine as the leader of its own process group, so a stop signal
+   * sent to the owner's group reaches the owner only. Off by default. */
+  ownProcessGroup?: boolean;
 }
 
 export interface EngineClientConnectOptions {
@@ -804,7 +821,7 @@ export class EngineClient implements EngineTransport {
   }
 
   async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget & {recovery?:boolean}, signal?: AbortSignal): Promise<
-    {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor}
+    {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor} | {status:"retired"}
   > {
     const params=ownerDeliveryTarget(target);
     const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.prepareEnrollment",3*1024*1024,()=>({params:{...params,...(target.recovery ? {recovery:true} : {})},streams:[]}),signal);
@@ -814,6 +831,7 @@ export class EngineClient implements EngineTransport {
       if (JSON.stringify(draft.binding)!==JSON.stringify(params.binding) || draft.relayDatabaseNamespace!==params.relayDatabaseNamespace) throw new TypeError("Owner enrollment target changed.");
       return {status:"observed",draft};
     }
+    if (row.status==="retired" && Object.keys(row).join()==="status") return {status:"retired"};
     if (row.status!=="capture" || Object.keys(row).sort().join()!=="captured,status") throw new TypeError("Invalid owner capture response.");
     const captured=row.captured as {nativeHeadSequence:number;localStateDigest:string};
     if (!captured || Object.keys(captured).sort().join()!=="localStateDigest,nativeHeadSequence" || !Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0) throw new TypeError("Invalid owner capture.");
@@ -866,10 +884,11 @@ export class EngineClient implements EngineTransport {
     if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
     return value.stops.map((row: unknown) => {
       // Only a release says whether settlement wrote the file.
-      const optional = action === "release" ? ["deferred", "keptSnapshot", "materialized"] : ["deferred", "keptSnapshot"];
+      const optional = action === "release" ? ["deferred", "keptSnapshot", "materialized", "settlementReason"] : ["deferred", "keptSnapshot"];
       if (!row || typeof row !== "object" || Object.keys(row).filter(key => !optional.includes(key)).sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
-      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;keptSnapshot?: unknown;materialized?: unknown};
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;keptSnapshot?: unknown;materialized?: unknown;settlementReason?: unknown};
       if (r.materialized !== undefined && typeof r.materialized !== "boolean") throw new TypeError("Invalid Stop materialization.");
+      if (r.settlementReason !== undefined && (r.settlementReason !== "markdown-write-held" || r.materialized !== false || r.state !== "released")) throw new TypeError("Invalid Stop settlement reason.");
       if (r.keptSnapshot !== undefined && (typeof r.keptSnapshot !== "string" || !KEPT_SNAPSHOT.test(r.keptSnapshot) || r.binding === null)) throw new TypeError("Invalid Stop kept edits.");
       if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
       const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
@@ -885,6 +904,7 @@ export class EngineClient implements EngineTransport {
       }
       return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {}),
         ...(typeof r.keptSnapshot === "string" ? {keptSnapshot:r.keptSnapshot} : {}),
+        ...(r.settlementReason === "markdown-write-held" ? {settlementReason: r.settlementReason} : {}),
         ...(typeof r.materialized === "boolean" ? {materialized:r.materialized} : {})};
     });
   }
@@ -1050,7 +1070,9 @@ export class EngineClient implements EngineTransport {
   private bufferedBlobChunks = 0;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly abandonedRequestIds = new Set<number>();
-  private readonly abandonedBlobStreamIds = new Set<number>();
+  // The wire ID of the abandoned request each dropped stream belongs to, until
+  // the stream's FIN or the request's own answer, which is its last frame.
+  private readonly abandonedBlobStreams = new Map<number, number>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
   private readonly readyPromise: Promise<EngineClient>;
   private readyResolve!: (client: EngineClient) => void;
@@ -1279,6 +1301,12 @@ export class EngineClient implements EngineTransport {
       this.pending.delete(wireId);
       if (pending && transmitted) this.abandonedRequestIds.add(wireId);
       if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      // Its streams' later frames are dropped, so their buffers leave the budget now.
+      for (const [streamId, stream] of this.blobStreams) {
+        if (stream.start.requestId !== wireId) continue;
+        this.releaseBlobStream(streamId, stream);
+        this.abandonedBlobStreams.set(streamId, wireId);
+      }
       pending?.reject(error);
       unsent.abort(error);
       if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
@@ -1646,7 +1674,7 @@ export class EngineClient implements EngineTransport {
     return parseFirstOpenCandidateCheck(response.result, binding);
   }
 
-  async applyReplicaJournalPage(request: Omit<LiveApplicationRequest, "registrationId">, after: number, epochLogFloor: number, rows: readonly ReplicaJournalRow[], signal?: AbortSignal): Promise<ReplicaPageResult> {
+  async applyReplicaJournalPage(request: Omit<LiveApplicationRequest, "registrationId">, after: number, epochLogFloor: number, rows: readonly ReplicaJournalEntry[], signal?: AbortSignal): Promise<ReplicaPageResult> {
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("Invalid replica cursor.");
     if (!Number.isSafeInteger(epochLogFloor) || epochLogFloor < 0) throw new TypeError("Invalid replica epoch floor.");
     const bytes = encodeReplicaJournalPage(rows);
@@ -1768,7 +1796,7 @@ export class EngineClient implements EngineTransport {
         for (const [streamId, stream] of this.blobStreams) {
           if (stream.start.requestId !== restoreOutput.wireId) continue;
           this.releaseBlobStream(streamId, stream);
-          this.abandonedBlobStreamIds.add(streamId);
+          this.abandonedBlobStreams.set(streamId, restoreOutput.wireId);
         }
       }
       this.liveUploadBytes -= charge;
@@ -2140,7 +2168,7 @@ export class EngineClient implements EngineTransport {
     // and a reuse simply starts a fresh stream bound to its own known request.
     if (
       this.blobStreams.has(start.streamId) ||
-      this.abandonedBlobStreamIds.has(start.streamId)
+      this.abandonedBlobStreams.has(start.streamId)
     ) {
       throw new BlobStreamError(
         "duplicate-blob-stream",
@@ -2168,7 +2196,7 @@ export class EngineClient implements EngineTransport {
       );
     }
     if (this.abandonedRequestIds.has(start.requestId)) {
-      this.abandonedBlobStreamIds.add(start.streamId);
+      this.abandonedBlobStreams.set(start.streamId, start.requestId);
       return;
     }
     if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
@@ -2235,8 +2263,8 @@ export class EngineClient implements EngineTransport {
   }
 
   private receiveBlobChunk(frame: Extract<Frame, { kind: "blobChunk" }>): void {
-    if (this.abandonedBlobStreamIds.has(frame.streamId)) {
-      if (frame.fin) this.abandonedBlobStreamIds.delete(frame.streamId);
+    if (this.abandonedBlobStreams.has(frame.streamId)) {
+      if (frame.fin) this.abandonedBlobStreams.delete(frame.streamId);
       return;
     }
     const stream = this.blobStreams.get(frame.streamId);
@@ -2341,7 +2369,7 @@ export class EngineClient implements EngineTransport {
   private resolveResponse(response: Response): void {
     const pending = this.pending.get(response.id);
     if (!pending) {
-      if (this.abandonedRequestIds.delete(response.id)) return;
+      if (this.forgetAbandoned(response.id)) return;
       throw new EngineClientError(
         "protocol-error",
         `Received response for unknown request ${response.id}.`,
@@ -2374,7 +2402,7 @@ export class EngineClient implements EngineTransport {
     }
     const pending = this.pending.get(id);
     if (!pending) {
-      if (this.abandonedRequestIds.delete(id)) return;
+      if (this.forgetAbandoned(id)) return;
       throw new EngineClientError(
         "protocol-error",
         `Received error for unknown request ${id}.`,
@@ -2389,6 +2417,15 @@ export class EngineClient implements EngineTransport {
       this.releaseBlobStream(streamId, stream);
     }
     pending.reject(new EngineRequestError(pending.callerId, wireError));
+  }
+
+  /** Whether `id` was abandoned. Its answer ends it, and its streams with it. */
+  private forgetAbandoned(id: number): boolean {
+    if (!this.abandonedRequestIds.delete(id)) return false;
+    for (const [streamId, requestId] of this.abandonedBlobStreams) {
+      if (requestId === id) this.abandonedBlobStreams.delete(streamId);
+    }
+    return true;
   }
 
   private releaseBlobStream(streamId: number, stream: PendingBlob): void {
@@ -2498,7 +2535,7 @@ export class EngineClient implements EngineTransport {
     }
     this.pending.clear();
     this.abandonedRequestIds.clear();
-    this.abandonedBlobStreamIds.clear();
+    this.abandonedBlobStreams.clear();
     this.blobStreams.clear();
     this.bufferedBlobBytes = 0;
     this.bufferedBlobChunks = 0;
@@ -2574,6 +2611,8 @@ export async function createEngineClient(
       [ENGINE_AUTH_TOKEN_ENV]: options.authToken,
     },
     stdio: ["pipe", "pipe", "pipe"],
+    // The engine still exits when its owner dies, because its stdin closes.
+    ...(options.ownProcessGroup ? { detached: true } : {}),
     windowsHide: true,
   }) as ChildProcessWithoutNullStreams;
   const connection = Duplex.from({

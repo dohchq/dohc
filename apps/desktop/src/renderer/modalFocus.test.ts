@@ -12,6 +12,27 @@ function dialogWith(markup: string): HTMLDivElement {
   return dialog;
 }
 
+describe("F6 into the toasts", () => {
+  it("lands on a toast's first worded action, and on Details when it has no other", () => {
+    const dialog = dialogWith("<button>Review change</button>");
+    const action = dialog.querySelector("button")!;
+    const toasts = document.createElement("div");
+    toasts.setAttribute("data-dohc-toasts", "");
+    toasts.innerHTML = `
+      <div><button>Show more</button><div data-toast-actions><button>Try again</button><button>Details</button></div><button>Close</button></div>
+      <div><button>Show more</button><div data-toast-actions><button>Details</button></div><button>Close</button></div>`;
+    document.body.append(toasts);
+    const f6 = () => switchModalRegion(new KeyboardEvent("keydown", { key: "F6", cancelable: true }), dialog);
+    action.focus();
+    expect(f6()).toBe(true);
+    expect(document.activeElement?.textContent).toBe("Try again");
+    toasts.firstElementChild!.remove();
+    action.focus();
+    expect(f6()).toBe(true);
+    expect(document.activeElement?.textContent).toBe("Details");
+  });
+});
+
 describe("modal focus with native summaries", () => {
   it("cycles native summaries in a toast and returns to the dialog on F6", () => {
     const dialog = dialogWith('<button>Review change</button>');

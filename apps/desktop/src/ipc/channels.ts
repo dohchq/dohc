@@ -42,9 +42,8 @@ export function isEditorMenuCommand(command: unknown): command is EditorMenuComm
   return (EDITOR_MENU_COMMANDS as readonly unknown[]).includes(command);
 }
 
-// Explorer context menu: the renderer names what was right-clicked, main pops
-// a native menu built from main-owned labels over this closed set, and the
-// chosen id comes back over the same invoke.
+// Explorer context menu: the renderer names what was right-clicked, and main
+// answers with the entries it offers there, each over this closed set.
 export const EXPLORER_MENU_COMMANDS = [
   "new-file",
   "new-folder",
@@ -195,7 +194,6 @@ export const CHANNELS = {
   closeThisWindow: "desktop:close-this-window",
   revealWorkspaceFolder: "desktop:reveal-workspace-folder",
   createCollectionRecord: "desktop:create-collection-record",
-  showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
   listCollections: "desktop:list-collections",
@@ -222,6 +220,7 @@ export const CHANNELS = {
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   publishOwnerApp: "desktop:publish-owner-app",
+  appViewEvent: "desktop:app-view-event",
   ownerAppResponses: "desktop:owner-app-responses",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
@@ -241,6 +240,7 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
+  agentsListening: "desktop:agents-listening",
   chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
@@ -270,6 +270,7 @@ export const CHANNELS = {
   findDatasetCollection: "desktop:find-dataset-collection",
   findAutomationCollection: "desktop:find-automation-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
+  collectionRulesChanged: "desktop:collection-rules-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.
   listAutomationButtons: "desktop:list-automation-buttons",
@@ -312,6 +313,7 @@ export const CHANNELS = {
   detectAgentTools: "desktop:detect-agent-tools",
   setTitlebarTheme: "desktop:set-titlebar-theme",
   windowFullScreen: "desktop:window-full-screen",
+  windowFocused: "desktop:window-focused",
   stepWindowZoom: "desktop:step-window-zoom",
   agentColorChanged: "desktop:agent-color-changed",
   userSettingsChanged: "desktop:user-settings-changed",
@@ -331,6 +333,7 @@ export const CHANNELS = {
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   workspacePathOpenFailed: "desktop:workspace-path-open-failed",
+  oldWindowStateChanged: "desktop:old-window-state-changed",
   updateState: "desktop:update-state",
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",

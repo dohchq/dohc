@@ -32,7 +32,7 @@ import {
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
 import { registerOperations, type OperationHandlers } from "./operationTable";
-import { ipcWireError } from "./errorWords";
+import { GROUP_NAME_TAKEN_ERROR, ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
@@ -94,15 +94,22 @@ function automationForIpc(automation: NonNullable<ChatMessage["automation"]>, co
   return { automationId: automation.automationId, collectionPath: collectionOf(automation.automationId) };
 }
 
+function linkAgentForIpc(author: ChatMessage["author"]): { linkAgent?: true } {
+  return author.kind === "link" && author.agentConnectionId ? { linkAgent: true } : {};
+}
+
 export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf, presentation: ActorPresentation): ChatMessageRecord {
   return {
     presentation,
     id: message.id,
     threadId: message.threadId,
     authorKind: message.author.kind,
+    ...linkAgentForIpc(message.author),
     authorDisplayName: message.author.displayName,
     ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
     ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
+    ...(message.authorReported ? { authorReported: message.authorReported } : {}),
+    ...(message.authorAgentId ? { authorAgentId: message.authorAgentId } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
       : {}),
@@ -502,12 +509,14 @@ export function registerChatsIpcHandlers<
             presentation,
             id: summary.openingMessage.id,
             authorKind: summary.openingMessage.author.kind,
+            ...linkAgentForIpc(summary.openingMessage.author),
             authorDisplayName: summary.openingMessage.author.displayName,
             ...(summary.openingMessage.authorOwnerDisplayName ? { authorOwnerDisplayName: summary.openingMessage.authorOwnerDisplayName } : {}),
             ...(summary.openingMessage.authorUserId ? { authorUserId: summary.openingMessage.authorUserId } : {}),
             createdAtMs: summary.openingMessage.createdAtMs,
             bodySnippet: summary.openingMessage.bodySnippet,
             ...(summary.openingMessage.automation ? { automation: automationForIpc(summary.openingMessage.automation, collectionOf) } : {}),
+            ...(summary.openingMessage.authorReported ? { authorReported: summary.openingMessage.authorReported } : {}),
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,
@@ -799,7 +808,10 @@ export function registerChatsIpcHandlers<
   ]);
   function groupCreateRefusal(error: unknown): unknown {
     const copy = error instanceof Error ? GROUP_CREATE_REFUSALS.get(error.message) : undefined;
-    return copy === undefined ? error : new Error(copy);
+    if (copy === undefined) return error;
+    const refusal = new Error(copy);
+    if (error instanceof Error && error.message === "channel-exists") refusal.name = GROUP_NAME_TAKEN_ERROR;
+    return refusal;
   }
 
   const createChatChannel: ChatHandler<"createChatChannel"> = async (input) => {

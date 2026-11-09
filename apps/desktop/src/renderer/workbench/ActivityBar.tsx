@@ -23,8 +23,6 @@ function RailButton(props: {
   active?: boolean;
   // Badge dot seam (conflicts, running agent — more arrive in later phases).
   badge?: "danger" | "success";
-  // Numeric badge seam (Phase E5.0: search results count while showing).
-  count?: number;
   onClick?: () => void;
   onContextMenu?: () => void;
   // A node, not a component: dohc's views draw a lucide glyph and a pinned
@@ -33,7 +31,7 @@ function RailButton(props: {
 }) {
   const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
     props.active
-      ? "bg-selected text-ink"
+      ? "bg-selected text-ink font-medium"
       : props.onClick
         ? "text-subtle hover:bg-hover hover:text-ink"
         : "text-subtle"
@@ -48,18 +46,6 @@ function RailButton(props: {
             props.badge === "danger" ? "bg-danger" : "bg-success"
           }`}
         />
-      ) : null}
-      {typeof props.count === "number" ? (
-        <span
-          data-testid={`${props.testId}-count`}
-          className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
-        >
-          {/* Clamp at 99+: the right-anchored pill grows leftward, and at
-              four glyphs ("999+") it spanned ~36px of the 48px rail and
-              detached from its icon. Three glyphs keeps it a corner
-              ornament on the icon tile. */}
-          {props.count > 99 ? "99+" : props.count}
-        </span>
       ) : null}
     </>
   );
@@ -108,8 +94,6 @@ export function ActivityBar(props: {
   activeView: ActivityViewId;
   sidebarVisible: boolean;
   hasConflict: boolean;
-  // Content-search results count; undefined = no badge.
-  searchResultCount?: number;
   // Apps pinned in this workspace, after dohc's own views.
   pinnedApps?: readonly PinnedApp[];
   onPinnedAppMenu?: (appRoot: string) => void;
@@ -127,8 +111,8 @@ export function ActivityBar(props: {
     >
       {/* The view list scrolls, so enough pinned apps never push the
           Sharing and Settings buttons off the rail. It spans the rail and pads
-          its ends, so the clip keeps the active bar, a tile's count, and the
-          focus ring, and never scrolls sideways. */}
+          its ends, so the clip keeps the active bar and the focus ring, and
+          never scrolls sideways. */}
       <div inert={props.viewsDisabled || undefined} className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1">
         {props.views.map((view) => (
           <RailButton
@@ -138,7 +122,6 @@ export function ActivityBar(props: {
             // The rail reflects a collapsed panel: no active mark while hidden.
             active={props.sidebarVisible && props.activeView === view}
             badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
-            count={view === "search" ? props.searchResultCount : undefined}
             onClick={() => props.onSelectView(view)}
             icon={<RailGlyph Icon={VIEW_IDENTITY[view].Icon} />}
           />

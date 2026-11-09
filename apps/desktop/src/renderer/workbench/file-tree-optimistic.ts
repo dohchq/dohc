@@ -2,7 +2,7 @@
 // web app's file-tree-optimistic lib. Retyped for the desktop: FileRow is the
 // {path, kind} wire shape and folders are plain path strings (the pre-pivot
 // _id/title/source fabrication is gone). Pure: pending changes are projected
-// onto (files, folders) until the authoritative refresh confirms them.
+// onto (files, folders) until a listing after main's answer settles them.
 import type { FileRow, FolderInput } from './path-tree'
 
 export type PendingTreeMove = {
@@ -12,10 +12,27 @@ export type PendingTreeMove = {
   toPath: string
 }
 
+// One failed move in the shell's Notices, named by its workspace, source and
+// destination: a later success of the same move removes it.
+export function moveFailureIdentity(workspaceId: string, move: Pick<PendingTreeMove, 'fromPath' | 'toPath'>): string {
+  return `move:${JSON.stringify([workspaceId, move.fromPath, move.toPath])}`
+}
+
+// One refused delete in the shell's Notices: a later delete of the same path
+// removes it.
+export function deleteRefusalIdentity(workspaceId: string, path: string): string {
+  return `delete:${JSON.stringify([workspaceId, path])}`
+}
+
 export type PendingTreeChange =
   | PendingTreeMove
-  | { id: string; kind: 'create-folder'; path: string }
+  | { id: string; kind: 'create-file' | 'create-folder'; path: string }
   | { id: string; kind: 'delete-file' | 'delete-folder'; path: string }
+
+// The path a change starts from.
+export function sourcePath(change: PendingTreeChange): string {
+  return 'path' in change ? change.path : change.fromPath
+}
 
 // Not exported on the desktop (knip single-consumer rule): every caller
 // lives in this module.
@@ -54,6 +71,20 @@ export function projectTreePath(
   )
 }
 
+// Which ends of a move a listing holds. A file's end is that file. A folder's
+// end is the folder or anything in it.
+export function listedMoveEnds(
+  move: PendingTreeMove,
+  files: ReadonlyArray<FileRow>,
+  folders: ReadonlyArray<FolderInput>,
+): { from: boolean; to: boolean } {
+  const listed = (path: string) =>
+    move.kind === 'file'
+      ? files.some((file) => file.path === path)
+      : folders.includes(path) || files.some((file) => pathInsideFolder(file.path, path))
+  return { from: listed(move.fromPath), to: listed(move.toPath) }
+}
+
 export function applyPendingTreeMoves(
   files: ReadonlyArray<FileRow>,
   folders: ReadonlyArray<FolderInput>,
@@ -64,6 +95,12 @@ export function applyPendingTreeMoves(
   let nextFolders = [...folders]
 
   for (const change of moves) {
+    if (change.kind === 'create-file') {
+      if (!nextFiles.some((file) => file.path === change.path)) {
+        nextFiles.push({ path: change.path, kind: 'file' })
+      }
+      continue
+    }
     if (change.kind === 'create-folder') {
       if (!nextFolders.includes(change.path)) nextFolders.push(change.path)
       continue
@@ -83,31 +120,16 @@ export function applyPendingTreeMoves(
   return { files: nextFiles, folders: nextFolders }
 }
 
-export function pendingTreeMoveSettled(
-  move: PendingTreeChange,
-  files: ReadonlyArray<FileRow>,
-  folders: ReadonlyArray<FolderInput>,
+// A change main answered, with `listing`, the request of the first listing
+// asked for after that answer.
+export type AnsweredTreeChange = PendingTreeChange & { listing?: number }
+
+// That listing, or any later one, settles the change whatever paths it holds,
+// so a file put back at a changed path shows as itself. A listing already in
+// flight at the answer settles nothing.
+export function pendingTreeChangeSettled(
+  change: AnsweredTreeChange,
+  listing: number,
 ): boolean {
-  if (move.kind === 'create-folder') {
-    return folders.includes(move.path)
-  }
-  if (move.kind === 'delete-file') {
-    return !files.some((file) => file.path === move.path)
-  }
-  if (move.kind === 'delete-folder') {
-    return (
-      !folders.some((folder) => pathInsideFolder(folder, move.path)) &&
-      !files.some((file) => pathInsideFolder(file.path, move.path))
-    )
-  }
-  if (move.kind === 'file') {
-    return files.some((file) => file.path === move.toPath)
-  }
-  if (move.kind === 'folder') {
-    return (
-      folders.includes(move.toPath) ||
-      files.some((file) => pathInsideFolder(file.path, move.toPath))
-    )
-  }
-  return false
+  return change.listing !== undefined && listing >= change.listing
 }

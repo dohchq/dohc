@@ -6,6 +6,7 @@ import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
+import { explorerMenuOperations } from "./ipc/explorerMenuOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
@@ -23,6 +24,8 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  appViewOperations,
+  AppViewEvent,
   workspaceSyncOperations,
   CaptureHoldsEvent,
   workspaceFolderNameOperations,
@@ -43,10 +46,10 @@ import {
   ExitRoundMessage,
   VersionRoundAnswerPayload,
   VersionRoundMessage,
-  ExplorerMenuCommand,
   MenuCommand,
   CrashReportChangedEvent,
   CollectionCopiesLeftChangedEvent,
+  CollectionRulesChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
@@ -59,11 +62,15 @@ import {
   WorkspaceIdPayload,
   WorkspaceActivated,
   WorkspacePathOpenFailedEvent,
+  WindowFocusedEvent,
   WindowFullScreenEvent,
   crashReportOperations,
   collectionCopiesLeftOperations,
   workspaceTrustOperations,
   WorkspaceTrustChangedEvent,
+  oldWindowOperations,
+  workLinkOperations,
+  OldWindowStateChangedEvent,
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
@@ -78,6 +85,8 @@ import {
   stoppedRunOperations,
   chatDispatchPauseOperations,
   ChatDispatchPausedEvent,
+  agentsListeningOperations,
+  AgentsListeningEvent,
   ChatAgentRequestsChangedEvent,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
@@ -147,6 +156,7 @@ const relay = operationBridge(relayShareOperations, invoke);
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
+  ...operationBridge(explorerMenuOperations, invoke),
   ...operationBridge(settingsOperations, invoke),
   ...operationBridge(chatOperations, invoke),
   ...operationBridge(shareHandoffOperations, invoke),
@@ -206,12 +216,6 @@ const bridge: DohcDesktopBridge = {
   // The invoke RESULT is validated like main→renderer events are: only a
   // member of the closed command set reaches renderer code — anything else
   // reads as null ("dismissed").
-  showExplorerMenu: async (payload) => {
-    const result = ExplorerMenuCommand.safeParse(
-      await ipcRenderer.invoke(CHANNELS.showExplorerMenu, payload),
-    );
-    return result.success ? result.data : null;
-  },
   showWorkbenchMenu: async (payload) => {
     const result = WorkbenchMenuCommand.safeParse(
       await ipcRenderer.invoke(CHANNELS.showWorkbenchMenu, payload),
@@ -273,6 +277,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
+  ...operationBridge(appViewOperations, invoke),
+  onAppViewEvent: listener => onEvent(CHANNELS.appViewEvent, AppViewEvent, listener),
   ...operationBridge(datasetOperations, invoke),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
   ...operationBridge(sharedViewAccessOperations, invoke),
@@ -335,6 +341,8 @@ const bridge: DohcDesktopBridge = {
   onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
+  onCollectionRulesChanged: (listener) =>
+    onEvent(CHANNELS.collectionRulesChanged, CollectionRulesChangedEvent, listener),
   onAutomationRunsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {
@@ -484,6 +492,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onWindowFullScreen: (listener) =>
     onEvent(CHANNELS.windowFullScreen, WindowFullScreenEvent, listener),
+  onWindowFocused: (listener) =>
+    onEvent(CHANNELS.windowFocused, WindowFocusedEvent, listener),
   onAgentColorChanged: listener => onEvent(CHANNELS.agentColorChanged, AgentColorChangedEvent, listener),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
@@ -528,9 +538,13 @@ const bridge: DohcDesktopBridge = {
     return () => { menuCommandListeners.delete(listener); };
   },
   onWorkspaceActivated: (listener) =>
-    onEvent(CHANNELS.workspaceActivated, WorkspaceActivated, ({ file, ...workspace }) => listener(workspace, file)),
+    onEvent(CHANNELS.workspaceActivated, WorkspaceActivated, ({ file, message, ...workspace }) => listener(workspace, file, message)),
   onWorkspacePathOpenFailed: (listener) =>
     onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
+  ...operationBridge(oldWindowOperations, invoke),
+  ...operationBridge(workLinkOperations, invoke),
+  onOldWindowStateChanged: (listener) =>
+    onEvent(CHANNELS.oldWindowStateChanged, OldWindowStateChangedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
@@ -574,6 +588,9 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(chatDispatchPauseOperations, invoke),
   onChatDispatchPaused: (listener) =>
     onEvent(CHANNELS.chatDispatchPaused, ChatDispatchPausedEvent, listener),
+  ...operationBridge(agentsListeningOperations, invoke),
+  onAgentsListening: (listener) =>
+    onEvent(CHANNELS.agentsListening, AgentsListeningEvent, listener),
   onChatAgentRequestsChanged: (listener) =>
     onEvent(CHANNELS.chatAgentRequestsChanged, ChatAgentRequestsChangedEvent, listener),
   // Engine Y.Doc editor binding.

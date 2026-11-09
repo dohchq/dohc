@@ -25,6 +25,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
+use dohc_engine_storage::capture_first_imports;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
@@ -256,7 +257,7 @@ mod capture_file_hold_tests {
         let deletes = Arc::new(AtomicUsize::new(0));
         let observed = deletes.clone();
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
                     if matches!(
                         ctx.action,
@@ -885,6 +886,147 @@ mod capture_file_hold_tests {
     }
 
     #[test]
+    fn a_retire_waits_while_a_pending_write_has_not_placed_the_head() {
+        // dohc#2360. A switch or settle whose placement failed leaves the
+        // head's write pending, so its missing file is not a deletion yet.
+        use dohc_engine_storage::{MaterializationJobSpec, MaterializationOperation, Preimage};
+        let scratch = ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("hold-proof", "main", 1, &NoFaults)
+            .unwrap();
+        let head = offer(&mut store, &input("placed.md", "Target.\n"))
+            .unwrap()
+            .snapshot;
+        let job_id = crate::actor::versions::switch_projection_job_id(
+            "hold-proof",
+            "main",
+            "placed.md",
+            MaterializationOperation::Write,
+            &head.blob_sha256,
+            false,
+        );
+        let spec = MaterializationJobSpec {
+            job_id: job_id.clone(),
+            workspace_id: "hold-proof".into(),
+            target_path: "placed.md".into(),
+            content_sha256: head.blob_sha256.clone(),
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            now_ms: 5,
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::upsert_projection_job(
+                    tx,
+                    &spec,
+                    MaterializationOperation::Write,
+                )
+            })
+            .unwrap();
+        assert!(!scratch.path().join("placed.md").exists());
+        let retire = CaptureRetire {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: "placed.md".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 6,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let moments = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0))
+                })
+                .unwrap()
+        };
+        let count = moments(&store);
+        let retire_once = |store: &mut EngineStore| {
+            capture_retire_on_store(
+                store,
+                &retire,
+                None,
+                scratch.path(),
+                &Root,
+                true,
+                &(),
+                &LeaseRegistry::new(),
+                &NoFaults,
+            )
+        };
+        assert!(matches!(
+            retire_once(&mut store),
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "head-placement-pending"
+                }
+            ))
+        ));
+        assert_eq!(moments(&store), count);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET status='complete',completed_at_ms=7 \
+                     WHERE job_id=?1",
+                    params![job_id],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        // A document settle whose write failed leaves its moment's write pending.
+        let order: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT m.moment_order FROM snapshots s JOIN moments m \
+                     ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id \
+                     WHERE s.workspace_id='hold-proof' AND s.path='placed.md'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        let settle = MaterializationJobSpec {
+            job_id: "ydoc-mat_settle".into(),
+            target_generation: order,
+            ..spec
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::upsert_projection_job(
+                    tx,
+                    &settle,
+                    MaterializationOperation::Write,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            retire_once(&mut store),
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "head-placement-pending"
+                }
+            ))
+        ));
+        assert_eq!(moments(&store), count);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET status='complete',completed_at_ms=7 \
+                     WHERE job_id=?1",
+                    params![settle.job_id],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        assert!(retire_once(&mut store).unwrap().retired.is_some());
+        assert!(moments(&store) > count);
+    }
+
+    #[test]
     fn history_operation_restart_parked_placement_never_reports_restored() {
         #[derive(Default)]
         struct Crash(std::sync::atomic::AtomicUsize);
@@ -1090,12 +1232,16 @@ fn select_released_switch_jobs(
         .filter(|path| path.released_hold)
         .map(|path| path_collision_key(&path.path))
         .collect();
+    // A write above a released path waits for the folder the hold kept.
     for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
         let target = path_collision_key(&target);
         if released.iter().any(|path| {
             target == *path
                 || target
                     .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+                || path
+                    .strip_prefix(target.as_str())
                     .is_some_and(|rest| rest.starts_with('/'))
         }) {
             selected.insert(id);
@@ -1242,6 +1388,50 @@ impl ActorHandle {
         })
         .await
     }
+
+    /// Continue the workspace's unfinished first import, or start one under
+    /// `correlation_id`. Returns the import's correlation id.
+    pub async fn begin_first_import(
+        &self,
+        workspace_id: String,
+        correlation_id: String,
+    ) -> Result<String, RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_first_imports::begin_in(tx, &workspace_id, &correlation_id)
+            })? {
+                TxnOutcome::Committed(correlation_id) => Ok(correlation_id),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
+    /// The correlation id of the workspace's unfinished first import.
+    pub async fn unfinished_first_import(
+        &self,
+        workspace_id: String,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| capture_first_imports::unfinished_in(conn, &workspace_id))
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn finish_first_import(&self, workspace_id: String) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_first_imports::finish_in(tx, &workspace_id)
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     pub async fn capture_recoveries(
         &self,
         workspace_id: String,
@@ -1863,6 +2053,8 @@ struct PreparedCaptureRecovery {
     /// path to a different, disambiguated object.
     object_id: String,
     lineage: dohc_engine_sync::PreparedLocalYdocLineage,
+    /// Decided before the file is ingested, while its old snapshot stands.
+    outcome: dohc_engine_sync::CaptureLineage,
     preserve: bool,
     authors: Option<String>,
 }
@@ -1874,12 +2066,18 @@ fn prepare_capture_recovery_in(
     indexing: &CaptureIndexing,
 ) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
+    let lineage = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?;
+    let outcome = dohc_engine_sync::admit_capture_in_tx(tx, &lineage, &input.path, &input.text)?;
     let mut prepared = PreparedCaptureRecovery {
         object_id: object_id.to_owned(),
-        lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
+        lineage,
+        outcome,
         preserve: false,
         authors: None,
     };
+    if outcome == dohc_engine_sync::CaptureLineage::KeepTail {
+        return Ok(prepared);
+    }
     if let CaptureIndexing::Reader { folds, root, .. } = indexing
         && let Some(fold) = folds
             .iter()
@@ -2053,7 +2251,12 @@ fn capture_ingest_in_tx(
             },
             None => true,
         };
-        let changed = if has_ydoc_state {
+        let keeps_tail = recovery
+            .as_ref()
+            .is_some_and(|prepared| prepared.outcome == dohc_engine_sync::CaptureLineage::KeepTail);
+        let changed = if keeps_tail {
+            None
+        } else if has_ydoc_state {
             let resulting = dohc_engine_sync::ResultingHead::Text {
                 path: &result.snapshot.path,
                 text: &result.snapshot.text,
@@ -2433,7 +2636,7 @@ mod capture_batch_fast_path_tests {
         let trigger_compiles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_compiles = Arc::clone(&trigger_compiles);
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
                     if matches!(
                         context.action,
@@ -2764,6 +2967,46 @@ pub(super) fn ensure_no_pending_undo_placement(
     Ok(())
 }
 
+/// A write that failed to place the active head stays pending, so its file is
+/// missing until replay lands it. Retiring that head would discard the file
+/// instead of waiting for it. The write is a version switch's, or the one that
+/// records the head's latest moment, as for a document settle. Another
+/// version's pending write with the same bytes does not count: replay skips it
+/// while that version is inactive.
+fn ensure_no_pending_head_placement(
+    conn: &Connection,
+    workspace: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    let pending: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs j
+         JOIN versioned_workspaces w ON w.workspace_id=?1
+         JOIN path_aliases a ON a.workspace_id=w.workspace_id AND a.path=j.target_path
+             AND a.version_id=coalesce((SELECT version_id FROM active_versions
+                 WHERE workspace_id=w.workspace_id),w.main_version_id)
+         JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id
+             AND s.object_id=a.object_id
+         WHERE j.workspace_id IN (?1,'') AND j.target_path=?2 AND j.status='pending'
+             AND j.operation='write'
+             AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256
+             AND (j.job_id GLOB 'version-switch-mat_*' OR EXISTS(SELECT 1 FROM moments m
+                 WHERE m.workspace_id=a.workspace_id AND m.moment_id=s.latest_moment_id
+                     AND m.moment_order=j.target_generation)))",
+        )
+        .map_err(StorageError::corrupt_public)?
+        .query_row(params![workspace, path], |r| r.get(0))
+        .map_err(StorageError::corrupt_public)?;
+    if pending {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "head-placement-pending",
+            },
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_capture_target_not_leased(
     conn: &Connection,
     leases: &LeaseRegistry,
@@ -2969,7 +3212,9 @@ fn capture_retire_on_store(
     let outcome = store.write_with(faults, |tx| {
         let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
         let placement_admission = if hold.is_none() {
-            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)
+            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path).and_then(|()| {
+                ensure_no_pending_head_placement(tx, &input.workspace_id, &input.path)
+            })
         } else {
             Ok(())
         };
@@ -3620,6 +3865,7 @@ mod capture_secret_root_guard_tests {
                     path: SECRET_PATH.to_owned(),
                     text: "TOKEN=original".to_owned(),
                     metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms: 2,
                     claim_foreign_head: true,

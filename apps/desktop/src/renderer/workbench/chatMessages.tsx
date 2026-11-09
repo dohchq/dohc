@@ -3,7 +3,7 @@ import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
@@ -12,6 +12,7 @@ import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
 import { SmilePlus } from "lucide-react";
+import { EmptyState } from "../ui/controls";
 import {
   memo,
   useCallback,
@@ -22,23 +23,18 @@ import {
   useId,
   useRef,
   useState,
+  type ReactElement,
   type ReactNode,
   type RefObject,
 } from "react";
+import { useToastsAbove } from "./toastClearance";
 import type {
   ChatAttachmentRecord,
   ChatMessageRecord,
   ChatReactionRecord,
 } from "../../ipc/bridgeContract";
-import {
-  findMentions,
-  type MentionCandidate,
-} from "@dohc/workspace-contracts/chat-mentions";
-import {
-  extractChatFileReferenceTokens,
-  fileReferenceKey,
-  resolveFileMentionNavigationTargets,
-} from "./chatFileMentions";
+import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these same
@@ -73,14 +69,7 @@ export function MentionText(props: {
     fileTokens,
     props.attachments ?? [],
   );
-  // A file token owns its complete source range. A handle-like substring in a
-  // filename is part of the attachment syntax, not a person mention.
-  const mentions = findMentions(props.body, props.candidates, { ignoreCode: true }).filter(
-    (mention) =>
-      !fileTokens.some(
-        (token) => mention.start < token.end && mention.end > token.start,
-      ),
-  );
+  const mentions = chatMentions(props.body, props.candidates, fileTokens);
   const content: ReactNode[] = [];
   let cursor = 0;
   let mentionIndex = 0;
@@ -129,7 +118,7 @@ const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀
 // One-click reactions on the row's hover toolbar.
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
 export const TOOLBAR_BUTTON =
-  "grid size-6 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default";
+  "grid size-7 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default";
 
 // A row's actions, floating over its top-right corner while the row is
 // hovered or holds focus. Only opacity changes, so the row never moves, and
@@ -340,7 +329,7 @@ export function MessageReactions(props: {
       className={`${
         props.hoverToolbar
           ? `${TOOLBAR_BUTTON} text-muted`
-          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink dohc-focus-visible disabled:opacity-50 disabled:cursor-default"
+          : "grid size-8 place-items-center rounded-md border border-transparent text-muted hover:border-line hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default"
       } aria-disabled:opacity-50 aria-disabled:cursor-default`}
     >
       <SmilePlus size={16} aria-hidden />
@@ -476,14 +465,58 @@ export function MessageReactions(props: {
 
 const GROUP_WINDOW_MS = 5 * 60_000;
 
+export type ChatDensity = "stream" | "thread" | "narrow";
+
+// A day's line across the pane, with the day's name in the middle. The pinned
+// copy at the top of a scrolled list uses the same classes, so the two match.
+const DAY_DIVIDER = "mb-1.5 mt-2.5 flex items-center gap-3 text-[12px] font-medium text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line";
+// The divider's top margin. A divider becomes the pinned copy once it rises
+// past this line, where the copy sits, so the swap moves nothing.
+const DAY_DIVIDER_TOP = 10;
+// A mark above each divider by the divider's height and bottom margin. It
+// rises past the pinned copy's line as the divider reaches the copy's bottom
+// edge, so the copy steps aside while the next day's divider passes under it.
+const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%_-_6px)] h-0";
+
+// A row is a face column and the text, at the spacing each place gives it.
+// The stream stops text at 720px; a thread's panel is narrower than that.
+// A narrow row has no room beside its name, so its hover bar rises above it.
+export const DENSITY = {
+  stream: {
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-5", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-5",
+  },
+  thread: {
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-4", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-4",
+  },
+  narrow: {
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 px-3", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-3",
+  },
+} as const;
+
 // Whether a message continues the run before it: the same author within
-// five minutes on the same day.
+// five minutes on the same day. Every connected agent shares the unnamed
+// agent's group, so an agent's run also needs the same name.
 export function continuesRun(previous: ChatMessageRecord | undefined, message: ChatMessageRecord): boolean {
   return previous !== undefined &&
     sameChatDay(previous.createdAtMs, message.createdAtMs) &&
     previous.authorKind === message.authorKind &&
     previous.presentation.group === message.presentation.group &&
+    (message.authorKind !== "agent" || previous.authorDisplayName === message.authorDisplayName) &&
     message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
+}
+
+// The day pinned at the top of the list for its topmost visible row, or null.
+// A row that starts its day carries that day's divider; any other row's
+// divider is further up, out of view. The day is pinned only once its divider
+// has risen to the pinned copy's place, so the two never show at once. While
+// another day's divider is passing under the copy's place, nothing is pinned,
+// so the copy never hides that day.
+export function pinnedChatDay(
+  topRow: { day: string; startsDay: boolean; dividerFullyVisible: boolean } | null,
+  dividerUnderPin = false,
+): string | null {
+  if (!topRow || dividerUnderPin || topRow.startsDay && topRow.dividerFullyVisible) return null;
+  return topRow.day;
 }
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
@@ -510,6 +543,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   messages: ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
+  // A chat that fills its own panel shows this picture over the label; without
+  // it the label is one muted line, for a chat inside a surface with more in it.
+  emptyPicture?: ReactNode;
   listRef?: RefObject<ChatMessageListHandle | null>;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
@@ -522,9 +558,24 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   flashMessageId?: string | null;
   // A "New" hairline sits before this message, the first the reader has not seen.
   firstUnreadMessageId?: string | null;
-  // Room under the last message, in pixels, that the list always keeps.
-  bottomSpace?: number;
+  // More buttons on a row's hover bar, after the reactions.
+  rowActions?: (message: ChatMessageRecord) => ReactNode;
+  // The message whose thread is open beside the list.
+  openMessageId?: string | null;
+  // A thread's parent comes first; this line divides it from the replies.
+  dividerAfterFirst?: string;
+  // A row after the last message, such as an agent at work.
+  footer?: ReactElement | null;
+  // A stream sits at the bottom, above its composer, with a line for each day.
+  // A thread reads from the top, without day lines.
+  anchor?: "end" | "start";
+  // A stream at full width, a thread in its side panel, or a narrow pane.
+  density?: ChatDensity;
+  // The pane's background, which the pinned day covers messages with.
+  surface?: "bg" | "panel";
 }) {
+  const density = props.density ?? "stream";
+  const anchor = props.anchor ?? "end";
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   // Long messages parse in the chat's worker; start it before they need it.
   useEffect(retainChatParser, []);
@@ -552,20 +603,115 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     },
     getScrollableNode: () => list.current?.getScrollableNode() ?? null,
   }), [indexes]);
-  // The day of the topmost visible message, pinned over the list while the
-  // reader is somewhere in history: neither the first nor the last message is
-  // in view. Legend reports viewability once per change of the visible set,
-  // and an unchanged label is a no-op update.
+  // The day of the topmost visible message, pinned at the top of the list
+  // once its day's divider has risen there. Legend reports the visible set,
+  // and an IntersectionObserver on the mounted day dividers reports each
+  // divider that crosses the pinned copy's line. Nothing reads layout while
+  // scrolling, and state changes only with the day.
   const [topDay, setTopDay] = useState<string | null>(null);
-  const messageCount = useRef(props.messages.length);
-  messageCount.current = props.messages.length;
-  const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
-    const first = info.viewableItems[0];
-    const last = info.viewableItems[info.viewableItems.length - 1];
-    const inHistory =
-      first !== undefined && first.index > 0 && last !== undefined && last.index < messageCount.current - 1;
-    setTopDay(inHistory ? formatChatDay(first.item.createdAtMs) : null);
+  const messagesRef = useRef(props.messages);
+  messagesRef.current = props.messages;
+  const indexesRef = useRef(indexes);
+  indexesRef.current = indexes;
+  const topMessageId = useRef<string | null>(null);
+  const clippedDividers = useRef(new Set<string>());
+  // Dividers whose mark has risen past the line: under the pinned copy or above.
+  const risenMarks = useRef(new Set<string>());
+  const dividers = useRef(new Map<string, HTMLElement>());
+  const marks = useRef(new Map<string, HTMLElement>());
+  const dividerObserver = useRef<IntersectionObserver | null>(null);
+  const updateTopDay = useCallback(() => {
+    const messages = messagesRef.current;
+    const at = topMessageId.current === null ? undefined : indexesRef.current.get(topMessageId.current);
+    const message = at === undefined ? undefined : messages[at];
+    const underPin = [...risenMarks.current].some(id => !clippedDividers.current.has(id));
+    const label = at === undefined || !message ? null : pinnedChatDay({
+      day: formatChatDay(message.createdAtMs),
+      startsDay: at === 0 || !sameChatDay(messages[at - 1]!.createdAtMs, message.createdAtMs),
+      dividerFullyVisible: !clippedDividers.current.has(message.id),
+    }, underPin);
+    setTopDay(current => current === label ? current : label);
   }, []);
+  const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
+    const id = info.viewableItems[0]?.item.id ?? null;
+    if (id === topMessageId.current) return;
+    topMessageId.current = id;
+    // A jump can carry a divider or its mark past the line with no threshold
+    // crossed, so the visible rows' dividers and marks are observed afresh, and
+    // so is every risen mark, wherever its row now is. Each first entry says
+    // which side of the line it is on.
+    const observer = dividerObserver.current;
+    if (observer) {
+      for (const viewable of info.viewableItems) {
+        for (const edge of [dividers.current.get(viewable.item.id), marks.current.get(viewable.item.id)]) {
+          if (!edge) continue;
+          observer.unobserve(edge);
+          observer.observe(edge);
+        }
+      }
+      for (const risen of risenMarks.current) {
+        const mark = marks.current.get(risen);
+        if (!mark) continue;
+        observer.unobserve(mark);
+        observer.observe(mark);
+      }
+    }
+    updateTopDay();
+  }, [updateTopDay]);
+  // Rows mount and unmount as Legend virtualizes, so each divider and its
+  // mark join and leave the observer through their refs.
+  const observeDayEdge = useCallback((edge: HTMLElement | null) => {
+    if (!edge) return;
+    const mark = edge.dataset.dayMark;
+    const id = mark ?? edge.dataset.dayDivider!;
+    const edges = mark === undefined ? dividers.current : marks.current;
+    edges.set(id, edge);
+    dividerObserver.current?.observe(edge);
+    return () => {
+      if (edges.get(id) === edge) edges.delete(id);
+      dividerObserver.current?.unobserve(edge);
+      (mark === undefined ? clippedDividers : risenMarks).current.delete(id);
+    };
+  }, []);
+  const listShown = !props.loading && props.messages.length > 0;
+  useEffect(() => {
+    const scroller = listShown ? list.current?.getScrollableNode() : null;
+    if (!scroller || typeof IntersectionObserver === "undefined") return;
+    // Thresholds 0 and 1 report a divider leaving full view or leaving the pane.
+    const observer = new IntersectionObserver((entries) => {
+      let changed = false;
+      for (const entry of entries) {
+        const target = entry.target as HTMLElement;
+        const mark = target.dataset.dayMark;
+        const id = mark ?? target.dataset.dayDivider!;
+        const above = (mark === undefined ? clippedDividers : risenMarks).current;
+        // Crossing or above the pinned copy's line.
+        const risen = entry.rootBounds !== null && entry.boundingClientRect.top < entry.rootBounds.top;
+        if (risen === above.has(id)) continue;
+        changed = true;
+        if (risen) above.add(id);
+        else above.delete(id);
+      }
+      if (changed) updateTopDay();
+    }, { root: scroller, rootMargin: `-${DAY_DIVIDER_TOP}px 0px 0px 0px`, threshold: [0, 1] });
+    dividerObserver.current = observer;
+    for (const edge of [...dividers.current.values(), ...marks.current.values()]) observer.observe(edge);
+    return () => {
+      observer.disconnect();
+      dividerObserver.current = null;
+      clippedDividers.current.clear();
+      risenMarks.current.clear();
+      // A list shown again reports its top row afresh.
+      topMessageId.current = null;
+      setTopDay(null);
+    };
+  }, [listShown, updateTopDay]);
+  useEffect(updateTopDay, [props.messages, updateTopDay]);
+  const [scrollbarWidth, setScrollbarWidth] = useState(0);
+  useLayoutEffect(() => {
+    const scroller = topDay ? list.current?.getScrollableNode() : null;
+    if (scroller) setScrollbarWidth(scroller.offsetWidth - scroller.clientWidth);
+  }, [topDay]);
 
   const messageKey = useCallback((node: Node | null) => {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -625,10 +771,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   const renderMessage = useCallback(({ item: message, index: at }: { item: ChatMessageRecord; index: number }) => {
     const previous = at > 0 ? props.messages[at - 1] : undefined;
     const newDay = !previous || !sameChatDay(previous.createdAtMs, message.createdAtMs);
-    const continues = continuesRun(previous, message);
-    const isAgent = message.authorKind === "agent";
+    // The divider under a thread's parent starts a new run.
+    const continues = !(props.dividerAfterFirst && at === 1) && continuesRun(previous, message);
+    const isAgent = isAgentAuthor(message);
     const time = formatChatTime(message.createdAtMs);
     const reactions = reactionsByMessage.get(message.id) ?? [];
+    const open = props.openMessageId === message.id;
+    const sizes = DENSITY[density];
     return (
       <li
         key={message.id}
@@ -638,43 +787,55 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-testid={`${props.testIdPrefix}-message`}
         data-message-id={message.id}
         data-continues={continues ? "true" : "false"}
-        className={`relative flex flex-col transition-shadow ${
-          continues ? "mt-0.5" : "mt-4"
-        } ${
-          props.flashMessageId === message.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-            : ""
+        data-open={open ? "true" : undefined}
+        className={`relative flex flex-col ${
+          props.flashMessageId === message.id ? "dohc-target-flash" : ""
         }`}
       >
-        {newDay ? (
+        {newDay && anchor === "end" ? (
           <span
             data-testid={`${props.testIdPrefix}-day`}
-            className="mb-3 flex items-center gap-2 text-[11px] text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+            data-day-divider={message.id}
+            ref={observeDayEdge}
+            className={`relative ${sizes.divider} ${DAY_DIVIDER}`}
           >
             {formatChatDay(message.createdAtMs)}
+            <span aria-hidden data-day-mark={message.id} ref={observeDayEdge} className={DAY_DIVIDER_MARK} />
+          </span>
+        ) : null}
+        {props.dividerAfterFirst && at === 1 ? (
+          <span
+            data-testid={`${props.testIdPrefix}-replies-divider`}
+            className={`${sizes.divider} my-2 flex items-center gap-2.5 text-[12px] font-medium text-subtle after:h-px after:flex-1 after:bg-line`}
+          >
+            {props.dividerAfterFirst}
           </span>
         ) : null}
         {message.id === props.firstUnreadMessageId ? (
           <span
             data-testid={`${props.testIdPrefix}-new-divider`}
-            className="mb-2 flex items-center gap-2 text-[11px] text-muted before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line"
+            className={`${sizes.divider} my-1.5 flex items-center gap-3 text-[12px] font-medium text-muted before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line`}
           >
             New
           </span>
         ) : null}
         <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
-        <div className="group -mx-2 flex gap-2.5 rounded-lg px-2 hover:bg-hover">
-          {/* A continued message's time sits in the avatar's column, ending at
+        <div
+          className={`group relative grid ${sizes.row} ${continues ? "pt-px" : "pt-1.5"} pb-1 ${
+            open ? "bg-hue-blue/10 shadow-[inset_2px_0_0_var(--dohc-hue-blue)]" : "hover:bg-hover keyboard:focus-within:bg-hover"
+          }`}
+        >
+          {/* A continued message's time sits in the face's column, ending at
               its edge, so "12:45" fits at every hour. The full time is its
               tooltip, and a screen reader reads it with AM or PM. */}
-          <span className="flex h-5 w-9 shrink-0 items-start justify-end">
+          <span className="flex items-start justify-end">
             {continues ? (
               <>
                 <time
                   aria-hidden
                   dateTime={time.iso}
                   title={time.label}
-                  className="whitespace-nowrap text-[10px] tabular-nums leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+                  className="whitespace-nowrap text-[11px] tabular-nums leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
                 >
                   {formatClockDigits(message.createdAtMs)}
                 </time>
@@ -682,27 +843,33 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
               </>
             ) : (
               <AgentColorAvatar>
-                <ChatAvatar presentation={message.presentation}
-                  name={message.authorDisplayName}
-                  kind={message.authorKind}
-                  size="comment"
-                />
+                {isAgent ? (
+                  // The face marks an agent; hovering it says whose agent.
+                  <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation}>
+                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} linkAgent={message.linkAgent === true} size={sizes.avatar} />
+                  </AgentBadge>
+                ) : (
+                  <ChatAvatar presentation={message.presentation}
+                    name={message.authorDisplayName}
+                    kind={message.authorKind} linkAgent={message.linkAgent === true}
+                    size={sizes.avatar}
+                  />
+                )}
               </AgentColorAvatar>
             )}
           </span>
-          <div className="relative min-w-0 flex-1 pr-6">
+          <div className={`min-w-0 ${sizes.text}`}>
             {!continues ? (
-              <span className="flex items-baseline gap-1.5">
+              <span className="flex items-baseline gap-2 leading-5">
                 <span
                   data-testid={`${props.testIdPrefix}-message-author`}
                   data-author-kind={message.authorKind}
-                  className="shrink-0 text-[13px] font-semibold text-ink"
+                  className={`min-w-0 truncate font-semibold text-ink ${sizes.name}`}
                 >
-                  <AgentName kind={message.authorKind} presentation={message.presentation}>
+                  <AgentName kind={message.authorKind} presentation={message.presentation} linkAgent={message.linkAgent === true}>
                     <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                   </AgentName>
                 </span>
-                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation} /> : null}
                 {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
@@ -715,7 +882,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <time
                   dateTime={time.iso}
                   title={time.iso}
-                  className="shrink-0 text-[11px] tabular-nums text-subtle"
+                  className="shrink-0 text-[12px] tabular-nums text-subtle"
                 >
                   {formatClock(message.createdAtMs)}
                 </time>
@@ -736,6 +903,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 records={reactions}
                 controls={props.reactionControls}
                 hoverToolbar
+                toolbarClassName={sizes.toolbar}
+                toolbarActions={props.rowActions?.(message)}
               />
             ) : null}
           </div>
@@ -743,25 +912,31 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </AgentColorScope>
       </li>
     );
-  }, [props, candidates, reactionsByMessage]);
+  }, [props, candidates, reactionsByMessage, density, anchor, observeDayEdge]);
+  if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
+    return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
+      <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
+    </div>;
+  }
   if (props.loading || props.messages.length === 0) {
-    return <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 ${anchor === "end" ? "justify-end" : ""}`}>
       {props.loading ? (
         <SkeletonRows label="Loading..." className="pt-1" />
       ) : (
-        <p className="m-0 pt-4 text-center text-[11px] text-subtle">{props.emptyLabel}</p>
+        <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
       )}
     </div>;
   }
   return <div className="relative flex min-h-0 flex-1 flex-col">
     {topDay ? (
-      <span
+      <div
         aria-hidden
         data-testid={`${props.testIdPrefix}-sticky-day`}
-        className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] text-subtle"
+        className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
+        style={{ right: scrollbarWidth }}
       >
-        {topDay}
-      </span>
+        <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+      </div>
     ) : null}
     <LegendList
     ref={list}
@@ -771,7 +946,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     renderItem={renderMessage}
     onViewableItemsChanged={onViewableItemsChanged}
     estimatedItemSize={80}
-    initialScrollAtEnd
+    initialScrollAtEnd={anchor === "end"}
+    alignItemsAtEnd={anchor === "end"}
+    ListFooterComponent={props.footer}
     maintainScrollAtEnd={{ animated: false, on: { dataChange: true, itemLayout: true, layout: true } }}
     // DOM scrollHeight rounds fractional row sizes to whole CSS pixels.
     maintainScrollAtEndThreshold={40.5 / Math.max(1, viewportHeight)}
@@ -780,7 +957,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     recycleItems={false}
     alwaysRender={pinned}
     className="min-h-0 flex-1 overflow-y-auto"
-    style={{ paddingTop: 8, paddingBottom: props.bottomSpace ?? 8, paddingLeft: 12, paddingRight: 12 }}
+    // A narrow row's hover bar rises above it, so the first row needs the room.
+    style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: 8 }}
     role="list"
     data-chat-virtualized="true"
     onKeyDown={event => {
@@ -803,8 +981,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
 });
 
 // The fast composer: Enter sends (Shift+Enter for a newline), disabled while
-// a send is in flight, submit button gated on non-blank input. A slow send
-// shows on the shared send control.
+// a send is in flight, submit button gated on non-blank input. Send sits in
+// the field's corner, as in every other composer, and a slow send shows on
+// it.
 export function ChatComposer(props: {
   testIdPrefix: string;
   composerId: string;
@@ -815,10 +994,15 @@ export function ChatComposer(props: {
   onChange: (value: string) => void;
   onSend: () => void;
   onEscape?: () => void;
+  // The box sits at the bottom of its view, so toasts stay above it.
+  pinned?: boolean;
 }) {
+  const formRef = useRef<HTMLFormElement | null>(null);
+  useToastsAbove(formRef, props.pinned === true);
   return (
     <form
-      className="flex shrink-0 items-end gap-1.5 border-t border-line p-2"
+      ref={formRef}
+      className="shrink-0 border-t border-line p-2"
       onSubmit={(event) => {
         event.preventDefault();
         props.onSend();
@@ -827,35 +1011,39 @@ export function ChatComposer(props: {
       <label className="sr-only" htmlFor={props.composerId}>
         Message
       </label>
-      <textarea
-        id={props.composerId}
-        data-testid={`${props.testIdPrefix}-composer`}
-        value={props.value}
-        disabled={props.sending}
-        rows={2}
-        placeholder={props.placeholder}
-        onChange={(event) => props.onChange(event.target.value)}
-        onKeyDown={(event) => {
-          // During IME composition (CJK input), Enter confirms the composed
-          // characters and Escape cancels them; neither sends or backs out.
-          if (isComposingKey(event)) return;
-          if (isSendKey(event)) {
-            event.preventDefault();
-            props.onSend();
-          } else if (event.key === "Escape" && props.onEscape) {
-            event.stopPropagation();
-            props.onEscape();
-          }
-        }}
-        className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
-      />
-      <ComposerSendButton
-        testId={`${props.testIdPrefix}-send`}
-        label={props.sendLabel}
-        sending={props.sending}
-        disabled={props.value.trim().length === 0}
-        shape="icon"
-      />
+      <div className="relative">
+        <textarea
+          id={props.composerId}
+          data-testid={`${props.testIdPrefix}-composer`}
+          value={props.value}
+          disabled={props.sending}
+          rows={2}
+          placeholder={props.placeholder}
+          onChange={(event) => props.onChange(event.target.value)}
+          onKeyDown={(event) => {
+            // During IME composition (CJK input), Enter confirms the composed
+            // characters and Escape cancels them; neither sends or backs out.
+            if (isComposingKey(event)) return;
+            if (isSendKey(event)) {
+              event.preventDefault();
+              props.onSend();
+            } else if (event.key === "Escape" && props.onEscape) {
+              event.stopPropagation();
+              props.onEscape();
+            }
+          }}
+          className="block w-full resize-none rounded-md border border-line bg-bg py-1.5 pl-2.5 pr-10 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
+        />
+        <div className="absolute bottom-1.5 right-1.5 flex">
+          <ComposerSendButton
+            testId={`${props.testIdPrefix}-send`}
+            label={props.sendLabel}
+            sending={props.sending}
+            disabled={props.value.trim().length === 0}
+            shape="box"
+          />
+        </div>
+      </div>
     </form>
   );
 }

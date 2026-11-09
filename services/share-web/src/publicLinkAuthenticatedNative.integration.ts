@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import {fileURLToPath} from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import {LIVE_TICKET_TABLE} from "../../sync-relay/src/storage/schema.js";
-import {createLinkLiveBrowserResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
+import {createLinkLiveResolver} from "../../sync-relay/src/linkLiveBrowserAuth.js";
 import {createLinkLiveHttp} from "../../sync-relay/src/linkLiveHttp.js";
 import {createPublicLinkWireProof} from "./publicLinkWireProof.integration-helper.js";
 import {readPublicWorkload} from "./publicLinkWorkload.integration-helper.js";
@@ -201,10 +201,11 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const membership = createLiveMembershipRegistry({maxSessions: routeLimits.maxConnections, maxMembers: routeLimits.maxConnections,
       maxSnapshotBytes: frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage)), sharedAdmission = createLiveConnectionAdmission();
     routes = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
-      bounds: capacity.bounds, validate, sessions: createLinkLiveBrowserResolver({publicEditRelease:{version:1},storage, linkKey}), tickets, captureNative, membership, admission: sharedAdmission});
+      bounds: capacity.bounds, validate, sessions: createLinkLiveResolver({publicEditRelease:{version:1},storage, linkKey, linkAuthority: relayApp.linkAuthority}), tickets, captureNative, membership, admission: sharedAdmission});
     namedRoutes = createNamedLiveRoutes({kind: "named", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: capacity.bounds, validate, sessions: {resolve: relayApp.resolveNamedBrowserSession}, tickets, captureNative, membership, admission: sharedAdmission});
-    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
+    linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits,
+      linkAuthority: relayApp.linkAuthority});
     closes.push(async () => routes.close());
     closes.push(async () => namedRoutes.close());
     relayHttp.on("upgrade", (request, socket, head) => {upgrades.push((new URL(request.url!, relayUrl).pathname === "/sync/live/link" ? routes : namedRoutes).handleUpgrade(request, socket, head));});
@@ -320,7 +321,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       }
       results.initialApplications = rows;
     } finally {journal.close();}
-    const settlement = await active.settle(document); expect(settlement.materialized).toBe(true);
+    const settlement = await active.settle(document); expect(settlement).toMatchObject({materialized: true});
     const settledMarkdown = readFileSync(join(workspace, "docs/a.md"), "utf8");
     for (let index = 0; index < peers.length; index++) expect(settledMarkdown).toContain(`Public peer ${index}.`);
     results.tinyBrowserLifecycle = {concurrency: peers.length, settlement, settledMarkdown};
@@ -472,7 +473,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       for (const row of rows) expect(await browserNative.client.readLiveApplicationAck({id: browserNative.nextRequestId(), workspace: browserNative.workspace,
         registrationId: browserNative.registrationId, deadlineMs: browserNative.deadlineMs}, {deliveryId: String(row.delivery_id), updateDigest: String(row.update_digest)}))
         .toMatchObject({deliveryId: row.delivery_id, updateDigest: row.update_digest});
-      const settled = await active.settle(browserWorkloadDocument); expect(settled.materialized).toBe(true);
+      const settled = await active.settle(browserWorkloadDocument); expect(settled).toMatchObject({materialized: true});
       const markdown = readFileSync(join(workspace, "docs/browser-workload.md"), "utf8");
       for (let index = 0; index < workloadBrowsers.length; index++) expect(markdown).toContain(`Workload peer ${index}.`);
       results.workloadBrowserEdits = {concurrency: workloadBrowsers.length, applications: rows, settled, markdownSha256: hash(Buffer.from(markdown))};
@@ -504,7 +505,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         expect(ack).toMatchObject({deliveryId: update.deliveryId, updateDigest: hash(update.content)}); return ack;
       }));
       for (const peer of workloadWires) await peer.until(() => hash(Buffer.from(yDocToMarkdown(peer.doc))) === hash(round.markdown));
-      const settled = await active.settle(workloadDocument); expect(settled.materialized).toBe(true);
+      const settled = await active.settle(workloadDocument); expect(settled).toMatchObject({materialized: true});
       expect(hash(readFileSync(join(workspace, "docs/workload.md")))).toBe(hash(round.markdown));
       workloadRounds.push({index, startedAt, finishedAt: Date.now(), acknowledgments, settled, markdownSha256: hash(round.markdown)});
     }

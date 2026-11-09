@@ -1,5 +1,6 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import {parseRoute} from "./relayRoute";
+import {createWorkReferenceRoutes} from "./workReferenceRoutes";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {normalizeLinkRefusal} from "./linkRefusal";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -15,6 +16,7 @@ import {readOwnerAppResponses} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientChat} from "./namedRecipientChat";
+import {createPushRoutes} from "./pushRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -26,9 +28,10 @@ import {
   readOwnerCollectionWrites,
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
+import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
-import type { ResolveActor } from "@dohc/workspace-auth/session";
+import type { ResolveAccountSession, ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
@@ -55,12 +58,15 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
+import { createAgentChatRoutes } from "./agentChatRoutes";
+import { createAgentConnectionRoutes } from "./agentConnectionRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
 import { createLinkChatRoutes } from "./linkChatRoutes";
 import { createLinkReadRoutes } from "./linkReadRoutes";
+import { createLinkAuthorityResolver, type LinkAuthority, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
 import { createShareInventoryRoutes } from "./shareInventoryRoutes";
@@ -117,8 +123,15 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
+  // The session host's read of what its hosted replicas hold for released retained work.
+  heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
+  // The browser sign-in behind a cookie, for state bound to it such as push subscriptions.
+  resolveAccountSession?: ResolveAccountSession;
+  // This server's VAPID public key. Absent means alerts are unavailable here.
+  pushVapidPublicKey?: string;
+  pushHosts?: ReadonlySet<string>;
   nowMs?: () => number;
   // Maps a verified email to its account id. An unknown or unverified address returns null.
   // Absent means email-addressed grants are unavailable; grants by user id still work.
@@ -194,8 +207,12 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
+  heldDocumentHost = () => undefined,
   storage,
   resolveActor,
+  resolveAccountSession,
+  pushVapidPublicKey,
+  pushHosts,
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
@@ -257,6 +274,8 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
+  linkAuthority: LinkAuthorityResolver;
   dispose(): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
@@ -461,11 +480,22 @@ export function createSyncRelayHandler({
     historicalSharedBlob,
     discussionActivity,
     lookupUserDisplayName,
+    linkKey,
   );
 
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
     resolveActor, lookupUserDisplayName, claimPendingShares, activity: discussionActivity, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+  }) : undefined;
+
+  const push = namedBrowserSessionLimits && resolveAccountSession ? createPushRoutes({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, vapidPublicKey: pushVapidPublicKey, pushHosts,
+    limits: namedBrowserSessionLimits, nowMs,
+    resolveAccountSession: async (request) => {
+      const session = await resolveAccountSession(request);
+      if (accountIsFenced(storage, session.userId)) throw notFound();
+      return session;
+    },
   }) : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
@@ -562,16 +592,6 @@ export function createSyncRelayHandler({
     if (!capability) throw invalidLinkCapability();
     return {capabilityToken, capability};
   };
-  const respondToLinkCollectionWrites = linkKey ? createLinkCollectionWriteRoute({
-    storage,
-    rateLimiter: collectionWriteRateLimiter,
-    admission: linkCollectionWriteAdmission,
-    linkKey,
-    requireLinkCapability,
-    nowMs,
-    newId,
-    discussionActivity,
-  }) : null;
   const requireLinkRead = (
     request: Request,
     capabilityRateLimiter: TokenBucketLimiter,
@@ -611,25 +631,51 @@ export function createSyncRelayHandler({
     return fresh;
   };
 
-  const linkJsonResponse = (
-    shareId: string,
-    grantId: string,
-    body: unknown,
-  ): Response => {
+  // The routes share-web's MCP tool loop calls take a link holder's
+  // capability or a connected agent's access token through this one resolver.
+  const linkAuthority = createLinkAuthorityResolver({
+    storage,
+    linkKey,
+    publicEditRelease,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    requireLinkCapability,
+    requireFreshLinkRead,
+  });
+  const respondToLinkCollectionWrites = linkKey ? createLinkCollectionWriteRoute({
+    storage,
+    rateLimiter: collectionWriteRateLimiter,
+    admission: linkCollectionWriteAdmission,
+    linkKey,
+    linkAuthority,
+    nowMs,
+    newId,
+    discussionActivity,
+  }) : null;
+
+  const linkJsonResponse: LinkJsonResponse = (authority, body, signal) => {
     const bytes = new TextEncoder().encode(JSON.stringify(body));
     const settleEgress = linkGrantEgressRateLimiter.reserve(
-      grantId,
+      authority.grantId,
       bytes.byteLength,
       nowMs(),
     );
     if (!settleEgress) throw relayError("link_read_rate_limited");
+    // An agent's answer stops once its token expires or its connection or link ends.
+    let stream: { signal: AbortSignal; guard(): void } | undefined;
+    if (authority.credential !== undefined && authority.credential.kind === "agent") {
+      const agent: LinkAuthority = authority;
+      stream = { signal, guard: () => { linkAuthority.fresh(agent); } };
+    }
     return respondWithLinkBytes(
       bytes,
-      shareId,
-      grantId,
+      authority.shareId,
+      authority.grantId,
       () => undefined,
       settleEgress,
       { "content-type": "application/json" },
+      stream,
     );
   };
 
@@ -656,6 +702,7 @@ export function createSyncRelayHandler({
     linkReadRateLimiter,
     linkGrantReadRateLimiter,
     discussionActivity,
+    linkAuthority,
   );
 
   const {
@@ -683,12 +730,37 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
+  const { respondToAgentSignIn, respondToLinkAgents } = createAgentConnectionRoutes({
+    storage,
+    linkKey,
+    shareWebOrigin,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    newId,
+    newLinkBearer,
+    linkExchangeRateLimiter,
+    linkExchangeGlobalRateLimiter,
+    requireShareWorkspace,
+    publicEditRelease,
+    activity: discussionActivity,
+  });
+
+  const respondToAgentChat = createAgentChatRoutes({
+    storage,
+    linkKey,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    activity: discussionActivity,
+    reads: { chatResolverFor },
+  });
+
   const respondToLinkChat = createLinkChatRoutes({
     storage,
     linkKey,
     nowMs,
-    requireLinkRead,
-    requireFreshLinkRead,
+    linkAuthority,
     linkJsonResponse,
     readLimiters: { capability: linkReadRateLimiter, grant: linkGrantReadRateLimiter },
     followLimiters: { capability: linkLogReadRateLimiter, grant: linkGrantLogReadRateLimiter },
@@ -702,8 +774,7 @@ export function createSyncRelayHandler({
     storage,
     nowMs,
     linkCurrentFileLimit,
-    requireLinkRead,
-    requireFreshLinkRead,
+    linkAuthority,
     linkJsonResponse,
     filteredLogPage,
     newestFilteredOpFreshness,
@@ -721,8 +792,10 @@ export function createSyncRelayHandler({
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});
+  const respondToHeldDocuments = createHeldDocumentRoutes({storage, host: heldDocumentHost});
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
+    requireCollectionFile: datasetHost?.requireCollectionFile,
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
@@ -739,7 +812,26 @@ export function createSyncRelayHandler({
       if (pathname.startsWith("/sync/named-chat/")) {
         return namedChat ? await namedChat(request) : errorResponse(notFound());
       }
+      if (pathname.startsWith("/sync/push/")) {
+        return push ? await push(request) : errorResponse(notFound());
+      }
       const route = parseRoute(request);
+      if (route.route === "work-reference" || route.route === "work-references" || route.route === "share-work-references" || route.route === "internal-work-reference") {
+        if (request.headers.has("cookie")) throw notFound();
+        if (route.route === "internal-work-reference" &&
+            (!relayExchangeKeyHash || !hasValidRelayExchangeKey(request))) throw notFound();
+        const respond = createWorkReferenceRoutes(storage, linkKey, nowMs);
+        if (request.headers.get("authorization")?.startsWith("LinkCapability ")) {
+          const {capabilityToken, capability} = requireLinkCapability(request);
+          const secret = request.headers.get("x-dohc-link-profile-secret");
+          const datasetAuth = secret && linkKey && LINK_SECRET_PATTERN.test(secret)
+            ? {kind: "link" as const, capabilityHash: capability.session.capabilityHash, profileTokenHash: hashLinkProfileSecret(secret, linkKey)} : undefined;
+          return await respond(request, route, {kind: "link", grantId: capability.grantId, generation: capability.generation, datasetAuth,
+            requireSession: () => { requireFreshLinkRead(capabilityToken, capability); }});
+        }
+        const actor = await resolveActor(request, route.route === "work-references" ? route.workspaceId : "");
+        return await respond(request, route, {kind: "user", userId: actor.userId});
+      }
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         return await respondToLinkExchange(request);
@@ -751,6 +843,17 @@ export function createSyncRelayHandler({
       if (route.route === "link-handoff") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         return respondToLinkHandoff(request);
+      }
+      if (
+        route.route === "agent-clients" ||
+        route.route === "agent-authorizations" ||
+        route.route === "agent-token" ||
+        route.route === "agent-introspect"
+      ) {
+        return await respondToAgentSignIn(request, route);
+      }
+      if (route.route === "agent-chat") {
+        return await respondToAgentChat(request, route);
       }
       if (route.route === "link-redeem") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
@@ -874,6 +977,16 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await automationPresses.respondToHost(request, route, actor.userId);
       }
+      if (route.route === "held-documents") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+        const actor = await resolveActor(new Request(request.url, {
+          headers: {authorization: authorization!}, signal: request.signal,
+        }), route.workspaceId);
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToHeldDocuments(request, route, actor.userId);
+      }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -931,6 +1044,10 @@ export function createSyncRelayHandler({
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);
+      }
+
+      if (route.route === "share-link-agents" || route.route === "share-link-agent-disconnect") {
+        return respondToLinkAgents(request, route, actor);
       }
 
       if (route.route === "share-log" || route.route === "share-blob") {
@@ -1025,6 +1142,7 @@ export function createSyncRelayHandler({
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
+    linkAuthority,
     dispose(){replicaLinkReads?.close();},
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
       presence.deleteAccount(userId, workspaceIds);

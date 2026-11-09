@@ -200,7 +200,7 @@ test("a file linked mention opens the exact unmounted DM message", async () => {
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let relay: SyncRelayHandle | null = null;
   try {
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token, workspaceId });
     await seedWorkspaceManifest(temp, workspaceId);
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: userId } }]);

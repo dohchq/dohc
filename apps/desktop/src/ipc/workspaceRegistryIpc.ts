@@ -2,13 +2,16 @@ import {
   defaultWorkspaceRoot,
   normalizeRootPath,
   validateWorkspaceRootChoice,
+  WorkspaceFolderRefusalError,
 } from "@dohc/workspace-core";
 import type {
   CreatedWorkspace,
   createWorkspaceFolderWithFreshness,
   FreshWorkspaceFolder,
 } from "../workspaces/createWorkspaceFolder";
+import type { ForgottenShareViews } from "../workspaces/forgottenShareViews";
 import type { Computer } from "../workspaces/syncHistory";
+import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -56,7 +59,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
   // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
     const check = validateWorkspaceRootChoice(rootPath, effectiveHome(), process.platform);
-    if (!check.ok) throw new Error(check.reason);
+    if (!check.ok) throw new WorkspaceFolderRefusalError(check.reason);
     if (!isApprovedRoot(check.normalized)) {
       throw new Error(
         "Workspace root must be chosen through dohc (the default location or the folder picker).",
@@ -82,6 +85,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   };
   roots: ReturnType<typeof createWorkspaceRootApproval>;
   effectiveHome(): string;
+  // dohc's own state folder, which no workspace may be or contain.
+  stateDir(): string;
   workspaceSummaries(): WorkspaceSummary[];
   prioritizePreferredWorkspace(workspaces: WorkspaceSummary[], event: Event): WorkspaceSummary[];
   createWorkspaceFolder: typeof createWorkspaceFolderWithFreshness;
@@ -95,6 +100,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
+  // Registers a folder Open folder chose, as the share the person forgot in
+  // it when this computer saved one.
+  forgottenShareViews: Pick<ForgottenShareViews, "reopen">;
   // New workspace's one default: a workspace made from nothing starts
   // trusted, in the folder that creation made. Every other way in starts in
   // Restricted Mode.
@@ -112,6 +120,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     dialog,
     roots: { approveRoot, usableRoot },
     effectiveHome,
+    stateDir,
     workspaceSummaries,
     prioritizePreferredWorkspace,
     createWorkspaceFolder,
@@ -122,6 +131,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     openWorkspaceManager,
     closeWindowOf,
     registerPhysicalWorkspace,
+    forgottenShareViews,
     trustNewWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -180,6 +190,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const { workspace: created, fresh } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      stateDir: stateDir(),
       computer: thisComputer(),
       kind: input.kind,
     });
@@ -208,16 +219,17 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     const { workspace: attached } = await createWorkspaceFolder({
       rootPath: usableRoot(input.rootPath),
       homeDir: effectiveHome(),
+      stateDir: stateDir(),
       computer: thisComputer(),
       kind: "personal",
     });
     // Parse-then-register (see createLocalWorkspace): a foreign manifest's
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
-    const summary = WorkspaceSummary.parse(attached);
-    registerPhysicalWorkspace(attached);
+    WorkspaceSummary.parse(attached);
+    const entry = await forgottenShareViews.reopen(attached, registerPhysicalWorkspace);
     refreshNativeWorkspaceSurfaces();
-    return summary;
+    return workspaceSummaryFor(entry);
   });
 
   registerHandler(CHANNELS.forgetWorkspace, async (event, payload) => {

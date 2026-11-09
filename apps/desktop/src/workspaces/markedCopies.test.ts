@@ -2,9 +2,11 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, readFile, readdir, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import * as fsPromises from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { ipcWireError, readError, withErrorWords } from "../ipc/errorWords";
 import { workspaceFileOperations } from "../ipc/workspaceFileOperations";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 import {
   fileOrigin,
   markAsDownloaded,
@@ -16,6 +18,8 @@ import {
 import { withPrivacyDenial } from "./privacyDenial";
 import type { RegistryEntry } from "./registryStore";
 import { createTestScratch } from "./testTemp";
+
+vi.mock("node:fs/promises", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs/promises")>() }));
 
 const linkType = process.platform === "win32" ? "junction" : "dir";
 const unmarked = (profile: string) => ({ ...systemMarkedCopies(profile), mark: async () => undefined });
@@ -189,8 +193,76 @@ describe("marked copies", () => {
       { workspaceId: "unrelated", rootPath: unrelated },
       { workspaceId: "unrelated view", rootPath: unrelated, shareView: {} as NonNullable<RegistryEntry["shareView"]> },
     ];
-    await expect(fileOrigin({ workspaceId: "own", rootPath: scratch }, registered, join(scratch, "notes.bin"), resolve)).resolves.toBe("own");
-    expect(resolve.mock.calls.map(([path]) => path)).toEqual([join(scratch, "shared-with-me")]);
+    await mkdir(join(scratch, "shared-with-me"));
+    const statSpy = vi.spyOn(fsPromises, "stat");
+    try {
+      await expect(fileOrigin({ workspaceId: "own", rootPath: scratch }, registered, join(scratch, "notes.bin"), resolve)).resolves.toBe("own");
+      expect(resolve.mock.calls.map(([path]) => path)).toEqual([join(scratch, "shared-with-me")]);
+      expect(statSpy).not.toHaveBeenCalled();
+    } finally { statSpy.mockRestore(); }
+  });
+
+  describe.each(["current workspace", "registered workspace", "registered shared view"] as const)("shared files in the %s", (location) => {
+    async function origin(...args: Parameters<typeof fileOrigin>) {
+      const platform = process.platform;
+      Object.defineProperty(process, "platform", { value: "linux" });
+      try { return await fileOrigin(...args); }
+      finally { Object.defineProperty(process, "platform", { value: platform }); }
+    }
+
+    function places(parent: string) {
+      const workspace = { workspaceId: "own", rootPath: location === "current workspace" ? dirname(parent) : join(dirname(parent), "own") };
+      const registered = location === "current workspace" ? [] : [{
+        workspaceId: "other",
+        rootPath: location === "registered workspace" ? dirname(parent) : parent,
+        ...(location === "registered shared view" ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}),
+      }];
+      return { workspace, registered };
+    }
+
+    it.each([false, true])("keeps a shared file's copy behavior with either path spelling (reverse: %s)", async (reverse) => {
+      const scratch = await createTestScratch("marked-copy-spelling-");
+      const stored = join(scratch, "Work", "shared-with-me"), lookup = join(scratch, "work", "shared-with-me");
+      await mkdir(stored, { recursive: true });
+      const ignoresCase = (await stat(lookup).catch(() => null)) !== null;
+      if (!ignoresCase) await mkdir(lookup, { recursive: true });
+      const parent = reverse ? lookup : stored, child = reverse ? stored : lookup;
+      const { workspace, registered } = places(parent);
+      const resolve = async (path: string) => { await realpath(path); return path; };
+      await expect(origin(workspace, registered, join(child, "notes.bin"), resolve)).resolves.toBe(ignoresCase ? "received" : "own");
+
+      const parentStat = await stat(parent, { bigint: true }), otherStat = await stat(scratch, { bigint: true });
+      for (const { identity } of folderIdentities) {
+        const statPath = fakeFolderStat(identity, parent, parentStat, otherStat);
+        const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (path) => statPath(path));
+        try {
+          await expect(origin(workspace, registered, join(child, "notes.bin"), resolve)).resolves.toBe(identity === "different" ? "own" : "received");
+          expect(statSpy).toHaveBeenCalledWith(parent, { bigint: true });
+          expect(statSpy).toHaveBeenCalledWith(child, { bigint: true });
+        } finally { statSpy.mockRestore(); }
+      }
+    });
+
+    it("keeps a shared file's copy behavior when its path uses a short folder name", async () => {
+      const scratch = await createTestScratch("marked-copy-spelling-");
+      await mkdir(join(scratch, "other"));
+      const parentStat = await stat(scratch, { bigint: true }), otherStat = await stat(join(scratch, "other"), { bigint: true });
+      const pair = shortNamePairs(join(process.cwd(), "origin-folders"), "LongFolderName")[0]!;
+      const parent = join(pair.parent, "shared-with-me"), child = join(pair.child, "shared-with-me");
+      const { workspace, registered } = places(parent);
+      for (const { identity } of folderIdentities) {
+        const resolve = vi.fn(async (path: string) => path);
+        const statPath = fakeFolderStat(identity, parent, parentStat, otherStat);
+        const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (path) => statPath(path));
+        try {
+          await expect(origin(workspace, registered, join(child, "notes.bin"), resolve)).resolves.toBe(identity === "different" ? "own" : "received");
+          expect(statSpy).toHaveBeenCalledWith(parent, { bigint: true });
+          expect(statSpy).toHaveBeenCalledWith(child, { bigint: true });
+          if (identity === "different" && location !== "current workspace") expect(resolve).not.toHaveBeenCalledWith(parent);
+          else expect(resolve).toHaveBeenCalledWith(parent);
+        } finally { statSpy.mockRestore(); }
+      }
+    });
   });
 
   it("makes the copy read-only after marking it, and leaves the original writable", async () => {

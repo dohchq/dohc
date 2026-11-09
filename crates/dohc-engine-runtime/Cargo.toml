@@ -11,6 +11,9 @@ description = "Workspace actor runtime for the engine: one actor per engine.db o
 # Forwards the storage crash-injection seam so a build that arms faults (the
 # testkit / `cargo test --workspace`) also arms them under the actor loop.
 fault-injection = ["dohc-engine-storage/fault-injection", "dohc-engine-domain/fault-injection"]
+# Relay requests answered by a test's own transport, and hooks for measurements
+# that compare revisions. Production builds must not enable this feature.
+test-support = ["dohc-engine-storage/test-support"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -33,7 +36,7 @@ thiserror = "2"
 # `bundled` already compiles SQLite with FTS5 + the trigram tokenizer
 # (libsqlite3-sys 0.35 build.rs: -DSQLITE_ENABLE_FTS5; bundle 3.50.2) — no extra
 # feature needed. Same version the storage/domain crates content-address with.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # The async command loop. The writer connection still lives on ONE dedicated
 # blocking OS thread (never on the runtime); commands flow over tokio::sync
 # channels and the worker receives them via `blocking_recv`.
@@ -65,6 +68,7 @@ winapi-util = "=0.1.11"
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 base64 = "0.22"
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
+dohc-engine-runtime = { path = ".", features = ["test-support"] }
 yrs = "=0.27.3"
 tokio = { version = "1", features = [
   "sync",
@@ -79,7 +83,7 @@ tokio = { version = "1", features = [
 # testkit also unifies the storage `fault-injection` feature ON for `cargo test`,
 # arming the crash-injection at the index-commit boundary.
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "trace"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Stands in for /proc/self/fd where the engine's folder can't be held.

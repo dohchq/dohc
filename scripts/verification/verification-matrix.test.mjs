@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { repoRoot, run } from "./process.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
+import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 // Each case starts the verifier in its own Node process. On Windows, run() would
 // add two to three seconds of PowerShell job setup to every case.
@@ -79,7 +80,8 @@ function createVerificationFixtures(directory) {
   put("tools/rust-engine-program/build-slot.mjs", "import {writeFileSync} from 'node:fs';export const acquireExclusiveSlot=()=>null;export const buildQueueStatus=()=>({owners:[]});export const maxVerificationLanes=4;export const readVerificationLanes=()=>1;export const heldVerificationSlots=()=>[];export const macSlotRoot=()=>'';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('not expected')};export const acquireVerificationSlot=()=>{writeFileSync('.dohc-dev/queued','yes');return {update(){},release(){}};};");
   git(["config", "core.logAllRefUpdates", "true"]);
   mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-  for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+  copyFlakyFixture(root);
+  for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
     "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs",
     "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
     put(path, readFileSync(join(repoRoot, path)));
@@ -304,10 +306,10 @@ function createVerificationFixtures(directory) {
           return {stdout:''};
         }
         const restartTags=['@restart-durability-idle-external','@restart-durability-overlapping-typing','@restart-durability-capture-before-reopen','@restart-durability-person-agent'];
-        const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding'+(fixture.gallery?'|@states-page':''):'@verification-smoke'];
+        const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding|@share-link-agent-sign-in'+(fixture.gallery?'|@states-page':''):'@verification-smoke'];
         assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
         const restartTitles=restartTags.map((tag,index)=>process.env.FIXTURE_FAULT==='restart-missing'||process.env.FIXTURE_FAULT==='restart-one-missing'&&index===3?'unrelated restart spec':tag+' restart proof');
-        const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(fixture.gallery?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+        const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync','@share-link-agent-sign-in agent sign-in']:[]),...(fixture.gallery?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
         const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
         writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
           stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},

@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot } from "lucide-react";
+import { ArrowLeft, Bot, PowerOff, TriangleAlert } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -34,7 +34,7 @@ export function AgentPresenceHint(props: {
       role="status"
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-subtle"
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted"
     >
       <span
         aria-hidden
@@ -47,8 +47,8 @@ export function AgentPresenceHint(props: {
   );
 }
 
-// Ink means the user was addressed: a DM or their agent. Quiet marks unread
-// activity in a group the user only follows.
+// Ink means the user was addressed: a DM or their agent. A group's chat row
+// shows no count, only its bold name. Quiet marks a post's unread replies.
 export function UnreadPill(props: { count: number; testId: string; tone?: "ink" | "quiet" }) {
   if (props.count <= 0) return null;
   return (
@@ -103,13 +103,15 @@ export function ShareReadFailureNotice(props: {
   // they are just older than this failure.
   stale: boolean;
   onRetry: () => void;
+  // The frame, for a notice that is not a band across a panel.
+  className?: string;
 }) {
   const staleLine = props.stale ? " This list may be out of date." : "";
   return (
     <div
       data-testid={props.testId}
       data-failure={props.failure.kind}
-      className="flex items-start gap-1.5 border-b border-line px-3 py-2"
+      className={`flex items-start gap-1.5 ${props.className ?? "border-b border-line px-3 py-2"}`}
     >
       <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
         {props.failure.kind === "unreachable"
@@ -142,9 +144,11 @@ export function ChatHeader(props: {
   // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
   action?: React.ReactNode;
+  // A page's header: 48px, with the title at 15px.
+  large?: boolean;
 }) {
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2">
+    <div className={`flex shrink-0 items-center border-b border-line ${props.large ? "h-12 gap-2 pl-5 pr-4" : "h-9 gap-1.5 px-2"}`}>
       {props.onBack ? (
         <button
           type="button"
@@ -161,7 +165,7 @@ export function ChatHeader(props: {
       <span className="flex min-w-0 flex-1 items-baseline gap-2">
         <span
           data-testid={`${props.testId}-title`}
-          className="min-w-0 truncate text-[13px] font-medium text-ink"
+          className={`min-w-0 truncate text-ink ${props.large ? "text-[15px] font-semibold" : "text-[13px] font-medium"}`}
         >
           {props.label}
         </span>
@@ -212,7 +216,7 @@ export function ComposerModeBar(props: {
         data-testid={props.cancelTestId}
         aria-label={props.cancelLabel}
         onClick={props.onCancel}
-        className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded px-1 text-subtle hover:text-ink"
       >
         ×
       </button>
@@ -249,3 +253,27 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
   );
 }
 
+
+// Over an agent DM's composer, only when the agent can't answer: what's
+// wrong, and the one action that fixes it. An agent that's off is a state,
+// not a fault, so it reads without the warning.
+export function AgentProblemLine(props: { words: string; action: string; off?: boolean; onAction?: (() => void) | undefined }) {
+  return (
+    <div data-testid="chats-agent-problem" className="mx-5 mb-1 mt-2 flex min-h-7 items-center gap-2 text-[13px] text-muted">
+      {props.off
+        ? <PowerOff size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+        : <TriangleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />}
+      <span className="min-w-0 truncate">{props.words}</span>
+      {props.onAction ? (
+        <button
+          type="button"
+          data-testid="chats-agent-problem-action"
+          onClick={props.onAction}
+          className="inline-flex h-6 shrink-0 items-center rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-ink hover:bg-hover"
+        >
+          {props.action}
+        </button>
+      ) : null}
+    </div>
+  );
+}

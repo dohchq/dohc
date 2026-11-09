@@ -1,3 +1,5 @@
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   initialUpdateState,
   transition,
@@ -21,8 +23,9 @@ export type PublicUpdateState = {
   // A Linux .deb that did not install: the command that installs it from a terminal.
   installCommand?: string;
   // The last step that failed, while its state stands. `message` says why. A
-  // new id is a new failure to report.
-  failure?: { step: UpdateStep; id: number };
+  // new id is a new failure to report. `notInstalled` is the version of an
+  // update a person chose that dohc opened without.
+  failure?: { step: UpdateStep; id: number; notInstalled?: string };
 };
 
 export type UpdateActionResult = {
@@ -80,6 +83,10 @@ type AutoUpdaterLike = {
   // neither an AppImage nor a package. Its checks then resolve without events.
   isUpdaterActive?(): boolean;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  // Starts the installer without quitting. Returns false, and starts nothing,
+  // once an install already started. The Windows and Linux updaters have it;
+  // the macOS one does not.
+  install?(isSilent?: boolean, isForceRunAfter?: boolean): boolean;
   on(eventName: "checking-for-update", listener: () => void): void;
   on(eventName: "update-available", listener: (info: { version: string }) => void): void;
   on(eventName: "update-not-available", listener: () => void): void;
@@ -132,7 +139,19 @@ export function installsOnQuit(platform: NodeJS.Platform): boolean {
   return INSTALL_ON_QUIT && platform !== "linux";
 }
 
-type InstallFailure = { message: string; installCommand?: string };
+type InstallFailure = { message: string; installCommand?: string; notInstalled?: string };
+
+// The update a person chose, and the version dohc was on when they chose it.
+type ChosenUpdate = { version: string; from: string };
+
+function readChosenUpdate(path: string): ChosenUpdate | null {
+  try {
+    const { version, from } = JSON.parse(readFileSync(path, "utf8")) as Partial<ChosenUpdate>;
+    return typeof version === "string" && typeof from === "string" ? { version, from } : null;
+  } catch {
+    return null;
+  }
+}
 
 // Each failure shows while the state it left stands: a failed check leaves
 // "error", a failed download "available", and a failed install "ready".
@@ -148,13 +167,15 @@ const FAILED_STATUS = { check: "error", download: "available", install: "ready" 
  */
 export function debInstallFailure(error: Error, installer: string): InstallFailure {
   const [, program, status] = /^Command (\S+) exited with code (\d+)$/u.exec(error.message) ?? [];
+  // Each sits under the title "dohc could not install the update", so none
+  // says it again.
   if (program === "pkexec" && status === "126") {
-    return { message: "The update did not install without your password." };
+    return { message: "The update needs your password." };
   }
   const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
   return program === "pkexec" && status === "127"
-    ? { message: "dohc did not get permission to install the update. Run this command in a terminal to install it.", installCommand }
-    : { message: "The update did not install. Run this command in a terminal to install it.", installCommand };
+    ? { message: "dohc did not get permission. Run this command in a terminal to install it.", installCommand }
+    : { message: "Run this command in a terminal to install it.", installCommand };
 }
 // electron-updater's code when the feed has no channel file for this
 // platform. GitHubProvider sets it on a 404 for <channel>-mac.yml in the
@@ -230,10 +251,21 @@ export async function startAutoUpdates(options: {
   startupDelayMs?: number;
   pollIntervalMs?: number;
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
-  // Completes a restart that was already staged. quitAndInstall starts its
-  // own quit on the first call and has none left to start on a second, so
-  // main makes it.
-  quitForStagedRestart?: () => void;
+  // Quits dohc through its ordinary close path, where every window can still
+  // stop the quit. Restart to update quits this way on Windows. Elsewhere it
+  // completes a restart already staged: quitAndInstall starts its own quit on
+  // the first call and has none left to start on a second.
+  quit: () => void;
+  // Runs the handler with the exit code when dohc finally quits. It is added
+  // at start, and electron-updater adds its own install on quit only after a
+  // download, so this handler runs first.
+  onQuit: (handler: (exitCode: number) => void) => void;
+  // Whether the quit under way is the one Restart to update asked for. A
+  // window that went back retracts it, and a later quit installs as any quit
+  // does, without opening dohc again. Absent means yes.
+  restartApproved?: () => boolean;
+  // The folder that keeps the update a person chose across a quit.
+  stateDir?: string;
   importUpdater?: () => Promise<UpdaterModuleLike>;
   platform?: NodeJS.Platform;
 }): Promise<AutoUpdateController | null> {
@@ -269,8 +301,13 @@ export async function startAutoUpdates(options: {
       restartStaged,
     });
     if (!failure || FAILED_STATUS[failure.step] !== state.status) return base;
-    const { step, id, message, installCommand } = failure;
-    return { ...base, message, failure: { step, id }, ...(installCommand ? { installCommand } : {}) };
+    const { step, id, message, installCommand, notInstalled } = failure;
+    return {
+      ...base,
+      message,
+      failure: { step, id, ...(notInstalled ? { notInstalled } : {}) },
+      ...(installCommand ? { installCommand } : {}),
+    };
   };
   // A background check that fails as the last one did keeps that failure,
   // so its row updates without a new toast. Anything a person asked for is
@@ -300,6 +337,16 @@ export async function startAutoUpdates(options: {
   // On Linux the click installs at once, so a staged restart has nothing
   // left to install.
   autoUpdater.autoInstallOnAppQuit = installsOnQuit(platform);
+  // Windows' installer closes dohc by force about a second after it starts, so
+  // a window that set an edit aside could not keep dohc open with Go back.
+  // The installer starts once dohc has quit instead, after its shutdown.
+  // install() spends electron-updater's latch, so its own install on quit,
+  // which would not open dohc again, does not run as well.
+  options.onQuit((exitCode) => {
+    if (platform !== "win32" || !restartStaged || exitCode !== 0) return;
+    if (!(options.restartApproved?.() ?? true)) return;
+    autoUpdater.install?.(false, true);
+  });
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
   autoUpdater.allowDowngrade = false;
@@ -311,18 +358,43 @@ export async function startAutoUpdates(options: {
   }
   if (autoUpdater.isUpdaterActive?.() === false) return null;
 
+  // Still on the version a person chose an update on: dohc did not install
+  // it. Once the feed offers an update again, that is reported, and Try
+  // again downloads it. A feed that offers none leaves nothing to report.
+  const chosenPath = options.stateDir ? join(options.stateDir, "chosen-update.json") : null;
+  const chosen = chosenPath ? readChosenUpdate(chosenPath) : null;
+  let notInstalled = chosen?.from === currentVersion ? chosen.version : null;
+  const keepChosen = (version: string | null): void => {
+    if (!chosenPath) return;
+    // An unwritten record loses only its notice.
+    try {
+      if (version) writeFileSync(chosenPath, JSON.stringify({ version, from: currentVersion }));
+      else rmSync(chosenPath, { force: true });
+    } catch {}
+  };
+  if (!notInstalled) keepChosen(null);
+
   autoUpdater.on("checking-for-update", () => {
     checkInFlight = true;
     dispatch({ type: "check" });
   });
   autoUpdater.on("update-available", (info) => {
     failure = null;
+    if (notInstalled) {
+      fail("download", { message: `dohc is still on version ${currentVersion}.`, notInstalled }, true);
+      notInstalled = null;
+      keepChosen(null);
+    }
     dispatch({ type: "available", version: info.version });
     checkInFlight = false;
     emit();
   });
   autoUpdater.on("update-not-available", () => {
     failure = null;
+    if (notInstalled) {
+      notInstalled = null;
+      keepChosen(null);
+    }
     dispatch({ type: "not-available" });
     checkInFlight = false;
     emit();
@@ -399,6 +471,9 @@ export async function startAutoUpdates(options: {
       return { accepted: false, state: publicState() };
     }
     failure = null;
+    // Quitting installs a downloaded update, except on Linux, where only
+    // Restart to update does.
+    if (installsOnQuit(platform)) keepChosen(state.version);
     dispatch({ type: "download" });
     // The updater's error event reports a failure first; this covers one it
     // never emitted, so the download cannot stay running forever.
@@ -410,6 +485,7 @@ export async function startAutoUpdates(options: {
   // without quitting. Every recovery decision therefore happens before this
   // runs (the renderer checks its set-aside drafts first, and main
   // pre-approves the quit) — there is deliberately no resume path here.
+  // Windows quits first and installs on the quit, so it has no latch to spend.
   const installUpdate = async (): Promise<UpdateActionResult> => {
     if (stopped || state.status !== "ready") {
       return { accepted: false, state: publicState() };
@@ -422,12 +498,17 @@ export async function startAutoUpdates(options: {
       // to know — it held this fact in a module variable, which a reload
       // reset while this latch stayed set, stranding the update for the rest
       // of the run.
-      options.quitForStagedRestart?.();
+      options.quit();
       return { accepted: true, state: publicState() };
     }
     restartStaged = true;
     failure = null;
+    keepChosen(state.version);
     emit();
+    if (platform === "win32") {
+      options.quit();
+      return { accepted: true, state: publicState() };
+    }
     try {
       autoUpdater.quitAndInstall(false, true);
       // The updater's error event sets it while quitAndInstall runs.

@@ -216,18 +216,35 @@ describe("the / catalog", () => {
 });
 
 describe("the poll block", () => {
-  it("the poll button opens and closes it in both surfaces", async () => {
-    for (const surface of [undefined, "post"] as const) {
-      render(<Harness surface={surface} initialValue="Lunch?" />);
-      const toggle = screen.getByTestId("chats-poll-toggle");
-      expect(toggle.getAttribute("aria-pressed")).toBe("false");
-      fireEvent.mouseDown(toggle);
-      expect(pollState()).toEqual(["", ""]);
-      expect(toggle.getAttribute("aria-pressed")).toBe("true");
-      fireEvent.mouseDown(toggle);
-      expect(pollState()).toBeNull();
-      cleanup();
-    }
+  it("the post's Poll button opens and closes it", () => {
+    render(<Harness surface="post" initialValue="Lunch?" />);
+    const toggle = screen.getByTestId("chats-poll-toggle");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.mouseDown(toggle);
+    expect(pollState()).toEqual(["", ""]);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.mouseDown(toggle);
+    expect(pollState()).toBeNull();
+  });
+
+  it("the chat's + starts a poll and removes it", () => {
+    render(<Harness initialValue="Lunch?" />);
+    fireEvent.click(screen.getByTestId("chats-add"));
+    expect(screen.getByTestId("chats-poll-toggle").textContent).toContain("Start a poll");
+    fireEvent.click(screen.getByTestId("chats-poll-toggle"));
+    expect(pollState()).toEqual(["", ""]);
+    fireEvent.click(screen.getByTestId("chats-add"));
+    expect(screen.getByTestId("chats-poll-toggle").textContent).toContain("Remove poll");
+    fireEvent.click(screen.getByTestId("chats-poll-toggle"));
+    expect(pollState()).toBeNull();
+  });
+
+  it.each(["stream", "post"] as const)("puts a %s poll's choices under its question, in the box", (surface) => {
+    render(<Harness surface={surface === "post" ? surface : undefined} initialValue="Lunch?" initialPoll={["Soup", "Salad"]} />);
+    const question = screen.getByTestId("chats-composer");
+    const poll = screen.getByTestId("chats-poll");
+    expect(question.closest("form")!.contains(poll)).toBe(true);
+    expect(question.compareDocumentPosition(poll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("Enter moves to the next choice and adds one at the end", async () => {
@@ -357,7 +374,8 @@ describe("the poll block", () => {
   it("asks for the question while a poll is open, and keeps the box's name", () => {
     render(<Harness />);
     expect(composer().placeholder).toBe("Write a message…");
-    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    fireEvent.click(screen.getByTestId("chats-add"));
+    fireEvent.click(screen.getByTestId("chats-poll-toggle"));
     expect(composer().placeholder).toBe("Ask a question");
     expect(screen.getByLabelText("Message")).toBe(composer());
   });

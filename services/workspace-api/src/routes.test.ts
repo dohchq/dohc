@@ -3,7 +3,7 @@ import { ACCOUNT_CSS_PATH, ACCOUNT_JS_PATH } from "./assets";
 import type { ServerDescriptor } from "./config";
 import { createCrashReportIntake } from "./crashReports";
 import type { ReadinessReport } from "./readiness";
-import { createRouter, type AuthGateway, type RouterOptions } from "./routes";
+import { AUTH_BODY_MAX_BYTES, createRouter, type AuthGateway, type RouterOptions } from "./routes";
 
 const ORIGIN = "https://auth.example.com";
 const SHARE = "https://share.example.com";
@@ -134,6 +134,62 @@ describe("email delivery gate", () => {
   it("passes the same routes through once a transport exists", async () => {
     const response = await router()(get(routes[0] as string, { method: "POST", body: "{}" }));
     expect(response.status).toBe(200);
+  });
+});
+
+describe("auth body limit", () => {
+  /** An endless body in 16 KiB chunks that counts what the router pulls. */
+  function endless() {
+    const counted = { pulled: 0 };
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        counted.pulled += 1;
+        controller.enqueue(new Uint8Array(16 * 1024));
+      },
+    }, { highWaterMark: 0 });
+    return { body, counted };
+  }
+
+  function post(body: BodyInit, headers: Record<string, string> = {}): Request {
+    return new Request(`${ORIGIN}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body,
+      duplex: "half",
+    } as RequestInit);
+  }
+
+  it("passes a body within the limit to Better Auth unchanged", async () => {
+    const received: string[] = [];
+    const handle = router({ auth: gateway({}, async (request) => (received.push(await request.text()), Response.json({ ok: true }))) });
+    const body = JSON.stringify({ email: "ada@example.com", password: "x".repeat(AUTH_BODY_MAX_BYTES - 64) });
+    const response = await handle(post(body));
+    expect(response.status).toBe(200);
+    expect(received).toEqual([body]);
+  });
+
+  it("answers 413 to a declared body past the limit without reading it", async () => {
+    const handler = vi.fn(async () => Response.json({ ok: true }));
+    const { body, counted } = endless();
+    const response = await router({ auth: gateway({}, handler) })(
+      post(body, { "content-length": String(AUTH_BODY_MAX_BYTES + 1) }),
+    );
+    expect(response.status).toBe(413);
+    expect(response.headers.get("connection")).toBe("close");
+    expect(await response.json()).toMatchObject({ code: "BODY_TOO_LARGE" });
+    expect(counted.pulled).toBe(0);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("answers 413 once a body with no declared length passes the limit", async () => {
+    const handler = vi.fn(async () => Response.json({ ok: true }));
+    const { body, counted } = endless();
+    const response = await router({ auth: gateway({}, handler) })(post(body));
+    expect(response.status).toBe(413);
+    expect(response.headers.get("connection")).toBe("close");
+    // It stops at the chunk that crosses the limit.
+    expect(counted.pulled).toBe(AUTH_BODY_MAX_BYTES / (16 * 1024) + 1);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 

@@ -467,7 +467,7 @@ mod os {
             | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
             | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         limits.BasicLimitInformation.ActiveProcessLimit = 1;
-        limits.ProcessMemoryLimit = 512 * 1024 * 1024;
+        limits.ProcessMemoryLimit = 1024 * 1024 * 1024;
         // SAFETY: The job and correctly sized input buffer remain live for the synchronous call.
         unsafe {
             check(SetInformationJobObject(

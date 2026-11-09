@@ -15,10 +15,15 @@ import {
   SaveAsFileActions,
   type PostData,
 } from "./PostCard";
-import { AgentName, ChatAvatar, LinkHolderMark, useAgentInk } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
+import { ThreadedChat } from "./ThreadedChat";
+import { showChat } from "./chatsOnScreen";
+import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
+import { ChatMembersDialog } from "./ChatMembersDialog";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
+import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
 import {
@@ -29,6 +34,7 @@ import {
   joinedChannelLabel,
   ComposerModeBar,
   ComposerNotice,
+  AgentProblemLine,
   DispatchAnnouncement,
   dispatchAnnouncement,
   type ShareReadFailure,
@@ -50,20 +56,25 @@ import {
   type JoinedLaneOrder,
   type ShareListing,
 } from "./chatShareLanes";
-import { SectionLabel } from "../ui/controls";
+import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { EMPTY_ART } from "./EmptyArt";
 import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
+import { nameSlug } from "@dohc/workspace-contracts/names";
+import { isGroupNameTaken } from "../../ipc/errorWords";
+import type { ShellError } from "../shell/useShellError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
+import { inputCount, onNextInput } from "../ui/inputCount";
 import {
   AtSign,
-  Bot,
   Hash,
   House,
   MessageSquare,
-  MessagesSquare,
   Plus,
+  Settings,
+  Sparkles,
   Square,
   Users,
   X,
@@ -99,24 +110,22 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
-  ChatMessageList,
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
   type ChatReactionControls,
 } from "./chatMessages";
-import { MentionComposer } from "./MentionComposer";
+import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
-import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
+import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { agentMentionId, listAgents, runnableAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
-import { extractChatFileReferences } from "./chatFileMentions";
-import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
-import { withErrorWords } from "../../ipc/errorWords";
+import { isLivePageOwnedRefusal, withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
@@ -189,12 +198,18 @@ type OverviewState =
 // carries its own commit watermark (see commitTicket).
 type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 
+// An invitation a notice's Open asks Chats to show, with the input count from
+// when the person pressed Open.
+export type ChatsInvitation = { shareId: string; inputs: number };
+
 // Exported for the shell's expand-to-tab seam: the panel reports where it is
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
 export type ChatsNav =
   | { level: "channels" }
   | { level: "feed" }
-  | { level: "channel"; channel: ChatChannelRecord }
+  // A channel, or with `lane` its chat lane, at a message when one is named.
+  // An agent DM is always its chat lane.
+  | { level: "channel"; channel: ChatChannelRecord; lane?: "chat"; focusMessageId?: string }
   | {
       level: "thread";
       channel: ChatChannelRecord;
@@ -377,6 +392,18 @@ interface ChatsComposerReplyTarget {
 
 type ComposerReplyTarget = ChatsComposerReplyTarget;
 
+// The answering bar names whose question it is. Main marks this computer's
+// person with presentation.self, so a display name never makes it "your".
+// Before the question loads, the bar says "the question".
+function answeringWords(question: ChatMessageRecord | undefined, option: string | null): string {
+  const whose = question === undefined
+    ? "the"
+    : question.authorKind === "human" && question.presentation.self
+      ? "your"
+      : `${chatAuthorLabel(question)}'s`;
+  return option ? `Answering ${whose} question · ${option}` : `Answering ${whose} question`;
+}
+
 // Whether a new outgoing grant would deepen the over-limit state. Only the
 // granted lane can: an outgoing share adds a row there and nowhere else. A
 // full received lane is an inbound backlog the user did not create and cannot
@@ -390,11 +417,10 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
 }
 
 // An agent chat's mark beside its name, in its agent's hue.
-function AgentMark(props: { presentation: ActorPresentation }) {
-  const ink = useAgentInk(props.presentation);
+function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   return (
-    <span aria-hidden data-testid="chats-channel-agent-mark" className={`shrink-0 font-mono text-[12px] ${ink}`}>
-      ◈
+    <span data-testid="chats-channel-agent-mark" className="inline-flex shrink-0">
+      <ChatAvatar presentation={props.presentation} name={props.name} kind="agent" size="strip" />
     </span>
   );
 }
@@ -408,8 +434,8 @@ function NavRow(props: {
   onClick: () => void;
   active?: boolean;
   muted?: boolean;
-  // Unread activity the user was not addressed in: the name carries the
-  // weight, not a pill.
+  // Any unread message: the name goes bold on every row. A count beside it
+  // means the user was addressed.
   unread?: boolean;
   labelTestId?: string;
   trailing?: React.ReactNode;
@@ -424,8 +450,8 @@ function NavRow(props: {
       aria-current={props.active ? "page" : undefined}
       onClick={props.onClick}
       {...props.data}
-      className={`mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-visible ${
-        props.active ? "bg-selected" : "hover:bg-hover"
+      className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
+        props.active ? "bg-selected font-medium" : "hover:bg-hover"
       } ${props.className ?? ""}`}
     >
       {props.icon}
@@ -463,7 +489,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-40"
+      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-40"
     >
       {props.children}
     </button>
@@ -490,6 +516,8 @@ export function runnerProgram(command: string): string {
   return script && /\.(m?js|cjs|ts|py|sh|ps1)$/u.test(script) ? `${program} ${script}` : program;
 }
 
+export type ChatErrorNotice = Pick<ShellError, "action" | "title" | "identity">;
+
 export function ChatsView(props: {
   workspaceId: string;
   workspaces: readonly DmWorkspaceOption[];
@@ -498,8 +526,14 @@ export function ChatsView(props: {
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  // A retry, when given, is the failure's Try again.
-  onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // A retry, when given, is the failure's Try again. An archive refused for
+  // live editing also names the bookmark's page. A notice can give the
+  // failure a title, an identity and an action in place of Try again.
+  onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, notice?: ChatErrorNotice) => void;
+  // What a change card's Apply or Undo did, when it finishes after the chat closed.
+  onNotice?: (message: string) => void;
+  // A bookmark's page was archived, so an earlier refusal to archive it is over.
+  onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
   // and holds the Undo, so it outlives this panel; a refused removal goes to
   // the same shell with Try again.
@@ -577,6 +611,12 @@ export function ChatsView(props: {
   // the read-revision badge catch-ups stay on. On unsuspend, one catch-up
   // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
+  // An invitation to show: once its row is listed, the row scrolls into view
+  // and is marked, and its first action, Join or Accept, takes focus. If the
+  // person did something since Open, nothing moves. Either way
+  // onInvitationRevealed then reports it handled.
+  revealInvitation?: ChatsInvitation;
+  onInvitationRevealed?: () => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
@@ -629,7 +669,7 @@ export function ChatsView(props: {
   // The open thread's dispatch, null until read.
   const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const computerDispatchPaused = useChatDispatchPaused((error) =>
-    props.onError(withErrorWords("dohc could not read whether agent dispatch is paused.", error), error));
+    props.onError(withErrorWords("dohc could not read whether agent replies are paused.", error), error));
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
   const [poll, setPoll] = useState<ThreadPollDraft | null>(null);
@@ -647,13 +687,17 @@ export function ChatsView(props: {
     if (nav.level === "channel" && newThreadPoll && newThreadPoll.channelId !== nav.channel.id) setNewThreadPoll(null);
   }, [nav, poll, newThreadPoll]);
   const [startingThread, setStartingThread] = useState(false);
-  const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
-  const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
-  const [newGroupPurpose, setNewGroupPurpose] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  // A failed create the dialog showed and no retry fixed.
+  const unreportedCreateFailure = useRef<{
+    message: string;
+    error: unknown;
+    input: { name: string; type: GroupType; purpose: string };
+    notice?: ChatErrorNotice;
+  } | null>(null);
   const resetGroupForm = useCallback(() => {
-    setCreatingChannel(null);
-    setNewGroupType("posts");
-    setNewGroupPurpose("");
+    unreportedCreateFailure.current = null;
+    setCreatingGroup(false);
   }, []);
   const [addingAgent, setAddingAgent] = useState(false);
   // Direct messages (WS-MU-C3). The section renders only when collaboration
@@ -701,9 +745,6 @@ export function ChatsView(props: {
   // publish under the previous workspace's scope. Reset on every switch.
   const [sharesWorkspaceId, setSharesWorkspaceId] = useState<string | null>(null);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
-  const [shareEmail, setShareEmail] = useState("");
-  const [shareReadOnly, setShareReadOnly] = useState(false);
-  const [shareBusy, setShareBusy] = useState(false);
   const [joiningShareId, setJoiningShareId] = useState<string | null>(null);
   // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
   // and stay false until the next render, so a double-send (two Enters in one
@@ -745,6 +786,12 @@ export function ChatsView(props: {
   // when the activated pill was the viewer's only row and unmounts.
   const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
   const threadComposerRef = useRef<HTMLDivElement | null>(null);
+  // A failed run's ask-again readies the comment box; it never sends.
+  const commentComposer = useRef<MentionComposerHandle>(null);
+  const askAgainInComment = useCallback((agentId: string, mention: boolean) => {
+    if (mention) commentComposer.current?.mention(agentMentionId(agentId));
+    else commentComposer.current?.focus();
+  }, []);
   const flatChatListRef = useRef<ChatMessageListHandle | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
   // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
@@ -1285,7 +1332,9 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      setBookmarks(result.bookmarks.filter((bookmark) => bookmark.state === "active"));
+      // An archive whose page did not move stays saved, so archiving it again can move the page.
+      setBookmarks(result.bookmarks.filter((bookmark) => bookmark.state === "active"
+        || (bookmark.state === "archived" && bookmark.projectionState === "failed")));
     } catch {
       // A projection problem must not make the core chat surface unavailable.
     }
@@ -1406,8 +1455,6 @@ export function ChatsView(props: {
       relayReach: 0,
     };
     setSharePanelOpen(false);
-    setShareEmail("");
-    setShareReadOnly(false);
     setJoiningShareId(null);
     setDms([]);
     setDmAvailable(false);
@@ -1480,6 +1527,7 @@ export function ChatsView(props: {
               (bookmark) => bookmark.bookmarkId !== existing.bookmarkId,
             ),
           );
+          props.onBookmarkArchived?.(existing.destinationPath);
         } else {
           const result = await bridge().saveChatBookmark({
             workspaceId,
@@ -1496,9 +1544,13 @@ export function ChatsView(props: {
         }
       } catch (error) {
         if (mutationIsCurrent()) {
+          // An archive refused for live editing can run again after Stop.
+          const refusedPage = existing && isLivePageOwnedRefusal(error) ? existing.destinationPath : undefined;
           props.onError(
             ipcErrorMessage(error, "Could not update this bookmark."),
             error,
+            refusedPage !== undefined ? () => void toggleBookmark(input) : undefined,
+            refusedPage,
           );
         }
       } finally {
@@ -1512,7 +1564,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [bookmarkBusy, bookmarkFor, props.onError, workspaceId],
+    [bookmarkBusy, bookmarkFor, props.onBookmarkArchived, props.onError, workspaceId],
   );
 
   // Gentle DM poll while the view is open: the other side's messages arrive
@@ -1598,6 +1650,7 @@ export function ChatsView(props: {
                       createdAtMs: preview.createdAtMs,
                       bodySnippet: preview.bodySnippet,
                       ...(preview.automation ? { automation: preview.automation } : {}),
+                      ...(preview.authorReported ? { authorReported: preview.authorReported } : {}),
                     }
                   : null,
                 reactions: preview?.reactions ?? [],
@@ -1617,10 +1670,16 @@ export function ChatsView(props: {
   }, []);
 
   const openChannel = useCallback(
-    async (channel: ChatChannelRecord) => {
+    async (channel: ChatChannelRecord, lane?: "chat", focusMessageId?: string) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
-      setNav({ level: "channel", channel: withListedAgent(channel, latestChannels.current) });
+      setNav({
+        level: "channel",
+        channel: withListedAgent(channel, latestChannels.current),
+        ...(lane ? { lane } : {}),
+        ...(focusMessageId ? { focusMessageId } : {}),
+      });
+      if (lane) setGroupLane(lane);
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -2275,10 +2334,7 @@ export function ChatsView(props: {
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
       if (result.resolveFailure) {
-        props.onError(
-          ipcErrorMessage(result.resolveFailure, "Your reply was sent, but the decision is still open."),
-          result.resolveFailure,
-        );
+        props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
@@ -2458,7 +2514,7 @@ export function ChatsView(props: {
       // no nav state, so the passive report alone would cancel nothing.
       props.onNavCommand?.(target);
       if (target.level === "feed") openFeed();
-      else if (target.level === "channel") void openChannel(target.channel);
+      else if (target.level === "channel") void openChannel(target.channel, target.lane, target.focusMessageId);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
       } else void openDm(target.dm, target.focusMessageId);
@@ -2541,7 +2597,7 @@ export function ChatsView(props: {
     handoffReportBlocked.current = false;
     if (seed) {
       if (seed.level === "feed") openFeed();
-      else if (seed.level === "channel") void openChannel(seed.channel);
+      else if (seed.level === "channel") void openChannel(seed.channel, seed.lane, seed.focusMessageId);
       else if (seed.level === "thread") {
         void openThread(seed.channel, seed.thread, seed.focusMessageId);
       }
@@ -2674,6 +2730,32 @@ export function ChatsView(props: {
     }
   }, [composer, nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, sending, workspaceId]);
 
+  // A reply in one of the DM's threads.
+  const sendDmReply = useCallback(async (rootId: string, body: string) => {
+    if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return false;
+    const context = sendContextKey;
+    try {
+      const references = extractChatFileReferences(body);
+      const result = await bridge().sendChatMessage({
+        workspaceId,
+        threadId: nav.dm.threadId,
+        body,
+        parentMessageId: rootId,
+        ...(references.length > 0 ? { fileReferences: references } : {}),
+      });
+      if (activeSendContext.current !== context) return false;
+      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+      dmRefreshSeq.current += 1;
+      setMessages((current) =>
+        current.some((message) => message.id === result.message.id) ? current : [...current, result.message],
+      );
+      return true;
+    } catch (error) {
+      if (activeSendContext.current === context) props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
+      return false;
+    }
+  }, [nav, props.onAgentWaitsForTrust, props.onError, sendContextKey, workspaceId]);
+
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.
   const startDm = useCallback(async () => {
@@ -2793,6 +2875,8 @@ export function ChatsView(props: {
     }
     return map;
   }, [channelShares]);
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const { revealInvitation, onInvitationRevealed } = props;
   const receivedNotJoined = useMemo(() => {
     if (!channelShares) return [];
     // An ended row is a durable leave tombstone, not an active join. Keep its
@@ -2811,6 +2895,35 @@ export function ChatsView(props: {
     }
     return channelShares.received.filter((row) => !joinedIds.has(row.shareId));
   }, [channelShares]);
+  const [markedInvitation, setMarkedInvitation] = useState<ChatsInvitation | null>(null);
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    // A person who clicked, typed or left the window after pressing Open has
+    // moved on, so focus stays where they put it.
+    if (inputCount() !== revealInvitation.inputs) {
+      onInvitationRevealed?.();
+      return;
+    }
+    const action = viewRef.current?.querySelector<HTMLElement>(`[data-invitation="${CSS.escape(revealInvitation.shareId)}"]`);
+    if (!action) return;
+    action.scrollIntoView({ block: "nearest" });
+    action.focus();
+    // Every Join is disabled while another join is in flight. The reveal
+    // waits until its action can take focus.
+    if (document.activeElement !== action) return;
+    setMarkedInvitation({ shareId: revealInvitation.shareId, inputs: inputCount() });
+    onInvitationRevealed?.();
+  }, [joiningShareId, onInvitationRevealed, pendingDmRequests, receivedNotJoined, revealInvitation]);
+  // The revealed row stays marked until the person's next click or key press,
+  // which joins it or acts elsewhere.
+  useEffect(() => {
+    if (markedInvitation === null) return;
+    if (inputCount() !== markedInvitation.inputs) {
+      setMarkedInvitation(null);
+      return;
+    }
+    return onNextInput(() => setMarkedInvitation(null));
+  }, [markedInvitation]);
   const joinedFor = useCallback(
     (channel: ChatChannelRecord) =>
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
@@ -3131,6 +3244,14 @@ export function ChatsView(props: {
     // stale response there.
     commitShareListing(ticket, session, shares);
   }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
+  // A notice's Open can name an invitation that arrived after Chats last
+  // listed it. Each reveal reads the shares again and pulls message requests,
+  // whose poll stops while a conversation tab is open.
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    void refreshShares();
+    void refreshDms("open");
+  }, [refreshDms, refreshShares, revealInvitation]);
 
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic
@@ -3197,44 +3318,34 @@ export function ChatsView(props: {
     });
   }, [refreshDms, refreshShares]);
 
-  const submitShare = useCallback(async () => {
+  const submitShare = useCallback(async (input: { email: string; viewOnly: boolean }): Promise<boolean> => {
     // The disabled control is honesty; this is the gate. A submit that slips
     // past it (a stale enter key, a re-render race) would still grow the lane
     // dohc already cannot list. Only the granted lane, though — an outgoing
     // share never touches the received one.
-    if (grantedLaneIsOverLimit(shareReadFailure)) return;
-    if (nav.level !== "channel" || shareBusy) return;
-    const recipientEmail = shareEmail.trim();
-    if (recipientEmail.length === 0) return;
+    if (grantedLaneIsOverLimit(shareReadFailure)) return false;
+    if (nav.level !== "channel") return false;
+    const recipientEmail = input.email.trim();
+    if (recipientEmail.length === 0) return false;
     const token = liveToken.current;
-    setShareBusy(true);
     try {
       await bridge().shareChatChannel({
         workspaceId,
         channelId: nav.channel.id,
         recipientEmail,
-        ...(shareReadOnly ? { access: "read-only" as const } : {}),
+        ...(input.viewOnly ? { access: "read-only" as const } : {}),
       });
-      if (token !== liveToken.current) return;
-      setShareEmail("");
-      setShareReadOnly(false);
-      await refreshShares();
+      if (token !== liveToken.current) return false;
+      // Not awaited: the dialog clears its field now, so an address typed
+      // while the list reloads is kept.
+      void refreshShares();
+      return true;
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (token !== liveToken.current) return false;
       props.onError(ipcErrorMessage(error, "Could not share that group."), error);
-    } finally {
-      setShareBusy(false);
+      return false;
     }
-  }, [
-    nav,
-    props.onError,
-    refreshShares,
-    shareBusy,
-    shareEmail,
-    shareReadFailure,
-    shareReadOnly,
-    workspaceId,
-  ]);
+  }, [nav, props.onError, refreshShares, shareReadFailure, workspaceId]);
 
   const revokeShare = useCallback(
     async (shareId: string, member: string, group: string) => {
@@ -3360,23 +3471,20 @@ export function ChatsView(props: {
     [props.onError, props.onNavCommand, refreshOverview, workspaceId],
   );
 
-  // Which lane a "both" group shows. An agent DM opens on its conversation.
+  // Which lane a "both" group shows.
   const [groupLane, setGroupLane] = useState<"posts" | "chat">("posts");
-  const [agentLane, setAgentLane] = useState<"posts" | "chat">("chat");
+  // The new group dialog's create. A failure stays in the dialog.
   const createChannel = useCallback(
-    async (name: string) => {
-      const trimmed = name.trim();
-      if (trimmed.length === 0) return;
+    async (input: { name: string; type: GroupType; purpose: string }): Promise<string | null> => {
       const token = liveToken.current;
       try {
-        const purpose = newGroupPurpose.trim();
         const result = await bridge().createChatChannel({
           workspaceId,
-          name: trimmed,
-          type: newGroupType,
-          ...(purpose ? { purpose } : {}),
+          name: input.name,
+          type: input.type,
+          ...(input.purpose ? { purpose: input.purpose } : {}),
         });
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current) return null;
         resetGroupForm();
         setOverview((current) =>
           current.status === "ready"
@@ -3393,13 +3501,46 @@ export function ChatsView(props: {
         setChannelShares((current) => answerCreatedChannel(current, result.channel));
         // The new group opens where any click on it would.
         openConversation({ level: "channel", channel: result.channel });
+        return null;
       } catch (error) {
-        if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not create that group."), error);
+        // The open dialog says why and keeps the draft. Notices hears of it
+        // only if the person closes the dialog without a retry that worked.
+        const message = ipcErrorMessage(error, `dohc couldn't create ${input.name}.`);
+        if (token !== liveToken.current) return message;
+        let notice: ChatErrorNotice | undefined;
+        if (isGroupNameTaken(error)) {
+          const slug = nameSlug(input.name);
+          notice = {
+            title: `dohc couldn't create #${input.name}`,
+            identity: `group-name-taken:${slug}`,
+          };
+          const listing = await bridge().listChatChannels({ workspaceId }).catch(() => null);
+          if (token !== liveToken.current) return message;
+          const existing = listing?.channels.find((channel) => channel.kind === "channel" && channel.slug === slug);
+          if (existing) notice.action = { label: "Open", run: () => openConversation({ level: "channel", channel: existing }), ends: true };
+        }
+        unreportedCreateFailure.current = { message, error, input, ...(notice ? { notice } : {}) };
+        return message;
       }
     },
-    [newGroupPurpose, newGroupType, resetGroupForm, openConversation, props.onError, workspaceId],
+    [resetGroupForm, openConversation, workspaceId],
   );
+  const closeGroupDialog = useCallback(() => {
+    const failure = unreportedCreateFailure.current;
+    resetGroupForm();
+    if (!failure) return;
+    const report = (next: NonNullable<typeof failure>) => {
+      if (next.notice) props.onError(next.message, next.error, next.notice.action ? undefined : again, undefined, next.notice);
+      else props.onError(next.message, next.error, again);
+    };
+    // Try again creates the same group; a failure there reports again.
+    const again = () => void createChannel(failure.input).then(() => {
+      const next = unreportedCreateFailure.current;
+      unreportedCreateFailure.current = null;
+      if (next) report(next);
+    });
+    report(failure);
+  }, [createChannel, props.onError, resetGroupForm]);
 
   const goBack = useCallback(() => {
     // Back is an explicit command like any conversation click: report it
@@ -3546,11 +3687,14 @@ export function ChatsView(props: {
     }
     setFlashMessageId(messageId);
     const token = liveToken.current;
+    requestAnimationFrame(() => {
+      if (token === liveToken.current) focusMessage(document, messageId);
+    });
     window.setTimeout(() => {
       if (token === liveToken.current) {
         setFlashMessageId((current) => (current === messageId ? null : current));
       }
-    }, 1_200);
+    }, TARGET_FLASH_MS);
   }, []);
 
   useEffect(() => {
@@ -3599,6 +3743,12 @@ export function ChatsView(props: {
       authorLabel: chatAuthorLabel(message),
     });
   }, []);
+  const answeringMessage = useMemo(
+    () => resolveTargetMessageId === null
+      ? undefined
+      : messages.find((message) => message.id === resolveTargetMessageId),
+    [messages, resolveTargetMessageId],
+  );
 
   const liveRunId = dispatchState?.liveRunId ?? null;
   const stopThreadRun = useCallback(async () => {
@@ -3671,17 +3821,17 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      props.onError(ipcErrorMessage(error, "Could not resume dispatch."), error);
+      props.onError(ipcErrorMessage(error, "dohc could not resume agent replies."), error);
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
-  const stoppedRun = dispatchState?.stoppedRun ?? null;
-  const retryStoppedRun = useCallback(async () => {
-    if (nav.level !== "thread" || !stoppedRun?.retryable || dispatchActionBusy) return;
+  const failedRun = dispatchState?.failedRun ?? null;
+  const retryFailedRun = useCallback(async () => {
+    if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
-    const { runId } = stoppedRun;
+    const { runId } = failedRun;
     const token = liveToken.current;
     const refreshSeq = ++threadRefreshSeq.current;
     const current = () => token === liveToken.current && refreshSeq === threadRefreshSeq.current;
@@ -3702,7 +3852,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, nav, props.onError, stoppedRun, workspaceId]);
+  }, [dispatchActionBusy, failedRun, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -3729,6 +3879,14 @@ export function ChatsView(props: {
       goBack();
     },
     [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
+  );
+
+  // A post's view shows its thread, so an agent's notice about a run there
+  // is skipped while it's on screen.
+  const postThreadId = nav.level === "thread" ? nav.thread.id : null;
+  const showPost = useCallback(
+    (node: HTMLDivElement | null) => (node && postThreadId ? showChat(postThreadId, node) : undefined),
+    [postThreadId],
   );
 
   const editorTab = parseTab(props.editorTabPath ?? null);
@@ -3772,21 +3930,19 @@ export function ChatsView(props: {
           items={personalFeed}
           itemKey={(item) => item.message.id}
           columnClassName={pageColumn}
-          header={<>
-            {personalFeed.length === 0 && !personalFeedLoading ? (
-              <div className="flex flex-col items-center gap-2 py-10 text-[13px] text-subtle">
-                <p className="m-0">No posts in your groups yet.</p>
-                <button
-                  type="button"
+          empty={personalFeedLoading ? undefined : (
+            <div className="flex flex-1 py-12">
+              <EmptyState picture={EMPTY_ART.posts} title="No posts in your groups yet.">
+                <SecondaryButton
                   data-testid="chats-feed-empty-groups"
+                  size="compact"
                   onClick={variant === "page" ? props.onOpenNavigator : goBack}
-                  className="rounded-md px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
                 >
                   Open Groups
-                </button>
-              </div>
-            ) : null}
-          </>}
+                </SecondaryButton>
+              </EmptyState>
+            </div>
+          )}
           footer={<>
             {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
             {personalFeedNextCursor && !personalFeedLoading ? (
@@ -3910,17 +4066,20 @@ export function ChatsView(props: {
                     <button
                       type="button"
                       onClick={open}
-                      className="flex w-full cursor-pointer gap-3 text-left dohc-focus-visible"
+                      className="dohc-focus-row flex w-full cursor-pointer gap-3 rounded-md text-left"
                     >
                       <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
-                        kind={item.message.authorKind}
+                        kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-1.5 leading-[18px]">
                           <span className="truncate text-[13px] font-semibold text-ink">
-                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation}>
+                            {/* The row is one button, so the agent's badge cannot sit in it; its name says agent. */}
+                            {item.message.authorKind === "link" && item.message.linkAgent === true
+                              ? <span data-testid="chats-feed-link-agent" className="sr-only">agent </span> : null}
+                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation} linkAgent={item.message.linkAgent === true}>
                               {chatAuthorLabel(item.message)}
                             </AgentName>
                           </span>
@@ -4055,6 +4214,7 @@ export function ChatsView(props: {
           <MentionComposer
             testIdPrefix="chats-dm-new"
             composerId="chats-dm-new-composer"
+            pinned
             value={dmDraft}
             sending={startingDm}
             placeholder="Write the first message…"
@@ -4075,6 +4235,35 @@ export function ChatsView(props: {
 
   if (nav.level === "dm") {
     const dm = nav.dm;
+    const dmHeader = (
+      <ChatHeader
+        label={dm.peerLabel}
+        testId="chats-dm"
+        large={variant === "page"}
+        onBack={variant === "panel" ? goBack : undefined}
+        icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
+        // A connected participant (shareId set, not already ended) has a
+        // live placement to reverse; the owner side (shareId null)
+        // never accepted a grant here, and an already-ended row (owner
+        // revoked, or already left) has nothing live to end — confirming
+        // would re-end a tombstone and promise a request that, for an
+        // owner-revoked grant, can never appear (its grant is gone from
+        // the relay's received listing).
+        action={
+          dm.shareId && dm.connected ? (
+            <button
+              type="button"
+              data-testid="chats-dm-leave"
+              onClick={() => setLeavingDm(dm)}
+              className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
+            >
+              Leave
+            </button>
+          ) : undefined
+        }
+        trailing={<PresenceFaces others={presence.others} />}
+      />
+    );
     return (
       <div
         data-testid="chats-dm-view"
@@ -4082,89 +4271,74 @@ export function ChatsView(props: {
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >
-        <ChatHeader
-          label={dm.peerLabel}
-          testId="chats-dm"
-          onBack={variant === "panel" ? goBack : undefined}
-          icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
-          // A connected participant (shareId set, not already ended) has a
-          // live placement to reverse; the owner side (shareId null)
-          // never accepted a grant here, and an already-ended row (owner
-          // revoked, or already left) has nothing live to end — confirming
-          // would re-end a tombstone and promise a request that, for an
-          // owner-revoked grant, can never appear (its grant is gone from
-          // the relay's received listing).
-          action={
-            dm.shareId && dm.connected ? (
-              <button
-                type="button"
-                data-testid="chats-dm-leave"
-                onClick={() => setLeavingDm(dm)}
-                className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
-              >
-                Leave
-              </button>
-            ) : undefined
-          }
-          trailing={<PresenceFaces others={presence.others} />}
-        />
         {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
             its channelWireId and fanned out through the same shareForRecipient
             grant gate. Dormant (calm header, no fake liveness) when solo. */}
-        <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
-          {dm.threadId ? (
-            <ChatMessageList
-              testIdPrefix="chats-dm"
-              messages={messages}
-              loading={messagesLoading}
-              emptyLabel="No messages yet."
-              key={`${workspaceId}:${dm.threadId}`}
-              listRef={flatChatListRef}
-              mentionCandidates={mentionCandidates}
-              onOpenPath={props.onOpenPath}
-              flashMessageId={flashMessageId}
-              reactionControls={reactionControls}
-              bottomSpace={AGENT_OFFER_SPACE}
-            />
-          ) : (
+        {dm.threadId ? (
+          <ThreadedChat
+            key={`${workspaceId}:${dm.threadId}`}
+            testIdPrefix="chats-dm"
+            messages={messages}
+            loading={messagesLoading}
+            emptyLabel="No messages yet."
+            place={dm.peerLabel}
+            header={dmHeader}
+            belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
+            composer={(inset) => dm.connected ? (
+              <MentionComposer
+                pinned
+                testIdPrefix="chats-dm"
+                composerId="chats-dm-composer"
+                value={composer}
+                sending={sending}
+                placeholder={`Message ${dm.peerLabel}`}
+                sendLabel="Send message"
+                candidates={mentionCandidates}
+                fileCandidates={fileMentionCandidates}
+                loadFileHeadings={loadFileHeadings}
+                onChange={(value) => {
+                  setComposer(value);
+                  presence.setTyping(value.trim().length > 0);
+                }}
+                onSend={() => {
+                  presence.setTyping(false);
+                  void sendDmMessage();
+                }}
+                onRosterPick={agentOffer.onRosterPick}
+                rosterScope={agentOffer.scope}
+                agentOffer={agentOffer.offer}
+                inset={inset}
+              />
+            ) : (
+              <ComposerNotice testId="chats-dm-ended">
+                This conversation has ended. You can still read it.
+              </ComposerNotice>
+            )}
+            replyNotice={dm.connected ? undefined : (
+              <ComposerNotice testId="chats-dm-thread-ended">
+                This conversation has ended. You can still read it.
+              </ComposerNotice>
+            )}
+            onSendReply={sendDmReply}
+            mentionCandidates={mentionCandidates}
+            fileCandidates={fileMentionCandidates}
+            loadFileHeadings={loadFileHeadings}
+            onOpenPath={props.onOpenPath}
+            reactionControls={reactionControls}
+            listRef={flatChatListRef}
+            flashMessageId={flashMessageId}
+          />
+        ) : (
+          <>
+            {dmHeader}
             <div
               data-testid="chats-dm-waiting"
               className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
             >
               Waiting for this conversation to sync…
             </div>
-          )}
-          <TypingIndicator names={presence.typingNames} className="px-2" />
-          {dm.connected ? (
-            <MentionComposer
-              testIdPrefix="chats-dm"
-              composerId="chats-dm-composer"
-              value={composer}
-              sending={sending}
-              disabled={!dm.threadId}
-              placeholder={`Message ${dm.peerLabel}…`}
-              sendLabel="Send message"
-              candidates={mentionCandidates}
-              fileCandidates={fileMentionCandidates}
-              loadFileHeadings={loadFileHeadings}
-              onChange={(value) => {
-                setComposer(value);
-                presence.setTyping(value.trim().length > 0);
-              }}
-              onSend={() => {
-                presence.setTyping(false);
-                void sendDmMessage();
-              }}
-              onRosterPick={agentOffer.onRosterPick}
-              rosterScope={agentOffer.scope}
-              agentOffer={agentOffer.offer}
-            />
-          ) : (
-            <ComposerNotice testId="chats-dm-ended">
-              This conversation has ended. You can still read it.
-            </ComposerNotice>
-          )}
-        </div>
+          </>
+        )}
         {leavingDm ? (
           <LeaveDmDialog
             key={leavingDm.channelId}
@@ -4193,6 +4367,7 @@ export function ChatsView(props: {
       dispatchState.pendingCount > 0 && liveRunId === null;
     return (
       <div
+        ref={showPost}
         data-testid="chats-thread-view"
         data-variant={variant}
         data-open-decision-count={
@@ -4236,7 +4411,7 @@ export function ChatsView(props: {
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                 >
                   <Square size={8} fill="currentColor" aria-hidden />
                   Stop
@@ -4261,7 +4436,7 @@ export function ChatsView(props: {
         {computerPausedStrip ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
           >
             <span>Agent replies paused on this computer</span>
             {!threadLocked ? (
@@ -4270,18 +4445,18 @@ export function ChatsView(props: {
                 data-testid="chats-resume-computer-dispatch"
                 onClick={() => void bridge().setChatDispatchPaused({ paused: false }).catch((error: unknown) =>
                   props.onError(withErrorWords("dohc could not resume agent replies on this computer.", error), error))}
-                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible"
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink"
               >
                 Resume
               </button>
             ) : (
-              <span>read-only</span>
+              <span className="text-muted">read-only</span>
             )}
           </div>
         ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 text-[10px] text-muted"
           >
             <span>Agent replies paused</span>
             {!threadLocked ? (
@@ -4290,19 +4465,19 @@ export function ChatsView(props: {
                 data-testid="chats-resume-dispatch"
                 disabled={dispatchActionBusy}
                 onClick={() => void resumeThreadDispatch()}
-                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible disabled:cursor-default disabled:opacity-50"
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink disabled:cursor-default disabled:opacity-50"
               >
                 Resume
               </button>
             ) : (
-              <span>read-only</span>
+              <span className="text-muted">read-only</span>
             )}
           </div>
         ) : dispatchState && (liveRunId !== null ||
           dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-muted"
           >
             {liveRunId !== null
               ? `agent working${
@@ -4327,6 +4502,7 @@ export function ChatsView(props: {
             className="mx-auto w-full max-w-[640px] px-3 pb-3 pt-3 sm:px-4"
           >
             <ThreadMessages
+              workspaceId={workspaceId}
               nav={nav}
               channelLabel={nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents).label : `#${nav.channel.name}`}
               messages={messages}
@@ -4334,9 +4510,11 @@ export function ChatsView(props: {
               threadLocked={threadLocked}
               flashMessageId={flashMessageId}
               runRecords={runRecords}
-              stoppedRun={stoppedRun}
-              stoppedRunBusy={dispatchActionBusy}
-              onRetryStoppedRun={threadLocked ? undefined : retryStoppedRun}
+              failedRun={failedRun}
+              retryBusy={dispatchActionBusy}
+              onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
+              onOpenAgentSettings={props.onSetupAgent}
+              onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
@@ -4364,15 +4542,14 @@ export function ChatsView(props: {
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
-            // The top space holds a picked agent's offer, so it covers no comment.
-            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-6 sm:px-4">
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-3 sm:px-4">
               <MentionComposer
                 above={<>
                   {resolveTargetMessageId ? (
                     <ComposerModeBar
                       testId="chats-resolving-mode"
                       cancelTestId="chats-resolving-cancel"
-                      cancelLabel="Cancel resolving decision"
+                      cancelLabel="Cancel answer"
                       onCancel={() => {
                         if (replyTarget?.messageId === resolveTargetMessageId) {
                           setReplyTarget(null);
@@ -4381,22 +4558,16 @@ export function ChatsView(props: {
                         setResolveChosenOption(null);
                       }}
                     >
-                      {resolveChosenOption
-                        ? `Answering the poll · ${resolveChosenOption}`
-                        : "Answering the poll"}
+                      {answeringWords(answeringMessage, resolveChosenOption)}
                     </ComposerModeBar>
                   ) : null}
-                  {replyTarget ? (
+                  {/* An answer is also a reply to its question, so that reply needs no bar of its own. */}
+                  {replyTarget && replyTarget.messageId !== resolveTargetMessageId ? (
                     <ComposerModeBar
                       testId="chats-replying-mode"
                       cancelTestId="chats-replying-cancel"
                       cancelLabel="Cancel reply"
-                      onCancel={() => {
-                        if (resolveTargetMessageId === replyTarget.messageId) {
-                          setResolveTargetMessageId(null);
-                        }
-                        setReplyTarget(null);
-                      }}
+                      onCancel={() => setReplyTarget(null)}
                     >
                       Replying to {replyTarget.authorLabel}
                     </ComposerModeBar>
@@ -4404,6 +4575,7 @@ export function ChatsView(props: {
                 </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
+                handle={commentComposer}
                 value={composer}
                 sending={sending}
                 allowEmptySend={resolveTargetMessageId !== null}
@@ -4438,23 +4610,26 @@ export function ChatsView(props: {
   }
 
   // The Agents list's rule: a name to post as, and a runner that starts it.
-  const agentReady = Boolean(props.agentSetup?.agentName && props.agentSetup.runnerEnabled);
+  // The row keeps one name while any agent exists, whether or not it's on.
+  const hasAgent = (props.agentSetup?.agents.length ?? 0) > 0;
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
     const channelLocked = channelIsLocked(nav.channel);
     const channelAgent = nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents) : null;
     const channelSettingsAgent = channelAgent ? settingsAgents.find((agent) => agent.id === nav.channel.agentId) : undefined;
-    // The strip under an agent's chat describes that agent's own runner.
-    const channelLaunch = channelSettingsAgent?.enabled ? channelSettingsAgent.launch : undefined;
-    const channelCommand = channelLaunch ? launchCommand(channelLaunch) : "";
-    // An agent DM is one conversation. Its older posts stay under Posts, which
-    // takes no new ones.
+    // An agent DM is one conversation, with threads. A group keeps its kind.
     const agentDm = nav.channel.kind === "agent";
-    const groupType = agentDm ? "both" : nav.channel.type ?? "posts";
-    const lane = agentDm ? agentLane : groupLane;
-    const setLane = agentDm ? setAgentLane : setGroupLane;
+    const groupType = agentDm ? "chat" : nav.channel.type ?? "posts";
+    const lane = groupLane;
+    const setLane = setGroupLane;
     const showLane = groupType === "chat" || (groupType === "both" && lane === "chat");
+    // Only when the agent can't answer: what's wrong, and the fix. An agent
+    // you run has no launch; it answers whenever it's connected.
+    const agentProblem = !agentDm || !props.agentSetup ? null
+      : !channelSettingsAgent ? { words: `${channelAgent?.label ?? "This agent"} was removed.`, action: "Agents" }
+      : channelSettingsAgent.launch && !channelSettingsAgent.enabled ? { words: `${channelSettingsAgent.name} is off.`, action: "Turn on", off: true }
+      : null;
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
@@ -4478,55 +4653,38 @@ export function ChatsView(props: {
     // switch keeps its own row there.
     const laneTabs =
       groupType === "both" ? (
-        <div
-          role="tablist"
-          aria-label="Group lanes"
-          className={
-            variant === "page"
-              ? "flex shrink-0 gap-1"
-              : "flex shrink-0 gap-1 border-b border-line px-3 py-1.5"
-          }
-        >
-          {(
-            agentDm
-              ? ([["chat", "Chat"], ["posts", "Posts"]] as const)
-              : ([["posts", "Posts"], ["chat", "Chat"]] as const)
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              aria-selected={lane === value}
-              data-testid={`chats-group-lane-${value}`}
-              onClick={() => setLane(value)}
-              className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
-                lane === value
-                  ? "bg-selected text-ink"
-                  : "text-muted hover:bg-hover hover:text-ink"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className={variant === "page" ? "shrink-0" : "flex shrink-0 border-b border-line px-3 py-1.5"}>
+          <div role="tablist" aria-label="Group lanes" className="flex rounded-lg border border-line bg-panel-2 p-0.5">
+            {([["posts", "Posts"], ["chat", "Chat"]] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={lane === value}
+                data-testid={`chats-group-lane-${value}`}
+                onClick={() => setLane(value)}
+                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+                  lane === value ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null;
-    return (
-      <div
-        data-testid="chats-channel-view"
-        data-variant={variant}
-        data-group-type={groupType}
-        className="flex min-h-0 flex-1 flex-col"
-        onKeyDownCapture={onKeyDownCapture}
-      >
+    const top = (
+      <>
         <ChatHeader
           label={channelAgent ? channelAgent.label : nav.channel.name}
           testId="chats-channel"
+          large={variant === "page"}
           onBack={variant === "panel" ? goBack : undefined}
           icon={
             channelAgent ? (
-              <AgentMark presentation={channelAgent.presentation} />
+              <AgentMark presentation={channelAgent.presentation} name={channelAgent.label} />
             ) : (
-              <Hash size={12} aria-hidden className="shrink-0 text-subtle" />
+              <Hash size={variant === "page" ? 16 : 12} aria-hidden className="shrink-0 text-subtle" />
             )
           }
           description={
@@ -4548,14 +4706,27 @@ export function ChatsView(props: {
               <PresenceFaces
                 others={nav.channel.kind === "agent" ? peoplePresence : presence.others}
               />
+              {agentDm && props.onSetupAgent ? (
+                <button
+                  type="button"
+                  data-testid="chats-agent-settings"
+                  aria-label={`${channelAgent?.label ?? "Agent"} settings`}
+                  title={`${channelAgent?.label ?? "Agent"} settings`}
+                  onClick={props.onSetupAgent}
+                  className="grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink"
+                >
+                  <Settings size={16} strokeWidth={1.9} aria-hidden />
+                </button>
+              ) : null}
               {canShare ? (
                 <button
                   type="button"
                   data-testid="chats-share-channel"
                   title={channelGrants.length > 0 ? "Members" : "Add members"}
+                  aria-haspopup="dialog"
                   aria-expanded={sharePanelOpen}
-                  onClick={() => setSharePanelOpen((open) => !open)}
-                  className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+                  onClick={() => setSharePanelOpen(true)}
+                  className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
                 >
                   {channelGrants.length > 0 ? (
                     <span className="flex items-center -space-x-1.5">
@@ -4579,49 +4750,6 @@ export function ChatsView(props: {
           }
         />
         {variant === "panel" ? laneTabs : null}
-        {nav.channel.kind === "agent" && props.agentSetup ? (
-          <div
-            data-testid="chats-agent-screen"
-            data-state={channelLaunch ? "ready" : "needs-setup"}
-            className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-2/40 px-3 py-1.5 text-[11px] text-muted"
-          >
-            <Bot size={12} aria-hidden className="shrink-0 text-agent" />
-            <span
-              data-testid="chats-agent-screen-runner"
-              className="min-w-0 flex-1 truncate"
-              title={channelCommand || undefined}
-            >
-              {channelLaunch
-                ? channelCommand
-                  ? `Runs ${runnerProgram(channelCommand)}`
-                  : "Runner on"
-                : channelSettingsAgent?.launch
-                  ? "Chat runner is off in Settings"
-                  : props.agentSetup.agentRunActive
-                    ? "Agent run active · connect an agent to reply here"
-                    : "No runner yet · add an agent under Agents"}
-            </span>
-            {props.workspacePath ? (
-              <span
-                data-testid="chats-agent-screen-reach"
-                title={props.workspacePath}
-                className="hidden shrink-0 truncate text-[10px] tabular-nums text-subtle sm:inline"
-              >
-                reaches {reachName(props.workspacePath)}
-              </span>
-            ) : null}
-            {props.onSetupAgent ? (
-              <button
-                type="button"
-                data-testid="chats-agent-screen-manage"
-                onClick={props.onSetupAgent}
-                className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
-              >
-                Manage
-              </button>
-            ) : null}
-          </div>
-        ) : null}
         {channelJoined !== null ? (
           <div
             data-testid="chats-joined-banner"
@@ -4642,97 +4770,30 @@ export function ChatsView(props: {
           </div>
         ) : null}
         {canShare && sharePanelOpen ? (
-          <div
-            data-testid="chats-share-panel"
-            className="shrink-0 border-b border-line bg-panel-2/40 px-3 py-2"
-          >
-            {/* Same honesty on the owner side: an unreadable listing left this
-                panel showing no members, which reads as "nobody has this
-                channel". */}
-            {shareReadFailure ? (
-              <ShareReadFailureNotice
-                testId="chats-share-members-unreadable"
-                failure={shareReadFailure}
-                stale={channelGrants.length > 0}
-                onRetry={() => void refreshShares()}
-              />
-            ) : null}
-            {channelGrants.length > 0 ? (
-              <ul className="m-0 mb-2 list-none p-0">
-                {channelGrants.map((grant) => (
-                  <li
-                    key={grant.shareId}
-                    data-testid="chats-share-member"
-                    className="flex h-7 items-center gap-2"
-                  >
-                    <ChatAvatar presentation={neutralPresentation} name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
-                    <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-                      {grant.recipientEmail ?? "Invited"}
-                    </span>
-                    {grant.access === "read-only" ? (
-                      <span className="shrink-0 text-[10px] text-subtle">read-only</span>
-                    ) : null}
-                    <button
-                      type="button"
-                      data-testid="chats-share-revoke"
-                      onClick={() =>
-                        void revokeShare(
-                          grant.shareId,
-                          grant.recipientEmail ?? "the invited person",
-                          nav.channel.name,
-                        )
-                      }
-                      className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
-                    >
-                      Remove
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            <form
-              className="flex items-center gap-1.5"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitShare();
-              }}
-            >
-              <label className="sr-only" htmlFor="chats-share-email">
-                Add a member by email
-              </label>
-              <input
-                id="chats-share-email"
-                data-testid="chats-share-email"
-                type="email"
-                value={shareEmail}
-                disabled={shareGrantsBlocked}
-                maxLength={320}
-                placeholder="Add by email"
-                onChange={(event) => setShareEmail(event.target.value)}
-                className="h-6 min-w-0 flex-1 rounded border border-line bg-bg px-2 text-[11px] text-ink placeholder:text-subtle dohc-focus-input"
-              />
-              <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted">
-                <input
-                  data-testid="chats-share-readonly"
-                  type="checkbox"
-                  checked={shareReadOnly}
-                  onChange={(event) => setShareReadOnly(event.target.checked)}
-                />
-                View only
-              </label>
-              <button
-                type="submit"
-                data-testid="chats-share-submit"
-                disabled={
-                  shareBusy || shareGrantsBlocked || shareEmail.trim().length === 0
-                }
-                className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
-              >
-                Add
-              </button>
-            </form>
-          </div>
+          <ChatMembersDialog
+            groupName={nav.channel.name}
+            members={channelGrants}
+            readFailure={shareReadFailure}
+            blocked={shareGrantsBlocked}
+            onAdd={submitShare}
+            onRemove={(grant) =>
+              void revokeShare(grant.shareId, grant.recipientEmail ?? "the invited person", nav.channel.name)
+            }
+            onRetryRead={() => void refreshShares()}
+            onClose={() => setSharePanelOpen(false)}
+          />
         ) : null}
+      </>
+    );
+    return (
+      <div
+        data-testid="chats-channel-view"
+        data-variant={variant}
+        data-group-type={groupType}
+        className="flex min-h-0 flex-1 flex-col"
+        onKeyDownCapture={onKeyDownCapture}
+      >
+        {showLane ? null : top}
         {showLane ? (
           <ChatLane
             workspaceId={workspaceId}
@@ -4743,13 +4804,21 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onOpenPath={props.onOpenPath}
             onError={props.onError}
+            onNotice={props.onNotice}
             onThreadRead={props.onThreadRead}
+            onOpenAgentSettings={props.onSetupAgent}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
+            {...(nav.focusMessageId === undefined ? {} : { focusMessageId: nav.focusMessageId })}
+            header={top}
+            notice={agentProblem ? (
+              <AgentProblemLine words={agentProblem.words} action={agentProblem.action} off={"off" in agentProblem} onAction={props.onSetupAgent} />
+            ) : null}
             {...(agentDm ? {
-              ...(channelSettingsAgent ? { agentName: channelSettingsAgent.name } : {}),
+              agentName: channelAgent?.label ?? channelSettingsAgent?.name ?? "Your agent",
+              ...(channelAgent ? { agentPresentation: channelAgent.presentation } : {}),
               draft: {
                 value: newThreadBody,
                 onChange: setNewThreadBody,
@@ -4769,14 +4838,16 @@ export function ChatsView(props: {
           topPadding={0}
           header={<>
             {!channelLocked && !agentDm ? (
-              <div className="mb-4 mt-4">
+              // Padding, not margin: a top margin would collapse through the
+              // list's full-height content and make an empty page scroll.
+              <div className="py-4">
                 <MentionComposer
                   testIdPrefix="chats-new-thread"
                   composerId="chats-new-thread-composer"
                   value={newThreadBody}
                   sending={startingThread}
                   surface="post"
-                  authorName={collaboration?.displayName || "You"}
+                  authorName={viewerLabel}
                   placeholder={`What's happening in #${nav.channel.name}?`}
                   sendLabel="Start post"
                   candidates={mentionCandidates}
@@ -4796,17 +4867,12 @@ export function ChatsView(props: {
           empty={threadsLoading ? (
               <SkeletonRows label="Loading..." className="pt-4" />
             ) : (
-              <div
-                data-testid="chats-channel-empty"
-                className="flex flex-col items-center justify-center gap-1 px-4 py-12 text-center"
-              >
-                <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                <span className="text-[13px] text-subtle">
-                  {agentDm
-                    ? "No posts."
-                    : `No posts in #${nav.channel.name} yet.`}
-                  {channelLocked || agentDm ? "" : " Start one above."}
-                </span>
+              <div className="flex flex-1 py-12">
+                <EmptyState
+                  data-testid="chats-channel-empty"
+                  picture={EMPTY_ART.posts}
+                  title={agentDm ? "No posts." : `No posts in #${nav.channel.name} yet.`}
+                />
               </div>
             )}
           renderItem={(thread) => {
@@ -4900,6 +4966,7 @@ export function ChatsView(props: {
 
   return (
     <div
+      ref={viewRef}
       data-testid="chats-view"
       data-variant={variant}
       className="flex min-h-0 flex-1 flex-col"
@@ -4922,8 +4989,7 @@ export function ChatsView(props: {
             <SectionActionButton
               testId="chats-new-channel"
               label="New group"
-              disabled={creatingChannel !== null}
-              onClick={() => setCreatingChannel("")}
+              onClick={() => setCreatingGroup(true)}
             >
               <Plus size={12} aria-hidden />
             </SectionActionButton>
@@ -4966,7 +5032,11 @@ export function ChatsView(props: {
                               <span className="sr-only">{sharedLabel}</span>
                             </span>
                           ) : null}
-                          <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" tone="quiet" />
+                          {channel.unreadCount > 0 ? (
+                            <span data-testid="chats-channel-unread" className="sr-only">
+                              {channel.unreadCount} unread
+                            </span>
+                          ) : null}
                         </>
                       }
                     />
@@ -4993,19 +5063,24 @@ export function ChatsView(props: {
               ) : null}
               <ul className="m-0 list-none p-0">
                 {receivedNotJoined.map((row) => (
-                  <li key={row.shareId} className="mx-1 flex min-h-8 items-center gap-2 px-2 py-1">
+                  <li
+                    key={row.shareId}
+                    aria-current={markedInvitation?.shareId === row.shareId ? "true" : undefined}
+                    className={`mx-1 flex min-h-8 items-center gap-2 rounded-md px-2 py-1${markedInvitation?.shareId === row.shareId ? " bg-selected" : ""}`}
+                  >
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
                     <div className="min-w-0 flex-1" title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}>
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
                       <ShareSender name={row.sharerName} email={row.granterEmail} />
                     </div>
-                    <span className="shrink-0 text-[10px] text-subtle">{shareAccessLabel(row.access)}</span>
+                    <span className="shrink-0 text-[10px] text-muted">{shareAccessLabel(row.access)}</span>
                     <button
                       type="button"
                       data-testid="chats-join-shared"
+                      data-invitation={row.shareId}
                       disabled={joiningShareId !== null}
                       onClick={() => void joinShared(row.shareId)}
-                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 dohc-focus-visible"
+                      className="h-6 shrink-0 cursor-pointer rounded border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
                     >
                       {joiningShareId === row.shareId ? "Joining…" : "Join"}
                     </button>
@@ -5033,6 +5108,7 @@ export function ChatsView(props: {
                       testId="chats-dm-item"
                       data={{ "data-channel-id": dm.channelId }}
                       active={selectedDmId === dm.channelId}
+                      unread={dm.unreadCount > 0}
                       onClick={() => openConversation({ level: "dm", dm })}
                       icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
                       label={dm.peerLabel}
@@ -5041,7 +5117,7 @@ export function ChatsView(props: {
                       trailing={
                         <>
                           {dm.connected ? null : (
-                            <span className="shrink-0 text-[10px] text-subtle">ended</span>
+                            <span className="shrink-0 text-[10px] text-muted">ended</span>
                           )}
                           <UnreadPill count={dm.unreadCount} testId="chats-dm-unread" />
                         </>
@@ -5093,6 +5169,7 @@ export function ChatsView(props: {
                     key={request.shareId}
                     request={request}
                     state="pending"
+                    marked={markedInvitation?.shareId === request.shareId}
                     busy={dmRequestBusy !== null}
                     onAccept={() => setAcceptingDmRequest(request)}
                     onDecline={() => void setDmRequestDeclined(request, true)}
@@ -5130,26 +5207,29 @@ export function ChatsView(props: {
                 const agent = settingsAgents.find((candidate) => candidate.id === channel.agentId);
                 const { label, presentation } = agentChatIdentity(channel, settingsAgents);
                 const launch = agent?.enabled ? agent.launch : undefined;
+                // An agent you run has no launch and no state here; Settings shows whether it's listening.
+                const state = !agent ? "removed" : agent.launch && !agent.enabled ? "off" : null;
                 return (
                   <NavRow
                     key={channel.id}
                     testId="chats-my-agent"
                     data={{ "data-channel-id": channel.id, ...(channel.agentId ? { "data-agent-id": channel.agentId } : {}) }}
                     active={selectedChannelId === channel.id}
+                    unread={channel.unreadCount > 0}
                     onClick={() => openConversation({ level: "channel", channel })}
                     icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
                     label={label}
                     labelTestId="chats-my-agent-name"
                     trailing={
                       <>
-                        {launch ? null : (
+                        {state ? (
                           <span
                             data-testid="chats-my-agent-state"
-                            className="shrink-0 text-[10px] text-subtle"
+                            className="shrink-0 text-[10px] text-muted"
                           >
-                            {agent?.launch ? "off" : "not set up"}
+                            {state}
                           </span>
-                        )}
+                        ) : null}
                         <AgentPresenceHint
                           activity={agent ? agentActivity(agent.name) : null}
                           program={launch ? runnerProgram(launchCommand(launch)) : null}
@@ -5175,7 +5255,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-muted">
                             via {agent.owner}
                           </span>
                         }
@@ -5198,15 +5278,15 @@ export function ChatsView(props: {
               {props.userSettings && props.onSaveUserSettings ? (
                 <button
                   type="button"
-                  data-testid={agentReady ? "chats-manage-agent" : "chats-add-agent-open"}
+                  data-testid={hasAgent ? "chats-manage-agent" : "chats-add-agent-open"}
                   onClick={() =>
-                    agentReady && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
+                    hasAgent && props.onSetupAgent ? props.onSetupAgent() : setAddingAgent(true)
                   }
-                  className="mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-visible"
+                  className="dohc-focus-row mx-1 flex h-7 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                 >
-                  {agentReady ? (
+                  {hasAgent ? (
                     <>
-                      <Bot size={13} aria-hidden className="shrink-0 text-subtle" />
+                      <Sparkles size={13} aria-hidden className="shrink-0 text-subtle" />
                       Manage agents
                     </>
                   ) : (
@@ -5221,90 +5301,8 @@ export function ChatsView(props: {
           ) : null}
         </nav>
       </div>
-      {creatingChannel !== null ? (
-        <div className={`shrink-0 border-t border-line p-2 ${pageColumn}`}>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createChannel(creatingChannel);
-            }}
-          >
-            <label className="sr-only" htmlFor="chats-new-channel-name">
-              Group name
-            </label>
-            <input
-              id="chats-new-channel-name"
-              data-testid="chats-new-channel-name"
-              autoFocus
-              value={creatingChannel}
-              maxLength={80}
-              placeholder="Group name"
-              onChange={(event) => setCreatingChannel(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  resetGroupForm();
-                }
-              }}
-              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-            />
-            <label className="sr-only" htmlFor="chats-new-channel-purpose">
-              Purpose
-            </label>
-            <input
-              id="chats-new-channel-purpose"
-              data-testid="chats-new-channel-purpose"
-              value={newGroupPurpose}
-              maxLength={200}
-              placeholder="What it's for"
-              onChange={(event) => setNewGroupPurpose(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  resetGroupForm();
-                }
-              }}
-              className="mt-1.5 h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-            />
-            <div
-              role="radiogroup"
-              aria-label="Group type"
-              className="mt-1.5 flex gap-1"
-            >
-              {(
-                [
-                  ["posts", "Posts"],
-                  ["chat", "Chat"],
-                  ["both", "Both"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="radio"
-                  aria-checked={newGroupType === value}
-                  data-testid={`chats-new-channel-type-${value}`}
-                  onClick={() => setNewGroupType(value)}
-                  className={`h-7 flex-1 rounded-md border text-[12px] transition-colors dohc-focus-visible ${
-                    newGroupType === value
-                      ? "border-ink bg-panel-2 text-ink"
-                      : "border-line text-muted hover:bg-hover hover:text-ink"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <button
-              type="submit"
-              data-testid="chats-new-channel-submit"
-              disabled={creatingChannel.trim().length === 0}
-              className="mt-1.5 h-7 w-full rounded-md bg-ink text-[12px] font-medium text-bg hover:opacity-90 disabled:opacity-40 dohc-focus-visible"
-            >
-              Create group
-            </button>
-          </form>
-        </div>
+      {creatingGroup ? (
+        <NewGroupDialog onCreate={createChannel} onClose={closeGroupDialog} />
       ) : null}
       {acceptingDmRequest ? (
         <AcceptDmDialog

@@ -1,6 +1,6 @@
 # dohc
 
-A local-first workspace for people and their agents. This glossary is the canonical vocabulary; check new names against it before defining them.
+A local-first workspace where people and their agents build, share, and manage small apps alongside their files, documents, data, and chat. This glossary is the canonical vocabulary; check new names against it before defining them.
 
 ## Language
 
@@ -54,6 +54,10 @@ _Avoid_: version (the line of history that holds moments), snapshot (a file's cu
 
 ### Notes
 
+**Page**:
+A Markdown file in a workspace, shown with its title and icon. The Explorer's Home lists pages by their folders. A page open in an editor is a live document.
+_Avoid_: document (in the interface), doc
+
 **Lossy note**:
 A Markdown note whose meaning would change if dohc saved it from its editor, because the editor can't hold some of its parts, such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens and opens a lossy note read-only.
 _Avoid_: reader-built note (a note the engine's reader built, marked by `dohcMarkdownSourceReader`), unsupported note
@@ -103,6 +107,10 @@ A relay-derived identity for one source workspace within a recipient namespace. 
 **Received object token**:
 A relay-derived file identity within the same recipient namespace. It survives source renames and never exposes the source object id.
 
+**Work link**:
+A web link to one message, `<server origin>/l/<reference>`, on the server the workspace syncs with. It carries no credential and grants nothing. dohc opens it in the workspace on this computer that holds the message. In a browser, the server's page shows only an Open in dohc button. Messages are the only work that has one so far.
+_Avoid_: share link (that is the URL grant), message URL
+
 ### Chat
 
 **ActorKey**:
@@ -114,6 +122,32 @@ The canonical server URL that distinguishes account identities from different se
 **Group**:
 A named space with members where people and agents post, chat, or both.
 _Avoid_: channel, room, space. An editor group is the split pane, not a Group.
+
+**Comment**:
+A chat about one file, started from the file's About. Its first message is the comment and its replies continue as chat. The share's discussion, which Comment share access adds, is separate.
+_Avoid_: linked chat, file chat (in the interface)
+
+### Agents
+
+**Agent**:
+An AI program that acts for one person, its owner, whether dohc starts it or not.
+_Avoid_: bot, assistant
+
+**Agent run**:
+A period of an agent's work that dohc records, so History marks its changes as that agent's. dohc starts one when a person's message or an automation wakes an agent. A person can also start one in Settings for an agent working outside dohc.
+_Avoid_: job, session
+
+**Connected agent**:
+An agent dohc does not start, which reaches dohc through the CLI or MCP.
+_Avoid_: outside agent, external agent
+
+**Personal agent link**:
+An MCP URL tied to one person's server account. An agent signs in with it to act as that person's agent, within the reach the person chose. Planned, not built yet.
+_Avoid_: API key, agent token
+
+**Work card**:
+A chat card an agent posts for work happening elsewhere, such as a thread or a pull request. It shows a title, a link and a status the agent reports, and the agent updates it in place. Planned, not built yet.
+_Avoid_: status message, task card
 
 ### Sharing
 
@@ -142,12 +176,16 @@ A URL carrying the credential that authenticates a link grant: anyone holding it
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-A person using a share link without a server account. Known by a link principal and an optional self-claimed, unverified name.
+Whoever uses a share link without a server account: a person in a browser, or an agent that signs in with the link. The relay records each one as a link principal with an optional unverified name. For an agent, it also records the agent connection it signed in with. The agent's name is the one its client reported, under the rules for a person's name, or "Agent". Its chat posts, discussion messages, and Collection writes all show that name.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
-The server-minted identity for one browser holding one share link. It carries provenance on everything the link holder does; it never carries authority beyond the grant.
+The server-minted identity for one browser or one agent connection holding one share link. It carries provenance on everything the link holder does; it never carries authority beyond the grant.
 _Avoid_: anonymous id, device id
+
+**Agent connection**:
+One agent signed in through MCP with a share link, after a person allowed it on the consent page. It acts with the link's access under its own link principal. The owner sees it in the link's Agents list and can disconnect it alone. Reset link and End link end every connection on the link.
+_Avoid_: agent session, OAuth client
 
 **Received share**:
 The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server.

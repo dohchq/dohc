@@ -12,7 +12,7 @@ dohc-engine-storage = { path = "../dohc-engine-storage" }
 dohc-engine-domain = { path = "../dohc-engine-domain" }
 dohc-engine-collab = { path = "../dohc-engine-collab" }
 dohc-engine-files = { path = "../dohc-engine-files" }
-rusqlite = "0.40"
+rusqlite = "0.41"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -28,6 +28,8 @@ dohc-macos-files = { path = "../dohc-macos-files" }
 dohc-linux-files = { path = "../dohc-linux-files" }
 
 [dev-dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
+tokio = { version = "1", features = ["macros", "rt"] }
 yrs = "=0.27.3"
 quote = "1"
 syn = { version = "2", features = ["full"] }

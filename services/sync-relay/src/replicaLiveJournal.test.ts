@@ -15,7 +15,13 @@ import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-s
 
 afterEach(() => {vi.restoreAllMocks(); cleanupLiveDeliveryFixtures();});
 
-const deliveryId = (row: journal.ReplicaLiveJournalRow) => row.admitted.metadata.accepted.receipt.deliveryId;
+// A cancellation control entry has no delivery; it is named by its cursor.
+const deliveryId = (row: journal.ReplicaLiveJournalPage["rows"][number]) =>
+  "cancellation" in row ? `cancellation-${row.journalCursor}` : row.admitted.metadata.accepted.receipt.deliveryId;
+const delivery = (row: journal.ReplicaLiveJournalPage["rows"][number] | undefined): journal.ReplicaLiveJournalRow => {
+  if (!row || "cancellation" in row) throw new Error("Expected a delivery row.");
+  return row;
+};
 
 function spyCapture(context: StorageContext, onRow?: (row: Record<string, unknown>) => void) {
   const prepare = context.db.prepare.bind(context.db);
@@ -84,7 +90,7 @@ it("already exposes the applied admitted metadata and author snapshot through th
     const row = f.journalRows().journal[0]!;
     const record = {kind: "application", relayDatabaseNamespace: row.relay_database_namespace,
       eventCount: row.accepted_event_count, evidenceDigest: row.accepted_evidence_digest, updateByteLength: input.updateBytes.byteLength,
-      metadata, sourceApplication: null, sourceRestore: null, contentCoordinate: {originId: "device", originSeq: 0}};
+      metadata, sourceApplication: null, sourceRestore: null, cancelledRestores: [], contentCoordinate: {originId: "device", originSeq: 0}};
     const bytes = Buffer.from(JSON.stringify(record)), digest = hash(bytes);
     f.storage.putBlob({workspaceId: "workspace", sha256: receipt.updateDigest, content: input.updateBytes, createdAtMs: 1});
     f.storage.putBlob({workspaceId: "workspace", sha256: digest, content: bytes, createdAtMs: 1});
@@ -449,7 +455,7 @@ it("yields within a large row and stops hashing after the guard revokes", async 
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toBe("revoked during hashing");
     expect(guard).toHaveBeenCalledTimes(3);
-    expect(Buffer.from((await f.readStorage()).rows[0]!.admitted.updateBytes, "base64")).toEqual(Buffer.from(input.updateBytes));
+    expect(Buffer.from(delivery((await f.readStorage()).rows[0]).admitted.updateBytes, "base64")).toEqual(Buffer.from(input.updateBytes));
   } finally {f.close();}
 });
 

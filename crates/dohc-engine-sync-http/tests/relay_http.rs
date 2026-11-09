@@ -262,6 +262,69 @@ fn transport(server: &FakeServer) -> HttpRelayTransport {
         .expect("HTTP relay transport")
 }
 
+#[test]
+fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
+    use dohc_engine_sync::{PushRequest, WorkReferenceMapping};
+    let reference = "R".repeat(43);
+    let mapping: WorkReferenceMapping = serde_json::from_value(json!({
+        "reference": reference,
+        "target": {"kind":"file", "versionId":"main", "objectId":"object"},
+        "createdAtMs": 1,
+    }))
+    .unwrap();
+    let expected = mapping.clone();
+    let server = FakeServer::start(move |request| {
+        assert_eq!(request.path(), "/sync/ws/log");
+        if request.method == "POST" {
+            assert_eq!(request.json()["workReferences"], json!([expected]));
+            TestResponse::json(
+                200,
+                json!({
+                    "accepted":0, "inserted":0, "skipped":0, "currentMaxOriginSeq":-1,
+                    "registeredReferences":[expected.reference],
+                }),
+            )
+        } else {
+            assert!(request.target.contains("referenceAfter=page-cursor"));
+            assert!(request.target.contains("includeReferences=true"));
+            TestResponse::json(
+                200,
+                json!({
+                    "ops":[], "nextCursor":0, "hasMore":false,
+                    "workReferences":[expected], "nextReferenceAfter":"next-page", "referenceHasMore":true,
+                }),
+            )
+        }
+    });
+    let relay = transport(&server);
+    let pushed = relay
+        .push(PushRequest {
+            workspace_id: "ws".into(),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            origin_id: "device".into(),
+            after_seq: -1,
+            ops: Vec::new(),
+            work_references: vec![mapping.clone()],
+        })
+        .unwrap();
+    assert_eq!(pushed.registered_references, vec![reference]);
+    let pulled = relay
+        .pull(PullRequest {
+            include_work_references: true,
+            workspace_id: "ws".into(),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            cursor: 0,
+            limit: 128,
+            reference_after: Some("page-cursor".into()),
+        })
+        .unwrap();
+    assert_eq!(pulled.work_references, vec![mapping]);
+    assert_eq!(pulled.next_reference_after.as_deref(), Some("next-page"));
+    assert!(pulled.reference_has_more);
+}
+
 fn batch_uploads() -> Vec<BlobUploadRequest> {
     (0..4)
         .map(|index| {
@@ -789,14 +852,7 @@ fn pull_aborts_when_has_more_cursor_does_not_advance() {
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
+        .fetch_pull(&mut engine, "ws", &NoFaults)
         .expect_err("non-advancing page must abort");
     assert_eq!(
         error,
@@ -830,11 +886,16 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
             false,
         )
     });
-    let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
+    let client = RelaySyncClient::new(transport(&server));
+    let prepared = client
+        .fetch_pull(&mut engine, "ws", &NoFaults)
+        .expect("fetch page");
+    let error = client
+        .apply_pull(
             &mut engine,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -869,11 +930,16 @@ fn pull_accepts_the_relays_integral_float_normalization() {
         )
     });
 
-    let outcome = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
+    let client = RelaySyncClient::new(transport(&server));
+    let prepared = client
+        .fetch_pull(&mut engine, "ws", &NoFaults)
+        .expect("fetch page");
+    let outcome = client
+        .apply_pull(
             &mut engine,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -907,6 +973,8 @@ fn pull_rejects_rows_without_the_mandatory_relay_sequence() {
     });
     let error = transport(&server)
         .pull(PullRequest {
+            include_work_references: true,
+            reference_after: None,
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -928,6 +996,8 @@ fn pull_captures_the_relay_sequence() {
     });
     let response = transport(&server)
         .pull(PullRequest {
+            include_work_references: true,
+            reference_after: None,
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1024,6 +1094,8 @@ fn direct_transport_rejects_fractional_wire_timestamps_without_rounding() {
 
     let error = transport(&server)
         .pull(PullRequest {
+            include_work_references: true,
+            reference_after: None,
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1042,6 +1114,7 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
         json!({"data": "x".repeat(dohc_engine_sync::MAX_PAYLOAD_JSON_BYTES - overhead + 1)});
     let error = transport(&server)
         .push(dohc_engine_sync::PushRequest {
+            work_references: Vec::new(),
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1084,14 +1157,7 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
+        .fetch_pull(&mut engine, "ws", &NoFaults)
         .expect_err("wrong blob content must fail");
     assert_eq!(error, RelayError::BlobInvalid);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -1143,11 +1209,15 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         }
     });
     let client = RelaySyncClient::new(transport(&server));
+    let prepared = client
+        .fetch_pull(&mut engine, "ws", &NoFaults)
+        .expect("fetch first page");
     let first = client
-        .pull_chat_workspace(
+        .apply_pull(
             &mut engine,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1179,11 +1249,15 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .is_none(),
         "the simulated crash must leave the persisted cursor unchanged"
     );
+    let prepared = client
+        .fetch_pull(&mut reopened, "ws", &NoFaults)
+        .expect("fetch second page");
     let second = client
-        .pull_chat_workspace(
+        .apply_pull(
             &mut reopened,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1235,11 +1309,15 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .cursor,
         1
     );
+    let prepared = client
+        .fetch_pull(&mut committed, "ws", &NoFaults)
+        .expect("fetch third page");
     let third = client
-        .pull_chat_workspace(
+        .apply_pull(
             &mut committed,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1305,6 +1383,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "ambiguous_selector" => RelayError::AmbiguousSelector,
         "api_version_too_new" => RelayError::ApiVersionTooNew,
         "api_version_too_old" => RelayError::ApiVersionTooOld,
+        "app_collection_missing" => RelayError::HttpStatus(410),
         "authorship_mismatch" => RelayError::AuthorshipMismatch,
         "bad_request" | "empty_selector" | "invalid_access" | "invalid_path"
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
@@ -1315,8 +1394,15 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "link_name_already_set"
         | "notice_list_full"
         | "restore-in-progress"
+        | "edits-pending"
+        | "host-diverged"
+        | "host-paused"
+        | "host-no-edit-grant"
+        | "host-moved"
+        | "host-start-failed"
+        | "host-not-loaded"
         | "stale" => RelayError::Conflict,
-        "collection_write_rate_limited" => RelayError::HttpStatus(429),
+        "collection_write_rate_limited" | "held_read_busy" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
         "epoch_superseded" => RelayError::EpochSuperseded,
@@ -1446,6 +1532,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let (workspace_id, replication_epoch, stream_identity) = coordinate();
     transport
         .push(dohc_engine_sync::PushRequest {
+            work_references: Vec::new(),
             workspace_id,
             replication_epoch,
             stream_identity,
@@ -1467,6 +1554,8 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let (workspace_id, replication_epoch, stream_identity) = coordinate();
     transport
         .pull(PullRequest {
+            include_work_references: true,
+            reference_after: None,
             workspace_id,
             replication_epoch,
             stream_identity,
@@ -1543,6 +1632,8 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         .expect("share push");
     let shared = transport
         .shared_channel_pull(SharedChannelRequest {
+            include_work_references: true,
+            reference_after: None,
             share_id: "share-1".to_owned(),
             channel_wire_id: "wire-1".to_owned(),
             origin_id: "member".to_owned(),
@@ -1556,6 +1647,8 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     );
     transport
         .share_view_pull(ShareViewRequest {
+            include_work_references: true,
+            reference_after: None,
             share_id: "share-1".to_owned(),
             cursor: 0,
             limit: usize::MAX,
@@ -1568,6 +1661,26 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         })
         .expect("share blob");
 
+    transport
+        .shared_channel_pull(SharedChannelRequest {
+            include_work_references: false,
+            reference_after: Some("mapping-tail".into()),
+            share_id: "share-1".into(),
+            channel_wire_id: "wire-1".into(),
+            origin_id: "member".into(),
+            cursor: 1,
+            ops: Vec::new(),
+        })
+        .unwrap();
+    transport
+        .share_view_pull(ShareViewRequest {
+            include_work_references: false,
+            reference_after: Some("mapping-tail".into()),
+            share_id: "share-1".into(),
+            cursor: 1,
+            limit: 500,
+        })
+        .unwrap();
     let seen = seen.lock().expect("seen endpoints");
     for endpoint in [
         "POST /sync/workspaces",
@@ -1586,12 +1699,14 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         assert!(seen.contains(endpoint), "missing endpoint {endpoint}");
     }
     assert!(seen.contains(
-        "TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1&originId=member"
+        "TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1&originId=member&referenceAfter=&includeReferences=true"
     ));
     assert!(
-        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500"),
+        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500&referenceAfter=&includeReferences=true"),
         "forwarding an unbounded share-view limit exceeds the response budget"
     );
+    assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&channelWireId=wire-1&originId=member&referenceAfter=mapping-tail&includeReferences=false"));
+    assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&referenceAfter=mapping-tail&includeReferences=false"));
 }
 
 #[test]
@@ -1806,14 +1921,9 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
     // The served bytes hash to the requested sha256, so only the ceiling can
     // refuse them.
     assert_eq!(
-        RelaySyncClient::new(transport(&server)).pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        ),
+        RelaySyncClient::new(transport(&server))
+            .fetch_pull(&mut engine, "ws", &NoFaults)
+            .map(|_| ()),
         Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
@@ -1908,14 +2018,7 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
+        .fetch_pull(&mut engine, "ws", &NoFaults)
         .expect_err("a binary body past the read limit is refused");
     assert_eq!(
         error,
@@ -1939,6 +2042,8 @@ fn shared_channel_pull_requires_authenticated_origin_metadata() {
         TestResponse::json(200, json!({"ops": [], "nextCursor": 0, "hasMore": false}))
     });
     let result = transport(&server).shared_channel_pull(SharedChannelRequest {
+        include_work_references: true,
+        reference_after: None,
         share_id: "share".into(),
         channel_wire_id: "wire".into(),
         origin_id: "member".into(),
@@ -2154,6 +2259,7 @@ fn a_hosted_transport_sends_the_log_blobs_and_coordinates_to_the_hosted_feed() {
             Ok(LogCoordinateResponse::Absent)
         );
         let push = dohc_engine_sync::PushRequest {
+            work_references: Vec::new(),
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -2207,6 +2313,7 @@ fn hosted_feed_refusals_map_to_their_errors() {
     });
     let hosted = transport(&server).hosted();
     let push = dohc_engine_sync::PushRequest {
+        work_references: Vec::new(),
         workspace_id: "ws".to_owned(),
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
@@ -2263,6 +2370,7 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
     let refusals = [
         hosted
             .push(dohc_engine_sync::PushRequest {
+                work_references: Vec::new(),
                 workspace_id: "ws".to_owned(),
                 replication_epoch: "epoch".to_owned(),
                 stream_identity: "stream".to_owned(),
@@ -2273,6 +2381,8 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
             .map(drop),
         hosted
             .pull(PullRequest {
+                include_work_references: true,
+                reference_after: None,
                 workspace_id: "ws".to_owned(),
                 replication_epoch: "epoch".to_owned(),
                 stream_identity: "stream".to_owned(),
@@ -2326,6 +2436,8 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
             .map(drop),
         hosted
             .shared_channel_pull(SharedChannelRequest {
+                include_work_references: true,
+                reference_after: None,
                 share_id: "share-1".to_owned(),
                 channel_wire_id: "wire-1".to_owned(),
                 origin_id: "member".to_owned(),
@@ -2335,6 +2447,8 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
             .map(drop),
         hosted
             .share_view_pull(ShareViewRequest {
+                include_work_references: true,
+                reference_after: None,
                 share_id: "share-1".to_owned(),
                 cursor: 0,
                 limit: 1,

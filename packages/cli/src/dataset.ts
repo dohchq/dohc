@@ -1,4 +1,5 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
 import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
@@ -55,6 +56,22 @@ export const DatasetPermissionsPage = z.object({ permissions: z.array(z.discrimi
   z.object({ kind: z.literal("app"), principal: z.string().min(1).max(256), current: z.boolean(), metadata: z.unknown().transform(value => parseDatasetBindingReference(value)) }).strict(),
 ])).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
 export type DatasetPermissionsPage = z.infer<typeof DatasetPermissionsPage>;
+const host = z.string().min(1).max(260);
+/**
+ * Where a Collection is. `here`: only on this computer. Giving a person
+ * access or publishing an app on a link moves it to `server`, the
+ * workspace's server, for good; null when the workspace has none. `runs` is
+ * what that server runs, null when dohc could not ask or had no automations
+ * to ask about. The counts are of the Collection's automations and of those a
+ * schedule or Group message starts. `server`: on that server, which it needs
+ * from then on.
+ */
+export const DatasetPlace = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("here"), server: z.object({ host, runs: z.enum(["all", "no-schedules", "off"]).nullable(),
+    automations: z.number().int().min(0), scheduledAutomations: z.number().int().min(0) }).strict().nullable() }).strict(),
+  z.object({ kind: z.literal("server"), host }).strict(),
+]);
+export type DatasetPlace = z.infer<typeof DatasetPlace>;
 export const DatasetSchemaChange = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("renameCollection"), name: z.string().trim().min(1).max(128) }).strict(),
   z.object({ kind: z.literal("renameTable"), tableId: identity, name: z.string().trim().min(1).max(128) }).strict(),
@@ -73,8 +90,9 @@ const migrationValues = z.record(z.string().max(256), migrationValue);
 const migrationRowChange = z.object({ table: z.string().min(1).max(128), kind: z.enum(["insert", "update", "delete"]), key: migrationValues,
   before: migrationValues.nullable(), after: migrationValues.nullable() }).strict();
 export const DatasetMigrationPreviewPage = z.object({ changes: z.array(migrationRowChange).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
-const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative() }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
-export const DatasetMigrationCandidate = z.object({ candidateId: identity, expected: DatasetCursor, approvedRevisionHash: sha256, checkpointSha256: sha256,
+const valueCounts = z.record(z.string().max(256), z.number().int().nonnegative());
+const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative(), deletedRows: z.number().int().nonnegative(), beforeValues: valueCounts, afterValues: valueCounts, clearedValues: valueCounts }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
+export const DatasetMigrationCandidate = z.object({ candidateId: identity, expected: DatasetCursor, approvedRevisionHash: sha256, checkpointSha256: sha256, changeSha256: sha256,
   expiresAtMs: z.number().int().positive(), preview: migrationPreview }).strict();
 export type DatasetMigrationPreviewPage = z.infer<typeof DatasetMigrationPreviewPage>;
 export type DatasetMigrationCandidate = z.infer<typeof DatasetMigrationCandidate>;
@@ -106,7 +124,8 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("reconcileAttempt"), reference: sha256, acknowledge: z.literal(true) }).strict(),
   z.object({ ...selection, action: z.literal("cancelAttempt"), reference: sha256, acknowledge: z.literal(true) }).strict(),
   z.object({ ...selection, action: z.literal("permissions"), after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
-  z.object({ ...selection, action: z.literal("setGrant"), grantId: z.string().min(1).max(256), grant: DatasetDataGrant }).strict(),
+  z.object({ ...selection, action: z.literal("setGrant"), grantId: z.string().min(1).max(256), grant: DatasetDataGrant,
+    moveToServer: z.literal(true).describe("Agree to move a Collection that is only on this computer to the workspace's server for good.").optional() }).strict(),
   z.object({ ...selection, action: z.literal("removeGrant"), principalKey: z.string().min(1).max(256) }).strict(),
   z.object({ ...selection, action: z.literal("export"), savePath: z.string().min(1).max(4096).optional(), overwrite: z.boolean().optional() }).strict(),
   z.object({ ...pinned, action: z.literal("upload"), fieldId: identity, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
@@ -125,9 +144,11 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }).strict(),
   z.object({ ...pinned, action: z.literal("prepareHistoryRestore"), targetRevisionSha256: sha256, changedRevisionSha256: sha256 }).strict(),
   z.object({ ...selection, action: z.literal("prepareMigration"), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...selection, action: z.literal("askToApply"), migrationPath: z.string().min(1).max(1024), note: z.string().trim().min(1).max(500).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("migrationPreviewPage"), preparationId: identity, after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
-  z.object({ ...workspace, action: z.literal("approveMigration"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
+  z.object({ ...workspace, action: z.literal("approveMigration"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256,
+    changeSha256: sha256.describe("The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs.").optional() }).strict(),
   z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("invoke"), operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
     input: json, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
@@ -139,7 +160,9 @@ export const DatasetMigrationPreparation = z.object({ preparationId: identity, p
   sourceDigest: sha256, approvalDigest: sha256, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024),
   migrationSql: z.string().min(1).max(256 * 1024), expiresAtMs: z.number().int().positive() }).strict();
 export type DatasetMigrationPreparation = z.infer<typeof DatasetMigrationPreparation>;
-export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative(), coverage: z.literal("saved-pages").optional() }).strict();
+export const DatasetCopyStatus = z.object({ offline: z.boolean(), savedAtMs: z.number().int().nonnegative(), coverage: z.literal("saved-pages").optional(),
+  /** The server that holds an owner's Collection, which it needs to change. */
+  host: z.string().min(1).max(260).optional() }).strict();
 export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;
 export const DatasetInvocationResult = z.object({
   result: z.unknown().transform((value, context) => {
@@ -164,13 +187,16 @@ export const DatasetHistoryPage = z.object({ datasetId: identity, name: z.string
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
 const description = z.unknown().transform((value, context) => {
   try {
-    const { datasetPath: path, datasetAddressStatus, ...metadata } = value as Record<string, unknown>;
-    const status = z.enum(["available", "missing", "ambiguous"]).optional().parse(datasetAddressStatus);
-    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : resultDatasetPath.parse(path), ...(status ? { datasetAddressStatus: status } : {}) };
+    const { datasetPath: path, datasetAddressStatus, datasetPaths, ...metadata } = value as Record<string, unknown>;
+    const status = z.enum(["available", "missing", "ambiguous", "unreadable"]).optional().parse(datasetAddressStatus);
+    const paths = z.array(resultDatasetPath).min(1).optional().parse(datasetPaths);
+    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : resultDatasetPath.parse(path), ...(status ? { datasetAddressStatus: status } : {}), ...(paths ? { datasetPaths: paths } : {}) };
   }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
 export type AddressedDatasetDescription = z.infer<typeof description>;
+// A computer's name, checked as the Collections record checks it, so every name a record holds passes.
+const computerLabel = z.string().refine(label => isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS), "Invalid computer name.");
 /**
  * A list on a computer that doesn't keep the workspace's Collections. It
  * holds the Collections on `server`, which this computer asked, and
@@ -178,9 +204,25 @@ export type AddressedDatasetDescription = z.infer<typeof description>;
  */
 export const DatasetListElsewhere = z.object({
   server: z.string().url().max(2048),
-  computer: z.object({ label: z.string().min(1).max(64), sameName: z.boolean() }).strict(),
+  computer: z.object({ label: computerLabel, sameName: z.boolean() }).strict(),
 }).strict();
 export type DatasetListElsewhere = z.infer<typeof DatasetListElsewhere>;
+// No limit: an unreadable record's words can carry the error that stopped dohc reading it, with the workspace's path.
+const refusalWords = z.string().min(1);
+const refusalComputer = computerLabel.nullable();
+/**
+ * Why this computer can't list a workspace's Collections. `words` say why
+ * and what to do. `elsewhere`: another computer keeps them, and `computer`
+ * names it. `server-unavailable`: another computer keeps them, and this
+ * computer's server didn't answer. Its `words` say where the Collections
+ * are, and `failure` is the server's error.
+ */
+export const DatasetListRefusal = z.discriminatedUnion("kind", [
+  z.object({ kind: z.enum(["unclaimed", "unreadable", "missing", "replaced", "changed"]), words: refusalWords }).strict(),
+  z.object({ kind: z.literal("elsewhere"), words: refusalWords, computer: refusalComputer }).strict(),
+  z.object({ kind: z.literal("server-unavailable"), words: refusalWords, computer: refusalComputer, failure: z.string().max(4096) }).strict(),
+]);
+export type DatasetListRefusal = z.infer<typeof DatasetListRefusal>;
 export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
@@ -195,8 +237,9 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable(), elsewhere: DatasetListElsewhere.optional() }).strict(),
+  z.object({ kind: z.literal("collections-refused"), refusal: DatasetListRefusal }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
-  DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
+  DatasetPermissionsPage.extend({ kind: z.literal("permissions"), place: DatasetPlace.optional() }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),
   z.object({ kind: z.literal("exported"), savedPath: z.string().min(1).max(4096).nullable() }).strict(),
   CreationPartial,
@@ -212,6 +255,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetMigrationPreviewPage.extend({ kind: z.literal("migration-preview-page") }).strict(),
   z.object({ kind: z.literal("migrated"), revision, cursor: DatasetCursor }).strict(),
   z.object({ kind: z.literal("migration-discarded") }).strict(),
+  z.object({ kind: z.literal("change-asked"), path: z.string().min(1).max(1024), changeSha256: sha256 }).strict(),
 ]);
 export type DatasetResult = z.infer<typeof DatasetResult>;
 
@@ -246,6 +290,7 @@ export const DATASET_CAPABILITIES = {
   approve: "dataset.approve",
   discard: "dataset.discard",
   prepareMigration: "dataset.migration.prepare",
+  askToApply: "dataset.change.ask",
   migrationPreviewPage: "dataset.migration.preview",
   prepareSchemaChange: "dataset.schema.change.prepare",
   approveMigration: "dataset.migration.approve",

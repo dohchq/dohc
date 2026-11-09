@@ -6,9 +6,9 @@ import {
   MessageSquare,
   Regex,
   Search,
-  SearchX,
   SlidersHorizontal,
   WholeWord,
+  X,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
@@ -16,6 +16,7 @@ import { rendererMarks } from "../../performance/rendererMarks";
 import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Ref } from "../ui/Ref";
+import { EMPTY_ART } from "./EmptyArt";
 import {
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
@@ -99,7 +100,7 @@ const FileGroup = memo(function FileGroup(props: {
         onClick={() => props.onToggle(group.path)}
         // h-7 at 13px: the workbench list rhythm (Explorer rows, palette
         // rows) — Search must not read denser than the tree one click away.
-        className="flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
+        className="dohc-focus-row flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
       >
         {props.collapsed ? (
           <ChevronRight size={12} aria-hidden className="shrink-0 text-subtle" />
@@ -139,7 +140,7 @@ const FileGroup = memo(function FileGroup(props: {
                 // matching the h-7 workbench row pitch.
                 className={`block w-full rounded-md py-[4px] pl-6 pr-2 text-left transition-colors duration-75 ${
                   index === props.selectedEntryIndex
-                    ? "bg-selected text-ink"
+                    ? "bg-selected text-ink font-medium"
                     : "hover:bg-hover"
                 }`}
               >
@@ -153,7 +154,7 @@ const FileGroup = memo(function FileGroup(props: {
                 type="button"
                 data-testid="search-show-more"
                 onClick={() => props.onShowAll(group.path)}
-                className="flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
+                className="dohc-focus-row flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 Show {hidden} more match{hidden === 1 ? "" : "es"}
               </button>
@@ -497,12 +498,13 @@ export function SearchView(props: {
       ) : model.status === "complete" && model.totalMatches === 0 ? (
         <EmptyState
           data-testid="search-empty-state"
-          icon={SearchX}
+          picture={EMPTY_ART.search}
           title={`No files or chats match "${model.query}".`}
-          hint={narrowed ? undefined : "Try a shorter search."}
         >
           {narrowed ? (
             <SecondaryButton
+              size="compact"
+              className="inline-flex items-center gap-1.5"
               onClick={() => {
                 // The search runs again at once and this state unmounts with
                 // the button, so focus goes where the person keeps searching.
@@ -516,6 +518,7 @@ export function SearchView(props: {
                 });
               }}
             >
+              <X size={12} aria-hidden />
               Clear filters
             </SecondaryButton>
           ) : null}
@@ -555,7 +558,7 @@ export function SearchView(props: {
                 type="button"
                 data-testid="search-show-more-files"
                 onClick={() => setGroupWindow((current) => current + GROUP_WINDOW_STEP)}
-                className="flex h-7 w-full items-center rounded-md px-1.5 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
+                className="dohc-focus-row flex h-7 w-full items-center rounded-md px-1.5 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 Show {hiddenGroupCount} more file{hiddenGroupCount === 1 ? "" : "s"}
               </button>

@@ -3213,8 +3213,15 @@ describe("relay capability reads", () => {
       const { authors: _authors, ...artifact } = payload as Record<string, unknown>;
       return { ...op, payload: artifact };
     });
-    const { ownOriginId, ...recipientPage } = recipientLog;
+    // Named sync carries reference mappings; link logs keep their file replay contract.
+    const { ownOriginId, workReferences, nextReferenceAfter, referenceHasMore, ...recipientPage } = recipientLog;
     expect(ownOriginId).toMatch(/^relay:share-member:[a-f0-9]{64}$/);
+    expect(workReferences).toEqual([]);
+    expect(nextReferenceAfter).toBeTypeOf("string");
+    expect(referenceHasMore).toBe(false);
+    expect(linkLog).not.toHaveProperty("workReferences");
+    expect(linkLog).not.toHaveProperty("nextReferenceAfter");
+    expect(linkLog).not.toHaveProperty("referenceHasMore");
     expect(withoutReceivedIdentity(linkLog)).toEqual(withoutReceivedIdentity({ ...recipientPage, ops: linkOps, epochLogFloor: 0 }));
     expect(linkLog).not.toHaveProperty("ownOriginId");
     expect(linkOps.every((op) => !Object.hasOwn(op, "originId"))).toBe(true);

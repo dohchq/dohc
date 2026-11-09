@@ -85,7 +85,7 @@ pub const DEFAULT_AGENT_ID: &str = "default";
 /// reserved for agent chats.
 const AGENT_CHANNEL_SLUG: &str = "my-agent";
 /// At most this many agents wake for one message.
-const MAX_NAMED_AGENTS: usize = 64;
+const MAX_WAKE_AGENTS: usize = 64;
 /// Workspace-only emptiness probe used to skip the full pending replay scan.
 pub const PENDING_CHAT_WORKSPACE_EXISTS_SQL: &str = "\
 SELECT EXISTS( \
@@ -275,11 +275,14 @@ impl ChatActorKind {
 
 /// The share link a link holder posted through: the relay-minted link grant
 /// and link principal. The message's display name is the name the holder
-/// had set when the relay wrote it. A link message names no account.
+/// had set when the relay wrote it. A link message names no account. An
+/// agent that signed in with the link also names its agent connection; the
+/// link principal stays the authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessageLinkAuthor {
     pub grant_id: String,
     pub principal_id: String,
+    pub agent_connection_id: Option<String>,
 }
 
 /// A durable chat channel row.
@@ -362,6 +365,20 @@ pub struct ChatMessageAutomation {
     pub chain_depth: u32,
 }
 
+/// What an agent says about itself: the product and version its MCP client
+/// names in the handshake, and the model the agent states. dohc can't check
+/// any of it, so it is only ever shown as reported. Absent means unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatReportedAgent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 /// A durable chat message row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
@@ -383,8 +400,10 @@ pub struct ChatMessage {
     pub automation: Option<ChatMessageAutomation>,
     /// Set on, and only on, a link message.
     pub link_author: Option<ChatMessageLinkAuthor>,
-    /// The agent that wrote the message in one of its runs. Provenance only.
+    /// The agent in Settings that wrote the message. Provenance only.
     pub author_agent_id: Option<String>,
+    /// What the agent reported about itself. Only an agent message has one.
+    pub author_reported: Option<ChatReportedAgent>,
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
@@ -522,6 +541,26 @@ pub struct ChatAgentRequest {
     pub created_at_ms: i64,
 }
 
+/// An unread request with what a waiting agent shows of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatAgentRequestDetail {
+    pub request: ChatAgentRequest,
+    /// The Group that holds the thread. A file's thread has none.
+    pub channel: Option<ChatAgentRequestChannel>,
+    pub author_display_name: String,
+    pub body: String,
+}
+
+/// The Group a request was posted in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatAgentRequestChannel {
+    pub channel_id: String,
+    pub kind: ChatChannelKind,
+    pub name: String,
+    pub slug: String,
+    pub purpose: String,
+}
+
 /// The per-thread read cursor (server-owned monotonic register + CAS revision).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatThreadReadState {
@@ -558,6 +597,8 @@ pub struct ChatAgentReadState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentUnreadThreadRow {
     pub thread: ChatThread,
+    pub last_read_created_at_ms: i64,
+    pub last_read_message_id: String,
     pub latest_created_at_ms: i64,
     pub latest_message_id: String,
 }
@@ -663,6 +704,9 @@ pub struct ChannelOpeningMessage {
     /// Set when this computer's automation wrote the message.
     pub automation: Option<ChatMessageAutomation>,
     pub link_author: Option<ChatMessageLinkAuthor>,
+    pub author_reported: Option<ChatReportedAgent>,
+    /// The agent in Settings that wrote the message.
+    pub author_agent_id: Option<String>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
 }
@@ -878,12 +922,13 @@ pub struct StartChannelThread {
     pub attachments: Vec<LocalAttachmentInput>,
     /// Required for, and only for, an automation author.
     pub automation: Option<ChatMessageAutomation>,
-    /// The agent writing in one of its runs. Only an agent author has one.
+    /// The agent in Settings writing. Only an agent author has one.
     pub author_agent_id: Option<String>,
-    /// The author's own agents the message names. Each one wakes, as does
-    /// the agent whose chat this is. Only a person's message names agents,
-    /// and the ids stay on this computer.
-    pub named_agent_ids: Vec<String>,
+    /// What the agent reported about itself. Only an agent author has one.
+    pub author_reported: Option<ChatReportedAgent>,
+    /// Every agent the message wakes, its DM's agent included. Only a
+    /// person's message wakes agents, and the ids stay on this computer.
+    pub wake_agent_ids: Vec<String>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with
     /// the same key + payload replays the recorded result exactly-once instead of
@@ -912,8 +957,10 @@ pub struct SendMessage {
     pub automation: Option<ChatMessageAutomation>,
     /// See [`StartChannelThread::author_agent_id`].
     pub author_agent_id: Option<String>,
-    /// See [`StartChannelThread::named_agent_ids`].
-    pub named_agent_ids: Vec<String>,
+    /// See [`StartChannelThread::author_reported`].
+    pub author_reported: Option<ChatReportedAgent>,
+    /// See [`StartChannelThread::wake_agent_ids`].
+    pub wake_agent_ids: Vec<String>,
     pub now_ms: i64,
     /// Optional idempotency key (see [`StartChannelThread::request_id`]).
     pub request_id: Option<String>,
@@ -1031,17 +1078,79 @@ pub fn is_agent_id(value: &str) -> bool {
 /// The place in each thread that agents outside a run dohc dispatched share.
 /// No agent id is empty, so their reads never move a dispatched agent's place.
 const OUTSIDE_RUN_READER: &str = "";
+/// At most this many accounts ask one agent you run.
+pub const MAX_AGENT_REQUESTERS: usize = 64;
+
+/// Which agent reads a workspace's requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentReader {
+    /// The agent of a run dohc dispatched, which must still be running.
+    Run { run_id: String },
+    /// An agent that gave no name. It shares one place in each thread.
+    Unnamed,
+    /// An agent you run on this computer. Only its person's posts ask it:
+    /// a post by one of `requesters`, or a post with no account when
+    /// `unattributed_counts` is set.
+    Connected {
+        agent_id: String,
+        handle: String,
+        requesters: Vec<String>,
+        unattributed_counts: bool,
+    },
+}
+
+impl AgentReader {
+    /// Check a connected reader's id, handle, and accounts. The handle is
+    /// stored as mentions store it.
+    pub fn normalized(self) -> Result<Self, DomainError> {
+        let AgentReader::Connected {
+            agent_id,
+            handle,
+            requesters,
+            unattributed_counts,
+        } = self
+        else {
+            return Ok(self);
+        };
+        if !is_agent_id(&agent_id) {
+            return Err(DomainError::InvalidInput {
+                reason: "an agent you run is named by a valid id",
+            });
+        }
+        if requesters.len() > MAX_AGENT_REQUESTERS {
+            return Err(DomainError::InvalidInput {
+                reason: "an agent you run has too many requesters",
+            });
+        }
+        let mut accounts = Vec::<String>::with_capacity(requesters.len());
+        for requester in &requesters {
+            if let Some(account) = normalize_author_user_id(Some(requester))?
+                && !accounts.contains(&account)
+            {
+                accounts.push(account);
+            }
+        }
+        Ok(AgentReader::Connected {
+            agent_id,
+            handle: normalize_mention_handle(&handle)?,
+            requesters: accounts,
+            unattributed_counts,
+        })
+    }
+}
 
 /// Whose place in a thread an agent read uses: the agent of the run, which must
-/// still be running in this workspace, or the place agents outside a run share.
-/// A caller names the run, never the agent.
+/// still be running in this workspace, the agent you run, or the place unnamed
+/// agents share. A caller names the run, never its agent.
 fn agent_reader(
     conn: &Connection,
     workspace_id: &str,
-    run_id: Option<&str>,
+    reader: &AgentReader,
 ) -> Result<String, DomainError> {
-    let Some(run_id) = run_id else {
-        return Ok(OUTSIDE_RUN_READER.to_owned());
+    let run_id = match reader {
+        AgentReader::Run { run_id } => run_id,
+        AgentReader::Unnamed => return Ok(OUTSIDE_RUN_READER.to_owned()),
+        AgentReader::Connected { agent_id, .. } => return Ok(agent_id.clone()),
     };
     conn.query_row(
         "SELECT agent_id FROM agent_run_records \
@@ -1057,6 +1166,171 @@ fn agent_reader(
             "No agent run with this id is running in this workspace.",
         )
     })
+}
+
+/// The query for one reader's unread requests. Every kind binds the
+/// workspace, the reader's place, the `after` coordinate, the limit, and the
+/// Group and thread filters as ?1 to ?8. A connected reader adds its handle,
+/// its requesters as a JSON array, and whether a post with no account counts.
+///
+/// Each candidate source skips what the reader has read and what comes before
+/// `after`, so read history never enters the union.
+fn agent_requests_sql(reader: &AgentReader, detail: bool) -> String {
+    let (candidates, source, rule) = match reader {
+        // The requests the run's agent was woken for.
+        AgentReader::Run { .. } => (
+            String::new(),
+            "FROM chat_dispatch_ledger l \
+             JOIN chat_messages m ON m.workspace_id = l.workspace_id \
+               AND m.thread_id = l.thread_id AND m.message_id = l.trigger_message_id",
+            "l.workspace_id = ?1 AND l.agent_id = ?2",
+        ),
+        // A plain @agent no agent was woken for, and a person's reply in a
+        // thread an unnamed agent posted in. Agent chats belong to their agents.
+        AgentReader::Unnamed => (
+            format!(
+                "WITH posted AS MATERIALIZED ( \
+                   SELECT thread_id, MIN(message_order) AS first_order FROM chat_messages \
+                   WHERE workspace_id = ?1 AND author_kind = 'agent' AND author_agent_id IS NULL \
+                   GROUP BY thread_id \
+                 ), candidates AS ( \
+                   SELECT x.thread_id, x.message_id FROM chat_mentions x {read_x} \
+                   WHERE x.workspace_id = ?1 AND x.handle = 'agent' AND {unread_x} \
+                     AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
+                       WHERE l.workspace_id = x.workspace_id \
+                         AND l.trigger_message_id = x.message_id) \
+                   UNION \
+                   SELECT m.thread_id, m.message_id FROM posted p {read_p} \
+                     CROSS JOIN chat_messages m \
+                     ON m.workspace_id = ?1 AND m.thread_id = p.thread_id \
+                       AND m.message_order > p.first_order AND {seek_m} \
+                   WHERE m.author_kind = 'human' AND {unread_m} \
+                 )",
+                read_x = read_place_join("x.thread_id"),
+                unread_x = unread_after("x"),
+                read_p = read_place_join("p.thread_id"),
+                seek_m = seek_after("m"),
+                unread_m = unread_after("m"),
+            ),
+            "FROM candidates candidate CROSS JOIN chat_messages m \
+               ON m.workspace_id = ?1 AND m.message_id = candidate.message_id \
+                 AND m.thread_id = candidate.thread_id",
+            "NOT (m.author_kind = 'agent' AND m.author_agent_id IS NULL) \
+             AND c.kind IS NOT 'agent'",
+        ),
+        // Its chat, a mention of its handle, and a reply in a thread it
+        // posted in, each by its person and not from the CLI.
+        AgentReader::Connected { .. } => (
+            format!(
+                "WITH posted AS MATERIALIZED ( \
+                   SELECT thread_id, MIN(message_order) AS first_order FROM chat_messages \
+                   WHERE workspace_id = ?1 AND author_agent_id = ?2 \
+                   GROUP BY thread_id \
+                 ), candidates AS ( \
+                   SELECT m.thread_id, m.message_id FROM chat_channels agent_chat \
+                     JOIN chat_threads chat_thread \
+                       ON chat_thread.workspace_id = agent_chat.workspace_id \
+                       AND chat_thread.channel_id = agent_chat.channel_id \
+                     {read_dm} \
+                     CROSS JOIN chat_messages m ON m.workspace_id = chat_thread.workspace_id \
+                       AND m.thread_id = chat_thread.thread_id AND {seek_m} \
+                   WHERE agent_chat.workspace_id = ?1 AND agent_chat.agent_id = ?2 \
+                     AND m.author_kind = 'human' AND {unread_m} \
+                   UNION \
+                   SELECT x.thread_id, x.message_id FROM chat_mentions x {read_x} \
+                   WHERE x.workspace_id = ?1 AND x.handle = ?9 AND x.author_kind = 'human' \
+                     AND {unread_x} \
+                   UNION \
+                   SELECT m.thread_id, m.message_id FROM posted p {read_p} \
+                     CROSS JOIN chat_messages m \
+                     ON m.workspace_id = ?1 AND m.thread_id = p.thread_id \
+                       AND m.message_order > p.first_order AND {seek_m} \
+                   WHERE m.author_kind = 'human' AND {unread_m} \
+                 )",
+                read_dm = read_place_join("chat_thread.thread_id"),
+                read_x = read_place_join("x.thread_id"),
+                read_p = read_place_join("p.thread_id"),
+                seek_m = seek_after("m"),
+                unread_m = unread_after("m"),
+                unread_x = unread_after("x"),
+            ),
+            "FROM candidates candidate CROSS JOIN chat_messages m \
+               ON m.workspace_id = ?1 AND m.message_id = candidate.message_id \
+                 AND m.thread_id = candidate.thread_id",
+            "m.author_kind = 'human' AND m.origin IS NOT 'cli' \
+             AND (m.author_user_id IN (SELECT value FROM json_each(?10)) \
+               OR (m.author_user_id IS NULL AND ?11 = 1))",
+        ),
+    };
+    let columns = if detail {
+        "m.thread_id, m.message_id, m.author_kind, m.created_at_ms, m.author_display_name, \
+         m.body, c.channel_id, c.kind, c.name, c.slug, c.purpose"
+    } else {
+        "m.thread_id, m.message_id, m.author_kind, m.created_at_ms"
+    };
+    format!(
+        "{candidates} SELECT {columns} {source} \
+         JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
+         LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id \
+           AND c.channel_id = t.channel_id \
+         LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id \
+           AND ars.agent_id = ?2 AND ars.thread_id = m.thread_id \
+         WHERE {rule} \
+           AND (ars.thread_id IS NULL OR m.created_at_ms > ars.last_read_created_at_ms \
+             OR (m.created_at_ms = ars.last_read_created_at_ms \
+               AND m.message_id > ars.last_read_message_id)) \
+           AND (?3 = 0 OR m.created_at_ms > ?4 \
+             OR (m.created_at_ms = ?4 AND m.message_id > ?5)) \
+           AND (?7 IS NULL OR t.channel_id = ?7) \
+           AND (?8 IS NULL OR m.thread_id = ?8) \
+         ORDER BY m.created_at_ms, m.message_id LIMIT ?6"
+    )
+}
+
+/// Joins the reader's read place for the thread in `thread` as `r`.
+fn read_place_join(thread: &str) -> String {
+    format!(
+        "LEFT JOIN chat_agent_read_state r ON r.workspace_id = ?1 \
+           AND r.agent_id = ?2 AND r.thread_id = {thread}"
+    )
+}
+
+/// A lower bound on `alias.created_at_ms` from the read place `r` and the
+/// `after` coordinate, so the thread's time index can skip read history.
+fn seek_after(alias: &str) -> String {
+    format!(
+        "{alias}.created_at_ms >= MAX(COALESCE(r.last_read_created_at_ms, {min}), \
+           CASE WHEN ?3 = 0 THEN {min} ELSE ?4 END)",
+        min = i64::MIN
+    )
+}
+
+/// The row in `alias` comes after the read place `r` and after `after`.
+fn unread_after(alias: &str) -> String {
+    format!(
+        "(r.thread_id IS NULL OR {alias}.created_at_ms > r.last_read_created_at_ms \
+           OR ({alias}.created_at_ms = r.last_read_created_at_ms \
+             AND {alias}.message_id > r.last_read_message_id)) \
+         AND (?3 = 0 OR {alias}.created_at_ms > ?4 \
+           OR ({alias}.created_at_ms = ?4 AND {alias}.message_id > ?5))"
+    )
+}
+
+fn map_agent_request(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<ChatAgentRequest, DomainError>> {
+    let thread_id: String = row.get(0)?;
+    let message_id: String = row.get(1)?;
+    let author_kind: String = row.get(2)?;
+    let created_at_ms: i64 = row.get(3)?;
+    Ok(
+        ChatActorKind::from_db(&author_kind).map(|author_kind| ChatAgentRequest {
+            thread_id,
+            message_id,
+            author_kind,
+            created_at_ms,
+        }),
+    )
 }
 
 /// The wire id every computer gives one agent's chat.
@@ -1759,12 +2033,12 @@ fn refuse_local_link_author(author_kind: ChatActorKind) -> Result<(), DomainErro
 }
 
 /// Check a local message's agents: an agent author may name the agent that
-/// writes in its run, and a person's message may name the author's agents,
+/// writes in its run, and a person's message may wake the author's agents,
 /// each once.
 fn normalize_message_agents(
     author_kind: ChatActorKind,
     author_agent_id: Option<&str>,
-    named_agent_ids: &[String],
+    wake_agent_ids: &[String],
 ) -> Result<(Option<String>, Vec<String>), DomainError> {
     if let Some(agent_id) = author_agent_id
         && (author_kind != ChatActorKind::Agent || !is_agent_id(agent_id))
@@ -1773,23 +2047,77 @@ fn normalize_message_agents(
             reason: "only an agent message names its agent, by a valid id",
         });
     }
-    let mut named = Vec::<String>::new();
-    for agent_id in named_agent_ids {
+    let mut wake = Vec::<String>::new();
+    for agent_id in wake_agent_ids {
         if author_kind != ChatActorKind::Human || !is_agent_id(agent_id) {
             return Err(DomainError::InvalidInput {
-                reason: "only a person's message names agents, by valid ids",
+                reason: "only a person's message wakes agents, by valid ids",
             });
         }
-        if !named.contains(agent_id) {
-            named.push(agent_id.clone());
+        if !wake.contains(agent_id) {
+            wake.push(agent_id.clone());
         }
     }
-    if named.len() > MAX_NAMED_AGENTS {
+    if wake.len() > MAX_WAKE_AGENTS {
         return Err(DomainError::InvalidInput {
-            reason: "a message names too many agents",
+            reason: "a message wakes too many agents",
         });
     }
-    Ok((author_agent_id.map(str::to_owned), named))
+    Ok((author_agent_id.map(str::to_owned), wake))
+}
+
+/// The longest reported product, version, or model, in UTF-16 code units,
+/// as JavaScript and the wire count it.
+pub const MAX_REPORTED_AGENT_CHARS: usize = 64;
+
+/// Check what an agent reported about itself. Only an agent message carries
+/// it. Each part is printable text with no surrounding space, a version
+/// belongs to a product, and a report with no parts is no report.
+pub fn normalize_reported_agent(
+    is_agent: bool,
+    reported: Option<&ChatReportedAgent>,
+) -> Result<Option<ChatReportedAgent>, DomainError> {
+    let Some(reported) = reported else {
+        return Ok(None);
+    };
+    let invalid = |reason| Err(DomainError::InvalidInput { reason });
+    if reported.product.is_none() && reported.version.is_none() && reported.model.is_none() {
+        return Ok(None);
+    }
+    if !is_agent {
+        return invalid("only an agent message carries what it reported");
+    }
+    if reported.version.is_some() && reported.product.is_none() {
+        return invalid("a reported version needs its product");
+    }
+    let part_is_valid = |part: &Option<String>| {
+        part.as_deref().is_none_or(|part| {
+            !part.is_empty()
+                && part.encode_utf16().count() <= MAX_REPORTED_AGENT_CHARS
+                && part.trim_matches(is_js_trim_ws) == part
+                && !part.chars().any(char::is_control)
+        })
+    };
+    if !part_is_valid(&reported.product)
+        || !part_is_valid(&reported.version)
+        || !part_is_valid(&reported.model)
+    {
+        return invalid("a reported product, version, or model is invalid");
+    }
+    Ok(Some(reported.clone()))
+}
+
+fn reported_agent_json(reported: Option<&ChatReportedAgent>) -> Option<String> {
+    reported.map(|reported| serde_json::to_string(reported).expect("a reported agent serializes"))
+}
+
+fn parse_reported_agent(json: Option<String>) -> Result<Option<ChatReportedAgent>, DomainError> {
+    json.map(|json| {
+        serde_json::from_str(&json).map_err(|_| DomainError::StateCorrupt {
+            reason: "chat message reported agent is corrupt",
+        })
+    })
+    .transpose()
 }
 
 /// An automation message must name its Collection automation and chain
@@ -1858,14 +2186,18 @@ pub fn replicated_source_origin(origin_id: &str) -> &str {
 /// A replicated message's link provenance. A link message names its grant and
 /// link principal, carries no account, owner, origin or chain depth, stays
 /// within the link body cap, uses the link message id prefix, and comes from
-/// its link principal's relay origin, as the relay writes it. No other message
-/// names a link or uses the prefix. Ids must already be in their stored form.
+/// its link principal's relay origin, as the relay writes it. An agent's link
+/// message also names its agent connection. No other message names a link or
+/// an agent connection, or uses the prefix. Ids must already be in their
+/// stored form.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_replicated_link_author(
     origin_id: &str,
     message_id: &str,
     author_kind: &str,
     grant_id: Option<&str>,
     principal_id: Option<&str>,
+    agent_connection_id: Option<&str>,
     account_fields: bool,
     body: &str,
 ) -> Result<Option<ChatMessageLinkAuthor>, DomainError> {
@@ -1884,10 +2216,15 @@ pub fn validate_replicated_link_author(
         grant_id,
         principal_id,
     ) {
-        (false, None, None) if !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) => Ok(None),
+        (false, None, None)
+            if agent_connection_id.is_none() && !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) =>
+        {
+            Ok(None)
+        }
         (true, Some(grant_id), Some(principal_id))
             if id(grant_id)
                 && id(principal_id)
+                && agent_connection_id.is_none_or(id)
                 && !account_fields
                 && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
                 && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
@@ -1896,6 +2233,7 @@ pub fn validate_replicated_link_author(
             Ok(Some(ChatMessageLinkAuthor {
                 grant_id: grant_id.to_owned(),
                 principal_id: principal_id.to_owned(),
+                agent_connection_id: agent_connection_id.map(str::to_owned),
             }))
         }
         _ => Err(invalid()),
@@ -2005,9 +2343,75 @@ fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_whitespace)
 }
 
+/// The byte ranges of a body's file links, in order, read as
+/// `extractChatFileReferenceTokens` in workspace-contracts reads them: `@[`,
+/// a path with no `#`, then an optional `#` and a heading, neither blank, and
+/// no `]` or line break before the closing `]`. An opener inside code, or a
+/// link that holds another `@[`, is no link, and the scan goes on after its
+/// `]`. The next `]` or line break, `#` and `@[` from each index come from
+/// one backward pass.
+fn file_link_ranges(body: &str, code: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut links = Vec::new();
+    if !body.contains("@[") {
+        return links;
+    }
+    let bytes = body.as_bytes();
+    let length = bytes.len();
+    // From each index: the next `]` or line break, the next `#`, and the next `@[`.
+    let mut stop_at = vec![length; length + 1];
+    let mut hash_at = vec![length; length + 1];
+    let mut opener_at = vec![length; length + 1];
+    for at in (0..length).rev() {
+        stop_at[at] = if matches!(bytes[at], b']' | b'\r' | b'\n') {
+            at
+        } else {
+            stop_at[at + 1]
+        };
+        hash_at[at] = if bytes[at] == b'#' {
+            at
+        } else {
+            hash_at[at + 1]
+        };
+        opener_at[at] = if bytes[at] == b'@' && bytes.get(at + 1) == Some(&b'[') {
+            at
+        } else {
+            opener_at[at + 1]
+        };
+    }
+    let mut start = opener_at[0];
+    while start < length {
+        let from = start + 2;
+        let (stop, hash) = (stop_at[from], hash_at[from]);
+        // The path runs to the first `#`, and a heading after it is not empty.
+        let matched = stop < length
+            && bytes[stop] == b']'
+            && stop > from
+            && hash > from
+            && (hash >= stop || stop > hash + 1);
+        if !matched {
+            start = opener_at[start + 1];
+            continue;
+        }
+        let end = stop + 1;
+        let next = opener_at[end];
+        if opener_at[from] + 1 < stop || range_contains(code, start) {
+            start = next;
+            continue;
+        }
+        let path = &body[from..hash.min(stop)];
+        let heading = (hash < stop).then(|| &body[hash + 1..stop]);
+        if !js_trim(path).is_empty() && heading.is_none_or(|heading| !js_trim(heading).is_empty()) {
+            links.push((start, end));
+        }
+        start = next;
+    }
+    links
+}
+
 /// Candidate-agnostic mention scanner shared by local writes, imported apply,
 /// and the mandatory historical backfill. This mirrors `scanMentionTokens`
-/// with `ignoreCode: true`, including fenced and inline backtick suppression.
+/// with `ignoreCode: true`, including fenced and inline backtick suppression,
+/// and skips names inside file links, as chat reads names.
 pub fn parse_mention_handles(body: &str) -> Vec<String> {
     let mut ignored = Vec::<(usize, usize)>::new();
     let mut open_fence: Option<(char, usize, usize)> = None;
@@ -2065,11 +2469,22 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
         }
     }
 
+    let links = file_link_ranges(body, &ignored);
+    let mut link = 0usize;
     let chars: Vec<(usize, char)> = body.char_indices().collect();
     let mut handles = Vec::new();
     let mut seen = HashSet::new();
     for (position, (offset, ch)) in chars.iter().copied().enumerate() {
         if ch != '@' || range_contains(&ignored, offset) {
+            continue;
+        }
+        // A file link owns its whole range, so a name inside a file's name
+        // names no one. A name can't hold `@`, so one that starts before a
+        // link ends before it.
+        while link < links.len() && links[link].1 <= offset {
+            link += 1;
+        }
+        if link < links.len() && links[link].0 <= offset {
             continue;
         }
         if position > 0 {
@@ -2793,11 +3208,16 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let automation =
             normalize_message_automation(input.author_kind, input.automation.as_ref())?;
-        let (author_agent_id, named_agent_ids) = normalize_message_agents(
+        let (author_agent_id, wake_agent_ids) = normalize_message_agents(
             input.author_kind,
             input.author_agent_id.as_deref(),
-            &input.named_agent_ids,
+            &input.wake_agent_ids,
         )?;
+        let author_reported = normalize_reported_agent(
+            input.author_kind == ChatActorKind::Agent,
+            input.author_reported.as_ref(),
+        )?;
+        let author_reported_json = reported_agent_json(author_reported.as_ref());
         let automation_depth = automation
             .as_ref()
             .map(|automation| automation.chain_depth.to_string())
@@ -2835,7 +3255,8 @@ impl<'a> LinkedChatStore<'a> {
                 .as_bytes(),
             automation_depth.as_bytes(),
             author_agent_id.as_deref().unwrap_or("").as_bytes(),
-            named_agent_ids.join(",").as_bytes(),
+            author_reported_json.as_deref().unwrap_or("").as_bytes(),
+            wake_agent_ids.join(",").as_bytes(),
         ]);
         // Exactly-once pre-check (single-writer: authoritative). A committed
         // retry replays the recorded thread+message instead of hitting the PK.
@@ -2920,8 +3341,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth, author_actor_key, author_agent_id) \
-                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14, ?15)",
+                  automation_id, chain_depth, author_actor_key, author_agent_id, author_reported) \
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     input.workspace_id,
                     thread_id,
@@ -2938,6 +3359,7 @@ impl<'a> LinkedChatStore<'a> {
                     automation.as_ref().map(|automation| automation.chain_depth),
                     author_actor_key,
                     author_agent_id,
+                    author_reported_json,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2948,7 +3370,7 @@ impl<'a> LinkedChatStore<'a> {
                 &input.message_id,
                 input.author_kind,
                 origin_c.as_deref(),
-                &named_agent_ids,
+                &wake_agent_ids,
                 now,
             )?;
             index_message_mentions_in_tx(
@@ -3017,6 +3439,9 @@ impl<'a> LinkedChatStore<'a> {
             }
             if let Some(agent_id) = &author_agent_id {
                 message_payload.insert("authorAgentId".to_owned(), serde_json::json!(agent_id));
+            }
+            if let Some(reported) = &author_reported {
+                message_payload.insert("authorReported".to_owned(), serde_json::json!(reported));
             }
             if let Some(author_user_id) = &author_user_c {
                 message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -3095,6 +3520,7 @@ impl<'a> LinkedChatStore<'a> {
                 automation: automation.clone(),
                 link_author: None,
                 author_agent_id: author_agent_id.clone(),
+                author_reported: author_reported.clone(),
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -3150,11 +3576,16 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let automation =
             normalize_message_automation(input.author_kind, input.automation.as_ref())?;
-        let (author_agent_id, named_agent_ids) = normalize_message_agents(
+        let (author_agent_id, wake_agent_ids) = normalize_message_agents(
             input.author_kind,
             input.author_agent_id.as_deref(),
-            &input.named_agent_ids,
+            &input.wake_agent_ids,
         )?;
+        let author_reported = normalize_reported_agent(
+            input.author_kind == ChatActorKind::Agent,
+            input.author_reported.as_ref(),
+        )?;
+        let author_reported_json = reported_agent_json(author_reported.as_ref());
         let automation_depth = automation
             .as_ref()
             .map(|automation| automation.chain_depth.to_string())
@@ -3197,7 +3628,8 @@ impl<'a> LinkedChatStore<'a> {
                 .as_bytes(),
             automation_depth.as_bytes(),
             author_agent_id.as_deref().unwrap_or("").as_bytes(),
-            named_agent_ids.join(",").as_bytes(),
+            author_reported_json.as_deref().unwrap_or("").as_bytes(),
+            wake_agent_ids.join(",").as_bytes(),
         ]);
         if let Some(request_id) = &input.request_id
             && let Some(recorded) = self
@@ -3232,8 +3664,8 @@ impl<'a> LinkedChatStore<'a> {
                 "INSERT INTO chat_messages \
                  (workspace_id, thread_id, message_order, message_id, author_kind, \
                   author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                  automation_id, chain_depth, author_actor_key, author_agent_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  automation_id, chain_depth, author_actor_key, author_agent_id, author_reported) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     input.workspace_id,
                     input.thread_id,
@@ -3251,6 +3683,7 @@ impl<'a> LinkedChatStore<'a> {
                     automation.as_ref().map(|automation| automation.chain_depth),
                     author_actor_key,
                     author_agent_id,
+                    author_reported_json,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -3261,7 +3694,7 @@ impl<'a> LinkedChatStore<'a> {
                 &input.message_id,
                 input.author_kind,
                 origin_c.as_deref(),
-                &named_agent_ids,
+                &wake_agent_ids,
                 now,
             )?;
             index_message_mentions_in_tx(
@@ -3331,6 +3764,9 @@ impl<'a> LinkedChatStore<'a> {
             }
             if let Some(agent_id) = &author_agent_id {
                 payload.insert("authorAgentId".to_owned(), serde_json::json!(agent_id));
+            }
+            if let Some(reported) = &author_reported {
+                payload.insert("authorReported".to_owned(), serde_json::json!(reported));
             }
             if let Some(author_user_id) = &author_user_c {
                 payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
@@ -3426,6 +3862,7 @@ impl<'a> LinkedChatStore<'a> {
                 automation: automation.clone(),
                 link_author: None,
                 author_agent_id: author_agent_id.clone(),
+                author_reported: author_reported.clone(),
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -3771,7 +4208,7 @@ impl<'a> LinkedChatStore<'a> {
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
                          created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
-                         link_grant_id, link_principal_id, author_agent_id \
+                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3806,6 +4243,8 @@ impl<'a> LinkedChatStore<'a> {
                         created_at_ms: message.created_at_ms,
                         automation: message.automation,
                         link_author: message.link_author,
+                        author_reported: message.author_reported,
+                        author_agent_id: message.author_agent_id,
                     });
                 summaries.push(ChannelThreadSummary {
                     thread,
@@ -4024,12 +4463,11 @@ impl<'a> LinkedChatStore<'a> {
     /// Mention rows for a normalized handle in ascending message-coordinate
     /// order. Inner joins fail closed over missing messages or threads. A
     /// message that already woke a dohc agent is that agent's work, so it is
-    /// left out. `unread_only` reads the place agents outside a run share.
+    /// left out.
     pub fn list_mentions_for_handle(
         &self,
         workspace_id: &str,
         handle: &str,
-        unread_only: bool,
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, DomainError> {
@@ -4048,19 +4486,13 @@ impl<'a> LinkedChatStore<'a> {
                        AND m.thread_id = x.thread_id AND m.message_id = x.message_id \
                      JOIN chat_threads t ON t.workspace_id = x.workspace_id \
                        AND t.thread_id = x.thread_id \
-                     LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = x.workspace_id \
-                       AND ars.agent_id = ?8 AND ars.thread_id = x.thread_id \
                      WHERE x.workspace_id = ?1 AND x.handle = ?2 \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
                          WHERE l.workspace_id = x.workspace_id \
                            AND l.trigger_message_id = x.message_id) \
-                       AND (?3 = 0 OR ars.thread_id IS NULL \
-                         OR x.created_at_ms > ars.last_read_created_at_ms \
-                         OR (x.created_at_ms = ars.last_read_created_at_ms \
-                           AND x.message_id > ars.last_read_message_id)) \
-                       AND (?4 = 0 OR x.created_at_ms > ?5 \
-                         OR (x.created_at_ms = ?5 AND x.message_id > ?6)) \
-                     ORDER BY x.created_at_ms, x.message_id LIMIT ?7",
+                       AND (?3 = 0 OR x.created_at_ms > ?4 \
+                         OR (x.created_at_ms = ?4 AND x.message_id > ?5)) \
+                     ORDER BY x.created_at_ms, x.message_id LIMIT ?6",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
@@ -4068,12 +4500,10 @@ impl<'a> LinkedChatStore<'a> {
                     params![
                         workspace_id,
                         handle,
-                        i64::from(unread_only),
                         has_after,
                         after_created_at_ms,
                         after_message_id,
-                        limit,
-                        OUTSIDE_RUN_READER
+                        limit
                     ],
                     |row| {
                         let thread_id: String = row.get(0)?;
@@ -4097,83 +4527,162 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// The messages that asked a running run's agent and lie beyond that
-    /// agent's place in their thread, in ascending message-coordinate order.
+    /// One reader's unread requests, oldest first.
     pub fn list_agent_unread_requests(
         &self,
         workspace_id: &str,
-        run_id: &str,
+        reader: &AgentReader,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, DomainError> {
+        self.agent_requests(
+            workspace_id,
+            reader,
+            None,
+            None,
+            after,
+            limit,
+            false,
+            map_agent_request,
+        )
+    }
+
+    /// One reader's unread requests after `after`, oldest first, with what a
+    /// waiting agent shows. A Group or thread filter narrows them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_agent_requests_page(
+        &self,
+        workspace_id: &str,
+        reader: &AgentReader,
+        channel_id: Option<&str>,
+        thread_id: Option<&str>,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequestDetail>, DomainError> {
+        self.agent_requests(
+            workspace_id,
+            reader,
+            channel_id,
+            thread_id,
+            after,
+            limit,
+            true,
+            |row| {
+                let request = match map_agent_request(row)? {
+                    Ok(request) => request,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let author_display_name: String = row.get(4)?;
+                let body: String = row.get(5)?;
+                let channel_id: Option<String> = row.get(6)?;
+                let channel = match channel_id {
+                    None => None,
+                    Some(channel_id) => {
+                        let kind: String = row.get(7)?;
+                        let kind = match ChatChannelKind::from_db(&kind) {
+                            Ok(kind) => kind,
+                            Err(error) => return Ok(Err(error)),
+                        };
+                        Some(ChatAgentRequestChannel {
+                            channel_id,
+                            kind,
+                            name: row.get(8)?,
+                            slug: row.get(9)?,
+                            purpose: row.get(10)?,
+                        })
+                    }
+                };
+                Ok(Ok(ChatAgentRequestDetail {
+                    request,
+                    channel,
+                    author_display_name,
+                    body,
+                }))
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn agent_requests<T>(
+        &self,
+        workspace_id: &str,
+        reader: &AgentReader,
+        channel_id: Option<&str>,
+        thread_id: Option<&str>,
+        after: Option<(i64, String)>,
+        limit: i64,
+        detail: bool,
+        map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<Result<T, DomainError>>,
+    ) -> Result<Vec<T>, DomainError> {
         validate_chat_page_limit(limit)?;
+        let reader = reader.clone().normalized()?;
         let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
+        let sql = agent_requests_sql(&reader, detail);
         self.store.read_with(|conn| {
-            let agent_id = agent_reader(conn, workspace_id, Some(run_id))?;
+            let place = agent_reader(conn, workspace_id, &reader)?;
             let mut stmt = conn
-                .prepare_cached(
-                    "SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms \
-                     FROM chat_dispatch_ledger l \
-                     JOIN chat_messages m ON m.workspace_id = l.workspace_id \
-                       AND m.thread_id = l.thread_id AND m.message_id = l.trigger_message_id \
-                     JOIN chat_threads t ON t.workspace_id = m.workspace_id \
-                       AND t.thread_id = m.thread_id \
-                     LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id \
-                       AND ars.agent_id = l.agent_id AND ars.thread_id = m.thread_id \
-                     WHERE l.workspace_id = ?1 AND l.agent_id = ?2 \
-                       AND (ars.thread_id IS NULL \
-                         OR m.created_at_ms > ars.last_read_created_at_ms \
-                         OR (m.created_at_ms = ars.last_read_created_at_ms \
-                           AND m.message_id > ars.last_read_message_id)) \
-                       AND (?3 = 0 OR m.created_at_ms > ?4 \
-                         OR (m.created_at_ms = ?4 AND m.message_id > ?5)) \
-                     ORDER BY m.created_at_ms, m.message_id LIMIT ?6",
-                )
+                .prepare_cached(&sql)
                 .map_err(DomainError::sql_corrupt)?;
-            let rows = stmt
-                .query_map(
+            let rows = match &reader {
+                AgentReader::Connected {
+                    handle,
+                    requesters,
+                    unattributed_counts,
+                    ..
+                } => {
+                    let requesters =
+                        serde_json::to_string(requesters).expect("a list of accounts serializes");
+                    stmt.query_map(
+                        params![
+                            workspace_id,
+                            place,
+                            has_after,
+                            after_created_at_ms,
+                            after_message_id,
+                            limit,
+                            channel_id,
+                            thread_id,
+                            handle,
+                            requesters,
+                            i64::from(*unattributed_counts)
+                        ],
+                        map,
+                    )
+                }
+                AgentReader::Run { .. } | AgentReader::Unnamed => stmt.query_map(
                     params![
                         workspace_id,
-                        agent_id,
+                        place,
                         has_after,
                         after_created_at_ms,
                         after_message_id,
-                        limit
+                        limit,
+                        channel_id,
+                        thread_id
                     ],
-                    |row| {
-                        let thread_id: String = row.get(0)?;
-                        let message_id: String = row.get(1)?;
-                        let author_kind: String = row.get(2)?;
-                        let created_at_ms: i64 = row.get(3)?;
-                        Ok(ChatActorKind::from_db(&author_kind).map(|author_kind| {
-                            ChatAgentRequest {
-                                thread_id,
-                                message_id,
-                                author_kind,
-                                created_at_ms,
-                            }
-                        }))
-                    },
-                )
-                .map_err(DomainError::sql_corrupt)?;
+                    map,
+                ),
+            }
+            .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
     }
 
     /// Threads whose latest message is human-authored and beyond the reader's
-    /// place, newest coordinate first. The reader is a running run's agent, or
-    /// agents outside a run without one.
+    /// place, newest coordinate first. An unnamed reader skips agent chats.
     pub fn list_agent_unread_threads(
         &self,
         workspace_id: &str,
-        run_id: Option<&str>,
+        reader: &AgentReader,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, DomainError> {
         validate_chat_page_limit(limit)?;
+        let reader = reader.clone().normalized()?;
+        let skips_agent_chats = i64::from(reader == AgentReader::Unnamed);
         let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
         self.store.read_with(|conn| {
-            let reader = agent_reader(conn, workspace_id, run_id)?;
+            let place = agent_reader(conn, workspace_id, &reader)?;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
@@ -4186,7 +4695,9 @@ impl<'a> LinkedChatStore<'a> {
                             EXISTS(SELECT 1 FROM chat_channels c \
                               WHERE c.workspace_id = t.workspace_id \
                                 AND c.channel_id = t.channel_id), \
-                            latest.created_at_ms, latest.message_id \
+                            latest.created_at_ms, latest.message_id, \
+                            COALESCE(ars.last_read_created_at_ms, 0), \
+                            COALESCE(ars.last_read_message_id, '') \
                      FROM chat_threads t \
                      JOIN chat_messages latest \
                        ON latest.workspace_id = t.workspace_id \
@@ -4207,6 +4718,10 @@ impl<'a> LinkedChatStore<'a> {
                            AND latest.message_id > ars.last_read_message_id)) \
                        AND (?2 = 0 OR latest.created_at_ms < ?3 \
                          OR (latest.created_at_ms = ?3 AND latest.message_id < ?4)) \
+                       AND (?7 = 0 OR NOT EXISTS (SELECT 1 FROM chat_channels agent_chat \
+                         WHERE agent_chat.workspace_id = t.workspace_id \
+                           AND agent_chat.channel_id = t.channel_id \
+                           AND agent_chat.kind = 'agent')) \
                      ORDER BY latest.created_at_ms DESC, latest.message_id DESC LIMIT ?5",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -4218,14 +4733,19 @@ impl<'a> LinkedChatStore<'a> {
                         after_created_at_ms,
                         after_message_id,
                         limit,
-                        reader
+                        place,
+                        skips_agent_chats
                     ],
                     |row| {
                         let thread = map_thread_row(row)?;
                         let latest_created_at_ms = row.get(12)?;
                         let latest_message_id = row.get(13)?;
+                        let last_read_created_at_ms = row.get(14)?;
+                        let last_read_message_id = row.get(15)?;
                         Ok(thread.map(|thread| AgentUnreadThreadRow {
                             thread,
+                            last_read_created_at_ms,
+                            last_read_message_id,
                             latest_created_at_ms,
                             latest_message_id,
                         }))
@@ -4266,7 +4786,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -4619,13 +5139,12 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Monotonic message-coordinate CAS for one reader's place in a thread:
-    /// a running run's agent, or agents outside a run without one.
+    /// Monotonic message-coordinate CAS for one reader's place in a thread.
     #[allow(clippy::too_many_arguments)]
     pub fn mark_thread_read_by_agent(
         &mut self,
         workspace_id: &str,
-        run_id: Option<&str>,
+        reader: &AgentReader,
         thread_id: &str,
         up_to_created_at_ms: i64,
         up_to_message_id: &str,
@@ -4645,11 +5164,12 @@ impl<'a> LinkedChatStore<'a> {
                 "Expected read-state revision is invalid.",
             ));
         }
+        let reader = reader.clone().normalized()?;
         let workspace_id = workspace_id.to_owned();
         let thread_id = thread_id.to_owned();
         let up_to_message_id = up_to_message_id.to_owned();
         let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
-            let reader = agent_reader(tx, &workspace_id, run_id)?;
+            let reader = agent_reader(tx, &workspace_id, &reader)?;
             require_thread(tx, &workspace_id, &thread_id)?;
             let current = agent_read_state_for_thread(tx, &workspace_id, &reader, &thread_id)?;
             if expected_revision.is_some_and(|revision| revision != current.revision) {
@@ -5381,6 +5901,47 @@ impl<'a> LinkedChatStore<'a> {
             let bookmark = require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
             record_request_result(tx, request_id, &payload_hash, bookmark.generation, now_ms)?;
             Ok::<_, DomainError>(bookmark)
+        })?;
+        committed(outcome)
+    }
+
+    /// Queue a failed projection again at the same generation, so an archive
+    /// whose page already moved finishes at that generation's path. Only a
+    /// failed row at `generation` changes.
+    pub fn retry_failed_bookmark(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        generation: i64,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmarkTransition, DomainError> {
+        let ws = workspace_id.to_owned();
+        let owner = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
+        let bid = bookmark_id.to_owned();
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
+            require_bookmark(tx, &ws, &owner, &bid)?;
+            if !(1..=9_007_199_254_740_991).contains(&generation) {
+                return Err(DomainError::chat(
+                    "invalid-bookmark-target",
+                    "Bookmark generation is invalid.",
+                ));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE chat_bookmark_outbox \
+                     SET projection_state = 'pending', failure_reason = NULL, updated_at_ms = ?4 \
+                     WHERE workspace_id = ?1 AND bookmark_id = ?2 AND generation = ?3 \
+                       AND projection_state = 'failed'",
+                    params![ws, bid, generation, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            let bookmark = require_bookmark(tx, &ws, &owner, &bid)?;
+            Ok::<_, DomainError>(ChatBookmarkTransition {
+                bookmark,
+                applied: changed == 1,
+            })
         })?;
         committed(outcome)
     }
@@ -7479,7 +8040,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -7499,7 +8060,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -7713,6 +8274,11 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let link_grant_id: Option<String> = row.get(15)?;
     let link_principal_id: Option<String> = row.get(16)?;
     let author_agent_id: Option<String> = row.get(17)?;
+    let author_reported = match parse_reported_agent(row.get(18)?) {
+        Ok(reported) => reported,
+        Err(error) => return Ok(Err(error)),
+    };
+    let agent_connection_id: Option<String> = row.get(19)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -7720,11 +8286,12 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         }),
         _ => None,
     };
-    // The table pairs both ids with the link kind.
+    // The table pairs both ids with the link kind, and an agent connection only with them.
     let link_author = match (link_grant_id, link_principal_id) {
         (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
             grant_id,
             principal_id,
+            agent_connection_id,
         }),
         _ => None,
     };
@@ -7746,6 +8313,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             automation,
             link_author,
             author_agent_id,
+            author_reported,
             attachments: Vec::new(),
         }),
     )
@@ -7957,6 +8525,7 @@ mod replicated_origin_tests {
                 "link",
                 Some("grant-1"),
                 Some("p"),
+                None,
                 false,
                 "Hi",
             )
@@ -7964,6 +8533,7 @@ mod replicated_origin_tests {
         let link = ChatMessageLinkAuthor {
             grant_id: "grant-1".to_owned(),
             principal_id: "p".to_owned(),
+            agent_connection_id: None,
         };
         for applies in ["relay:share-link:p", "shared:s:relay:share-link:p"] {
             assert_eq!(author(applies).expect(applies), Some(link.clone()));
@@ -7976,6 +8546,39 @@ mod replicated_origin_tests {
             "origin_1",
         ] {
             assert!(author(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn only_a_link_post_names_an_agent_connection() {
+        let author = |kind: &str, message_id: &str, link: bool, connection: &str| {
+            validate_replicated_link_author(
+                "relay:share-link:p",
+                message_id,
+                kind,
+                link.then_some("grant-1"),
+                link.then_some("p"),
+                Some(connection),
+                false,
+                "Hi",
+            )
+        };
+        assert_eq!(
+            author("link", "link-message:m", true, "connection-1").expect("agent link post"),
+            Some(ChatMessageLinkAuthor {
+                grant_id: "grant-1".to_owned(),
+                principal_id: "p".to_owned(),
+                agent_connection_id: Some("connection-1".to_owned()),
+            })
+        );
+        for kind in ["human", "agent", "automation"] {
+            assert!(author(kind, "m", false, "connection-1").is_err(), "{kind}");
+        }
+        for connection in ["", " connection-1", "connection\u{7}"] {
+            assert!(
+                author("link", "link-message:m", true, connection).is_err(),
+                "{connection:?}"
+            );
         }
     }
 }

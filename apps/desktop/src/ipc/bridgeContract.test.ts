@@ -1,7 +1,7 @@
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
+import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure, ShareMountStatusRow } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
 import { ImportWorkspaceFilesResult } from "./bridgeContract";
 import { OwnerLiveDocumentsResult } from "./bridgeContract";
@@ -208,6 +208,7 @@ import {
   RelayShareSelector,
   ReadShareProposalChangesResult,
   RefreshSharedViewResult,
+  RefreshShareMountsResult,
   SettleShareProposalPayload,
   SubmitShareChangesPayload,
   SubmitShareChangesResult,
@@ -1363,6 +1364,18 @@ describe("exact received relay share IPC contract", () => {
     ).toBe(false);
   });
 
+  it("answers a Group or message request as opening in Chats, with nothing else", () => {
+    expect(GetRelayReceivedShareResult.parse({ found: true, chats: true })).toEqual({ found: true, chats: true });
+    for (const result of [
+      { found: false, chats: true },
+      { found: true, chats: false },
+      { found: true, chats: true, share: received },
+      { found: true, chats: true, channelWireId: "wire-orders" },
+    ]) {
+      expect(GetRelayReceivedShareResult.safeParse(result).success).toBe(false);
+    }
+  });
+
   it("returns only the existing received-share schema", () => {
     const parsed = GetRelayReceivedShareResult.parse({
       found: true,
@@ -1440,6 +1453,35 @@ describe("shared view refresh IPC contract", () => {
       changedPaths: 2,
       errorMessage: "relay failed",
     });
+  });
+
+  it("carries a set-aside collision record on a failed refresh", () => {
+    const failed = {
+      ok: false,
+      changedPaths: 0,
+      errorMessage: "relay failed",
+      collisionRecordQuarantined: true,
+    };
+    expect(RefreshSharedViewResult.parse(failed)).toEqual(failed);
+    expect(RefreshSharedViewResult.parse({ ...failed, takesLocalWrites: false })).toEqual(failed);
+  });
+});
+
+describe("share mount refresh IPC contract", () => {
+  it("carries the paths kept apart by a mount", () => {
+    const row = { shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
+      unjournalablePaths: [{ path: "docs/a.md", reason: "local-collision" }] };
+    expect(ShareMountStatusRow.parse(row)).toEqual(row);
+    expect(ShareMountStatusRow.safeParse({ ...row, unjournalablePaths: [{ path: "docs/a.md", reason: "unknown" }] }).success).toBe(false);
+    expect(ShareMountStatusRow.safeParse({ ...row, unjournalablePaths: [{ path: 1, reason: "local-collision" }] }).success).toBe(false);
+  });
+
+  it("carries the rows of a refresh that stopped, with why it stopped", () => {
+    const stopped = {
+      results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }],
+      abortMessage: "Your server session expired. Sign in again, then refresh shares.",
+    };
+    expect(RefreshShareMountsResult.parse(stopped)).toEqual(stopped);
   });
 });
 
@@ -2218,14 +2260,14 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRunId: "run-1",
+        liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
       }),
-    ).toEqual({ liveRunId: "run-1", pendingCount: 2, paused: false });
+    ).toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: -1,
         paused: true,
       }).success,
@@ -2743,6 +2785,20 @@ describe("engine Y.Doc event boundaries", () => {
     });
     expect(parsed).toEqual({ sessionId: "s-1", update, lineageGeneration: 2 });
     expect(parsed).not.toHaveProperty("evil");
+  });
+
+  it("carry the head an update's state was read with, or an empty head when it is unknown", () => {
+    const update = new Uint8Array([0, 0]);
+    for (const head of [{ sha256: "a".repeat(64) }, { sha256: null }, { sha256: "b".repeat(64), committed: true }, {}]) {
+      expect(EngineYDocRemoteUpdateEvent.parse({ sessionId: "s", update, head, lineageGeneration: 1 }).head).toEqual(head);
+    }
+    for (const head of [{ sha256: "" }, { sha256: "a", committed: false }, { sha256: "a", extra: 1 }, { extra: 1 },
+      { committed: true }, { sha256: null, committed: true }]) {
+      expect(EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, head, lineageGeneration: 1 }).success).toBe(false);
+    }
+    expect(AcknowledgeEngineYDocLineageReplacementResult.parse({
+      accepted: true, updates: [{ update, head: { sha256: null } }, { update }],
+    })).toEqual({ accepted: true, updates: [{ update, head: { sha256: null } }, { update }] });
   });
 
   it("reject a missing field, a bad sessionId, and a non-Uint8Array update", () => {

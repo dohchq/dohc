@@ -10,7 +10,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import type { Nodes, Parents, Root } from "mdast";
+import type { Nodes, Parents, Root, RootContent } from "mdast";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -140,12 +140,27 @@ function expandTabs(line: string): string {
   return expanded;
 }
 
+// react-markdown shows raw HTML as its text, and a block of it at the top of
+// the document as a bare text node. The reading column centers only elements,
+// so that text would start at the pane's edge. Make each block a paragraph of
+// its source, as the editor's import does.
+function remarkHtmlBlocksAsText() {
+  return (tree: Root) => {
+    tree.children = tree.children.map((node): RootContent =>
+      node.type === "html"
+        ? { type: "paragraph", children: [{ type: "text", value: node.value }], position: node.position }
+        : node,
+    );
+  };
+}
+
 // GFM is what people actually write in a README: tables, strikethrough, bare
 // URLs, task lists. Chunk boundaries sit at blank lines, and no GFM block
 // carries one, so every chunk parses the same extensions the whole document
-// would. Still no raw HTML — remark-gfm adds syntax, not an HTML escape, and
-// remarkTableRowHeights takes only numbers from one kind of comment.
-const REMARK_PLUGINS = [remarkGfm, remarkTableRowHeights];
+// would. Still no raw HTML — remark-gfm adds syntax, not an HTML escape,
+// remarkTableRowHeights takes only numbers from one kind of comment, and the
+// HTML blocks left after it become text.
+const REMARK_PLUGINS = [remarkGfm, remarkTableRowHeights, remarkHtmlBlocksAsText];
 
 // Links reach the document that mounted them through context, so a chunk's
 // rendered elements hold nothing of the document and can be reused.

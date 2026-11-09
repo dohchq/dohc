@@ -1,12 +1,13 @@
 import {createHash} from 'node:crypto'
+import {LIVE_MARKDOWN_MAX_BYTES} from '@dohc/live-session-contract/limits'
+import {WORKER_LIVE_VALIDATION_POLICY} from './liveValidationPolicy.js'
 import {createEngineMarkdownReader, type EngineMarkdownProof} from './engine-markdown-reader.js'
 import type {LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
+import {checkMarkdownWitness} from './lossy-markdown.js'
 
 const CHUNK = 65536, UPDATE = 20 * 1024 * 1024
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
-const reader = createEngineMarkdownReader({maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000,
-  maxDecodedPayloadByteVisits: 100_000_000, maxStructClientGroupVisits: 1_000_000,
-  maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000})
+const reader = createEngineMarkdownReader(WORKER_LIVE_VALIDATION_POLICY)
 function requireWire(ok: unknown): asserts ok {if (!ok) throw new Error('invalid-frame')}
 function keys(value: unknown, names: readonly string[]): asserts value is Record<string, unknown> {
   requireWire(value && typeof value === 'object' && !Array.isArray(value)
@@ -102,12 +103,27 @@ export async function runEngineMarkdownHost() {
             unicode: process.versions.unicode, icu: process.versions.icu}})
         continue
       }
+      if (r.method === 'check-markdown-witness') {
+        keys(r, ['id', 'method', 'source', 'sourceSha256', 'projectionSha256'])
+        requireWire(typeof r.sourceSha256 === 'string' && /^[a-f0-9]{64}$/.test(r.sourceSha256)
+          && typeof r.projectionSha256 === 'string' && /^[a-f0-9]{64}$/.test(r.projectionSha256))
+        const declared = declaration(r.source, LIVE_MARKDOWN_MAX_BYTES)
+        requireWire(declared.sha256 === r.sourceSha256)
+        const source = await readBlob(1, declared)
+        const finish = await readControl(); keys(finish, ['id', 'end'])
+        requireWire(finish.id === id && finish.end === true)
+        const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(source)
+        await control({id, kind: 'witness-checked', sourceSha256: r.sourceSha256,
+          projectionSha256: r.projectionSha256,
+          keepsMeaning: checkMarkdownWitness(text, r.sourceSha256, r.projectionSha256)})
+        continue
+      }
       keys(r, ['id', 'method', 'document', 'currentPath', 'source', 'checkpoint'])
       requireWire(r.method === 'construct' || r.method === 'construct-fold' || r.method === 'prove')
       keys(r.document, ['workspaceId', 'mainVersionId', 'objectId', 'lineageClaimId'])
       requireWire(Object.values(r.document).every(v => typeof v === 'string' && v.length > 0)
         && typeof r.currentPath === 'string')
-      const sourceDeclaration = declaration(r.source, 2 * 1024 * 1024), checkpointDeclaration = declaration(r.checkpoint, UPDATE)
+      const sourceDeclaration = declaration(r.source, LIVE_MARKDOWN_MAX_BYTES), checkpointDeclaration = declaration(r.checkpoint, UPDATE)
       const source = await readBlob(1, sourceDeclaration), checkpoint = await readBlob(2, checkpointDeclaration)
       // An explicit end control catches surplus chunks before running the parser.
       const finish = await readControl(); keys(finish, ['id', 'end'])

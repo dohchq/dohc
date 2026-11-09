@@ -43,3 +43,15 @@ it("shows retry after a failure and does not paint a previous link's delayed app
   await act(async()=>held.release({publications:[row("a","Private old app")],nextCursor:null}));expect(container.textContent).not.toContain("Private old app");
   await act(async()=>[...container.querySelectorAll("button")].find(b=>b.textContent==="Retry")!.click());await settle(()=>container.textContent!.includes("No apps are available"));
 });
+it("marks a failed Open app with the alert icon and error tone, without the link or app ids", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({publications: [row("a", "Trip poll")], nextCursor: null}))
+    .mockResolvedValue(jsonResponse({ok: false, error: "not found"}, 404)));
+  await render(); await settle(() => container.textContent!.includes("Trip poll"));
+  const open = [...container.querySelectorAll("button")].find(button => button.textContent === "Open app")!;
+  await act(async () => open.click()); await settle(() => Boolean(container.querySelector(".launch-failure")));
+  const failure = container.querySelector(".launch-failure")!;
+  expect(failure.getAttribute("role")).toBe("status");
+  expect(failure.textContent).toBe("Could not open the app. Try again or ask the owner for a new link.");
+  expect(failure.querySelector("svg.launch-failure-mark")?.getAttribute("aria-hidden")).toBe("true");
+  for (const detail of ["a".repeat(64), "abcdefghijkl"]) expect(container.innerHTML).not.toContain(detail);
+});

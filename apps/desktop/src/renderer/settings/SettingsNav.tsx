@@ -13,6 +13,7 @@ type Section = (typeof SETTINGS_SECTIONS)[number];
  */
 export function SettingsNav(props: {
   workspacePath: string;
+  workspaceName?: string;
   // The sections search left, in registry order.
   sections: readonly Section[];
   activeSection: SettingsSectionId;
@@ -33,9 +34,9 @@ export function SettingsNav(props: {
       data-testid={settingsNavPin(section.id)}
       aria-current={props.activeSection === section.id ? "page" : undefined}
       onClick={() => props.onSelect(section.id)}
-      className={`flex h-7 w-full shrink-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+      className={`flex h-7 w-full shrink-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
         props.activeSection === section.id
-          ? "bg-selected text-ink"
+          ? "bg-selected text-ink font-medium"
           : "text-muted hover:bg-hover hover:text-ink"
       }`}
     >
@@ -94,7 +95,7 @@ export function SettingsNav(props: {
             className="mt-4 flex h-6 shrink-0 items-center gap-2 px-2 text-[12px] font-medium text-subtle first:mt-0"
           >
             <Folder size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-            <span className="min-w-0 truncate">{workspaceName({ rootPath: props.workspacePath })}</span>
+            <span className="min-w-0 truncate">{props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}</span>
           </div>
         ) : null}
         {workspace.map(item)}

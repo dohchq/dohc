@@ -1,7 +1,7 @@
 import type { ActorPresentation, DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { ACTOR_HUES } from "@dohc/workspace-contracts/actor-presentation";
 import { palette, identityHues, type IdentityHue } from "../tokens";
-import { chosenHue, subscribeChosenColors } from "./chosenColors";
+import { chosenHue, settingsAgentHue, subscribeChosenColors } from "./chosenColors";
 
 export const neutralPresentation: ActorPresentation = { group: "", hue: null, self: false };
 export const ownPresentation: ActorPresentation = { group: "own", hue: null, self: true };
@@ -61,11 +61,19 @@ export function agentChoice(token: ActorPresentation): IdentityHue | null {
 }
 // The renderer's own tokens and an unknown author's group name no agent main can color.
 const UNCHOOSABLE_GROUPS = new Set([neutralPresentation.group, ownPresentation.group, ownAgentPresentation.group, goneAgentPresentation.group]);
-/** Whether main issued this agent's group, so a color can be chosen for it. */
+/**
+ * Whether main issued this agent's group, so a color can be chosen for it.
+ * Your agent's run takes its color from Settings, so its message offers no choice.
+ */
 export function canChooseAgentColor(token: ActorPresentation): boolean {
-  return !UNCHOOSABLE_GROUPS.has(token.group) && !token.group.startsWith("unknown:");
+  return token.agentId === undefined && !UNCHOOSABLE_GROUPS.has(token.group) && !token.group.startsWith("unknown:");
+}
+// A removed agent's chat, or its run's message, takes no agent's hue.
+function goneAgent(token: ActorPresentation): boolean {
+  return token.group === goneAgentPresentation.group || (token.agentId !== undefined && settingsAgentHue(token.agentId) === undefined);
 }
 function hueFor(token: ActorPresentation, kind: "human" | "agent"): IdentityHue | null {
+  if (kind === "agent" && token.agentId !== undefined) return settingsAgentHue(token.agentId) ?? null;
   if (kind === "agent") return agentChoice(token) ?? (token.self ? chosenHue("agent") : null);
   return (token.self ? chosenHue("human") : null) ?? token.hue;
 }
@@ -75,12 +83,12 @@ const AGENT_TEXT: Record<IdentityHue, string> = {
 };
 /** An agent's name and mark in its avatar's hue, olive by default. */
 export function agentTextClass(token: ActorPresentation): string {
-  if (token.group === goneAgentPresentation.group) return "text-subtle";
+  if (goneAgent(token)) return "text-subtle";
   const hue = hueFor(token, "agent");
   return hue ? AGENT_TEXT[hue] : "text-agent";
 }
 export function presentationClasses(token: ActorPresentation, kind: "human" | "agent" = "human"): string {
-  if (kind === "agent" && token.group === goneAgentPresentation.group) return "border-subtle bg-panel text-subtle";
+  if (kind === "agent" && goneAgent(token)) return "border-subtle bg-panel text-subtle";
   const hue = hueFor(token, kind);
   return kind === "agent" ? hue ? AGENT_CLASSES[hue] : "border-agent bg-bg text-agent"
     : hue ? HUE_CLASSES[hue] : "bg-panel-2 text-muted";

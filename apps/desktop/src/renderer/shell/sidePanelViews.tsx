@@ -1,6 +1,6 @@
 import { parseTab } from "../workbench/workbenchState";
-import { Maximize2, RefreshCw } from "lucide-react";
-import { Suspense, lazy, type ReactNode } from "react";
+import { Maximize2 } from "lucide-react";
+import { Suspense, type ReactNode } from "react";
 import type { CustomizePart } from "../settings/customize";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
@@ -9,14 +9,11 @@ import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { VIEW_IDENTITY, type ViewIdentity } from "../workbench/viewIdentity";
-import { type ViewId } from "../workbench/workbenchState";
+import { setExplorerMode, type ViewId } from "../workbench/workbenchState";
+import { ExplorerModeSwitch } from "../workbench/ExplorerModeSwitch";
 import { chatsOffCopy } from "./capabilityOffCopy";
 import { LazyChatsView, LazyGraphView } from "./lazyViews";
-import type { SidePanelContext } from "./ShellSidePanel";
-
-const LazyAppsView = lazy(() =>
-  import("../workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
-);
+import type { ShellSidePanelProps } from "./ShellSidePanel";
 
 // One of dohc's own side-panel views: what the rail shows for it, what the
 // panel renders while it is selected, and the panel header's controls. The
@@ -25,8 +22,10 @@ const LazyAppsView = lazy(() =>
 export interface SidePanelView extends ViewIdentity {
   // What the panel menu's Customize… opens while this view is selected.
   customize?: CustomizePart;
-  render: (context: SidePanelContext) => ReactNode;
-  actions?: (context: SidePanelContext) => ReactNode;
+  render: (context: ShellSidePanelProps) => ReactNode;
+  // What the header shows in place of the view's name.
+  heading?: (context: ShellSidePanelProps) => ReactNode;
+  actions?: (context: ShellSidePanelProps) => ReactNode;
 }
 
 function HeaderButton(props: {
@@ -54,6 +53,12 @@ const openInTabIcon = <Maximize2 size={13} aria-hidden />;
 export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
   explorer: {
     ...VIEW_IDENTITY.explorer,
+    heading: (context) => (
+      <ExplorerModeSwitch
+        mode={context.wb.explorerMode}
+        onChange={(mode) => context.mutateWb((state) => setExplorerMode(state, mode))}
+      />
+    ),
     render: (context) => context.explorerView,
   },
   chats: {
@@ -120,37 +125,6 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
           variant="panel"
         />
       </Suspense>
-    ),
-  },
-  sites: {
-    ...VIEW_IDENTITY.sites,
-    actions: (context) => (
-      <>
-        {/* Where the Apps view puts its count and create button, ahead of
-            Refresh. */}
-        <span ref={context.setAppsHead} className="contents" />
-        <HeaderButton testId="sites-refresh" label="Refresh apps" onClick={context.refreshSites}>
-          <RefreshCw size={13} aria-hidden />
-        </HeaderButton>
-      </>
-    ),
-    render: (context) => (
-      <SkeletonSlot>
-        <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading apps…" />}>
-          <LazyAppsView
-            workspaceId={context.workspaceId}
-            head={context.appsHead}
-            activePath={context.focusedTabPath}
-            notices={context.appsNotices}
-            pinnedApps={context.pinnedRoots}
-            onSetPinned={(appRoot, pinned) => void context.setAppPinned(appRoot, pinned)}
-            filesSettledRevision={context.listingsSettled}
-            onOpenPath={context.openPathWithHeading}
-            onCreateFirstApp={context.createFirstApp}
-            receivedShareWorkspace={context.shareView !== null}
-          />
-        </Suspense>
-      </SkeletonSlot>
     ),
   },
   history: {

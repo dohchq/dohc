@@ -83,10 +83,10 @@ fn normalize_dispatch_agent_id(agent_id: &str) -> Result<String, DomainError> {
     }
 }
 
-/// Record a pending request for each agent a person's message wakes: the
-/// agent whose chat holds it, and each agent it names. The message's sender
-/// records them in the message's own write, so only that computer runs them.
-/// A message from the CLI wakes no agent.
+/// Record a pending request for each agent in `wake_agent_ids`, which the
+/// sender lists in full, its DM's agent included. The sender records them in
+/// the message's own write, so only that computer runs them. A message from
+/// the CLI wakes no agent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn record_message_triggers(
     tx: &Transaction<'_>,
@@ -95,24 +95,13 @@ pub(super) fn record_message_triggers(
     message_id: &str,
     author_kind: ChatActorKind,
     origin: Option<&str>,
-    named_agent_ids: &[String],
+    wake_agent_ids: &[String],
     created_at_ms: i64,
 ) -> Result<(), DomainError> {
     if author_kind != ChatActorKind::Human || origin == Some("cli") {
         return Ok(());
     }
-    let chat_agent: Option<String> = tx
-        .query_row(
-            "SELECT c.agent_id FROM chat_threads t JOIN chat_channels c \
-               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-             WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
-            params![workspace_id, thread_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?
-        .flatten();
-    for agent_id in chat_agent.iter().chain(named_agent_ids) {
+    for agent_id in wake_agent_ids {
         tx.execute(
             "INSERT OR IGNORE INTO chat_dispatch_ledger \
              (workspace_id, trigger_message_id, agent_id, thread_id, state, run_id, \
@@ -177,22 +166,26 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// Claim the oldest pending, non-paused dispatch trigger (`claimNextPending`):
+    /// Claim the agent's oldest pending, non-paused trigger (`claimNextPending`):
     /// flips it to `running`, marks the same agent's other pending triggers in
     /// the thread `done` under the same run, mints an `agent_run_records` row
     /// for that agent, and returns the claim. Another agent's triggers wait for
     /// their own run. Idempotent: retrying the same running `run_id` returns
     /// its existing claim; a different open run returns `None` (one run at a
-    /// time per workspace; no double-claim). `None` also when nothing is pending.
+    /// time per workspace; no double-claim). `None` also when this agent has no
+    /// pending request.
+    #[allow(clippy::too_many_arguments)]
     pub fn claim_next_pending(
         &mut self,
         workspace_id: &str,
+        agent_id: &str,
         run_id: &str,
         command: &str,
         log_path: Option<&str>,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<Option<DispatchClaim>, DomainError> {
+        let agent = normalize_dispatch_agent_id(agent_id)?;
         let run = normalize_dispatch_run_id(run_id)?;
         let ws = workspace_id.to_owned();
         let cmd = normalize_dispatch_command(command)?;
@@ -241,11 +234,12 @@ impl<'a> LinkedChatStore<'a> {
                     "SELECT l.trigger_message_id, l.agent_id, l.thread_id, l.attempt_count, \
                             l.created_at_ms \
                      FROM chat_dispatch_ledger l WHERE l.workspace_id = ?1 AND l.state = 'pending' \
+                       AND l.agent_id = ?2 \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_pause p \
                          WHERE p.workspace_id = l.workspace_id AND p.thread_id = l.thread_id \
                            AND p.paused = 1) \
                      ORDER BY l.created_at_ms, l.trigger_message_id, l.agent_id LIMIT 1",
-                    params![ws],
+                    params![ws, agent],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()
@@ -268,13 +262,17 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "dispatch claim raced its own pending row",
                 });
             }
-            // Cover the agent's every trigger pending in this thread at claim
-            // time under one run.
+            // Cover the agent's every trigger pending at claim time in the same
+            // place under one run: the main stream, or one message's thread.
             tx.execute(
                 "UPDATE chat_dispatch_ledger \
                  SET state = 'done', run_id = ?4, attempt_count = attempt_count + 1, updated_at_ms = ?5 \
-                 WHERE workspace_id = ?1 AND thread_id = ?2 AND agent_id = ?3 AND state = 'pending'",
-                params![ws, thread_id, agent_id, run, now_ms],
+                 WHERE workspace_id = ?1 AND thread_id = ?2 AND agent_id = ?3 AND state = 'pending' \
+                   AND (SELECT m.parent_message_id FROM chat_messages m \
+                        WHERE m.workspace_id = ?1 AND m.message_id = chat_dispatch_ledger.trigger_message_id) \
+                    IS (SELECT m.parent_message_id FROM chat_messages m \
+                        WHERE m.workspace_id = ?1 AND m.message_id = ?6)",
+                params![ws, thread_id, agent_id, run, now_ms, trigger],
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
@@ -887,7 +885,15 @@ impl<'a> LinkedChatStore<'a> {
                     "UPDATE chat_dispatch_ledger SET state = 'pending', run_id = NULL, \
                        failure_reason = NULL, updated_at_ms = ?4 \
                      WHERE workspace_id = ?1 AND trigger_message_id = ?2 \
-                       AND state = 'failed' AND run_id = ?3 AND attempt_count < 2",
+                       AND run_id = ?3 AND attempt_count < 2 \
+                       AND (state = 'failed' OR (state = 'done' AND EXISTS ( \
+                         SELECT 1 FROM agent_run_records r \
+                         WHERE r.workspace_id = ?1 AND r.run_id = ?3 \
+                           AND r.trigger_message_id = ?2 \
+                           AND r.agent_id = chat_dispatch_ledger.agent_id \
+                           AND (r.exit_code <> 0 OR r.failure_handled = 1) AND NOT EXISTS ( \
+                             SELECT 1 FROM run_message_links m \
+                             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))))",
                     params![workspace_id, trigger_message_id, run_id, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
@@ -899,9 +905,9 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
-    /// The workspace's runs a quit or restart stopped whose requests are still
-    /// failed, or only those in one thread when `thread_id` is given.
-    pub fn list_app_quit_recoveries(
+    /// Failed runs whose requests have not gone back in line, including runs
+    /// that used their attempts. Limit to one thread when `thread_id` is given.
+    pub fn list_failed_run_recoveries(
         &self,
         workspace_id: &str,
         thread_id: Option<&str>,
@@ -929,9 +935,10 @@ impl<'a> LinkedChatStore<'a> {
                        AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                        AND l.run_id = r.run_id \
                      WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
-                       AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
-                         OR r.failure_reason = 'app restart during run') \
-                       AND l.state = 'failed' \
+                       AND (l.state = 'failed' OR (l.state = 'done' \
+                         AND (r.exit_code <> 0 OR r.failure_handled = 1) AND NOT EXISTS ( \
+                           SELECT 1 FROM run_message_links m \
+                           WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))) \
                        AND (SELECT COUNT(*) FROM agent_run_records all_runs \
                          WHERE all_runs.run_id = r.run_id) <> 1)"
                     ),
@@ -953,9 +960,10 @@ impl<'a> LinkedChatStore<'a> {
                       AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                       AND l.run_id = r.run_id \
                      WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
-                       AND ((r.exit_code = 143 AND r.failure_reason = 'app-quit') \
-                         OR r.failure_reason = 'app restart during run') \
-                       AND l.state = 'failed' \
+                       AND (l.state = 'failed' OR (l.state = 'done' \
+                         AND (r.exit_code <> 0 OR r.failure_handled = 1) AND NOT EXISTS ( \
+                           SELECT 1 FROM run_message_links m \
+                           WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))) \
                        AND (?3 = 0 OR r.started_at_ms > ?4 \
                          OR (r.started_at_ms = ?4 AND r.run_id > ?5)) \
                      ORDER BY r.started_at_ms, r.run_id LIMIT ?6"

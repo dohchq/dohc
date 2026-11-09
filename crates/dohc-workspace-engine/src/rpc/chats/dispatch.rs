@@ -39,6 +39,7 @@ struct ChatDispatchEnqueueParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchClaimParams {
+    agent_id: String,
     run_id: String,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     command: Option<String>,
@@ -310,6 +311,7 @@ impl EngineService {
             "chats.dispatch.claimNextPending",
             open.actor.chat_dispatch_claim_next_pending(
                 open.workspace_id.clone(),
+                params.agent_id,
                 params.run_id,
                 params.command.unwrap_or_default(),
                 params.log_path,
@@ -792,7 +794,7 @@ impl EngineService {
         Ok(json!(requeued))
     }
 
-    pub(crate) async fn chats_dispatch_list_app_quit_recoveries(
+    pub(crate) async fn chats_dispatch_list_failed_run_recoveries(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
@@ -803,7 +805,7 @@ impl EngineService {
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
         let binding = chat_cursor_binding(
-            "chats.dispatch.listAppQuitRecoveries",
+            "chats.dispatch.listFailedRunRecoveries",
             &workspace_id,
             &[params.thread_id.as_deref().unwrap_or("")],
         );
@@ -814,8 +816,8 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         let rows = Self::read_under_ctx(
             &cancellation,
-            "chats.dispatch.listAppQuitRecoveries",
-            open.actor.chat_dispatch_list_app_quit_recoveries(
+            "chats.dispatch.listFailedRunRecoveries",
+            open.actor.chat_dispatch_list_failed_run_recoveries(
                 workspace_id,
                 params.thread_id,
                 after,
