@@ -145,6 +145,7 @@ export const CAPABILITIES = {
   "search.cancel": capability("Cancel a streamed workspace search.", {ipc: ["cancelWorkspaceSearch"]}),
   "crash.read": capability("Read a crash report on this computer.", {ipc: ["readCrashReport"]}),
   "crash.dismiss": capability("Dismiss a crash report.", {ipc: ["dismissCrashReport"]}),
+  "crash.mark": capability("Mark a crash report read, so its toast does not show again.", {ipc: ["markCrashReportRead"]}),
   "crash.send": capability("Send a confirmed crash report.", {ipc: ["sendCrashReport"]}),
   "collection.copies.left.read": capability("Read which workspaces hold offline Collection copies an account change could not remove.", {ipc: ["readCollectionCopiesLeft"]}),
   "collection.copies.left.remove": capability("Try again to remove the offline Collection copies an account change left.", {ipc: ["removeCollectionCopiesLeft"]}),

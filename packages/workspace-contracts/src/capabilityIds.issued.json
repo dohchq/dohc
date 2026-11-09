@@ -276,5 +276,6 @@
   "work.link.resolve",
   "share.link.agents.list",
   "share.link.agent.disconnect",
-  "agent.listening.read"
+  "agent.listening.read",
+  "crash.mark"
 ]

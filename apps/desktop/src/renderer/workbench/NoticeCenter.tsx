@@ -124,6 +124,9 @@ export interface WorkspaceErrorNotice {
 // its own dialog before anything leaves.
 export interface CrashReportNotice {
   revision: number;
+  // The person closed its toast or read its row. Main keeps this, so the
+  // toast shows once for each problem.
+  read: boolean;
   title: string;
   body: string;
   text: string;
@@ -1146,6 +1149,7 @@ export function NoticeCenter(props: {
   crashReport?: CrashReportNotice | null;
   onSendCrashReport?: () => void;
   onDismissCrashReport?: () => void;
+  onReadCrashReport?: () => void;
   // Automation steps that reach more now only because an editor left. Each
   // waits for someone who can edit the Collection to allow it.
   automationHolds?: readonly AutomationHoldNotice[];
@@ -1329,12 +1333,10 @@ export function NoticeCenter(props: {
     [onOpenSentNotice, openRow, sentAccount],
   );
 
-  // Closing the toast keeps the row. A newer problem is a new revision, so
-  // its toast shows again.
-  const [closedCrashRevision, setClosedCrashRevision] = useState<number | null>(null);
+  // Closing the toast keeps the row. A newer problem is unread, so its toast
+  // shows again.
   const crashReport = props.crashReport ?? null;
-  const crashToastVisible =
-    crashReport !== null && crashReport.revision !== closedCrashRevision;
+  const crashToastVisible = crashReport !== null && !crashReport.read;
 
   // Derived from the status, never accumulated: a snapshot that repeats
   // itself renders the same notice, and delivery that recovers to active (or
@@ -1510,7 +1512,8 @@ export function NoticeCenter(props: {
           ? { actions: [{ label: "Send report", onClick: props.onSendCrashReport }] }
           : {}),
         ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
-        onRead: () => setClosedCrashRevision(crashReport.revision),
+        read: crashReport.read,
+        ...(props.onReadCrashReport ? { onRead: props.onReadCrashReport } : {}),
         timeMs: crashReport.atMs,
         copy: { report: crashReport.text },
         Icon: AlertTriangle,
@@ -1810,6 +1813,7 @@ export function NoticeCenter(props: {
     crashReport,
     props.onSendCrashReport,
     props.onDismissCrashReport,
+    props.onReadCrashReport,
     props.agentActive,
     props.automationHolds,
     props.onAllowAutomationHold,
@@ -1876,7 +1880,11 @@ export function NoticeCenter(props: {
       return kept.length === current.size ? current : new Set(kept);
     });
   }, [notices, props.workspaceId, setAsideKey]);
-  const unreadNotices = notices.filter((notice) => !notice.read && !localRead.has(localReadKey(props.workspaceId, notice)));
+  // Main saves whether the crash report is read, so its row follows main. A
+  // read main could not save shows unread again, and reading it saves again.
+  const savedRead = (notice: Notice) => notice.id === "crash-report" && notice.onRead !== undefined;
+  const unreadNotices = notices.filter((notice) =>
+    !notice.read && (savedRead(notice) || !localRead.has(localReadKey(props.workspaceId, notice))));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
   // Every row counts until it is read.
@@ -2283,7 +2291,7 @@ export function NoticeCenter(props: {
               <button
                 type="button"
                 aria-label="Close crash report notice"
-                onClick={() => setClosedCrashRevision(crashReport.revision)}
+                onClick={props.onReadCrashReport}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />

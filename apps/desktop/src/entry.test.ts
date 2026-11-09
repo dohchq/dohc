@@ -43,7 +43,7 @@ describe("electron main entry", () => {
       // Kept in the file main's crash report store reads, before the check ran.
       expect(logged.mock.calls.map((call) => String(call[0]))).not.toContain("[desktop] Could not keep a crash report:");
       const report = JSON.parse(readFileSync(join(profile.dir, "crash-report.json"), "utf8"));
-      expect(report).toMatchObject({ version: 2, seq: 1, problems: [{ seq: 1, source: "main" }] });
+      expect(report).toMatchObject({ version: 3, seq: 1, problems: [{ seq: 1, source: "main" }] });
       expect(report.problems[0].text).toContain("What happened: The main module failed to load");
       expect(electron.dialog.showErrorBox.mock.invocationCallOrder[0])
         .toBeLessThan(recovery.checkForUpdateBeforeMain.mock.invocationCallOrder[0]!);

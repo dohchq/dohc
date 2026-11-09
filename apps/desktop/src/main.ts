@@ -7669,6 +7669,7 @@ function registerIpcHandlers(): void {
       crashReports.dismiss(through);
       await crashReportPreview.remove();
     },
+    markCrashReportRead: ({ through }) => { crashReports.markRead(through); },
     // The renderer only opens the dialog. The answer comes from the person.
     sendCrashReport: async (_input, { event }) => ({
       sent: await crashReports.send(async (request) => {
