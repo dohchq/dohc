@@ -8,7 +8,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { createFakeDaemonCapture } from "./fakeDaemonCapture";
+import { createFakeDaemonCapture, replaceFileOnScratchDisk } from "./fakeDaemonCapture";
 
 // A type alias, not an interface: only aliases get an implicit index signature,
 // which is what makes this assignable to the wire's `JsonValue`.
@@ -77,8 +77,8 @@ export function daemonCaptureLifecycleAnswer(
  * The loopback answers every versioned/secret/moment method with real state and
  * real sha256, so tests that read content back are not asserting against a
  * hand-written responder. Only the handful of methods the loopback has no
- * concept of — workspace open/close, capture flush and author, watcher status —
- * are answered here.
+ * concept of — workspace open/close, capture flush and author, watcher status,
+ * and the macOS disk write `files.replace` — are answered here.
  *
  * Extracted from `workspaceEngineCapture.test.ts`, where it was private, so the
  * remaining suites on the legacy fallback can migrate onto one harness instead
@@ -145,6 +145,7 @@ function loopbackSessions(
 ): EngineWorkspaceSessions {
   const { requests, captureFlushResult, beforeRequest, answer } = options;
   const blobHandlers = new Set<(blob: CompletedDaemonBlob) => void>();
+  const roots = new Map<string, string>();
   const client = {
     close: () => undefined,
     onEvent: () => () => undefined,
@@ -165,6 +166,7 @@ function loopbackSessions(
       requests?.push(request);
       const params = request.params as Record<string, JsonValue | undefined>;
       if (request.method === "workspace.open") {
+        if (typeof params.rootDir === "string") roots.set(String(params.workspaceId), params.rootDir);
         return {
           id: request.id,
           result: { workspace: String(params.workspaceId) },
@@ -175,6 +177,8 @@ function loopbackSessions(
       }
       const answered = answer ? await answer(request) : null;
       if (answered) return answered;
+      const root = roots.get(String(request.workspace));
+      if (request.method === "files.replace" && root !== undefined) return replaceFileOnScratchDisk(root, request);
       const lifecycle = daemonCaptureLifecycleAnswer(request, captureFlushResult);
       if (lifecycle) return lifecycle;
       const response = await loopback.sendRequest(request);

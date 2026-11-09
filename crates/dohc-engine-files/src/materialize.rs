@@ -5698,7 +5698,9 @@ pub fn replace_file_whole(
     let target = resolve_target(root, rel)?;
     prepare_target_parent_symlink_free(root, &target)?;
     let tmp = sibling_with_name(&target, temp_name);
-    let replaced = write_temp(&target, &tmp, content, false).and_then(|file| {
+    // A secret gets an owner-only temp, as an engine job's does.
+    let owner_only = crate::policy::normalized_path_is_secret(rel);
+    let replaced = write_temp(&target, &tmp, content, owner_only).and_then(|file| {
         file.sync_all()
             .map_err(|err| MaterializeError::io(&tmp, &err))?;
         drop(file);

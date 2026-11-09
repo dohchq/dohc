@@ -71,6 +71,19 @@ async function readSecret(
   }
 }
 
+/**
+ * Answers `files.replace`, the desktop's macOS disk write. The engine checks
+ * the path and swaps a temp in, which a scratch disk needs no more than a
+ * plain write for.
+ */
+export async function replaceFileOnScratchDisk(rootPath: string, request: Request): Promise<Response> {
+  const params = request.params as Record<string, JsonValue | undefined>;
+  const target = join(rootPath, String(params.path));
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, Buffer.from(String(params.bytesBase64), "base64"));
+  return { id: request.id, result: { replaced: true } };
+}
+
 export function createFakeDaemonCapture(input: {
   rootPath: string;
   workspaceId: string;
@@ -401,14 +414,8 @@ export function createFakeDaemonCapture(input: {
           await rename(from, to);
           return { id: request.id, result: { moved: true } };
         }
-        // The desktop's macOS disk writes; the engine checks the path and swaps
-        // a temp in, which a scratch disk needs no more than a plain write for.
-        case "files.replace": {
-          const target = join(rootPath, String(params.path));
-          await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, Buffer.from(String(params.bytesBase64), "base64"));
-          return { id: request.id, result: { replaced: true } };
-        }
+        case "files.replace":
+          return replaceFileOnScratchDisk(rootPath, request);
         case "ydoc.open": {
           if (!ydoc) return null;
           const response = await ydoc.sendRequest(request);

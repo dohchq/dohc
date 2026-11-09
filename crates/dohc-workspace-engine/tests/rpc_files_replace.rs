@@ -141,6 +141,34 @@ async fn files_replace_refuses_a_path_or_temp_outside_the_workspace_files() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_replace_writes_a_secret_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (scratch, transport, handle) = fixture("secret").await;
+    // A secret this machine doesn't hold yet, and one that others could read.
+    write_file(scratch.path(), "config/.env.local", b"TOKEN=old\n");
+    std::fs::set_permissions(
+        scratch.path().join("config/.env.local"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    for (id, path) in [".env", "config/.env.local"].into_iter().enumerate() {
+        call(
+            &transport,
+            &handle,
+            10 + id as u64,
+            "files.replace",
+            params(path, TEMP, b"TOKEN=new\n"),
+        )
+        .await;
+        let file = scratch.path().join(path);
+        assert_eq!(std::fs::read(&file).unwrap(), b"TOKEN=new\n", "{path}");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{path}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn files_replace_refuses_a_link_at_the_file_or_a_folder_above_it() {
     let (scratch, transport, handle) = fixture("links").await;
     let outside = ScratchDir::new().expect("outside");
