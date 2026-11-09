@@ -204,8 +204,9 @@ fn empty_appends(w: &mut RetainedWindow) {
 /// the feed, and the scope generation of the replica and its documents
 /// together. Moving the hold's reason, or the replica's scope alone, leaves
 /// nothing held.
-#[tokio::test]
-async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
+mod changed_proof {
+    use super::*;
+
     /// A restore of the document from generation 0 to 1: resumed, or still
     /// fencing it.
     fn fence(w: &RetainedWindow, resumed: bool) -> usize {
@@ -274,461 +275,13 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
                 &format!("DELETE FROM ydoc_snapshots WHERE object_id='object' AND up_to_seq={head}"),
             )
     }
-    // Each case: its name, the work the window retains, what it writes
-    // before the proof, the change, and whether that moves the generation.
-    let cases: [(&str, Retained, Option<Prepare>, Change, bool); 33] = [
-        (
-            "draft authorship",
-            Retained::Carried,
-            Some(drafted),
-            |w| {
-                changed(
-                    w,
-                    "UPDATE owner_ydoc_outbox_entries SET person_edit=1-COALESCE(person_edit,0)
-                 WHERE delivery_id='outbox-only'",
-                )
-            },
-            true,
-        ),
-        (
-            "native author",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    &format!(
-                        "UPDATE ydoc_updates SET actor_origin_id='another-device'
-                     WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'
-                       AND seq IN (SELECT json_extract(native_source_json,'$.nativeSequence')
-                         FROM owner_ydoc_outbox_entries WHERE update_digest='{}')",
-                        w.retained_digest
-                    ),
-                )
-            },
-            true,
-        ),
-        (
-            "seed capture",
-            Retained::Seed,
-            None,
-            |w| {
-                changed(
-                w,
-                "UPDATE ydoc_owner_activation_sources SET source_moment_id=source_moment_id||'-moved'
-                 WHERE object_id='object'",
-            )
-            },
-            true,
-        ),
-        (
-            "contribution bytes",
-            Retained::Carried,
-            Some(drafted),
-            |w| {
-                changed(
-                w,
-                "DELETE FROM binary_blobs WHERE sha256=
-                   (SELECT update_digest FROM owner_ydoc_outbox_entries WHERE delivery_id='outbox-only')",
-            )
-            },
-            true,
-        ),
-        (
-            "engine identity",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE engine_ownership SET engine_uuid='another-engine' WHERE rowid_guard=1",
-                )
-            },
-            false,
-        ),
-        (
-            "hold binding",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    &format!(
-                        "UPDATE hosted_documents SET released_hold_binding_digest='{}' WHERE object_id='object'",
-                        "f".repeat(64)
-                    ),
-                )
-            },
-            false,
-        ),
-        (
-            "hold reason",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        (
-            "hold path",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE hosted_documents SET path='notes/elsewhere.md' WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        (
-            "hold continuation",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE hosted_documents SET released_hold_continuation='dependency-drain'
-                 WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        (
-            "hold stale flag",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        (
-            "path",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        (
-            "restore generation",
-            Retained::Carried,
-            None,
-            |w| fence(w, true),
-            false,
-        ),
-        (
-            "restore fence",
-            Retained::Carried,
-            None,
-            |w| fence(w, false),
-            false,
-        ),
-        (
-            "lineage head",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        (
-            "head kind",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE ydoc_docs SET content_kind='plaintext' WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        // One below the compaction point, which no entry names.
-        (
-            "head compaction",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1 WHERE object_id='object'",
-                )
-            },
-            false,
-        ),
-        // Only the proof's own read of the latest snapshot sees this.
-        (
-            "head snapshot added",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    &format!(
-                        "INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS})
-                     SELECT workspace_id,version_id,object_id,up_to_seq+1,snapshot_blob_sha256,
-                       state_vector_blob_sha256,0
-                     FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"
-                    ),
-                )
-            },
-            false,
-        ),
-        (
-            "head snapshot replaced",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    &format!(
-                        "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}' WHERE {LATEST_SNAPSHOT}",
-                        "e".repeat(64)
-                    ),
-                )
-            },
-            true,
-        ),
-        // Sol's r2c-3c-3 finding 2: rebound, its bytes damaged while nothing
-        // names them, and rebound back.
-        (
-            "head snapshot rebound and back",
-            Retained::Carried,
-            None,
-            |w| {
-                let original = latest_snapshot(w, "snapshot_blob_sha256");
-                let rebind = |digest: &str| {
-                    format!(
-                        "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{digest}' WHERE {LATEST_SNAPSHOT}"
-                    )
-                };
-                changed(w, &rebind("e".repeat(64).as_str()))
-                    + changed(
-                        w,
-                        &format!(
-                            "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{original}'"
-                        ),
-                    )
-                    + changed(w, &rebind(original.as_str()))
-            },
-            true,
-        ),
-        (
-            "folded, then the snapshot removed",
-            Retained::Carried,
-            Some(empty_appends),
-            folded_then_removed,
-            true,
-        ),
-        // Opus's r2c-3c-3 finding 1: the latest snapshot removed and
-        // reseeded to identical coordinates.
-        (
-            "head snapshot reseeded",
-            Retained::Carried,
-            None,
-            |w| {
-                let row = latest_snapshot(
-                    w,
-                    "printf('(%Q,%Q,%Q,%d,%Q,%Q,%d)',workspace_id,version_id,object_id,up_to_seq,
-                   snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms)",
-                );
-                changed(
-                    w,
-                    &format!("DELETE FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"),
-                ) + changed(
-                    w,
-                    &format!("INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS}) VALUES {row}"),
-                )
-            },
-            true,
-        ),
-        (
-            "head snapshot bytes",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256=
-                   (SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id='object'
-                    ORDER BY up_to_seq DESC LIMIT 1)",
-                )
-            },
-            true,
-        ),
-        // A row past the head, which the head's coordinates do not name but
-        // its state loads.
-        (
-            "journal row past the head",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                w,
-                &format!(
-                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
-                     SELECT workspace_id,version_id,object_id,head_update_seq+1,'{}',0 FROM ydoc_docs
-                     WHERE object_id='object'",
-                    hex_sha256(EMPTY_UPDATE)
-                ),
-            )
-            },
-            false,
-        ),
-        (
-            "journal row removed",
-            Retained::Carried,
-            Some(empty_appends),
-            |w| changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")),
-            true,
-        ),
-        (
-            "journal row rewritten",
-            Retained::Carried,
-            Some(empty_appends),
-            |w| {
-                changed(
-                    w,
-                    &format!(
-                        "UPDATE ydoc_updates SET update_blob_sha256='{}' WHERE {INNER_ROW}",
-                        "d".repeat(64)
-                    ),
-                )
-            },
-            true,
-        ),
-        (
-            "journal row restored",
-            Retained::Carried,
-            Some(one_missing),
-            |w| {
-                changed(
-                w,
-                &format!(
-                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
-                     SELECT workspace_id,version_id,object_id,head_update_seq-1,'{}',0 FROM ydoc_docs
-                     WHERE object_id='object'",
-                    hex_sha256(EMPTY_UPDATE)
-                ),
-            )
-            },
-            true,
-        ),
-        (
-            "journal row bytes",
-            Retained::Carried,
-            Some(empty_appends),
-            |w| {
-                changed(
-                    w,
-                    &format!(
-                        "UPDATE binary_blobs SET bytes=X'01',byte_length=1 WHERE sha256='{}'",
-                        hex_sha256(EMPTY_UPDATE)
-                    ),
-                )
-            },
-            true,
-        ),
-        (
-            "workspace main version",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE versioned_workspaces SET main_version_id='elsewhere'
-                 WHERE workspace_id='workspace'",
-                )
-            },
-            false,
-        ),
-        (
-            "workspace removed",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
-                )
-            },
-            false,
-        ),
-        (
-            "feed stream",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE sync_identity SET stream_identity='moved' WHERE workspace_id='workspace'",
-                )
-            },
-            false,
-        ),
-        (
-            "feed epoch",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE sync_identity SET replication_epoch='moved' WHERE workspace_id='workspace'",
-                )
-            },
-            false,
-        ),
-        // The replica and its documents move scope together, so the hold
-        // reads as it did, but in another scope.
-        (
-            "scope generation",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE hosted_replicas SET scope_generation=scope_generation+1
-                 WHERE workspace_id='workspace'",
-                ) + changed(
-                    w,
-                    "UPDATE hosted_documents SET scope_generation=scope_generation+1
-                 WHERE workspace_id='workspace'",
-                )
-            },
-            false,
-        ),
-        (
-            "replica scope",
-            Retained::Carried,
-            None,
-            |w| {
-                changed(
-                    w,
-                    "UPDATE hosted_replicas SET scope_generation=scope_generation+1
-                 WHERE workspace_id='workspace'",
-                )
-            },
-            false,
-        ),
-    ];
-    for (case, retained, prepare, change, moves) in cases {
+    async fn assert_stale(
+        case: &str,
+        retained: Retained,
+        prepare: Option<Prepare>,
+        change: Change,
+        moves: bool,
+    ) {
         let (mut w, desktop, _client) = held_for_a_queued_fold_of(retained).await;
         if let Some(prepare) = prepare {
             prepare(&mut w);
@@ -759,6 +312,521 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
         desktop.close().await;
         w.close().await;
     }
+
+    macro_rules! stale_case {
+        ($name:ident, $case:literal, $retained:expr, $prepare:expr, $change:expr, $moves:expr $(,)?) => {
+            #[tokio::test]
+            async fn $name() {
+                assert_stale($case, $retained, $prepare, $change, $moves).await;
+            }
+        };
+    }
+
+    stale_case!(
+        change_draft_authorship,
+        "draft authorship",
+        Retained::Carried,
+        Some(drafted),
+        |w| {
+            changed(
+                w,
+                "UPDATE owner_ydoc_outbox_entries SET person_edit=1-COALESCE(person_edit,0)
+                 WHERE delivery_id='outbox-only'",
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_native_author,
+        "native author",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE ydoc_updates SET actor_origin_id='another-device'
+                     WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'
+                       AND seq IN (SELECT json_extract(native_source_json,'$.nativeSequence')
+                         FROM owner_ydoc_outbox_entries WHERE update_digest='{}')",
+                    w.retained_digest
+                ),
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_seed_capture,
+        "seed capture",
+        Retained::Seed,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE ydoc_owner_activation_sources SET source_moment_id=source_moment_id||'-moved'
+                 WHERE object_id='object'",
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_contribution_bytes,
+        "contribution bytes",
+        Retained::Carried,
+        Some(drafted),
+        |w| {
+            changed(
+                w,
+                "DELETE FROM binary_blobs WHERE sha256=
+                   (SELECT update_digest FROM owner_ydoc_outbox_entries WHERE delivery_id='outbox-only')",
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_engine_identity,
+        "engine identity",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE engine_ownership SET engine_uuid='another-engine' WHERE rowid_guard=1",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_hold_binding,
+        "hold binding",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE hosted_documents SET released_hold_binding_digest='{}' WHERE object_id='object'",
+                    "f".repeat(64)
+                ),
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_hold_reason,
+        "hold reason",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_hold_path,
+        "hold path",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE hosted_documents SET path='notes/elsewhere.md' WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_hold_continuation,
+        "hold continuation",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE hosted_documents SET released_hold_continuation='dependency-drain'
+                 WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_hold_stale_flag,
+        "hold stale flag",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_path,
+        "path",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_restore_generation,
+        "restore generation",
+        Retained::Carried,
+        None,
+        |w| fence(w, true),
+        false,
+    );
+
+    stale_case!(
+        change_restore_fence,
+        "restore fence",
+        Retained::Carried,
+        None,
+        |w| fence(w, false),
+        false,
+    );
+
+    stale_case!(
+        change_lineage_head,
+        "lineage head",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_head_kind,
+        "head kind",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE ydoc_docs SET content_kind='plaintext' WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_head_compaction,
+        "head compaction",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1 WHERE object_id='object'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_head_snapshot_added,
+        "head snapshot added",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS})
+                     SELECT workspace_id,version_id,object_id,up_to_seq+1,snapshot_blob_sha256,
+                       state_vector_blob_sha256,0
+                     FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"
+                ),
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_head_snapshot_replaced,
+        "head snapshot replaced",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}' WHERE {LATEST_SNAPSHOT}",
+                    "e".repeat(64)
+                ),
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_head_snapshot_rebound_and_back,
+        "head snapshot rebound and back",
+        Retained::Carried,
+        None,
+        |w| {
+            let original = latest_snapshot(w, "snapshot_blob_sha256");
+            let rebind = |digest: &str| {
+                format!(
+                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{digest}' WHERE {LATEST_SNAPSHOT}"
+                )
+            };
+            changed(w, &rebind("e".repeat(64).as_str()))
+                + changed(
+                    w,
+                    &format!(
+                        "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{original}'"
+                    ),
+                )
+                + changed(w, &rebind(original.as_str()))
+        },
+        true,
+    );
+
+    stale_case!(
+        change_folded_then_the_snapshot_removed,
+        "folded, then the snapshot removed",
+        Retained::Carried,
+        Some(empty_appends),
+        folded_then_removed,
+        true,
+    );
+
+    stale_case!(
+        change_head_snapshot_reseeded,
+        "head snapshot reseeded",
+        Retained::Carried,
+        None,
+        |w| {
+            let row = latest_snapshot(
+                w,
+                "printf('(%Q,%Q,%Q,%d,%Q,%Q,%d)',workspace_id,version_id,object_id,up_to_seq,
+                   snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms)",
+            );
+            changed(
+                w,
+                &format!("DELETE FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"),
+            ) + changed(
+                w,
+                &format!("INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS}) VALUES {row}"),
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_head_snapshot_bytes,
+        "head snapshot bytes",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256=
+                   (SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id='object'
+                    ORDER BY up_to_seq DESC LIMIT 1)",
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_journal_row_past_the_head,
+        "journal row past the head",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                     SELECT workspace_id,version_id,object_id,head_update_seq+1,'{}',0 FROM ydoc_docs
+                     WHERE object_id='object'",
+                    hex_sha256(EMPTY_UPDATE)
+                ),
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_journal_row_removed,
+        "journal row removed",
+        Retained::Carried,
+        Some(empty_appends),
+        |w| changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")),
+        true,
+    );
+
+    stale_case!(
+        change_journal_row_rewritten,
+        "journal row rewritten",
+        Retained::Carried,
+        Some(empty_appends),
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE ydoc_updates SET update_blob_sha256='{}' WHERE {INNER_ROW}",
+                    "d".repeat(64)
+                ),
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_journal_row_restored,
+        "journal row restored",
+        Retained::Carried,
+        Some(one_missing),
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                     SELECT workspace_id,version_id,object_id,head_update_seq-1,'{}',0 FROM ydoc_docs
+                     WHERE object_id='object'",
+                    hex_sha256(EMPTY_UPDATE)
+                ),
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_journal_row_bytes,
+        "journal row bytes",
+        Retained::Carried,
+        Some(empty_appends),
+        |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE binary_blobs SET bytes=X'01',byte_length=1 WHERE sha256='{}'",
+                    hex_sha256(EMPTY_UPDATE)
+                ),
+            )
+        },
+        true,
+    );
+
+    stale_case!(
+        change_workspace_main_version,
+        "workspace main version",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE versioned_workspaces SET main_version_id='elsewhere'
+                 WHERE workspace_id='workspace'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_workspace_removed,
+        "workspace removed",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_feed_stream,
+        "feed stream",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE sync_identity SET stream_identity='moved' WHERE workspace_id='workspace'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_feed_epoch,
+        "feed epoch",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE sync_identity SET replication_epoch='moved' WHERE workspace_id='workspace'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_scope_generation,
+        "scope generation",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE hosted_replicas SET scope_generation=scope_generation+1
+                 WHERE workspace_id='workspace'",
+            ) + changed(
+                w,
+                "UPDATE hosted_documents SET scope_generation=scope_generation+1
+                 WHERE workspace_id='workspace'",
+            )
+        },
+        false,
+    );
+
+    stale_case!(
+        change_replica_scope,
+        "replica scope",
+        Retained::Carried,
+        None,
+        |w| {
+            changed(
+                w,
+                "UPDATE hosted_replicas SET scope_generation=scope_generation+1
+                 WHERE workspace_id='workspace'",
+            )
+        },
+        false,
+    );
 }
 
 /// Sol's r2c-3c-1 findings 1 and 3, on the archived-hold fixture: an
