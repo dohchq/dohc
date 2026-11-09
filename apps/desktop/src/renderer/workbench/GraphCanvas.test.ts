@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { contrastRatio, mixHex } from "../accentColor";
 import { identityHues, palette } from "../tokens";
-import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, fitCamera, followCamera, labelOpacity } from "./GraphCanvas";
+import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, fitCamera, followCamera, labelOpacity, shortTitle } from "./GraphCanvas";
 
 // The Graph page draws on bg, the side panel on panel.
 const SURFACES = ["bg", "panel"] as const;
@@ -64,5 +64,12 @@ describe("fitting the Graph to its view", () => {
     expect(followCamera(camera, out, true)).toEqual(out);
     expect(followCamera(camera, zoomIn, true)).toEqual({ k: 1.15, tx: 115, ty: 85 });
     expect(followCamera(camera, out, false)).toEqual({ k: 0.925, tx: 115, ty: 85 });
+  });
+});
+
+describe("Graph labels", () => {
+  it("cut a long title with no space before the …", () => {
+    expect(shortTitle("Trip plan")).toBe("Trip plan");
+    expect(shortTitle(`${"a".repeat(30)} bcd`)).toBe(`${"a".repeat(30)}…`);
   });
 });

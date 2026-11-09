@@ -4,7 +4,7 @@ import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
-import { useShellError } from "./useShellError";
+import { SHELL_ERROR_MAX_CHARS, useShellError } from "./useShellError";
 import { SyncedDeletionRevivalError } from "../../workspaces/syncedDeletionRefusal";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
@@ -21,6 +21,12 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("cuts a long message at its limit with no space before the …", () => {
+    const { result } = renderHook(() => useShellError("ws-a", vi.fn()));
+    act(() => result.current.reportShellFailure({ message: `${"a".repeat(SHELL_ERROR_MAX_CHARS - 2)} ${"b".repeat(10)}` }));
+    expect(result.current.shellErrors[0]?.message).toBe(`${"a".repeat(SHELL_ERROR_MAX_CHARS - 2)}…`);
+  });
+
   it.each(["refresh first", "search first"])("shows one plain refusal from workspace search: %s", async order => {
     const error = new Error(`Error invoking remote method 'desktop:search-workspace': ${String(ipcWireError(await sharedViewRefusal()))}`);
     const retry = vi.fn();

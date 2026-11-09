@@ -1,7 +1,7 @@
 import { nextStepWords, type ChatDispatchFailedRun, type ChatDispatchNextStep, type ChatDispatchNotice, type RunnerSelfTestResult } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, CLAUDE_MIN_VERSION, launchCommand, launchProfile, supportsAgentProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
-import { cutText } from "@dohc/automation-executor/automation-chat";
+import { cutText } from "@dohc/workspace-contracts/names";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
 import { randomUUID } from "node:crypto";

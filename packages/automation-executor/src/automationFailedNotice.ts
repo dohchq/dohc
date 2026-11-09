@@ -6,7 +6,7 @@ import {
   type AutomationControlsTarget,
   type NoticeTarget,
 } from "@dohc/workspace-contracts/relay";
-import { cutText } from "./automationChat";
+import { cutText } from "@dohc/workspace-contracts/names";
 
 // The notice a failed run sends to this computer's person, who can try it
 // again here. One notice per failure, so a failure that happens again is

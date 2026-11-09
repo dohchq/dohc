@@ -1,3 +1,4 @@
+import { cutText } from "@dohc/workspace-contracts/names";
 import type { ImportWorkspaceFilesResult } from "../../ipc/bridgeContract";
 import type { ErrorDetailField } from "./copyDetails";
 import { SHELL_ERROR_MAX_CHARS } from "./useShellError";
@@ -38,26 +39,14 @@ export function importStopSentence(stop: ImportStop): string {
 const SHORT_NAME_MAX_CHARS = 60;
 
 function shortName(path: string): string {
-  const name = path.slice(path.lastIndexOf("/") + 1);
-  const chars = [...name];
-  return chars.length <= SHORT_NAME_MAX_CHARS
-    ? name
-    : `${chars.slice(0, SHORT_NAME_MAX_CHARS - 1).join("")}…`;
+  return cutText(path.slice(path.lastIndexOf("/") + 1), SHORT_NAME_MAX_CHARS);
 }
 
 // A notice made of what happened, why, and what to do next. The toast cuts a
 // message at SHELL_ERROR_MAX_CHARS, so when the three run long, the middle
 // is shortened: the instruction at the end always survives whole.
 export function fitImportMessage(head: string, middle: string, tail: string): string {
-  // Measured in UTF-16 units, as the toast measures; cut on whole characters.
-  const room = SHELL_ERROR_MAX_CHARS - head.length - tail.length;
-  if (middle.length <= room) return `${head}${middle}${tail}`;
-  let kept = "";
-  for (const char of middle) {
-    if (kept.length + char.length > room - 1) break;
-    kept += char;
-  }
-  return `${head}${kept}…${tail}`;
+  return `${head}${cutText(middle, SHELL_ERROR_MAX_CHARS - [...head].length - [...tail].length)}${tail}`;
 }
 
 // Every landed path for Copy details, whole: a path is useless once its file

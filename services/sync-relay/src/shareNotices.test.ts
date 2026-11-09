@@ -365,6 +365,7 @@ it.each([
   {name: "😀".repeat(39), email: null, expected: "😀".repeat(39)},
   {name: "Ana", email: "a".repeat(40) + "@example.test", expected: "Ana"},
   {name: null, email: "a".repeat(40) + "@example.test", expected: "a".repeat(39) + "…"},
+  {name: "Helpdesk Team XYZ", email: "helpdesk@company.phish.test", expected: "Helpdesk… (helpdesk@company.phish.test)"},
 ])("keeps a bounded identifiable notice sender: $expected", async ({name, email, expected}) => {
   const {h} = await relay({lookupUserDisplayName: () => name, lookupUserEmail: () => email});
   await createShare(h, "owner", WORKSPACE, {paths: ["trip"], recipientUserId: "ana"});

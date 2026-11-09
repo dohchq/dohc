@@ -112,6 +112,12 @@ describe("text menu template", () => {
       editFlags: { ...noFlags, canCopy: true },
     }), "darwin", actions());
     expect(long[0]?.label).toBe("Look up “a selection that runs we…”");
+
+    const atSpace = textMenuTemplate(params({
+      selectionText: `${"a".repeat(23)} bcd`,
+      editFlags: { ...noFlags, canCopy: true },
+    }), "darwin", actions());
+    expect(atSpace[0]?.label).toBe(`Look up “${"a".repeat(23)}…”`);
   });
 
   it("offers Paste and Match Style on macOS only while Paste applies", () => {

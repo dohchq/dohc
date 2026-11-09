@@ -2,6 +2,7 @@ import { createContext, useCallback, useEffect, useMemo, useRef, useState } from
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
+import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
 import type { NoticeTarget } from "./noticeTarget";
@@ -181,10 +182,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       nextId.current += 1;
       const id = error.id ?? `shell-error-${nextId.current}`;
       const atMs = Date.now();
-      const message =
-        error.message.length > SHELL_ERROR_MAX_CHARS
-          ? `${error.message.slice(0, SHELL_ERROR_MAX_CHARS - 1)}…`
-          : error.message;
+      const message = cutText(error.message, SHELL_ERROR_MAX_CHARS);
       setShellErrors((current) => {
         const matches = (existing: ShellError) =>
           error.identity !== undefined || existing.identity !== undefined

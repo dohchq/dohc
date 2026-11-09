@@ -21,6 +21,7 @@ import {
   type AutomationScheduleTrigger,
 } from "@dohc/workspace-contracts/automations";
 import { RECORD_ID_FRONTMATTER_KEY, type CollectionRecord, type CollectionValue } from "@dohc/workspace-contracts/collection";
+import { cutText } from "@dohc/workspace-contracts/names";
 import type { AutomationChangeKind, AutomationClaim } from "@dohc/workspace-engine-client";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { derivedRecordId } from "./recordIds";
@@ -30,7 +31,6 @@ import {
   automationNoticeId,
   automationThreadId,
   automationWakeThreadId,
-  cutText,
   GROUP_READ_ONLY,
   type AutomationNotice,
   type ChatDirectory,

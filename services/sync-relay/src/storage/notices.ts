@@ -23,6 +23,7 @@ import {
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
+import { cutText } from "@dohc/workspace-contracts/names";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { badRequest, relayError, RelayError } from "../errors";
 import { authorizeShareGrantAction } from "../shareAuthorization";
@@ -345,14 +346,12 @@ export function noticeShareReceived(storage: StorageContext, input: NoticeShareR
 }
 
 function shareNoticeSender(full: string, email: string | null): string {
-  const shorten = (value: string, limit: number) => [...value].length <= limit
-    ? value : `${[...value].slice(0, limit - 1).join("")}…`;
   const name = email && full.endsWith(` (${email})`) ? full.slice(0, -email.length - 3) : full === email ? "" : full;
   if (email && [...email].length <= NOTICE_SENDER_LABEL_MAX_CHARS) {
     const room = NOTICE_SENDER_LABEL_MAX_CHARS - [...email].length - 3;
-    return name && room > 1 ? `${shorten(name, room)} (${email})` : email;
+    return name && room > 1 ? `${cutText(name, room)} (${email})` : email;
   }
-  return shorten(name && name !== "the owner" ? name : email ?? "Someone", NOTICE_SENDER_LABEL_MAX_CHARS);
+  return cutText(name && name !== "the owner" ? name : email ?? "Someone", NOTICE_SENDER_LABEL_MAX_CHARS);
 }
 
 // "Ana shared Trip with you", naming what the share holds and shortening the

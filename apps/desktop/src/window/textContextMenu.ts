@@ -4,6 +4,7 @@ import {
   type ContextMenuParams,
   type MenuItemConstructorOptions,
 } from "electron";
+import { cutText } from "@dohc/workspace-contracts/names";
 
 type TextMenuParams = Pick<
   ContextMenuParams,
@@ -22,11 +23,10 @@ export interface TextMenuActions {
   lookUp(): void;
 }
 
-const LOOK_UP_CHARS = 24;
+const LOOK_UP_CHARS = 25;
 
 function lookUpLabel(selection: string): string {
-  const text = selection.replace(/\s+/g, " ");
-  return `Look up “${text.length > LOOK_UP_CHARS ? `${text.slice(0, LOOK_UP_CHARS)}…` : text}”`;
+  return `Look up “${cutText(selection.replace(/\s+/g, " "), LOOK_UP_CHARS)}”`;
 }
 
 // The submenus of the same name in macOS's Edit menu.

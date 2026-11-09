@@ -6,7 +6,7 @@ import { Suspense, useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
-import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
+import { commentTitle, LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { AboutFile } from "./About";
 import type { AccessContext } from "./accessReason";
@@ -1301,5 +1301,13 @@ describe("LinkedChatsPanel comment on the file", () => {
       "dohc does not track this file, so it cannot have comments.",
     );
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+  });
+});
+
+describe("commentTitle", () => {
+  it("cuts a long first line with no space before the …, on whole characters", () => {
+    expect(commentTitle(`${"a".repeat(198)} bbb\nmore`)).toBe(`${"a".repeat(198)}…`);
+    // A chat title holds 200 UTF-16 units. Each emoji takes two, and none is split.
+    expect(commentTitle("🎉".repeat(150))).toBe(`${"🎉".repeat(99)}…`);
   });
 });
