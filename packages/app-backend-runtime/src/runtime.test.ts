@@ -114,7 +114,9 @@ describe("app operation runtime", () => {
   });
 
   it("kills a native SQL runaway and accepts a following operation", async () => {
-    const input = request({source:`globalThis.operations={reserve(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n')}}`, limits:{deadlineMs:1500,evaluationMs:100}});
+    // The query must start inside the guest's 1 s limit, which a busy machine can spend on startup when it is shorter.
+    // The query outlives that limit, and only the worker deadline ends it.
+    const input = request({source:`globalThis.operations={reserve(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n')}}`, limits:{deadlineMs:1500}});
     await expect(evaluateAppOperation(input)).rejects.toThrow("deadline");
     expect((await evaluateAppOperation({...input,source,operation:"inspect",limits:undefined})).result).toEqual([{id:"item",remaining:1}]);
   });

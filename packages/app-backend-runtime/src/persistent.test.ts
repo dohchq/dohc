@@ -541,7 +541,8 @@ describe("persistent dataset worker",()=>{
       const writer=await open({schemaSql:cpuBudgetSchema});
       // Schema validation needs room before the much heavier replay spends this budget.
       const checkpointPath=join(root,"empty.sqlite");await writer.snapshot(checkpointPath);
-      const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
+      // 5,000 rows replay in several times the 100 ms budget, and far inside the default 5 s.
+      const prepared=await writer.prepare({...operation(),source:insertRows(1,5_000)});
       const committed=event(prepared);
       await expect((await open({schemaSql:cpuBudgetSchema,checkpointPath,limits:{cpuBudgetMs:100}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
         message:"The app's code ran too long: it used more than 100 ms of CPU time while reapplying a saved change. Try again."});
