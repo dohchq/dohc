@@ -57,7 +57,9 @@ type CapacityRetry = {
 };
 /** How long a first-open build may run. */
 export const FIRST_OPEN_BUILD_MS = 60_000;
-type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; work?: LiveValidationWork["kind"]; yielded: boolean; heapExhausted: boolean; exited: Promise<void> };
+type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; work?: LiveValidationWork["kind"]; note?: string; protected?: boolean; yielded: boolean; heapExhausted: boolean; exited: Promise<void> };
+/** How many notes whose build was ended the executor remembers. */
+const MAX_ENDED_BUILDS = 4_096;
 /** The validator threw instead of judging the edit, so the edit is tried again. */
 export class LiveValidatorFailure extends Error {
   constructor(readonly errorClass: string) {
@@ -87,6 +89,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false, yielding = 0;
+  // Notes whose build an activation or restore ended. Each one's next build runs to the end,
+  // so a repeating activation delays a note's first open by at most one build.
+  const ended = new Set<string>();
   const hasCapacity = (auxiliary = false) => !closed && (!auxiliary || ![...slots].some(slot => slot.auxiliary)) && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
@@ -192,11 +197,16 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     if (closed) throw new Error("Live validation closed.");
     const foreground = work.kind === "activation" || work.kind === "restore";
     const auxiliary = foreground || work.kind === "first-open" || work.kind === "first-open-history";
-    // A first-open build can take a minute; an activation or restore ends it
-    // rather than wait, and the build answers `busy`. No first-open job starts meanwhile.
-    const building = foreground ? [...slots].find((slot) => slot.work === "first-open") : undefined;
+    // A first-open build can take a minute; an activation or restore ends it rather than
+    // wait, unless it is its note's turn, and the build answers `busy`. No first-open job starts meanwhile.
+    const building = foreground ? [...slots].find((slot) => slot.work === "first-open" && !slot.protected) : undefined;
     if (building) {
       building.yielded = true;
+      if (building.note !== undefined) {
+        ended.delete(building.note);
+        ended.add(building.note);
+        if (ended.size > MAX_ENDED_BUILDS) ended.delete(ended.values().next().value!);
+      }
       yielding++;
       try {
         kill(building);
@@ -222,6 +232,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     claim?.(slot);
     slot.auxiliary = auxiliary;
     slot.work = work.kind;
+    // A malformed input fails in the child, as any other build input does.
+    slot.note = work.kind === "first-open" ? JSON.stringify([work.input.document?.workspaceId, work.input.document?.objectId]) : undefined;
+    slot.protected = slot.note !== undefined && ended.delete(slot.note);
     hold(slot, true);
     return new Promise<Result>((resolve, reject) => {
       let done = false;
@@ -255,11 +268,14 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
           return;
         }
         if (!settle()) return;
-        slot.busy = false;
-        slot.auxiliary = false;
-        slot.work = undefined;
-        // A result that arrives after `close` began must not release its hold.
-        if (!closed) hold(slot, false);
+        // An ended build's answer can arrive before its killed child exits; the slot stays busy until then.
+        if (!slot.yielded) {
+          slot.busy = false;
+          slot.auxiliary = false;
+          slot.work = slot.note = slot.protected = undefined;
+          // A result that arrives after `close` began must not release its hold.
+          if (!closed) hold(slot, false);
+        }
         if (failed.kind === "failed") reject(new LiveValidatorFailure(typeof failed.errorClass === "string" ? failed.errorClass : "unknown"));
         else resolve(value as Result);
         notify();
