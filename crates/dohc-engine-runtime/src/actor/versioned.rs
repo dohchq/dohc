@@ -5203,7 +5203,7 @@ mod doc_cache_reset_tests {
                 if failure == "commit" {
                     let armed = Arc::new(AtomicBool::new(true));
                     store
-                        .read_with(|conn| {
+                        .hooks_with(|conn| {
                             conn.commit_hook(Some(move || armed.swap(false, Ordering::SeqCst)))
                                 .unwrap();
                             Ok::<_, StorageError>(())
@@ -5238,8 +5238,10 @@ mod doc_cache_reset_tests {
                 );
                 assert_eq!(checked_delete_count(&store), 1);
                 store
+                    .hooks_with(|conn| conn.commit_hook(None::<fn() -> bool>))
+                    .unwrap();
+                store
                     .read_with(|conn| {
-                        conn.commit_hook(None::<fn() -> bool>).unwrap();
                         conn.execute_batch("DROP TRIGGER IF EXISTS fail_finish_check")
                     })
                     .unwrap();
@@ -5831,7 +5833,7 @@ mod doc_cache_reset_tests {
                 let hook_commits = commits.clone();
                 let final_commit = if cfg!(unix) { 4 } else { 3 };
                 store
-                    .read_with(|conn| {
+                    .hooks_with(|conn| {
                         // Preparation, finish preview, disk receipt, and POSIX retention commit first.
                         // Fail the final transaction after disposing of the staged source.
                         conn.commit_hook(Some(move || {
@@ -5856,7 +5858,7 @@ mod doc_cache_reset_tests {
                 );
                 assert_eq!(commits.load(Ordering::SeqCst), final_commit + 1);
                 store
-                    .read_with(|conn| {
+                    .hooks_with(|conn| {
                         conn.commit_hook(None::<fn() -> bool>).unwrap();
                         Ok::<_, StorageError>(())
                     })

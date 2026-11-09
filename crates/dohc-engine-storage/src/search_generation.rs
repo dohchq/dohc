@@ -4,7 +4,7 @@ use rusqlite::{Connection, functions::FunctionFlags};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-pub(crate) fn install(conn: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn install(conn: &mut Connection) -> rusqlite::Result<()> {
     let generation = Arc::new(AtomicI64::new(0));
     let dirty = Arc::new(AtomicBool::new(false));
     let writes = Arc::clone(&dirty);
@@ -73,12 +73,12 @@ mod tests {
     use super::*;
     #[test]
     fn row_writes_coalesce_until_the_search_revision_is_read() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE snapshots(value INTEGER); CREATE TABLE link_pending(value INTEGER); CREATE TABLE capture_file_holds(value INTEGER);",
         )
         .unwrap();
-        install(&conn).unwrap();
+        install(&mut conn).unwrap();
         assert_eq!(search_generation(&conn).unwrap(), 0);
         assert_eq!(crate::capture_file_holds::generation_in(&conn).unwrap(), 0);
         conn.execute_batch(

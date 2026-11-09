@@ -752,7 +752,7 @@ fn validate_committed(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
     {
-        hook(&reader);
+        hook(&mut reader);
     }
     let stopped = Arc::clone(&shared.stopped);
     reader
@@ -1351,14 +1351,14 @@ static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0
 /// reads, for measurements that attribute its statements; none stops.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub fn on_released_tail_reader(hook: Option<fn(&Connection)>) {
+pub fn on_released_tail_reader(hook: Option<fn(&mut Connection)>) {
     *READER_HOOK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
 }
 
 #[cfg(any(test, feature = "test-support"))]
-static READER_HOOK: std::sync::Mutex<Option<fn(&Connection)>> = std::sync::Mutex::new(None);
+static READER_HOOK: std::sync::Mutex<Option<fn(&mut Connection)>> = std::sync::Mutex::new(None);
 
 /// How many times the calling thread read a released window's tails: a
 /// thread that decides on a worker's validations reads none.

@@ -269,7 +269,7 @@ impl EngineStore {
     /// else holds it; `None` stops counting. The weak reference means the
     /// counter never outlives its owner, and a dead one costs one failed
     /// upgrade per step until the caller stops counting.
-    pub fn count_work(&self, work: Option<Weak<AtomicU64>>) -> Result<(), StorageError> {
+    pub fn count_work(&mut self, work: Option<Weak<AtomicU64>>) -> Result<(), StorageError> {
         match work {
             Some(work) => self.conn.progress_handler(
                 OPEN_WORK_STEP_OPS,
@@ -532,6 +532,16 @@ impl EngineStore {
     /// single-transaction discipline always apply.
     pub fn read_with<T, E>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
         f(&self.conn)
+    }
+
+    /// Install or remove a connection hook. rusqlite needs exclusive access to
+    /// change a hook; reads still go through [`Self::read_with`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hooks_with<T, E>(
+        &mut self,
+        f: impl FnOnce(&mut Connection) -> Result<T, E>,
+    ) -> Result<T, E> {
+        f(&mut self.conn)
     }
 
     /// Run a compound domain mutation inside exactly one `BEGIN IMMEDIATE`

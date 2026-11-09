@@ -1260,19 +1260,24 @@ mod tests {
         DELETES.store(0, Ordering::Relaxed);
         fixture_setup(&store, |store| {
             store
-                .read_with(|conn| {
+                .hooks_with(|conn| {
                     conn.trace_v2(
                         rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
                         Some(trace),
-                    );
+                    )
+                    .unwrap();
                     Ok::<_, RuntimeError>(())
                 })
                 .unwrap();
         });
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
-            .read_with(|conn| {
-                conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            .hooks_with(|conn| {
+                conn.trace_v2(
+                    rusqlite::trace::TraceEventCodes::empty(),
+                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+                )
+                .unwrap();
                 Ok::<_, RuntimeError>(())
             })
             .unwrap();
@@ -1319,7 +1324,7 @@ mod tests {
         let observed = Arc::clone(&commits);
         fixture_setup(&store, move |store| {
             store
-                .read_with(|conn| {
+                .hooks_with(|conn| {
                     conn.commit_hook(Some(move || {
                         observed.fetch_add(1, Ordering::Relaxed);
                         false
@@ -1329,7 +1334,7 @@ mod tests {
         });
         let result = undo(&mut store, root.path(), "undo", Arc::new(NoFaults));
         store
-            .read_with(|conn| conn.commit_hook(None::<fn() -> bool>))
+            .hooks_with(|conn| conn.commit_hook(None::<fn() -> bool>))
             .unwrap();
         assert!(result.unwrap().materialized);
         // Unix also durably retains each displaced original before completing the batch.

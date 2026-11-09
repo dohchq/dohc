@@ -919,7 +919,7 @@ mod tests {
         Arc,
     };
 
-    fn count_reads(conn: &Connection) -> Arc<AtomicUsize> {
+    fn count_reads(conn: &mut Connection) -> Arc<AtomicUsize> {
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();
         conn.authorizer(Some(move |context: AuthContext<'_>| {
@@ -933,12 +933,12 @@ mod tests {
     }
 
     fn read_json(json: &str, previous: &str) -> Result<NativeMetadata, ApplicationError> {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE metadata(json TEXT)")
             .unwrap();
         conn.execute("INSERT INTO metadata VALUES (?1)", [json])
             .unwrap();
-        let count = count_reads(&conn);
+        let count = count_reads(&mut conn);
         let result = parse(
             &conn,
             "metadata",
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     fn restore_json_with_generated_columns_uses_constant_queries_and_bounded_tokens() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE restores(application_json TEXT, generation INTEGER GENERATED ALWAYS AS (json_extract(application_json,'$.fence.generation')) VIRTUAL)").unwrap();
         let accepted: RelayAcceptedLiveUpdate =
             serde_json::from_str(super::super::tests::ACCEPTED_COMPLETE).unwrap();
@@ -1117,7 +1117,7 @@ mod tests {
         assert!(conn
             .blob_open("main", "restores", "application_json", 1, true)
             .is_err());
-        let queries = count_reads(&conn);
+        let queries = count_reads(&mut conn);
         let previous = "0".repeat(64);
         let parsed = parse(
             &conn,
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn incremental_blob_hash_checks_length_and_content_without_chunk_queries() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE binary_blobs(sha256 TEXT PRIMARY KEY, byte_length INTEGER, bytes BLOB)",
         )
@@ -1176,7 +1176,7 @@ mod tests {
             params![digest, bytes.len() as i64, bytes],
         )
         .unwrap();
-        let queries = count_reads(&conn);
+        let queries = count_reads(&mut conn);
         validate_blob_hash(&conn, &digest).unwrap();
         assert!(queries.load(Ordering::Relaxed) <= 2);
         conn.execute("UPDATE binary_blobs SET byte_length=byte_length+1", [])

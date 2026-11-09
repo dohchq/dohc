@@ -756,7 +756,7 @@ async fn outside_reader_fold_round1_preparation_error_is_per_item() {
     let observed = deny.clone();
     actor
         .run(move |store, _| {
-            store.read_with(|conn| {
+            store.hooks_with(|conn| {
                 conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
                     if matches!(
                         context.action,

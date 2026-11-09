@@ -992,7 +992,7 @@ impl HeldProofJob {
         };
         #[cfg(any(test, feature = "test-support"))]
         self.gate.inside_open();
-        let conn = open_reader(&self.path)?;
+        let mut conn = open_reader(&self.path)?;
         conn.busy_timeout(READER_BUSY_TIMEOUT)
             .map_err(open_failure)?;
         let halt = Arc::clone(&self.halt);

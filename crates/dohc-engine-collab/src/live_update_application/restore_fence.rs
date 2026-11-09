@@ -1350,7 +1350,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// The fence columns `sql` reads, and its query plan.
-    fn inspect(conn: &Connection, sql: &str) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+    fn inspect(conn: &mut Connection, sql: &str) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
         let columns = Arc::new(Mutex::new(Vec::new()));
         let seen = columns.clone();
         conn.authorizer(Some(move |context: AuthContext<'_>| {
@@ -1380,9 +1380,9 @@ mod tests {
     #[test]
     fn restored_document_reads_never_walk_the_restore_proof() {
         let scratch = dohc_test_scratch::ScratchDir::new_named("restore-proof-reads").unwrap();
-        let store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 let indexed: Vec<String> = conn
                     .prepare("SELECT name FROM pragma_index_info('live_restore_resumed')")?
                     .query_map([], |row| row.get(0))?

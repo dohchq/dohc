@@ -4487,7 +4487,7 @@ fn canonical_version_read_failure(refresh: bool) {
     let denied = Arc::new(AtomicBool::new(false));
     let captured = denied.clone();
     target
-        .read_with(|conn| {
+        .hooks_with(|conn| {
             conn.authorizer(Some(move |ctx: AuthContext<'_>| {
                 if matches!(
                     ctx.action,
@@ -4512,7 +4512,7 @@ fn canonical_version_read_failure(refresh: bool) {
         &NoLiveLeases,
     );
     target
-        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert!(denied.load(Ordering::SeqCst));
     assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");

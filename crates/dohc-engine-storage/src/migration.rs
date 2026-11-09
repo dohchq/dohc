@@ -11272,8 +11272,7 @@ mod tests {
     #[test]
     fn released_tail_triggers_never_scan_retained_history() {
         let dir = tempdir();
-        let conn = released_tail_store(&dir);
-        let steps = |sql: &str| vm_steps(&conn, sql);
+        let mut conn = released_tail_store(&dir);
         let journal = |seq: i64| {
             format!(
                 "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
@@ -11304,7 +11303,7 @@ mod tests {
                 format!("UPDATE owner_ydoc_outbox_entries SET created_at_ms=1 WHERE outbox_id='outbox-a' AND sequence={sequence}"),
             ]
         };
-        let short = writes(1).map(|write| steps(&write));
+        let short = writes(1).map(|write| vm_steps(&mut conn, &write));
         conn.execute_batch("BEGIN").unwrap();
         for sequence in 2..20_002 {
             let delivery = if sequence == 10_000 {
@@ -11316,7 +11315,7 @@ mod tests {
                 .unwrap();
         }
         conn.execute_batch("COMMIT").unwrap();
-        let long = writes(10_000).map(|write| steps(&write));
+        let long = writes(10_000).map(|write| vm_steps(&mut conn, &write));
         for ((write, short), long) in writes(10_000).iter().zip(short).zip(long) {
             assert!(
                 long < short + 100,
@@ -11327,7 +11326,7 @@ mod tests {
 
     /// How many virtual machine steps `sql` takes on `conn`, its triggers'
     /// included.
-    fn vm_steps(conn: &Connection, sql: &str) -> u64 {
+    fn vm_steps(conn: &mut Connection, sql: &str) -> u64 {
         use std::sync::atomic::{AtomicU64, Ordering};
         let counted = std::sync::Arc::new(AtomicU64::new(0));
         let counter = std::sync::Arc::clone(&counted);
@@ -11372,8 +11371,8 @@ mod tests {
     #[test]
     fn released_tail_triggers_that_match_move_by_key() {
         let dir = tempdir();
-        let conn = released_tail_store(&dir);
-        let grow = |from: i64, to: i64| {
+        let mut conn = released_tail_store(&dir);
+        let grow = |conn: &Connection, from: i64, to: i64| {
             conn.execute_batch("BEGIN").unwrap();
             for n in from..to {
                 conn.execute_batch(&format!(
@@ -11428,19 +11427,19 @@ mod tests {
                 format!("DELETE FROM ydoc_inactive_lineages WHERE {b} AND lineage_claim_id='archived-{n}'"),
             ]
         };
-        let moved = || {
-            released_tail_generation(&conn, "a").unwrap()
-                + released_tail_generation(&conn, "b").unwrap()
+        let moved = |conn: &Connection| {
+            released_tail_generation(conn, "a").unwrap()
+                + released_tail_generation(conn, "b").unwrap()
         };
-        grow(1, 3);
+        grow(&conn, 1, 3);
         let short = writes(1).map(|write| {
-            let before = moved();
-            let steps = vm_steps(&conn, &write);
-            assert!(moved() > before, "{write} matches");
+            let before = moved(&conn);
+            let steps = vm_steps(&mut conn, &write);
+            assert!(moved(&conn) > before, "{write} matches");
             steps
         });
-        grow(3, 20_002);
-        let long = writes(10_000).map(|write| vm_steps(&conn, &write));
+        grow(&conn, 3, 20_002);
+        let long = writes(10_000).map(|write| vm_steps(&mut conn, &write));
         for ((write, short), long) in writes(10_000).iter().zip(short).zip(long) {
             assert!(
                 long < short + 100,

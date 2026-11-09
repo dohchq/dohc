@@ -21,7 +21,7 @@ test-support = []
 [dependencies]
 # `hooks` counts open work and search changes; `functions` exposes the search counter;
 # `backup` copies an earlier store for its recovery copy.
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "functions", "backup"] }
 sha2 = "0.11"
 thiserror = "2"
 # Robust manifest parsing for the backup validator (the producer hand-writes a

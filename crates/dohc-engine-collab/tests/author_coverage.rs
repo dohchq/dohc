@@ -167,21 +167,25 @@ fn repeated_actorless_admission_does_not_scan_interval_rows() {
     seed_parents(&mut ts.store, &key, 1);
     record_actorless(&mut ts, &key, &Ydoc::wire().plaintext_insert(0, "x"), false);
     ts.store
-        .write_with(&NoFaults, |tx| {
-            tx.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        .hooks_with(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
                 AuthAction::Read {
                     table_name: "ydoc_updates",
                     ..
                 } => Authorization::Deny,
                 _ => Authorization::Allow,
             }))
-            .unwrap();
+        })
+        .unwrap();
+    ts.store
+        .write_with(&NoFaults, |tx| {
             let result = author_coverage::check_admission_in(tx, &key, None, None);
-            tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-                .unwrap();
             assert!(!result.expect("the pending marker makes an interval scan unnecessary"));
             Ok::<_, CollabError>(())
         })
+        .unwrap();
+    ts.store
+        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(
         interval_authors(&ts, &key, i64::MAX),

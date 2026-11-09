@@ -7187,11 +7187,11 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
     host_document(&mut store, "doc");
     let proofs =
         HeldProofs::new(dohc_engine_collab::live_update_application::HeldProofLimit::default());
-    let steps = |store: &EngineStore, run: &mut dyn FnMut()| {
+    let steps = |store: &mut EngineStore, run: &mut dyn FnMut(&EngineStore)| {
         let counted = std::sync::Arc::new(AtomicUsize::new(0));
         let counter = std::sync::Arc::clone(&counted);
         store
-            .read_with(|conn| {
+            .hooks_with(|conn| {
                 conn.progress_handler(
                     1,
                     Some(move || {
@@ -7202,14 +7202,14 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
             })
             .unwrap();
         let decodes = binding_decodes_on_this_thread();
-        run();
+        run(store);
         assert_eq!(
             binding_decodes_on_this_thread(),
             decodes,
             "the writer decodes no binding"
         );
         store
-            .read_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
+            .hooks_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
             .unwrap();
         counted.load(Ordering::Relaxed)
     };
@@ -7237,11 +7237,11 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
             .unwrap();
         assert!(matches!(held, TxnOutcome::Committed(true)), "{namespaces}");
         let proof = prove_held_document(&HeldProofJob::of(&store), "ws", "doc").unwrap();
-        let admitted = steps(&store, &mut || {
-            drop(admit_held_proof(&store, &proofs, "ws", "doc").unwrap());
+        let admitted = steps(&mut store, &mut |store| {
+            drop(admit_held_proof(store, &proofs, "ws", "doc").unwrap());
         });
-        let released = steps(&store, &mut || {
-            assert!(release_held_proof(&store, &proof).unwrap().is_some());
+        let released = steps(&mut store, &mut |store| {
+            assert!(release_held_proof(store, &proof).unwrap().is_some());
         });
         let marked = store
             .write_with(&NoFaults, |tx| {
@@ -7253,8 +7253,8 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
             })
             .unwrap();
         assert!(matches!(marked, TxnOutcome::Committed(1)), "{namespaces}");
-        let moved = steps(&store, &mut || {
-            let answer = release_held_proof(&store, &proof).unwrap().unwrap();
+        let moved = steps(&mut store, &mut |store| {
+            let answer = release_held_proof(store, &proof).unwrap().unwrap();
             assert_eq!(answer.status, HeldBindingStatus::Stale);
         });
         [admitted, released, moved]
