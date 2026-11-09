@@ -6,23 +6,24 @@ use serde::{Deserialize, Deserializer};
 use dohc_engine_domain::chats::{
     DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, PERSONAL_AGENT_ID_PREFIX,
     PERSONAL_AGENT_ORIGIN_PREFIX, PERSONAL_THREAD_ID_PREFIX, agent_channel_slug,
-    agent_channel_wire_id,
-    agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
-    chat_thread_display_title, free_agent_channel_slug, index_replicated_chat_message_search_rows,
-    is_agent_channel_slug, is_agent_id, normalize_reported_agent, replicated_source_origin,
+    agent_channel_wire_id, agent_id_for_channel_wire_id, bump_chat_conversation_revision,
+    channel_collision_slug, chat_thread_display_title, free_agent_channel_slug,
+    index_replicated_chat_message_search_rows, is_agent_channel_slug, is_agent_id,
+    normalize_reported_agent, personal_agent_may_post_in, replicated_source_origin,
     truncate_slug_base, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
     ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution, FollowTargetKind,
-    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution, attachment_id_for,
-    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
-    is_reaction_emoji_verbatim, normalize_agent_owner_name, normalize_author_user_id,
-    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
-    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
-    ReplicatedMessageAuthor, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    validate_addressable_plaintext_path, validate_replicated_link_author,
+    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
+    ThreadMessageResolution, attachment_id_for, channel_slug_for_name, encode_poll_options,
+    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
+    normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_channel_group,
+    normalize_channel_name, normalize_display_name, normalize_feed_identity,
+    normalize_poll_options, normalize_reaction_author_id, normalize_replicated_chat_id,
+    parse_mention_handles, replay_ready_pending_chat_coordinates, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message, validate_addressable_plaintext_path,
+    validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;
@@ -1708,7 +1709,7 @@ fn apply_message(
     let (link_author, personal_connection) = match &relay_author {
         ReplicatedMessageAuthor::Device => (None, None),
         ReplicatedMessageAuthor::Link(link) => (Some(link), None),
-        ReplicatedMessageAuthor::PersonalAgent { connection_id } => (None, Some(connection_id)),
+        ReplicatedMessageAuthor::PersonalAgent { connection_id, .. } => (None, Some(connection_id)),
     };
     let thread_exists: bool = tx
         .query_row(
@@ -1720,6 +1721,25 @@ fn apply_message(
     if !thread_exists {
         return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id)
             .map(|()| Vec::new());
+    }
+    // A personal agent posts only where the relay lets it, never in a
+    // person's DM or another agent's chat. Until the create of the thread's
+    // chat arrives, the post waits for it.
+    if let ReplicatedMessageAuthor::PersonalAgent { agent_id, .. } = &relay_author {
+        match personal_agent_may_post_in(tx, &op.workspace_id, &payload.thread_id, agent_id)
+            .map_err(SyncError::corrupt)?
+        {
+            Some(true) => {}
+            Some(false) => {
+                return Err(SyncError::InvalidInput {
+                    reason: "personal agent post is in a chat it can't post in",
+                });
+            }
+            None => {
+                return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id)
+                    .map(|()| Vec::new());
+            }
+        }
     }
     let previous: i64 = tx
         .query_row(

@@ -3,16 +3,16 @@ const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 
 /**
  * Answers with bytes sent in bounded chunks, each only when the transport
- * asks for it. The guard runs before every chunk. `register` receives the
- * stream's terminate, which errors it with `terminatedMessage`, and returns
- * its unregister. `release` runs once, with the bytes sent, however the
- * stream ends.
+ * asks for it. The guard runs before every chunk and may wait. `register`
+ * receives the stream's terminate, which errors it with `terminatedMessage`,
+ * and returns its unregister. `release` runs once, with the bytes sent,
+ * however the stream ends.
  */
 export function guardedByteResponse(bytes: Uint8Array, headers: Record<string, string>, options: {
   register(terminate: () => void): () => void;
   release(emittedByteLength: number): void;
   terminatedMessage: string;
-  guard?(): void;
+  guard?(): void | Promise<void>;
   signal?: AbortSignal;
 }): Response {
   let offset = 0;
@@ -39,13 +39,16 @@ export function guardedByteResponse(bytes: Uint8Array, headers: Record<string, s
         options.signal?.addEventListener("abort", abort, {once: true});
         if (options.signal?.aborted) abort();
       },
-      pull(controller) {
+      async pull(controller) {
         if (!active) return;
-        try {options.guard?.();} catch (error) {
+        try {await options.guard?.();} catch (error) {
+          if (!active) return;
           release();
           controller.error(error);
           return;
         }
+        // Ended while the guard ran.
+        if (!active) return;
         if (offset >= bytes.byteLength) {
           release();
           controller.close();

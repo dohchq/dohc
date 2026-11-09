@@ -2205,7 +2205,10 @@ pub enum ReplicatedMessageAuthor {
     /// A link holder, or an agent that signed in with the link.
     Link(ChatMessageLinkAuthor),
     /// A personal agent, through the connection it signed in with.
-    PersonalAgent { connection_id: String },
+    PersonalAgent {
+        agent_id: String,
+        connection_id: String,
+    },
 }
 
 /// A replicated message's relay provenance.
@@ -2252,25 +2255,26 @@ pub fn validate_replicated_link_author(
     let reserved_id = message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
         || message_id.starts_with(PERSONAL_MESSAGE_ID_PREFIX);
     let link = author_kind == ChatActorKind::Link.as_str();
-    match (grant_id, principal_id, agent_connection_id) {
-        (None, None, None) if !link && personal_origin.is_none() && !personal_author && !reserved_id => {
+    match (grant_id, principal_id, agent_connection_id, personal_origin) {
+        (None, None, None, None) if !link && !personal_author && !reserved_id => {
             Ok(ReplicatedMessageAuthor::Device)
         }
-        (None, None, Some(connection_id))
+        (None, None, Some(connection_id), Some(agent_id))
             if author_kind == ChatActorKind::Agent.as_str()
                 && id(connection_id)
-                && personal_origin.is_some_and(|agent_id| agent_id.starts_with(PERSONAL_AGENT_ID_PREFIX))
-                && author_agent_id == personal_origin
+                && agent_id.starts_with(PERSONAL_AGENT_ID_PREFIX)
+                && author_agent_id == Some(agent_id)
                 && author_user_id.is_some()
                 && !other_account_fields
                 && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
                 && message_id.starts_with(PERSONAL_MESSAGE_ID_PREFIX) =>
         {
             Ok(ReplicatedMessageAuthor::PersonalAgent {
+                agent_id: agent_id.to_owned(),
                 connection_id: connection_id.to_owned(),
             })
         }
-        (Some(grant_id), Some(principal_id), connection_id)
+        (Some(grant_id), Some(principal_id), connection_id, None)
             if link
                 && id(grant_id)
                 && id(principal_id)
@@ -2290,6 +2294,41 @@ pub fn validate_replicated_link_author(
         }
         _ => Err(invalid()),
     }
+}
+
+/// Whether a personal agent's post may land in this thread, as the relay
+/// allows it: in a Group, in the agent's own chat, or on a file. Never in a
+/// person's DM or another agent's chat. None while the thread, or the create
+/// of its chat, hasn't arrived.
+pub fn personal_agent_may_post_in(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    agent_id: &str,
+) -> rusqlite::Result<Option<bool>> {
+    let place: Option<(Option<String>, Option<String>, Option<String>, bool)> = conn
+        .query_row(
+            "SELECT t.channel_id, c.kind, c.agent_id, EXISTS( \
+               SELECT 1 FROM chat_channel_placeholders p \
+               WHERE p.workspace_id = t.workspace_id AND p.channel_id = t.channel_id) \
+             FROM chat_threads t \
+             LEFT JOIN chat_channels c \
+               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+             WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
+            params![workspace_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    Ok(match place {
+        None | Some((Some(_), _, _, true)) => None,
+        Some((None, _, _, _)) => Some(true),
+        Some((Some(_), Some(kind), channel_agent, false)) => Some(
+            kind == ChatChannelKind::Channel.as_str()
+                || (kind == ChatChannelKind::Agent.as_str()
+                    && channel_agent.as_deref() == Some(agent_id)),
+        ),
+        Some((Some(_), None, _, false)) => Some(false),
+    })
 }
 
 /// `normalizeBody`: CRLF/CR -> LF, trimEnd, non-empty, <= 64 KiB UTF-8.
@@ -8696,6 +8735,7 @@ mod replicated_origin_tests {
             )
         };
         let personal = ReplicatedMessageAuthor::PersonalAgent {
+            agent_id: PERSONAL.to_owned(),
             connection_id: "connection-1".to_owned(),
         };
         for applies in [origin.clone(), format!("shared:s:{origin}")] {
@@ -8719,18 +8759,45 @@ mod replicated_origin_tests {
         let connection = Some("connection-1");
         for (kind, message_id, link, user, agent, connection, other) in [
             ("human", id, false, owner, None, connection, false),
-            ("agent", id, false, owner, Some(OTHER_PERSONAL), connection, false),
+            (
+                "agent",
+                id,
+                false,
+                owner,
+                Some(OTHER_PERSONAL),
+                connection,
+                false,
+            ),
             ("agent", id, false, owner, None, connection, false),
             ("agent", id, false, None, Some(PERSONAL), connection, false),
             ("agent", id, false, owner, Some(PERSONAL), None, false),
             ("agent", id, false, owner, Some(PERSONAL), Some(""), false),
             ("agent", id, false, owner, Some(PERSONAL), connection, true),
-            ("agent", "m", false, owner, Some(PERSONAL), connection, false),
+            (
+                "agent",
+                "m",
+                false,
+                owner,
+                Some(PERSONAL),
+                connection,
+                false,
+            ),
             ("agent", id, true, owner, Some(PERSONAL), connection, false),
-            ("link", "link-message:m", true, None, None, connection, false),
+            (
+                "link",
+                "link-message:m",
+                true,
+                None,
+                None,
+                connection,
+                false,
+            ),
         ] {
             assert!(
-                author(&origin, kind, message_id, link, user, agent, connection, other).is_err(),
+                author(
+                    &origin, kind, message_id, link, user, agent, connection, other
+                )
+                .is_err(),
                 "{kind} {message_id} {user:?} {agent:?} {connection:?} {other}"
             );
         }
@@ -8749,7 +8816,10 @@ mod replicated_origin_tests {
                 let kind = if link { "link" } else { "agent" };
                 let user = (!link).then_some("owner");
                 assert!(
-                    author(origin, kind, message_id, link, user, agent, connection, false).is_err(),
+                    author(
+                        origin, kind, message_id, link, user, agent, connection, false
+                    )
+                    .is_err(),
                     "{origin} {message_id} {agent:?} {connection:?}"
                 );
             }

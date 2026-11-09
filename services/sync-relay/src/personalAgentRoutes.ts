@@ -1,5 +1,5 @@
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
-import { agentChannelWireId, agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
   AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES,
@@ -7,7 +7,6 @@ import {
   mentions,
   MAX_AGENT_CHAT_WAITS_PER_CONNECTION,
   MAX_AGENT_CHAT_WAITS_PER_LINK,
-  MAX_AGENT_CHAT_WAITS_PER_WORKSPACE,
 } from "./agentChatRoutes";
 import { DiscussionActivityCapacityError, ownerLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError, type RelayError } from "./errors";
@@ -35,8 +34,8 @@ export type PersonalAgentToolRoute = { route: "personal-agent-tools"; action: "p
 
 /** The most messages one wait answers with. */
 export const PERSONAL_WAIT_MAX_MESSAGES = 100;
-// The link wait's caps, with the account in place of the link. A wait counts
-// once for every workspace it scans.
+// The link wait's cap, with the account in place of the link. Reach holds only
+// the account's own workspaces, so no workspace holds more waits than this.
 export const MAX_PERSONAL_WAITS_PER_ACCOUNT = MAX_AGENT_CHAT_WAITS_PER_LINK;
 const CHAT_READ_DEFAULT_LIMIT = 50;
 const CHAT_READ_MAX_LIMIT = 100;
@@ -45,12 +44,17 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 
 type PersonalToolStorage = Pick<SyncRelayStorage,
   | "appendPersonalChatPost" | "currentFileBlobByteLength" | "fetchChatMessages" | "findChannelCreateKind"
-  | "findThreadCreateChannelWireId" | "getBlob" | "getEpochLogFloor" | "personalAgentPostedIn" | "readCurrentFileState"
-  | "readPersonalReach" | "readPersonalScope" | "readPersonalWaitWindow"
+  | "findThreadCreateChannelWireId" | "findThreadCreateFileBinding" | "getBlob" | "getEpochLogFloor" | "objectCurrentPath"
+  | "objectIdAtPath" | "personalAgentPostedIn" | "readCurrentFileState" | "readPersonalReach" | "readPersonalScope"
+  | "readPersonalWaitWindow"
 >;
 
-/** A message for the agent, with the workspace and channel it is in. */
-export type PersonalWaitMessage = LinkChatMessage & { workspaceId: string; channelWireId: string };
+/**
+ * A message for the agent, with the workspace and the place it is in: a
+ * channel, or for a thread on a file, no channel and the file's current path.
+ * The path is null when the file is gone.
+ */
+export type PersonalWaitMessage = LinkChatMessage & { workspaceId: string; channelWireId: string | null; filePath: string | null };
 
 /** Where the next wait starts: a place in each workspace, and the workspace whose turn is first. */
 export interface PersonalWaitCursor {
@@ -142,7 +146,6 @@ export function createPersonalAgentToolRoutes(input: {
   const maxResponseBytes = input.maxResponseBytes ?? AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES;
   const waitsByConnection = new Map<string, number>();
   const waitsByAccount = new Map<string, number>();
-  const waitsByWorkspace = new Map<string, number>();
 
   const credential = (authority: PersonalAuthority): PersonalCredential =>
     ({ check: authority.check, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch });
@@ -230,7 +233,8 @@ export function createPersonalAgentToolRoutes(input: {
   }
 
   // A current file's bytes. The download is running work: a revoking commit
-  // ends it, and each chunk checks the agent's authority and reach again.
+  // ends it, and each chunk checks the agent's authority at the account's
+  // current fence, and its reach, again.
   function blob(authority: PersonalAuthority, body: Record<string, unknown>, signal: AbortSignal): Response {
     fields(body, ["workspaceId", "sha256"], []);
     const workspaceId = parseWorkspaceId(body.workspaceId);
@@ -254,7 +258,6 @@ export function createPersonalAgentToolRoutes(input: {
       });
       const bytes = storage.getBlob(workspaceId, sha256);
       if (!bytes || bytes.byteLength !== byteLength) throw notFound();
-      const check = credential(authority);
       const response = guardedByteResponse(bytes, {
         "content-length": String(byteLength),
         "content-type": "application/octet-stream",
@@ -265,8 +268,9 @@ export function createPersonalAgentToolRoutes(input: {
         },
         release: () => releaseBytes(),
         terminatedMessage: "personal agent access changed during stream",
-        guard: () => {
-          if (!storage.readPersonalReach(check, workspaceId, nowMs())) throw notFound();
+        guard: async () => {
+          const fresh = await linkAuthority.freshPersonal(authority);
+          if (!storage.readPersonalReach(credential(fresh), workspaceId, nowMs())) throw notFound();
         },
         signal,
       });
@@ -282,7 +286,8 @@ export function createPersonalAgentToolRoutes(input: {
 
   // Answers with the messages for the agent across its reach: a human post by
   // its account, not from the CLI, in the agent's DM, mentioning its current
-  // handle, or in a thread it posted in. Every workspace shares one scan
+  // handle, or in a thread it posted in. Only the first row a scan reads may
+  // pass the scan's byte budget. Every workspace shares one scan
   // budget. A scan that finds nothing but is behind answers at once; one that
   // is caught up parks on every workspace in reach until a wake, the
   // deadline, or running work ending. Access is checked before every scan and
@@ -296,22 +301,20 @@ export function createPersonalAgentToolRoutes(input: {
     const { agentId, ownerUserId, connectionId } = authority;
     let current = authority;
     let scope = scopeOf(current);
-    const counted = scope.reach.map(entry => entry.workspaceId);
     if ((waitsByConnection.get(connectionId) ?? 0) >= MAX_AGENT_CHAT_WAITS_PER_CONNECTION ||
-        (waitsByAccount.get(ownerUserId) ?? 0) >= MAX_PERSONAL_WAITS_PER_ACCOUNT ||
-        counted.some(id => (waitsByWorkspace.get(id) ?? 0) >= MAX_AGENT_CHAT_WAITS_PER_WORKSPACE)) {
+        (waitsByAccount.get(ownerUserId) ?? 0) >= MAX_PERSONAL_WAITS_PER_ACCOUNT) {
       throw relayError("link_read_rate_limited");
     }
     take(waitsByConnection, connectionId);
     take(waitsByAccount, ownerUserId);
-    for (const id of counted) take(waitsByWorkspace, id);
     // Running work ending: Sign out, a reach change, a reset, or the fence going quiet.
     const ended = new AbortController();
     const held = AbortSignal.any([signal, ended.signal]);
     let unregister: (() => void) | undefined;
     try {
       unregister = input.personalAgents.register({
-        agentId, ownerUserId, connectionId, fenceEpoch: authority.fenceEpoch, workspaceIds: counted, kind: "wait",
+        agentId, ownerUserId, connectionId, fenceEpoch: authority.fenceEpoch,
+        workspaceIds: scope.reach.map(entry => entry.workspaceId), kind: "wait",
         terminate: () => ended.abort(),
       });
       const seqs = new Map(Object.entries(cursor?.seqs ?? {}));
@@ -334,6 +337,7 @@ export function createPersonalAgentToolRoutes(input: {
         const dm = agentChannelWireId(agentId);
         let rows = CHAT_HISTORY_SCAN_WINDOW;
         let bytes = CHAT_HISTORY_SCAN_BYTES;
+        let firstOfScan = true;
         let room = maxResponseBytes - Buffer.byteLength(JSON.stringify({
           ok: true, messages: [], more: true,
           cursor: {
@@ -346,7 +350,10 @@ export function createPersonalAgentToolRoutes(input: {
           const entry = reach[(start + visited) % reach.length]!;
           const after = seqs.get(entry.workspaceId)!;
           if (after >= entry.headSeq) continue;
-          const window = storage.readPersonalWaitWindow({ workspaceId: entry.workspaceId, afterSeq: after, maxRows: rows, maxBytes: bytes });
+          const window = storage.readPersonalWaitWindow({
+            workspaceId: entry.workspaceId, afterSeq: after, maxRows: rows, maxBytes: bytes, firstOfScan,
+          });
+          if (window.rows > 0) firstOfScan = false;
           rows -= window.rows;
           bytes -= window.bytes;
           let reached = window.edgeSeq;
@@ -427,9 +434,15 @@ export function createPersonalAgentToolRoutes(input: {
       unregister?.();
       release(waitsByConnection, connectionId);
       release(waitsByAccount, ownerUserId);
-      for (const id of counted) release(waitsByWorkspace, id);
     }
   }
+
+  // The current path of the file a thread is on; null when the file is gone.
+  const filePathOf = (workspaceId: string, threadId: string): string | null => {
+    const binding = storage.findThreadCreateFileBinding(workspaceId, threadId);
+    if (binding?.kind === "object") return storage.objectCurrentPath(workspaceId, binding.objectId) ?? null;
+    return binding?.kind === "path" && storage.objectIdAtPath(workspaceId, binding.path) ? binding.path : null;
+  };
 
   function forAgent(row: SyncRelayLogRow, workspaceId: string, scope: PersonalScope, mention: string, dm: string): PersonalWaitMessage | null {
     const read = chatMessage(row);
@@ -437,11 +450,15 @@ export function createPersonalAgentToolRoutes(input: {
         read.payload.origin === "cli") return null;
     const { threadId } = read.message;
     const channelWireId = storage.findThreadCreateChannelWireId(workspaceId, threadId);
-    // Another agent's DM is the agent's to read, not to answer in.
-    if (typeof channelWireId !== "string" || (channelWireId !== dm && agentIdForChannelWireId(channelWireId) !== null)) return null;
+    if (channelWireId === undefined) return null;
+    // Outside its own DM, another agent's DM and a thread on a file included,
+    // a message counts by a mention or a thread the agent posted in.
     if (channelWireId !== dm && !mentions(read.message.body, mention) &&
         !storage.personalAgentPostedIn({ agentId: scope.connection.agentId, workspaceId, threadId })) return null;
-    return { ...linkChatMessage(read.message), workspaceId, channelWireId };
+    return {
+      ...linkChatMessage(read.message), workspaceId, channelWireId,
+      filePath: channelWireId === null ? filePathOf(workspaceId, threadId) : null,
+    };
   }
 
   return async function respondToPersonalAgentTools(request: Request, route: PersonalAgentToolRoute): Promise<Response> {
@@ -450,7 +467,8 @@ export function createPersonalAgentToolRoutes(input: {
     if (!input.limiter.allow(authority.callerKey, nowMs())) throw relayError("link_read_rate_limited");
     const body = await readBody(request);
     switch (route.action) {
-      case "post": return post(authority, body);
+      // A post reads the fence again once its body is in; its write reads that epoch.
+      case "post": return post(await linkAuthority.freshPersonal(authority), body);
       case "wait": return await wait(authority, body, request.signal);
       case "chat": return chat(authority, body);
       case "files": return files(authority, body);

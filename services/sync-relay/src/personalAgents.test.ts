@@ -12,14 +12,14 @@ import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
-import { PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
+import { MAX_PERSONAL_WAITS_PER_ACCOUNT, PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
 import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, PERSONAL_PASSWORD_ATTEMPTS, type PersonalRunningEntry } from "./personalAgents";
 import { personalAgentOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
-import { CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
+import { CHAT_HISTORY_SCAN_BYTES, CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
 import { PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT } from "./storage/personalAgents";
 import {
   appendLog,
@@ -1024,7 +1024,7 @@ function chats(f: Fixture, workspaceId: string, agentId: string): void {
   ]);
 }
 
-/** A personal agent's tool call, as share-web forwards it. */
+/** A personal agent's tool call, as share-web forwards it. A stream is sent as the body as it arrives. */
 function tool(
   f: Fixture, agent: Pick<Signed, "accessToken" | "resource">, action: string, body: unknown, signal?: AbortSignal,
 ): Promise<Response> {
@@ -1036,9 +1036,9 @@ function tool(
       "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
       "content-type": "application/json",
     },
-    body: JSON.stringify(body),
+    ...(body instanceof ReadableStream ? { body, duplex: "half" } : { body: JSON.stringify(body) }),
     ...(signal === undefined ? {} : { signal }),
-  }));
+  } as RequestInit));
 }
 
 function post(f: Fixture, agent: Signed, fields: Record<string, unknown>): Promise<Response> {
@@ -1153,15 +1153,27 @@ describe("a personal agent's posts", () => {
     expect(count(f, "sync_relay_personal_agent_threads", "agent_id = ?", agent.agentId)).toBe(2);
   });
 
-  it("resolves a channel or thread only inside the named workspace, and never posts in another agent's DM", async () => {
+  it("resolves a channel or thread only inside the named workspace, and never posts in a person's DM or another agent's", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: BOTH_COMMENT });
     const second = await signIn(f, { agent: { kind: "new", name: "Second" }, reach: BOTH_COMMENT });
     fromComputer(f, WS_B, [chatChannelCreate("wire-b"), chatThreadCreate("thread-b", "wire-b")]);
+    fromComputer(f, WS_A, [
+      chatChannelCreate("wire-person", { kind: "dm" }),
+      chatThreadCreate("thread-person", "wire-person"),
+      { opKind: "chat.thread.create", payload: { threadId: "thread-file", title: "", createdAtMs: 2, linkedObjectId: "object-a", linkedAtMs: 2 } },
+    ]);
+    const before = logOf(f, WS_A).length;
 
     await expectRefused(await post(f, agent, { threadId: "thread-b" }));
     await expectRefused(await post(f, agent, { channelWireId: "wire-b" }));
     await expectRefused(await post(f, agent, { channelWireId: "wire-nowhere" }));
+    // A person's DM, as a new thread there or a reply in one of its threads.
+    await expectRefused(await post(f, agent, { channelWireId: "wire-person" }));
+    await expectRefused(await post(f, agent, { threadId: "thread-person", idempotencyKey: "post-person" }));
+    // A thread on a file has no channel to post in.
+    await expectRefused(await post(f, agent, { threadId: "thread-file", idempotencyKey: "post-file" }));
+    expect(logOf(f, WS_A)).toHaveLength(before);
     // Another agent's DM, as a new thread there or a reply in one of its threads.
     const theirs = await ok(await post(f, second, { channelWireId: agentChannelWireId(second.agentId) })) as {
       message: { threadId: string };
@@ -1224,6 +1236,26 @@ describe("a personal agent's posts", () => {
     expect(commit("before")).toMatchObject({ ok: true, replayed: false });
     await revoke(f, agent);
     expect(commit("after")).toEqual({ ok: false, reason });
+  });
+
+  it("refuses a post when a reset commits while its body is still arriving", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
+    const dm = agentChannelWireId(agent.agentId);
+    // The body's bytes come only when the relay reads them, after it authenticated the request.
+    const arriving = (idempotencyKey: string, meanwhile: () => void) => new ReadableStream<Uint8Array>({
+      pull(controller) {
+        meanwhile();
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ workspaceId: WS_A, channelWireId: dm, body: "late", idempotencyKey })));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+
+    await ok(await tool(f, agent, "post", arriving("post-1", () => {})));
+    const before = logOf(f, WS_A).length;
+    // No notification: the read of the fence after the body refuses.
+    await expectRefused(await tool(f, agent, "post", arriving("post-2", () => { f.fence.changePassword(OWNER, NEW_PASSWORD); })));
+    expect(logOf(f, WS_A)).toHaveLength(before);
   });
 });
 
@@ -1290,12 +1322,18 @@ describe("a personal agent's tools", () => {
 });
 
 describe("a personal agent's wait", () => {
-  it("answers its owner's posts in its DM, mentioning its current name, and in threads it posted in, and nothing else", async () => {
+  it("answers its owner's posts in its DM, mentioning its current name, and in threads it posted in, with where each is", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
     chats(f, WS_A, agent.agentId);
+    await putBlob(f.h, OWNER, WS_A, "plan");
+    await appendLog(f.h, OWNER, WS_A, [moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-plan" })]);
     const elsewhere = agentChannelWireId(`p-${"b".repeat(26)}`);
-    fromComputer(f, WS_A, [chatChannelCreate(elsewhere, { kind: "agent" }), chatThreadCreate("thread-elsewhere", elsewhere)]);
+    fromComputer(f, WS_A, [
+      chatChannelCreate(elsewhere, { kind: "agent" }),
+      chatThreadCreate("thread-elsewhere", elsewhere),
+      { opKind: "chat.thread.create", payload: { threadId: "thread-file", title: "", createdAtMs: 2, linkedObjectId: "object-plan", linkedAtMs: 2 } },
+    ]);
     await ok(await post(f, agent, { threadId: "thread-team" }));
     await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
     fromComputer(f, WS_A, [
@@ -1308,16 +1346,22 @@ describe("a personal agent's wait", () => {
       ownerSays("as-agent", "thread-dm", "an agent's post", { authorKind: "agent" }),
       chatMessageAppend("other-account", "thread-dm", "hello", { authorUserId: OTHER, authorDisplayName: "Bo" }),
       chatMessageAppend("no-account", "thread-dm", "hello"),
-      ownerSays("other-dm", "thread-elsewhere", "@Research not this one"),
+      // Another agent's DM and a thread on a file count as any thread outside its own DM.
+      ownerSays("other-dm", "thread-elsewhere", "@Research in another agent's DM"),
+      ownerSays("other-dm-unmentioned", "thread-elsewhere", "for the other agent"),
+      ownerSays("on-file", "thread-file", "@Research a comment"),
+      ownerSays("on-file-unmentioned", "thread-file", "a note"),
     ]);
 
     const answer = await waitOnce(f, agent);
-    expect(ids(answer)).toEqual(["dm", "mention", "reply"]);
+    expect(ids(answer)).toEqual(["dm", "mention", "reply", "other-dm", "on-file"]);
     expect(answer.messages[0]).toMatchObject({
-      workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId), authorKind: "human", body: "hello",
+      workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId), filePath: null, authorKind: "human", body: "hello",
     });
     expect(answer.messages[0]).not.toHaveProperty("authorUserId");
-    expect(answer.messages[1]).toMatchObject({ workspaceId: WS_A, channelWireId: "wire-team" });
+    expect(answer.messages[1]).toMatchObject({ workspaceId: WS_A, channelWireId: "wire-team", filePath: null });
+    expect(answer.messages[3]).toMatchObject({ workspaceId: WS_A, channelWireId: elsewhere, filePath: null });
+    expect(answer.messages[4]).toMatchObject({ workspaceId: WS_A, channelWireId: null, filePath: "notes/plan.md" });
     expect(answer).toMatchObject({ more: false, cursor: { v: 1, agentId: agent.agentId, turn: WS_A } });
     expect(ids(await waitOnce(f, agent, { cursor: answer.cursor }))).toEqual([]);
   });
@@ -1415,6 +1459,31 @@ describe("a personal agent's wait", () => {
     expect(ids(await waitOnce(f, agent, { cursor: third.cursor }))).toEqual(["in-b-again"]);
   });
 
+  it("reads past a scan's byte budget only for the scan's first row, not each workspace's", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: BOTH_VIEW });
+    chats(f, WS_A, agent.agentId);
+    chats(f, WS_B, agent.agentId);
+    const { cursor } = await waitOnce(f, agent);
+    expect(cursor.turn).toBe(WS_B);
+    // B's turn reads three quarters of the budget. A's next row is larger than what is left.
+    fromComputer(f, WS_B, ["noise-0", "noise-1"].map((id) => ownerSays(id, "thread-other", "x".repeat(CHAT_HISTORY_SCAN_BYTES * 3 / 8))));
+    fromComputer(f, WS_A, [
+      ownerSays("large", "thread-other", "x".repeat(CHAT_HISTORY_SCAN_BYTES / 2)),
+      ownerSays("dm-a", "thread-dm", "hello"),
+    ]);
+    const large = logOf(f, WS_A).find((row) => row.opKind === "chat.message.append" && payloadOf(row).messageId === "large")!;
+    const windows = vi.spyOn(f.storage, "readPersonalWaitWindow");
+
+    const first = await waitOnce(f, agent, { cursor });
+    expect(first).toMatchObject({ messages: [], more: true, cursor: { turn: WS_A } });
+    expect(first.cursor.seqs[WS_A]).toBeLessThan(large.relaySeq);
+    const read = windows.mock.results.reduce((bytes, result) => bytes + (result.value as { bytes: number }).bytes, 0);
+    expect(read).toBeLessThanOrEqual(CHAT_HISTORY_SCAN_BYTES);
+    // A's turn starts the next scan, so the large row is that scan's first.
+    expect(ids(await waitOnce(f, agent, { cursor: first.cursor }))).toEqual(["dm-a"]);
+  });
+
   it("parks on every workspace in reach, and releases every subscription on answer, abort, and deadline", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: BOTH_VIEW });
@@ -1460,6 +1529,27 @@ describe("a personal agent's wait", () => {
     controllers.forEach((controller) => controller.abort());
     for (const response of await Promise.all(held)) await expectRefused(response);
     await waitOnce(f, agent);
+  });
+
+  it("holds at most its account's share of waits across its agents, and frees a place when one ends", async () => {
+    const f = await fixture();
+    const agents: Signed[] = [];
+    for (let index = 0; index <= MAX_PERSONAL_WAITS_PER_ACCOUNT / MAX_AGENT_CHAT_WAITS_PER_CONNECTION; index++) {
+      agents.push(await signIn(f, { agent: { kind: "new", name: `Agent ${index}` } }));
+    }
+    const last = agents.pop()!;
+    const holders = agents.flatMap((agent) => Array.from({ length: MAX_AGENT_CHAT_WAITS_PER_CONNECTION }, () => agent));
+    const controllers = holders.map(() => new AbortController());
+    const held = holders.map((agent, index) => tool(f, agent, "wait", {}, controllers[index]!.signal));
+    await parked(f, MAX_PERSONAL_WAITS_PER_ACCOUNT);
+    // Its own connection holds none, but its account is full.
+    await expectCode(await tool(f, last, "wait", { timeoutMs: 0 }), 429, "link_read_rate_limited");
+
+    controllers[0]!.abort();
+    await expectRefused(await held[0]!);
+    await waitOnce(f, last);
+    controllers.slice(1).forEach((controller) => controller.abort());
+    for (const response of await Promise.all(held.slice(1))) await expectRefused(response);
   });
 
   const parkedRevocations: Array<[
@@ -1574,5 +1664,11 @@ describe("a personal agent's reads", () => {
     const lost = await open();
     setOwner(f, WS_A, OTHER);
     await expect(lost.read()).rejects.toMatchObject({ code: "not_found" });
+
+    // A reset with its notification withheld: the next chunk reads the fence again and refuses.
+    setOwner(f, WS_A, OWNER);
+    const reset = await open();
+    f.fence.changePassword(OWNER, NEW_PASSWORD);
+    await expect(reset.read()).rejects.toMatchObject({ code: "not_found" });
   });
 });

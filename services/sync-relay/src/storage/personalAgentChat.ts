@@ -80,7 +80,8 @@ export type AppendPersonalChatPostResult =
  * and a retry key. The connection, the account's fence, the reach, and
  * ownership are read again inside the transaction that writes the post, with
  * the clock read there too. A thread resolves only through its create in the
- * workspace's log, and another agent's DM refuses the post.
+ * workspace's log. The post lands only in a Group or the agent's own DM, never
+ * in a person's DM or another agent's.
  */
 export function appendPersonalChatPost(storage: StorageContext, input: PersonalCredential & {
   /** The relay's clock, read inside the write. */
@@ -104,12 +105,12 @@ export function appendPersonalChatPost(storage: StorageContext, input: PersonalC
     const reach = personalReachIn(storage, connection, workspaceId);
     if (!reach) return { ok: false, reason: "out-of-reach" };
     if (reach.level === "view") return { ok: false, reason: "read-only" };
-    const channelWireId = replyTo === null
-      ? (findChannelCreateKind(storage, workspaceId, named) ? named : undefined)
-      : findThreadCreateChannelWireId(storage, workspaceId, replyTo);
+    const channelWireId = replyTo === null ? named : findThreadCreateChannelWireId(storage, workspaceId, replyTo);
     if (typeof channelWireId !== "string") return { ok: false, reason: "not-found" };
-    const dmAgent = agentIdForChannelWireId(channelWireId);
-    if (dmAgent !== null && dmAgent !== connection.agentId) return { ok: false, reason: "not-found" };
+    const kind = findChannelCreateKind(storage, workspaceId, channelWireId);
+    if (kind !== "channel" && !(kind === "agent" && agentIdForChannelWireId(channelWireId) === connection.agentId)) {
+      return { ok: false, reason: "not-found" };
+    }
 
     const key = sha256Hex(JSON.stringify([connection.agentId, input.idempotencyKey]));
     const originId = personalAgentOrigin(connection.agentId);
@@ -163,12 +164,13 @@ export interface PersonalWaitWindow {
 }
 
 /**
- * The rows after `afterSeq`, up to `maxRows` and `maxBytes` of payload but at
- * least one, as a wait scans them. Only the chat messages among them are
- * read in full.
+ * The rows after `afterSeq`, up to `maxRows` and `maxBytes` of payload, as a
+ * wait scans them. The first row of a scan is read whatever its size, so a
+ * scan always moves; `firstOfScan` says this window starts one. Only the chat
+ * messages among the rows are read in full.
  */
 export function readPersonalWaitWindow(storage: StorageContext, input: {
-  workspaceId: string; afterSeq: number; maxRows: number; maxBytes: number;
+  workspaceId: string; afterSeq: number; maxRows: number; maxBytes: number; firstOfScan: boolean;
 }): PersonalWaitWindow {
   return storage.readTx(() => {
     let rows = 0;
@@ -179,7 +181,7 @@ export function readPersonalWaitWindow(storage: StorageContext, input: {
       .iterate(input.workspaceId, input.afterSeq, Math.max(0, input.maxRows));
     for (const row of coordinates) {
       const size = Number(row.payload_bytes);
-      if (rows > 0 && bytes + size > input.maxBytes) break;
+      if ((rows > 0 || !input.firstOfScan) && bytes + size > input.maxBytes) break;
       rows++;
       bytes += size;
       edgeSeq = Number(row.relay_seq);

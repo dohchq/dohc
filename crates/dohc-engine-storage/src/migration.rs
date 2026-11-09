@@ -5667,7 +5667,7 @@ mod tests {
             ),
             (
                 "v2-chat-personal-agent-connection",
-                "6b344137a0359bb98b4c34a3cc09117612d487824c9d873e8c8bde4de8a4fad9",
+                "d8165d91ddd8da01b9448db5be3279cfb3f8d3986423b19edbbaa23211b1d71d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

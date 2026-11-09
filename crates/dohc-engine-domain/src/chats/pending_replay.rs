@@ -1,11 +1,11 @@
 use super::{
     FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
     PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, PendingChatReplay,
-    ThreadMessageResolution, bump_chat_conversation_revision,
+    ReplicatedMessageAuthor, ThreadMessageResolution, bump_chat_conversation_revision,
     index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
     normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
-    ReplicatedMessageAuthor, normalize_reported_agent, parse_mention_handles, reported_agent_json,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    normalize_reported_agent, parse_mention_handles, personal_agent_may_post_in,
+    reported_agent_json, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
     validate_replicated_link_author,
 };
 use crate::AutomationClaim;
@@ -536,7 +536,7 @@ fn replay_pending_chat_operation(
             apply_pending_message(
                 tx,
                 workspace_id,
-                &operation.origin_id,
+                operation,
                 payload,
                 author_reported,
                 automation_claims,
@@ -565,7 +565,7 @@ fn pending_reported_agent(
 fn apply_pending_message(
     tx: &Transaction<'_>,
     workspace_id: &str,
-    origin_id: &str,
+    operation: &PendingChatOperation,
     payload: PendingMessageAppend,
     author_reported: Option<super::ChatReportedAgent>,
     automation_claims: &mut Vec<AutomationClaim>,
@@ -610,7 +610,7 @@ fn apply_pending_message(
     // Checked from the same values as sync apply, so replay refuses only a
     // link author that sync apply would have refused.
     let relay_author = validate_replicated_link_author(
-        origin_id,
+        &operation.origin_id,
         &payload.message_id,
         &payload.author_kind,
         payload.link_grant_id.as_deref(),
@@ -627,7 +627,33 @@ fn apply_pending_message(
     let (link_connection, personal_connection) = match relay_author {
         Ok(ReplicatedMessageAuthor::Device) => (None, None),
         Ok(ReplicatedMessageAuthor::Link(link)) => (link.agent_connection_id, None),
-        Ok(ReplicatedMessageAuthor::PersonalAgent { connection_id }) => (None, Some(connection_id)),
+        // Checked where sync apply checks it, now that the thread is here.
+        Ok(ReplicatedMessageAuthor::PersonalAgent {
+            agent_id,
+            connection_id,
+        }) => {
+            match personal_agent_may_post_in(tx, workspace_id, &payload.thread_id, &agent_id)
+                .map_err(DomainError::sql_corrupt)?
+            {
+                Some(true) => {}
+                Some(false) => {
+                    return Ok(PendingReplayOutcome::Refused(
+                        "pending personal agent post is in a chat it can't post in",
+                    ));
+                }
+                None => {
+                    park_pending_chat_operation(
+                        tx,
+                        workspace_id,
+                        operation,
+                        "message-thread",
+                        &payload.thread_id,
+                    )?;
+                    return Ok(PendingReplayOutcome::Deferred);
+                }
+            }
+            (None, Some(connection_id))
+        }
         Err(_) => {
             return Ok(PendingReplayOutcome::Refused(
                 "pending chat message link author is invalid",
@@ -828,15 +854,19 @@ fn changed_chat_dependencies(
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
             if let Some(channel_id) = channel_id {
-                collect_dependency_ids(
-                    tx,
-                    "SELECT thread_id FROM chat_threads \
-                     WHERE workspace_id=?1 AND channel_id=?2",
-                    workspace_id,
-                    &channel_id,
-                    "follow-target",
-                    &mut dependencies,
-                )?;
+                // A follow of a thread, and a personal agent's post in one,
+                // wait for the create of the thread's chat.
+                for kind in ["follow-target", "message-thread"] {
+                    collect_dependency_ids(
+                        tx,
+                        "SELECT thread_id FROM chat_threads \
+                         WHERE workspace_id=?1 AND channel_id=?2",
+                        workspace_id,
+                        &channel_id,
+                        kind,
+                        &mut dependencies,
+                    )?;
+                }
                 collect_dependency_ids(
                     tx,
                     "SELECT DISTINCT m.author_user_id FROM chat_messages m \
