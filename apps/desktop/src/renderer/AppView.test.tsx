@@ -168,6 +168,8 @@ describe("an owner app in its tab", () => {
     render(<Page />);
     expect(await screen.findByTestId("app-view-checking")).toBeTruthy();
     expect((screen.getByTestId("app-view-reload") as HTMLButtonElement).disabled).toBe(true);
+    // The paper renders before the effect that asks to open the app.
+    await waitFor(() => expect(appView).toHaveBeenCalledWith(expect.objectContaining({ action: "open" })));
     const request = appView.mock.calls[0]![0] as OpenRequest;
     expect(request).toEqual({ action: "open", workspaceId: "ws-shop", appRoot: "preorders", viewId: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/), colorScheme: "light" });
     await act(async () => answer.resolve(opened(request)));
