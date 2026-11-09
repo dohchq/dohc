@@ -1090,9 +1090,9 @@ describe("raw fileWrite socket requests", () => {
     }
     expect(vi.mocked(f.dependencies.activity.agentWriteRunId)).toHaveBeenCalledWith("workspace");
     expect(f.capture.writeAuthoredFile.mock.calls.map(call => call[2])).toEqual([
-      { kind: "agent", agentId: "Codex", onBehalfOf: "person-local", agentRunId: "run-1" },
-      { kind: "agent", agentId: "Codex", onBehalfOf: "person-local", agentRunId: "run-2" },
-      { kind: "agent", agentId: "Codex", onBehalfOf: "person-local" },
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Codex", onBehalfOf: "person-local", agentRunId: "run-1" },
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Codex", onBehalfOf: "person-local", agentRunId: "run-2" },
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Codex", onBehalfOf: "person-local" },
     ]);
   });
   it("enforces byte limits and base64 validation without MCP", async () => {

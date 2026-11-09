@@ -3093,8 +3093,8 @@ describe("CLI socket server", () => {
       origin("run-1"),
       author("run-2"),
       origin("run-2"),
-      { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 },
-      { actorOriginId: "Claude", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
+      { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
+      { actorOriginId: "dohc-mcp", agentName: "Claude", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 } },
     ]);
   });
 
