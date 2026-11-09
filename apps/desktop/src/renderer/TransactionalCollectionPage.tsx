@@ -372,16 +372,21 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       locked.current = false; setBusy(false);
       if (priorContract.current === contractKey) await load(currentQuery.current);
     } catch (cause) {
-      if (alive.current && !abort.signal.aborted) {
-        const refused = cause !== null && typeof cause === "object" && "code" in cause && cause.code === "operation_refused";
-        const words = refused ? "The collection refused this change." : "dohc could not confirm this change.";
-        if (refused) { mutation.current = null; setPending(null); }
-        // A cell still open keeps its value and says why under its input. Its check mark tries the same change again.
-        if (change.cell !== undefined && openCell.current === change.cell) { focusInvalid.current = true; setInvalid({ [change.cell]: words }); }
-        else if (!refused) closeEditor();
-        // Try again sends the change only while it still waits, so once it lands an old row can't close a newer edit.
-        onError(words, cause, refused ? null : () => { if (alive.current && mutation.current === change) void currentExecute.current(change); });
+      if (abort.signal.aborted) return;
+      const refused = cause !== null && typeof cause === "object" && "code" in cause && cause.code === "operation_refused";
+      // Once the page has closed, a failure still reaches a toast and Notices, and names the Collection.
+      if (!alive.current) {
+        const name = table?.name ?? "this Collection";
+        onError(refused ? `${name} refused the change. Open it to check its records.` : `dohc could not confirm the change to ${name}. Open it to check its records.`, cause, null);
+        return;
       }
+      const words = refused ? "The collection refused this change." : "dohc could not confirm this change.";
+      if (refused) { mutation.current = null; setPending(null); }
+      // A cell still open keeps its value and says why under its input. Its check mark tries the same change again.
+      if (change.cell !== undefined && openCell.current === change.cell) { focusInvalid.current = true; setInvalid({ [change.cell]: words }); }
+      else if (!refused) closeEditor();
+      // Try again sends the change only while it still waits, so once it lands an old row can't close a newer edit.
+      onError(words, cause, refused ? null : () => { if (alive.current && mutation.current === change) void currentExecute.current(change); });
     } finally { if (alive.current && !change.invalidated) { locked.current = false; setBusy(false); } }
   }
   function submitEditor(): void {
