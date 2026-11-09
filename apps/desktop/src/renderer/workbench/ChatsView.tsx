@@ -3336,7 +3336,9 @@ export function ChatsView(props: {
         ...(input.viewOnly ? { access: "read-only" as const } : {}),
       });
       if (token !== liveToken.current) return false;
-      await refreshShares();
+      // Not awaited: the dialog clears its field now, so an address typed
+      // while the list reloads is kept.
+      void refreshShares();
       return true;
     } catch (error) {
       if (token !== liveToken.current) return false;

@@ -1,5 +1,5 @@
 import { Eye, X } from "lucide-react";
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import type { ChatChannelShareGrantRow } from "../../ipc/bridgeContract";
 import { Overlay } from "../Overlay";
 import { GhostButton, IconButton, PrimaryButton } from "../ui/controls";
@@ -35,6 +35,7 @@ export function ChatMembersDialog(props: {
   const [busy, setBusy] = useState(false);
   const group = useRadioGroup({ value: access, options: ACCESS, onChange: setAccess, disabled: props.blocked });
   const id = useId();
+  const field = useRef<HTMLInputElement>(null);
   const typed = email.trim().length > 0;
 
   async function add() {
@@ -44,6 +45,8 @@ export function ChatMembersDialog(props: {
       if (await props.onAdd({ email: email.trim(), viewOnly: access === "view" })) {
         setEmail("");
         setAccess("post");
+        // Add disables on an empty field; the next address goes in here.
+        field.current?.focus();
       }
     } finally {
       setBusy(false);
@@ -80,6 +83,7 @@ export function ChatMembersDialog(props: {
           <div className="flex items-center gap-2">
             <input
               id={`${id}-email`}
+              ref={field}
               data-testid="chats-share-email"
               type="email"
               autoFocus
