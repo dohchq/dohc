@@ -9,6 +9,7 @@ import { APP_BACKEND_REQUEST_BYTES, APP_BACKEND_RESULT_BYTES, APP_BACKEND_UPLOAD
   parseAppBackendInvokeRequest, parseAppBackendUploadRequest, parseAppBackendRefusal } from "@dohc/security-contract/app-backend";
 import { APP_COLLECTION_REQUEST_BYTES, APP_COLLECTION_RESPONSE_BYTES, parseAppCollectionCreateRequest } from "@dohc/security-contract/app-publication";
 import { isAppCollectionPageRequest } from "@dohc/security-contract/app-collection-checks";
+import { palette } from "../renderer/tokens";
 export type LocalAppAction = "invoke" | "upload" | "attempt" | "list" | "create";
 /** The workspace engine cannot answer now. The app may retry; this is not a refusal. */
 export class LocalAppUnavailableError extends Error {}
@@ -31,6 +32,11 @@ export interface LocalAppLaunchSession {
   isAlive(): boolean;
   stop(): Promise<void>;
 }
+// An app's frame is transparent. Its document reports whether the app uses a light or dark color scheme, and the
+// frame's background follows it, so an app that paints no background shows its own scheme's page, as in a browser
+// tab. This page's own words, before the app opens and after it ends, get dohc's colors.
+const BOOTSTRAP_STYLE = `body{margin:0}iframe{background:Canvas}body:not(:has(iframe)){background:${palette.light.bg};color:${palette.light.ink}}` +
+  `@media (prefers-color-scheme:dark){body:not(:has(iframe)){background:${palette.dark.bg};color:${palette.dark.ink}}}`;
 const MAX_SESSIONS = 16, HANDOFF_MS = 30_000, SESSION_MS = 30 * 60_000, IDLE_MS = 90_000;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
@@ -125,6 +131,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
           request.then(async r=>{if(!r.ok)throw Error();const value=await r.json();if(stopped)return;proof=value.proof;saveProof(proof);
             frame=document.createElement('iframe');frame.title='Local app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';
             (${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch('/backend',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},body:JSON.stringify(body),signal}),lifetime.signal);
+            addEventListener('message',event=>{const scheme=event.data?.kind==='dohc-color-scheme'?event.data.scheme:null;if(event.source===frame.contentWindow&&(scheme==='light'||scheme==='dark'))frame.style.colorScheme=scheme;},{signal:lifetime.signal});
             frame.srcdoc=value.html;document.body.append(frame);const status=document.getElementById('status');status.textContent='';status.style.margin='0';
             ${browserLifetime}
           }).catch(()=>{if(!stopped)stop();});
@@ -135,7 +142,7 @@ export async function createLocalAppLaunchHost(options: { backend: LocalAppLaunc
         // the app document opens a plain link to another site in a new tab.
         const frameSources = launchOptions?.keepAlive ? "'self' http: https: mailto:" : "'self'";
         const csp = `default-src 'none'; script-src ${scriptHash} ${document.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src http: https: ws: wss:; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src ${frameSources}; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
-        const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title></head><body style="margin:0;background:transparent"><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;
+        const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local app</title><style>${BOOTSTRAP_STYLE}</style></head><body><p id="status" role="status">Opening app</p><script>${script}</script></body></html>`;
         const server = createServer(async (request, response) => {
           const abort = new AbortController(), requestAborted = () => abort.abort();
           request.once("aborted", requestAborted);

@@ -1,0 +1,7 @@
+.expo/
+/android/
+/ios/
+*.apk
+*.aab
+*.ipa
+src/*.generated.ts

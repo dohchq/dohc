@@ -44,8 +44,9 @@ import {createReplicaSupervisor} from "../../../services/sync-relay/src/replicaS
 import {closeTestStorages, tempRoot} from "../../../services/sync-relay/src/testing/index.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
-// Proofs normalize in this process with the worker's validator, as `restore` validates. The relay's two shared
-// validation slots are not what these tests check, and a timed-out test still holding them would refuse later proofs.
+// Proofs normalize, and restores validate through `restore`, in this process with the worker's validator. The relay's
+// two shared validation slots are not what these tests check. A cold validation child can outlast a test's 1 s host
+// deadline under load, and the run still holding a slot would refuse later proofs.
 const normalizeSettlement = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY);
 beforeEach(() => {vi.spyOn(liveValidation, "normalizeSettlement").mockImplementation(async input => normalizeSettlement(input));});
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
@@ -2836,7 +2837,7 @@ it.each([false, true])("ends a restore through its host's cancellation when its 
     const moments = f.raw.prepare("SELECT * FROM sync_relay_object_moments ORDER BY relay_seq").all();
     let reply: () => Promise<unknown> = lostReply;
     const {sendRequest, connection} = cancellingConnection(f, () => reply());
-    const preparation = new LiveRestorePreparation(preparationConfig());
+    const preparation = new LiveRestorePreparation(preparationConfig(), restore);
     const options = (store: typeof f.store) => ({store, lookup: f.lookup, deliveryKind: "bootstrap" as const, connection});
     await expect(preparation.prepare(options(f.store))).rejects.toThrow("The reply was lost.");
     expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: null}]);
@@ -2921,7 +2922,7 @@ it.each(["preparing", "saved"] as const)("ends a restore whose file is renamed a
       await expect(f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, restore, 201)).rejects.toThrow();
       expect(proposalRows(f)).toEqual(before);
     }
-    await expect(new LiveRestorePreparation(preparationConfig()).prepare(options)).rejects.toThrow("The reply was lost.");
+    await expect(new LiveRestorePreparation(preparationConfig(), restore).prepare(options)).rejects.toThrow("The reply was lost.");
     expect(sendRequest).toHaveBeenCalledTimes(1);
     expect(f.raw.prepare(`SELECT COUNT(*) AS count FROM ${proposalTable}`).get()!.count).toBe(when === "saved" ? 1 : 0);
     expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: null}]);
@@ -2943,7 +2944,7 @@ it("declines a restore whose file is renamed while its host prepares, with its h
     });
     const options = {store: f.store, lookup: f.lookup, deliveryKind: "bootstrap" as const,
       connection: {...connection, client: {sendRequest, sendLiveRestore} as never}};
-    await expect(new LiveRestorePreparation(preparationConfig()).prepare(options)).resolves.toEqual({kind: "pending", reason: "The restore was declined."});
+    await expect(new LiveRestorePreparation(preparationConfig(), restore).prepare(options)).resolves.toEqual({kind: "pending", reason: "The restore was declined."});
     expect(sendRequest).toHaveBeenCalledTimes(1);
     expect(f.raw.prepare(`SELECT COUNT(*) AS count FROM ${proposalTable}`).get()!.count).toBe(0);
     expect(readStopRestore(f.context, f.lookup)).toMatchObject({phase: "declined", nativeReceipt: fence});
@@ -2965,7 +2966,7 @@ it("declines at completion a saved restore whose file is renamed", async () => {
     const sendLiveRestore = vi.fn();
     const options = {store: f.store, lookup: f.lookup, deliveryKind: "bootstrap" as const,
       connection: {...connection, client: {sendRequest, sendLiveRestore} as never}};
-    await expect(new LiveRestorePreparation(preparationConfig()).complete(options, proposed.proposalDigest)).rejects.toThrow("The restore was declined.");
+    await expect(new LiveRestorePreparation(preparationConfig(), restore).complete(options, proposed.proposalDigest)).rejects.toThrow("The restore was declined.");
     expect(sendRequest).toHaveBeenCalledTimes(1);
     expect(sendLiveRestore).not.toHaveBeenCalled();
     expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_lifecycles").get()!.n).toBe(0);
@@ -3076,7 +3077,7 @@ it.each(["bootstrap", "owner"] as const)("stops an admitted %s restore after a w
     const sendLiveRestore = vi.fn();
     const options = {store: f.store, lookup: f.lookup, deliveryKind: kind,
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
-    await expect(new LiveRestorePreparation(preparationConfig()).complete(options, f.proposal.proposalDigest)).rejects.toThrow();
+    await expect(new LiveRestorePreparation(preparationConfig(), restore).complete(options, f.proposal.proposalDigest)).rejects.toThrow();
     expect(sendLiveRestore).not.toHaveBeenCalled();
     expect(admittedRows(f)).toEqual(before);
     expect(documentState(f)).toEqual({restore_fence_generation: 2, admission_state: "closed"});
@@ -3101,7 +3102,7 @@ it.each(["apply", "settle", "resume"] as const)("refuses a native %s reply that 
     });
     const options = {store: f.store, lookup: f.lookup, deliveryKind: "owner" as const,
       connection: {client: {sendLiveRestore} as never, workspace: "native-workspace", host: f.lookup.host, deadlineMs: 1000, nextRequestId: () => 1}};
-    await expect(new LiveRestorePreparation(preparationConfig()).complete(options, f.proposal.proposalDigest)).rejects.toThrow();
+    await expect(new LiveRestorePreparation(preparationConfig(), restore).complete(options, f.proposal.proposalDigest)).rejects.toThrow();
     expect(sendLiveRestore).toHaveBeenCalledTimes(1);
     expect(admittedRows(f)).toEqual(before);
     expect(f.store.readStopRestoreLifecycle(f.input)!.phase).toBe(phase);

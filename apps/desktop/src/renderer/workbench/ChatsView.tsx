@@ -2144,7 +2144,15 @@ export function ChatsView(props: {
   useEffect(() => {
     if (props.suspendPolling) {
       pollingWasSuspended.current = true;
-      return;
+      // The open page reloads only its own conversation, so the Group list
+      // stays this navigator's to keep: an agent can add a Group while Ice
+      // reads a DM. It is one coalesced listing; DM syncs and thread reads
+      // stay with the page. While an agent's chat is missing, the effect
+      // that waits for it already reloads the list.
+      if (awaitingAgentChannel) return;
+      return bridge().onWorkspaceActivity((event) => {
+        if (event.workspaceId === workspaceId) void refreshChannelBadges();
+      });
     }
     const unsubscribe = bridge().onWorkspaceActivity(refreshForActivity);
     if (pollingWasSuspended.current) {
@@ -2152,7 +2160,7 @@ export function ChatsView(props: {
       refreshForActivity();
     }
     return unsubscribe;
-  }, [props.suspendPolling, refreshForActivity]);
+  }, [awaitingAgentChannel, props.suspendPolling, refreshChannelBadges, refreshForActivity, workspaceId]);
 
   // The anti-forum move: typing in the channel composer starts the chat.
   // One Enter = thread + first message; no title prompt exists on this path.

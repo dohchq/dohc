@@ -64,7 +64,9 @@ import { UNNAMED_AGENT_ID, type ChangeAuthor } from "@dohc/workspace-contracts/e
 import type {
   ChannelThreadSummary,
   ChatAgentReader,
+  ChatChannel,
   ChatChannelSummary,
+  ChatChannelType,
   ChatMessage,
   ChatStreamItem,
   ChatThread,
@@ -374,6 +376,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // New group, as the window's: the group and its folder.
+  createGroup?(input: { name: string; purpose?: string; type?: ChatChannelType }): Promise<ChatChannel>;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
   listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[] | HistoryPolicyRefusal>;
@@ -3548,6 +3552,17 @@ async function dispatchWorkspace(
         channelWireId: await context.store.getChannelWireId({ workspaceId: context.workspaceId, channelId: engine.id }).catch(() => null),
       }))) };
 
+    case "groupCreate": {
+      if (!context.createGroup) throw new CliCommandError("Groups cannot be created in this workspace.");
+      const channel = await context.createGroup({
+        name: request.args.name,
+        ...(request.args.purpose !== undefined ? { purpose: request.args.purpose } : {}),
+        ...(request.args.type ? { type: request.args.type } : {}),
+      });
+      await notifyWrite(options, context);
+      return { group: groupForCli(channel) };
+    }
+
     case "threads": {
       const channel = resolveChannel(request.args.group, channels);
       const summaries = await listCliChannelThreads(context, channel.engine);
@@ -4113,6 +4128,7 @@ async function workspaceContextForRequest(
     collectionWriteRequest ||
     documentWriteRequest ||
     request.verb === "fileChatStart" ||
+    request.verb === "groupCreate" ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -4159,8 +4175,8 @@ const WATCH_BATCH = 100;
 // result. A first message past it still comes alone.
 export const WATCH_BATCH_MAX_BYTES = 96 * 1024;
 const MAX_WATCH_SEEN = 50_000;
-// `reader` is the id of the agent you run, or null for unnamed agents. Each
-// seen request is its time and message id.
+// `reader` is the id of the agent you run, `run:<id>` for a run dohc started,
+// or null for unnamed agents. Each seen request is its time and message id.
 const watchCursorSchema = z.object({
   v: z.literal(2),
   workspaceId: z.string(),
@@ -4178,20 +4194,23 @@ function compareWatchSeen([leftAt, leftId]: WatchSeen, [rightAt, rightId]: Watch
 async function watchMessages(
   request: Extract<CliRequest, { verb: "watch" }>,
   options: CliServerOptions,
+  runSecret: string | undefined,
   connectionSignal?: AbortSignal,
 ): Promise<CliResultByVerb["watch"]> {
   if (request.args.actor !== "agent") throw new CliCommandError("Chat watch is for agents. Use chat inbox for your unread threads.");
   connectionSignal?.throwIfAborted();
-  // Watch credits no run, so it takes no run credential, and a wait never
-  // reads as a run's agent, even while a run holds the workspace.
-  const context = await workspaceContextForRequest(request, options, undefined);
-  const reader = chatAgentReader(context, null);
+  // A run dohc started waits as its run's reader: for the requests its agent
+  // was woken for, which include replies in threads it posted in. Any other
+  // agent waits as itself or as the unnamed agent.
+  const context = await workspaceContextForRequest(request, options, runSecret);
+  const runId = context.run?.runId ?? null;
+  const reader = chatAgentReader(context, runId);
   const scope = {
     v: 2 as const,
     workspaceId: context.workspaceId,
     group: request.args.group ?? null,
     thread: request.args.thread ?? null,
-    reader: context.connected?.agentId ?? null,
+    reader: context.connected?.agentId ?? (runId === null ? null : `run:${runId}`),
   };
   let seen: WatchSeen[] = [];
   if (request.args.cursor !== undefined) {
@@ -4226,6 +4245,7 @@ async function watchMessages(
   const signals = [connectionSignal, context.signal].filter((value): value is AbortSignal => value !== undefined);
   // An agent you run reads as listening until the wait ends, aborts or times out.
   const endWait = context.connected ? options.agentWaiting?.(context.connected.agentId) : undefined;
+  const engineIds = new WeakMap<object, string[]>();
   const waited = waiters.wait<CliResultByVerb["watch"]>({
     signal: signals.length ? AbortSignal.any(signals) : undefined,
     timeoutMs: request.args.timeoutMs ?? CHAT_WATCH_TIMEOUT_MS,
@@ -4256,6 +4276,9 @@ async function watchMessages(
             met.add(unread.messageId);
             continue;
           }
+          // A run takes only people's requests. An automation's wake stays
+          // for the run it starts, which can only reply.
+          if (runId !== null && unread.author.kind !== "human") continue;
           const message = {
             threadId: cliThreadId(unread.threadId),
             messageId: cliMessageId(unread.messageId),
@@ -4280,9 +4303,22 @@ async function watchMessages(
       // A seen request the walk met is still unread. One past where it
       // stopped was not reached. Any other is read now, so it drops.
       const kept = seen.filter((entry) => met.has(entry[1]) || (stoppedAt !== null && compareWatchSeen(entry, stoppedAt) >= 0));
-      return { messages, cursor: encode([...kept, ...returned]) };
+      const found = { messages, cursor: encode([...kept, ...returned]) };
+      engineIds.set(found, returned.map(([, messageId]) => messageId));
+      return found;
     },
   });
+  if (runId !== null) {
+    // The run answers what it was given, so no run after it starts for those
+    // requests. Only the batch this watch returns counts: a query still in
+    // flight when the wait timed out or was cancelled delivered nothing.
+    const result = await waited;
+    const delivered = engineIds.get(result);
+    if (delivered !== undefined && delivered.length > 0) {
+      await context.dispatchStore.coverDeliveredRequests({ workspaceId: context.workspaceId, runId, messageIds: delivered });
+    }
+    return result;
+  }
   if (!endWait) return waited;
   // A refused or aborted wait clears at once; an answered one holds briefly.
   return waited.then((result) => {
@@ -4346,7 +4382,7 @@ export async function handleCliRequestLine(
     const { door: _door, runSecret, ...request } = parsed.data;
     const completion = { replayed: false };
     const unvalidated = request.verb === "watch"
-      ? await watchMessages(request, options, signal)
+      ? await watchMessages(request, options, runSecret, signal)
       : request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
       : request.verb === "chatLinks" || request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"

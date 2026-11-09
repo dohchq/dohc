@@ -1591,6 +1591,13 @@ export interface AgentDispatchStore {
     agentId: string;
     reason: string;
   }): number;
+  // Covers the requests a running run read while it ran: each pending one
+  // of its agent's among these messages is done under the run.
+  coverDeliveredRequests(input: {
+    workspaceId: WorkspaceId;
+    runId: string;
+    messageIds: ChatMessageId[];
+  }): number;
   completeRun(input: { runId: string; exitCode: number }): AgentRunRecord;
   failRun(input: { runId: string; exitCode?: number; reason: string }): AgentRunRecord;
   listPending(workspaceId: WorkspaceId): AgentDispatchRecord[];

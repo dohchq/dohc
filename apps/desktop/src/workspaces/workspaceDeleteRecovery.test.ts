@@ -198,7 +198,7 @@ describe("delete recovery", () => {
       expect((await readDeleteRecovery(f.root, id))?.engine).toBeUndefined();
       release.resolve();
       expect(await pending).toMatchObject({ ok: true, trashed: true, undo: { available: false } });
-      const reason = `Cannot undo the delete. folder/rowless.txt is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.`;
+      const reason = `Cannot undo the delete. folder/rowless.txt is in the system trash. Restore it there.`;
       expect(await undo).toEqual(refused(reason));
       expect(await readDeleteRecovery(f.root, id)).toMatchObject({ noUndo: reason });
       expect((await readDeleteRecovery(f.root, id))?.staged).toBeUndefined();
@@ -225,7 +225,7 @@ describe("delete recovery", () => {
   it.each([false, true])("offers no partial Undo when the OS accepts rowless files (hand=%s)", async hand => {
     const f = await fixture(undefined, true);
     const result = await f.remove(hand);
-    const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
+    const where = "in the system trash";
     expect(result).toMatchObject({ undo: { available: false, paths: ["folder/rowless.txt"],
       reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` } });
     expect(await f.undo(result.operationId!)).toEqual(refused(`Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.`));

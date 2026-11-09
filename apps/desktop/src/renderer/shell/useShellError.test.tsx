@@ -858,6 +858,21 @@ describe("useShellError", () => {
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
   });
 
+  it("drops a read that failed on the stopped workspace, and offers no Try again for another call", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const stopped = (kind: string) => new Error(
+      `Error invoking remote method 'desktop:get-sync-status': Error [stopped=${kind}]: This workspace is no longer open in this window.`,
+    );
+    act(() => result.current.reportLaneFailure("dohc could not refresh sync status.", stopped("read"), () => {}));
+    act(() => result.current.reportShellError("Could not read Collections.", stopped("read"), () => {}));
+    act(() => result.current.reportShellFailure({ message: "dohc could not check for typing it kept in History.", cause: stopped("read"), retry: () => {} }));
+    expect(result.current.shellErrors).toEqual([]);
+    act(() => result.current.reportLaneFailure("dohc could not refresh agent runs.", stopped("call"), () => {}));
+    act(() => result.current.reportShellError("dohc could not save the file.", stopped("call"), () => {}));
+    act(() => result.current.reportShellFailure({ message: "dohc could not keep your typing.", cause: stopped("call"), retry: () => {} }));
+    expect(result.current.shellErrors.map(({ retry }) => retry)).toEqual([null, null, null]);
+  });
+
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const refused = new Error(

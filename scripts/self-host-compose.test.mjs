@@ -152,7 +152,7 @@ test('hourly snapshots read the relay read-only, never mount continuity, and sta
   assert.deepEqual(service.networks, ['snapshots']);
   assert.deepEqual(compose.networks.snapshots, {});
   for (const [name, other] of Object.entries(compose.services)) if (name !== 'relay-snapshot') assert.ok(!JSON.stringify(other.networks ?? []).includes('snapshots'), name);
-  for (const overlay of ['private', 'cloudflare', 'external-postgres', 'data-disk']) {
+  for (const overlay of ['private', 'cloudflare', 'cloudflare-apps', 'external-postgres', 'data-disk']) {
     const text = readFileSync(`tools/self-host/compose.${overlay}.yml`, 'utf8');
     assert.ok(!/relay-snapshot|networks:/.test(text), overlay);
   }
@@ -166,7 +166,7 @@ test('hourly snapshots read the relay read-only, never mount continuity, and sta
 test('a deployment without snapshots starts without a snapshot key', () => {
   const required = /\$\{DOHC_SNAPSHOT_[A-Z0-9_]*:\?/;
   assert.ok(!required.test(composeText));
-  for (const file of ['compose.data-disk.yml', 'compose.private.yml', 'compose.external-postgres.yml', 'compose.cloudflare.yml']) {
+  for (const file of ['compose.data-disk.yml', 'compose.private.yml', 'compose.external-postgres.yml', 'compose.cloudflare.yml', 'compose.cloudflare-apps.yml']) {
     assert.ok(!required.test(readFileSync(`tools/self-host/${file}`, 'utf8')), file);
   }
   assert.equal(compose.services['relay-snapshot'].environment.DOHC_SNAPSHOT_KEY, '${DOHC_SNAPSHOT_KEY:-}');
@@ -509,6 +509,10 @@ test('every gateway refuses internal paths before proxy handles', () => {
     assert.ok(config.indexOf('handle @internal') < config.indexOf('handle @relay'));
     assert.ok(config.indexOf('handle @internal') < config.indexOf('handle {'));
   }
+  // The app route has no account or relay handles. It refuses internal paths before its only proxy.
+  const apps = readFileSync('tools/self-host/Caddyfile.cloudflare-apps', 'utf8');
+  assert.match(apps, /@internal path \/internal\/\*\s+handle @internal \{\s+respond 404\s+\}/);
+  assert.ok(apps.indexOf('handle @internal') < apps.indexOf('handle {'));
   assert.equal(compose.services['share-web'].environment.DOHC_SHARE_WEB_INTERNAL_HOSTS, 'share-web:1790');
 });
 

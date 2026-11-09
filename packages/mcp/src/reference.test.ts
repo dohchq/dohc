@@ -12,6 +12,7 @@ import {
   APP_RESPONSE_RESULTS,
   APP_RESULTS,
   CHAT_EXAMPLES,
+  CHAT_SOCKET_VERBS,
   DATASET_RESULTS,
   MCP_RETURNS,
   REFERENCE_PATH,
@@ -54,6 +55,7 @@ describe("CLI, MCP, and app channel reference", () => {
   it("documents every CLI socket verb, as a command or through an MCP tool", () => {
     const documented = new Set<string>([
       ...Object.keys(CLI_COMMANDS.chat!.verbs),
+      ...Object.values(CHAT_SOCKET_VERBS),
       ...Object.values(ACCESS_RESULTS),
       ...Object.values(ACCOUNT_RESULTS),
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
@@ -104,7 +106,7 @@ describe("CLI, MCP, and app channel reference", () => {
             throw new Error("parsed");
           },
         });
-        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: verb === "links" ? "chatLinks" : verb === "file-mentions" ? "chatFileMentions" : verb });
+        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: CHAT_SOCKET_VERBS[verb] ?? verb });
       }
       for (const flag of spec.flags ?? []) {
         expect(examples.flat(), `${verb} examples`).toContain(flag.name);

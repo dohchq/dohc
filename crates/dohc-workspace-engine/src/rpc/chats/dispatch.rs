@@ -96,6 +96,13 @@ struct ChatDispatchFailPendingParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchCoverDeliveredParams {
+    run_id: String,
+    message_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchLatestRunParams {
     thread_id: String,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
@@ -698,6 +705,36 @@ impl EngineService {
         )
         .await?;
         Ok(json!(changed))
+    }
+
+    pub(crate) async fn chats_dispatch_cover_delivered(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchCoverDeliveredParams = parse(params)?;
+        if params.message_ids.len() > 100 {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-parameters",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let covered = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.coverDelivered",
+            open.actor.chat_dispatch_cover_delivered(
+                open.workspace_id.clone(),
+                params.run_id,
+                params.message_ids,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!(covered))
     }
 
     pub(crate) async fn chats_dispatch_record_run_message(

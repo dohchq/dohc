@@ -183,7 +183,8 @@ describe("closed app compiler", () => {
      */
     const open = async (result: Awaited<ReturnType<typeof compileClosedApp>>) => {
       const document = createAppDocument(result.files, { maxBundleBytes: 1_000_000, maxDocumentBytes: 10_000_000 });
-      const dom = new JSDOM(document.html.replace("<head>", "<head><script>window.log=[];window.errors=[];window.addEventListener('error',e=>window.errors.push(e.message))</script>"), { runScripts: "dangerously" });
+      // jsdom has no matchMedia, which the document's color scheme report reads.
+      const dom = new JSDOM(document.html.replace("<head>", "<head><script>window.log=[];window.errors=[];window.addEventListener('error',e=>window.errors.push(e.message));window.matchMedia=()=>({matches:false,addEventListener(){}})</script>"), { runScripts: "dangerously" });
       await vi.waitFor(() => expect(dom.window.document.readyState).not.toBe("loading"));
       const runModules = () => {
         for (const stub of [...dom.window.document.querySelectorAll('script[type="module"]')]) {

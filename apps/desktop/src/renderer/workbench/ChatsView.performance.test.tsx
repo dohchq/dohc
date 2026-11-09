@@ -267,8 +267,9 @@ describe("keepIfUnchanged", () => {
 
 // D2#6: the shell suspends the panel navigator's polling while a Chats tab is
 // live, because the page instance runs the same polls against the same store.
+// The Group list is the exception: no page reloads it.
 describe("suspended polling", () => {
-  it("stops the polls while suspended, then resumes and catches up on unsuspend", async () => {
+  it("keeps only the Group list current while suspended, then resumes and catches up on unsuspend", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const view = render(
@@ -281,17 +282,24 @@ describe("suspended polling", () => {
       );
       await screen.findByTestId("chats-channel-name");
 
-      // Suspended: no activity subscription, so an event refreshes nothing,
-      // and no DM list interval exists for the clock to fire.
-      expect(workspaceActivityCallbacks.size).toBe(0);
+      // Suspended: an event reloads the Group list once, since an agent can
+      // add a Group while a DM page is open, and nothing else. No DM list
+      // interval exists for the clock to fire.
+      expect(workspaceActivityCallbacks.size).toBe(1);
       const dmSyncs = bridgeMock.syncDms.mock.calls.length;
-      const listings = bridgeMock.listChatChannels.mock.calls.length;
+      const before = bridgeMock.listChatChannels.mock.calls.length;
       act(() => emitWorkspaceActivity());
       await act(async () => {
         await vi.advanceTimersByTimeAsync(12_000);
       });
       expect(bridgeMock.syncDms.mock.calls.length).toBe(dmSyncs);
-      expect(bridgeMock.listChatChannels.mock.calls.length).toBe(listings);
+      expect(bridgeMock.listChatChannels.mock.calls.length).toBe(before + 1);
+      act(() => emitWorkspaceActivity("workspace-b"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(bridgeMock.listChatChannels.mock.calls.length).toBe(before + 1);
+      const listings = before + 1;
 
       // Unsuspended: one catch-up pass runs immediately — the activity that
       // fired meanwhile reached only the page instance — and the polls and

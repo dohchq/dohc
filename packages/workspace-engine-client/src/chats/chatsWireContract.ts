@@ -70,6 +70,7 @@ export const CHATS_METHOD = {
   dispatchGetThreadPauseState: "chats.dispatch.getThreadPauseState",
   dispatchRecentCount: "chats.dispatch.recentCount",
   dispatchFailPendingForThread: "chats.dispatch.failPendingForThread",
+  dispatchCoverDelivered: "chats.dispatch.coverDelivered",
   dispatchRecordRunMessage: "chats.dispatch.recordRunMessage",
   dispatchSetThreadPaused: "chats.dispatch.setThreadPaused",
   dispatchMarkFailureHandled: "chats.dispatch.markFailureHandled",
@@ -369,6 +370,10 @@ type ChatDispatchFailPendingParams = ChatsJsonObject & {
   agentId: string;
   reason: string;
 };
+type ChatDispatchCoverDeliveredParams = ChatsJsonObject & {
+  runId: string;
+  messageIds: string[];
+};
 type ChatDispatchLatestRunParams = ChatThreadParams & { agentId?: string };
 type ChatDispatchRecoveriesParams = ChatPageParams & { threadId?: string };
 type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
@@ -467,6 +472,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchGetThreadPauseState]: ChatThreadParams;
   [CHATS_METHOD.dispatchRecentCount]: ChatDispatchRecentCountParams;
   [CHATS_METHOD.dispatchFailPendingForThread]: ChatDispatchFailPendingParams;
+  [CHATS_METHOD.dispatchCoverDelivered]: ChatDispatchCoverDeliveredParams;
   [CHATS_METHOD.dispatchRecordRunMessage]: ChatDispatchRecordRunMessageParams;
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatDispatchSetPausedParams;
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatDispatchRunParams;
@@ -1033,6 +1039,7 @@ const ChatsResultSchemas = {
   ),
   [CHATS_METHOD.dispatchRecentCount]: NonnegativeInt,
   [CHATS_METHOD.dispatchFailPendingForThread]: NonnegativeInt,
+  [CHATS_METHOD.dispatchCoverDelivered]: NonnegativeInt,
   [CHATS_METHOD.dispatchRecordRunMessage]: Schema.Boolean,
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatThreadPauseSchema,
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatRunSchema,

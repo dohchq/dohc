@@ -1,6 +1,7 @@
 use dohc_engine_domain::{
-    AgentReader, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind, ChatThreadLane,
-    LinkedChatStore, NoFaults, SaveBookmark, SendMessage, StartChannelThread,
+    AgentReader, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
+    ChatMessageAutomation, ChatThreadLane, LinkedChatStore, NoFaults, SaveBookmark, SendMessage,
+    StartChannelThread,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -1620,6 +1621,95 @@ fn fail_pending_is_workspace_thread_scoped() {
         ),
         (1, vec![("a", "codex"), ("b", "default")]),
         "drop workspace/thread/agent/state predicate -> more than one row changes."
+    );
+}
+
+#[test]
+fn cover_delivered_takes_only_the_running_runs_agents_pending_requests() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    // An automation's wake starts its own run, which can only reply.
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: Some(ChatMessageAutomation {
+                    automation_id: "collection:board#stamp".to_owned(),
+                    chain_depth: 1,
+                }),
+                author_owner_display_name: Some("Ada".to_owned()),
+                ..start_input("stamped-thread", "stamped", ChatActorKind::Automation, 3)
+            },
+            &NO_FAULTS,
+        )
+        .expect("automation message");
+    claimed_run(&mut store, "start", "thread", "run", 10);
+    let mut chats = LinkedChatStore::new(&mut store);
+    for (trigger, agent, at) in [
+        ("reply", "default", 11),
+        ("reply", "codex", 11),
+        ("later", "default", 12),
+        ("stamped", "default", 13),
+    ] {
+        chats
+            .enqueue_dispatch(WS, trigger, agent, "thread", at, &NO_FAULTS)
+            .expect("enqueue");
+    }
+    let delivered = [
+        "reply".to_owned(),
+        "start".to_owned(),
+        "missing".to_owned(),
+        "stamped".to_owned(),
+    ];
+    assert!(
+        chats
+            .cover_delivered_requests(OTHER_WS, "run", &delivered, 13, &NO_FAULTS)
+            .is_err(),
+        "another workspace's caller cannot cover this run's requests"
+    );
+    let covered = chats
+        .cover_delivered_requests(WS, "run", &delivered, 13, &NO_FAULTS)
+        .expect("cover");
+    let pending = chats
+        .list_pending_dispatches(WS, None, 10)
+        .expect("pending");
+    assert_eq!(
+        (
+            covered,
+            pending
+                .iter()
+                .map(|dispatch| (
+                    dispatch.trigger_message_id.as_str(),
+                    dispatch.agent_id.as_str()
+                ))
+                .collect::<Vec<_>>()
+        ),
+        (
+            1,
+            vec![
+                ("reply", "codex"),
+                ("later", "default"),
+                ("stamped", "default")
+            ]
+        ),
+        "only the run agent's pending request from a person among the delivered ones is covered"
+    );
+    chats
+        .complete_dispatch(WS, "run", 0, 14, &NO_FAULTS)
+        .expect("complete");
+    assert_eq!(
+        chats
+            .cover_delivered_requests(WS, "run", &["later".to_owned()], 15, &NO_FAULTS)
+            .expect("cover after end"),
+        0,
+        "an ended run covers nothing"
+    );
+    let next = chats
+        .claim_next_pending(WS, "default", "run-2", "agent", None, 16, &NO_FAULTS)
+        .expect("claim")
+        .expect("some claim");
+    assert_eq!(
+        next.dispatch.trigger_message_id, "later",
+        "the next run skips the reply the first run already read"
     );
 }
 
