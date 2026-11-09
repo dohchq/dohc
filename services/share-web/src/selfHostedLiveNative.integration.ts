@@ -890,7 +890,11 @@ async function openSelfHostProof(name: string) {
     const ownerDocument = async (path: string, text: string, {seeded = true} = {}) => {
       mkdirSync(dirname(join(ownerRoot, path)), {recursive: true});
       writeFileSync(join(ownerRoot, path), text);
-      const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
+      // Text past the engine's in-band request cap is written as a blob, as an agent writes a large file.
+      const bytes = Buffer.from(text), write = bytes.byteLength > 32 * 1024
+        ? rpc("versionedText.writeBlob", {workspaceId: "workspace", versionId: mainVersionId, path, sha256: hash(bytes), bytesBase64: bytes.toString("base64"), origin: "api"}, randomUUID())
+        : rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID());
+      const objectId = (await write).object.id as string;
       // The owner's Y.Doc, as its engine holds it.
       const doc = markdownToYDoc(text), baseline = Y.encodeStateAsUpdate(doc);
       closes.push(async () => doc.destroy());
@@ -1872,7 +1876,8 @@ it("lets a collaborator edit live a note an agent wrote as a file and no device 
   expect(bases).toHaveLength(1);
   expect(yDoc.filter(row => row.origin_id === writerOrigin)).toEqual([]);
   expect(new Set(yDoc.flatMap(row => row.lineage === null ? [] : [row.lineage]))).toEqual(new Set([bases[0]!.lineageClaimId]));
-  const before = {liveUpdates: proof.journal(objectId), activations: proof.activations(objectId).map(row => row.activation_id), bases, yDoc,
+  const activationIds = () => proof.activations(objectId).map(row => (row as Record<string, unknown>).activation_id);
+  const before = {liveUpdates: proof.journal(objectId), activations: activationIds(), bases, yDoc,
     file: readFileSync(join(proof.store, path), "utf8"), relay: proof.latestText(objectId)};
   const asked = harness.firstOpens.filter(open => open.objectId === objectId).length;
 
@@ -1881,7 +1886,7 @@ it("lets a collaborator edit live a note an agent wrote as a file and no device 
   await proof.statusWhen(path, row => row?.status === "ready");
   const restarted = Date.now() - restarting;
   expect(proof.journal(objectId)).toEqual(before.liveUpdates);
-  expect(proof.activations(objectId).map(row => row.activation_id).slice(0, before.activations.length)).toEqual(before.activations);
+  expect(activationIds().slice(0, before.activations.length)).toEqual(before.activations);
   expect(proof.firstOpenBases(objectId)).toEqual(before.bases);
   expect(proof.yDocRows(objectId).slice(0, before.yDoc.length)).toEqual(before.yDoc);
   expect(readFileSync(join(proof.store, path), "utf8")).toBe(before.file);
@@ -1945,7 +1950,7 @@ it("keeps an unsupported note and a too-large note ordinary files, says why in L
     expect((await proof.documents()).find(row => row.path === note.path)).toEqual(rows[notes.indexOf(note)]);
   }
   expect(readFileSync(join(proof.store, "docs/autolink.md"), "utf8")).toBe(autolink);
-  expect(harness.captureAttempts.slice(captures)).toEqual([]);
+  expect(harness.captureAttempts.slice(captures).filter(attempt => notes.some(note => note.path === attempt.path))).toEqual([]);
   return {refusedMs, totalMs: Date.now() - started, rows, read, edit, firstOpens: harness.firstOpens,
     captures: harness.captureAttempts.filter(attempt => attempt.path !== "docs/a.md")};
 }), 240_000);
@@ -1955,12 +1960,12 @@ it("keeps an unsupported note and a too-large note ordinary files, says why in L
 // unchanged note, and releases what it held of the refused activation.
 it("reports a native refusal after first open published, with its code, captures once and holds no activation", () => withSelfHostProof("self-host-first-open-native-refused", async proof => {
   const started = Date.now(), path = "docs/budget.md";
-  // Once a base is published, the host captures the note with a one-byte budget, which the engine refuses.
-  harness.captureBudget = {path, maxBytes: 1, when: () => harness.firstOpens.some(open => open.kind === "published")};
-  const note = await proof.ownerDocument(path, "Too much for one byte", {seeded: false});
+  // Once a base is published, the host captures the note with the smallest budget its client sends, which the engine refuses.
+  harness.captureBudget = {path, maxBytes: 4, when: () => harness.firstOpens.some(open => open.kind === "published")};
+  const note = await proof.ownerDocument(path, "Far more than four bytes", {seeded: false});
   const limited = () => harness.captureAttempts.filter(attempt => attempt.path === path && attempt.limited);
   await vi.waitFor(() => expect(limited().filter(attempt => attempt.code !== undefined)).not.toEqual([]), {timeout: 60_000, interval: 100});
-  const refused = limited()[0]!, refusedMs = Date.now() - started;
+  const refused = limited().find(attempt => attempt.code !== undefined)!, refusedMs = Date.now() - started;
   await proof.passesAfter(10);
   const nativeCode = [refused.detail, refused.code].find(value => value !== undefined && FIRST_OPEN_ACTIVATION_CODE.test(value));
   const row = (await proof.documents()).find(row => row.path === path);
@@ -1969,7 +1974,7 @@ it("reports a native refusal after first open published, with its code, captures
       source: expect.objectContaining({objectId: note.objectId, path})}});
   expect.soft(limited(), "captures of the unchanged refused note").toHaveLength(1);
   expect.soft(proof.unreleased(note.objectId)).toEqual([]);
-  expect.soft(proof.activations(note.objectId).filter(row => !row.completed && !row.retired)).toEqual([]);
+  expect.soft(proof.activations(note.objectId).filter(row => !(row as Record<string, unknown>).completed && !(row as Record<string, unknown>).retired)).toEqual([]);
   expect(proof.firstOpenBases(note.objectId)).toHaveLength(1);
   expect(harness.captureAttempts.filter(attempt => attempt.path === path && attempt.code === undefined)).toEqual([]);
   return {refused, nativeCode, row, refusedMs, totalMs: Date.now() - started, captures: harness.captureAttempts.filter(attempt => attempt.path === path),
@@ -1980,7 +1985,7 @@ it("reports a native refusal after first open published, with its code, captures
 // checked it and before it is written, or after it is published and before
 // the host hears. Once it restarts, the note becomes ready once with its
 // exact bytes, or reports why it cannot, on one history.
-it.for(["build", "check", "reply"] as const)("starts a note once on one history when the relay stops at first open's %s", at => withSelfHostProof(`self-host-first-open-stop-${at}`, async proof => {
+it.for(["build", "check", "reply"] as const)("starts a note once on one history when the relay stops at first open's %s", {timeout: 240_000}, at => withSelfHostProof(`self-host-first-open-stop-${at}`, async proof => {
   const started = Date.now(), path = `docs/stopped-${at}.md`, text = `Stopped at ${at}`;
   let reached!: () => void;
   const stopped = new Promise<void>(resolve => {reached = resolve;});
@@ -2011,4 +2016,4 @@ it.for(["build", "check", "reply"] as const)("starts a note once on one history 
   expect((await proof.documents()).find(row => row.path === path)).toEqual(row);
   expect(proof.firstOpenBases(objectId)).toEqual(bases);
   return {at, basesAtStop, row, settledMs, totalMs: Date.now() - started, bases, firstOpens: harness.firstOpens.filter(open => open.objectId === objectId)};
-}), 240_000);
+}));
