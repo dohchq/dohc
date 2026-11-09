@@ -629,12 +629,13 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct DescriptorReserve {
         known: KnownSource,
+        descriptor: String,
         reserve: usize,
     }
 
     /// The relay reserves descriptor bytes before a first-open base exists, so
-    /// every value it cannot know yet takes its widest form, and #2103's
-    /// predecessor activation is counted.
+    /// every value it cannot know yet takes its widest form, as a successor
+    /// that names its predecessor. The relay builds the same bytes.
     #[test]
     fn first_open_descriptor_reserve_is_the_widest_native_descriptor() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -666,9 +667,8 @@ mod tests {
             full_state_byte_length: SAFE as usize,
             predecessor_activation_id: Some(format!("ordinary-activation-{digest}")),
         };
-        assert_eq!(
-            serde_json::to_string(&source).unwrap().len(),
-            fixture.reserve
-        );
+        let descriptor = serde_json::to_string(&source).unwrap();
+        assert_eq!(descriptor, fixture.descriptor);
+        assert_eq!(descriptor.len(), fixture.reserve);
     }
 }

@@ -3,8 +3,6 @@ import type {NativeOwnerActivationSource} from "@dohc/workspace-engine-client/da
 // The live validation worker reads these; keep this module free of storage imports.
 const emptyCandidate=()=>new Uint8Array([0,0]);
 const WIDEST_INTEGER=Number.MAX_SAFE_INTEGER,WIDEST_DIGEST="f".repeat(64);
-// #2103 adds the activation a resumed capture follows.
-const PREDECESSOR_FIELD=`,"predecessorActivationId":"ordinary-activation-${WIDEST_DIGEST}"`;
 export const activationDescriptorBytes=(source:NativeOwnerActivationSource)=>Buffer.byteLength(JSON.stringify(source));
 export const activationCaptureBytes=(baselineBytes:number,fullStateBytes:number,descriptorBytes:number)=>baselineBytes+fullStateBytes+descriptorBytes;
 /** What reading one history row's metadata charges. */
@@ -18,11 +16,13 @@ export const ordinaryActivationReadBytes=(history:{baselineBytes:number;entryByt
   history.baselineBytes+sum(history.entryBytes)+sum(history.updateBytes)+history.fullStateBytes+replayBytes(history.baselineBytes,history.updateBytes.slice(1));
 export type KnownActivationSource=Pick<NativeOwnerActivationSource,"relayDatabaseNamespace"|"workspaceId"|"objectId"|"currentPath"|
   "replicationEpoch"|"streamIdentity"|"baseOriginId"|"sourceMomentId"|"sourceDigest"|"sourceByteLength">;
-/** The largest descriptor native can capture for these values; the rest take their widest form. */
-export function activationDescriptorReserve(known:KnownActivationSource){
-  return activationDescriptorBytes({version:1,readerSource:true,relayDatabaseNamespace:known.relayDatabaseNamespace,workspaceId:known.workspaceId,mainVersionId:"main",
+/** The largest descriptor native can capture for these values: a successor's, which names its predecessor, with the rest in their widest form. */
+export function activationReserveSource(known:KnownActivationSource):NativeOwnerActivationSource{
+  return {version:1,readerSource:true,relayDatabaseNamespace:known.relayDatabaseNamespace,workspaceId:known.workspaceId,mainVersionId:"main",
     objectId:known.objectId,lineageClaimId:WIDEST_DIGEST,currentPath:known.currentPath,replicationEpoch:known.replicationEpoch,
     streamIdentity:known.streamIdentity,committedCursor:WIDEST_INTEGER,baseOriginId:known.baseOriginId,baseOriginSeq:WIDEST_INTEGER,
     baseRelaySeq:WIDEST_INTEGER,sourceMomentId:known.sourceMomentId,sourceDigest:known.sourceDigest,sourceByteLength:known.sourceByteLength,
-    nativeHeadSequence:WIDEST_INTEGER,fullStateDigest:WIDEST_DIGEST,fullStateByteLength:WIDEST_INTEGER})+Buffer.byteLength(PREDECESSOR_FIELD);
+    nativeHeadSequence:WIDEST_INTEGER,fullStateDigest:WIDEST_DIGEST,fullStateByteLength:WIDEST_INTEGER,
+    predecessorActivationId:`ordinary-activation-${WIDEST_DIGEST}`};
 }
+export const activationDescriptorReserve=(known:KnownActivationSource)=>activationDescriptorBytes(activationReserveSource(known));
