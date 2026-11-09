@@ -5,6 +5,7 @@ import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace
 import { AlertTriangle, CheckCircle2, Diff, Folder, Globe2, Merge, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
+import type { DesktopUserSettings } from "../../settings/userSettings";
 import type {
   ActorPresentation,
   ChannelThreadRecord,
@@ -3646,6 +3647,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" agents={SYNC_PAUSING_AGENTS} cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
           </div>
         </Specimen>
+        <Specimen label="sync off: paused by an agent Settings no longer lists">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" agents={{}} cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
+          </div>
+        </Specimen>
         <Specimen label="sync off: paused under this computer's earlier id">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_ANOTHER })} />
@@ -4128,7 +4134,7 @@ const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
   author: { kind: "agent", agentId: "codex", onBehalfOf: "human-sam", depth: 1 },
 };
-const SYNC_PAUSING_AGENTS: NonNullable<ComponentProps<typeof CloudSyncSettings>["agents"]> = {
+const SYNC_PAUSING_AGENTS: DesktopUserSettings["agents"] = {
   codex: { name: "Nova", hue: "olive", launch: { command: "node agent.mjs" }, changesFiles: true, enabled: true, timeoutMinutes: 30 },
 };
 const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({

@@ -354,22 +354,8 @@ describe("CloudSyncSettings", () => {
     expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
   });
 
-  it("marks a pause by a connected agent with the plug, and your agent's with the agent mark", () => {
-    for (const [author, mark, words] of [
-      [{ kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "human-sam", depth: 0 }, "connected", "Paused by connected agent Claude ·"],
-      [{ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "human-sam", depth: 0 }, "connected", "Paused by connected agent Agent ·"],
-      [{ kind: "agent", agentId: "claude", onBehalfOf: "human-sam", depth: 1 }, "agent", "Paused by agent claude ·"],
-    ] as const) {
-      render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, syncPause: { atMs: PAUSED_AT, author } })} />);
-      const paused = screen.getByTestId("cloud-sync-paused");
-      expect(paused.textContent).toContain(words);
-      expect(paused.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")).toBe(mark);
-      cleanup();
-    }
-  });
-
   // History and chat name your agents the same way.
-  it("names your agent's pause by its name in Settings › Agents, and a connected or removed agent as before", () => {
+  it("names your agent's pause from Settings › Agents, and marks a connected agent's with the plug", () => {
     const { launch: _launch, ...youRun } = testAgent({ name: "Terminal", enabled: false });
     const agents = { terminal: youRun, codex: testAgent({ name: "Nova" }) };
     for (const [author, mark, words] of [

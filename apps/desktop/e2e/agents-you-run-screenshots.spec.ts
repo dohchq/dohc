@@ -18,9 +18,9 @@ import {
 
 // Screenshot harness (@ui-audit) for agents you run, light and dark: Settings ›
 // Agents with one agent dohc starts and two you run, one of them Listening;
-// a row's menu; its Details, in the whole dialog; the Undo just after Remove; and the reply in the
-// agent's chat under its name and color. Not a regression test; it runs only
-// when a shot directory is set.
+// a row's menu; its Details, in the whole dialog; the Undo just after Remove;
+// and the reply in the agent's chat under its name and color. Not a regression
+// test; it runs only when a shot directory is set.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture agents you run screenshots");
 

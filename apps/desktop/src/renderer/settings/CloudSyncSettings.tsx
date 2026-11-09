@@ -422,9 +422,8 @@ function SyncPausedLine(props: { pause: SyncPause; agents: DesktopUserSettings["
   // names nobody. A connected agent takes the plug beside the name it gave, or "Agent".
   // Your agent goes by its name in Settings › Agents, or its id once Settings no longer lists it.
   const connected = author.kind === "agent" && isConnectedAgentId(author.agentId);
-  const agentId = author.kind === "agent" ? author.agentId : undefined;
-  const settingsName = agentId !== undefined && props.agents
-    ? listAgents({ agents: props.agents }).find(({ id }) => id === agentId)?.name
+  const settingsName = author.kind === "agent" && !connected && props.agents
+    ? listAgents({ agents: props.agents }).find(({ id }) => id === author.agentId)?.name
     : undefined;
   const Mark = connected ? Plug : Sparkles;
   const by = author.kind === "agent" ? (
