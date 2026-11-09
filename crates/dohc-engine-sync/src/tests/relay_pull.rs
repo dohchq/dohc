@@ -1873,6 +1873,9 @@ fn base_repair_refused_divergent_base_leaves_the_local_base_to_learn_its_relay_p
         (
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![refused],
                 next_cursor: 110,
                 has_more: false,
@@ -1881,6 +1884,9 @@ fn base_repair_refused_divergent_base_leaves_the_local_base_to_learn_its_relay_p
         (
             110,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![owner, local.clone()],
                 next_cursor: 121,
                 has_more: false,
@@ -1889,6 +1895,9 @@ fn base_repair_refused_divergent_base_leaves_the_local_base_to_learn_its_relay_p
         (
             121,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![later],
                 next_cursor: 130,
                 has_more: false,
