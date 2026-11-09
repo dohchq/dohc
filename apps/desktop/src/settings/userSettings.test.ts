@@ -10,8 +10,6 @@ import {
   DesktopUserSettings, AgentColors,
   clampZoomLevel,
   firstAgent,
-  firstAgentCommand,
-  firstAgentWithLaunch,
   agentHandle,
   agentIdsToWake,
   agentMentionCandidates,
@@ -349,13 +347,6 @@ describe("desktop user settings model", () => {
     };
     for (const id of ["default", "agent-b"]) expect(isOwnAgentId(settings, id)).toBe(true);
     for (const name of ["Atlas", "Nova", "Bee", "Default", "dohc-mcp"]) expect(isOwnAgentId(settings, name)).toBe(false);
-  });
-
-  it("starts only an agent dohc has a launch for", () => {
-    expect(firstAgentWithLaunch({ agents: { default: testAgent() } })?.id).toBe("default");
-    const { launch: _launch, ...named } = testAgent({ name: "Nova" });
-    expect(firstAgentWithLaunch({ agents: { default: named } })).toBeNull();
-    expect(firstAgentCommand({ agents: { default: named } })).toBe("");
   });
 
   it("leaves an agent you run to you when Chats sets up an agent dohc starts", () => {

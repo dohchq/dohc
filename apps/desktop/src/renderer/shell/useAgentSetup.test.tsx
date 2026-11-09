@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AgentRunStatusResult, DesktopUserSettingsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { testAgent } from "../../testing/agentSettings";
 import type { SettingsSectionId } from "../settings/settingsRegistry";
 import { useAgentSetup } from "./useAgentSetup";
 
@@ -61,4 +62,16 @@ it("does not read agent status before workspace admission", async () => {
   expect(getAgentRunStatus).not.toHaveBeenCalled();
   await act(async () => { rerender({ ready: true }); });
   expect(getAgentRunStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
+});
+
+it("sums up the agent dohc starts when an agent you run comes first", async () => {
+  vi.stubGlobal("dohcDesktop", { getAgentRunStatus: vi.fn().mockResolvedValue(inactive) });
+  const { launch: _launch, ...yours } = testAgent({ name: "Terminal", enabled: false });
+  const settings: DesktopUserSettingsResult = {
+    settings: { ...DEFAULT_USER_SETTINGS, agents: { agent: yours, "agent-2": testAgent({ name: "Nova" }) } },
+    source: "stored",
+  };
+  const { result } = renderHook(() => useAgentSetup("ws-1", settings, null, true));
+  await act(async () => undefined);
+  expect(result.current.agentSetup).toMatchObject({ agentName: "Nova", runnerConfigured: true, runnerEnabled: true });
 });

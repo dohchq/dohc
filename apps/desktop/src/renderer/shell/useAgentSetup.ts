@@ -1,4 +1,4 @@
-import { firstAgent, firstAgentWithLaunch, listAgents } from "../../settings/userSettings";
+import { automationAgent, listAgents, runnableAgents } from "../../settings/userSettings";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRunStatusResult,
@@ -21,14 +21,14 @@ export function useAgentSetup(
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
     if (!workspaceIsReady || !userSettings || agentRunStatus?.workspaceId !== workspaceId) return null;
-    const agent = firstAgent(userSettings.settings);
-    const runner = firstAgentWithLaunch(userSettings.settings);
+    // The agent Chats sets up is the first one dohc starts; an agent you run may come before it.
+    const runner = automationAgent(userSettings.settings);
     return {
       workspaceId,
       preferredName: userSettings.settings.profile.preferredName,
-      agentName: agent?.name,
+      agentName: runner?.name,
       runnerConfigured: runner !== null,
-      runnerEnabled: runner?.enabled === true,
+      runnerEnabled: runnableAgents(userSettings.settings).length > 0,
       agentRunActive: agentRunStatus.run.activeRun !== null,
       agents: listAgents(userSettings.settings)
         .flatMap(({ id, name, enabled, launch }) => launch ? [{ id, name, enabled }] : []),

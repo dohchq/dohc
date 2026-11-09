@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentLaunch, launchCommand } from "../agents/agentToolCatalog";
+import { AgentLaunch } from "../agents/agentToolCatalog";
 import type { PreferredName } from "@dohc/workspace-contracts/chat-identity";
 import {
   MAX_PREFERRED_NAME_LENGTH,
@@ -131,12 +131,6 @@ export function automationAgent(settings: Pick<DesktopUserSettings, "agents">): 
   return agent?.launch ? { ...agent, launch: agent.launch } : null;
 }
 
-/** The first agent when dohc can start it, else null. */
-export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
-  const agent = firstAgent(settings);
-  return agent?.launch ? { ...agent, launch: agent.launch } : null;
-}
-
 /** The agent you run with this id: an entry dohc never starts. */
 export function agentYouRun(settings: Pick<DesktopUserSettings, "agents">, agentId: string): Agent | null {
   return listAgents(settings).find((agent) => agent.id === agentId && !agent.launch) ?? null;
@@ -193,12 +187,6 @@ export function agentIdsToWake(
     })
     .map(({ id }) => id);
   return [...new Set([...dmAgent, ...namedAgents])];
-}
-
-/** The command that starts the first agent, or "" when there is none. */
-export function firstAgentCommand(settings: Pick<DesktopUserSettings, "agents">): string {
-  const launch = firstAgent(settings)?.launch;
-  return launch ? launchCommand(launch) : "";
 }
 
 /** The settings with one agent changed. */
