@@ -67,7 +67,8 @@ export async function startSelfHostedLiveHost(options: {
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined;
   let initialReconciliationComplete = false, selectedDocuments = false;
-  let signature = "", lastError: unknown;
+  // `startFailed` holds only while the last daemon start failed; `lastError` holds any failed reconciliation.
+  let signature = "", lastError: unknown, startFailed = false;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
   const lifetime = new AbortController();
@@ -128,7 +129,8 @@ export async function startSelfHostedLiveHost(options: {
       if (!covered(row)) return {code: "host-no-edit-grant", sessionHost: "running without this document (no Edit grant)"};
       if (!atPath(row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
     }
-    if (!current) return lastError !== undefined
+    // Another failure, such as in discovery, leaves the daemon waiting for the next pass to start it.
+    if (!current) return startFailed
       ? {code: "host-start-failed", sessionHost: "couldn't start"}
       : {code: "host-not-loaded", sessionHost: "starting"};
     return {code: "host-not-loaded", sessionHost: current.invalidated.aborted ? "restarting" : "running, document not loaded yet"};
@@ -236,7 +238,10 @@ export async function startSelfHostedLiveHost(options: {
         const desired = await hostedSet(selected);
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
-        if (!current && (targets.length || departing.length)) current = await start();
+        if (!current && (targets.length || departing.length)) {
+          try {current = await start();} catch (error) {startFailed = !signal.aborted; throw error;}
+          startFailed = false;
+        }
         // A failed update may already have changed membership, so the next reconciliation updates again.
         signature = "";
         await current?.update(desired);
@@ -265,7 +270,7 @@ export async function startSelfHostedLiveHost(options: {
         signature = "";
         for (const row of departing) if (row.workspaceId === workspaceId) leave(row);
       }
-      lastError = undefined; initialReconciliationComplete = true;
+      lastError = undefined; startFailed = false; initialReconciliationComplete = true;
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
     } finally {

@@ -296,6 +296,46 @@ it.each([
   } finally {finish.resolve();}
 });
 
+// Proves: Stop names a failed start only while the daemon's last start failed.
+// A discovery failure leaves the daemon waiting for the next pass to start it,
+// and a start that later succeeds answers as a running daemon.
+it("answers Stop with a start failure only while the daemon's start failed", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const discoveryFailure = new Error("private discovery failure detail"), startFailure = new Error("private engine start failure detail");
+  const failing: {discovery?: Error; start?: Error} = {discovery: discoveryFailure};
+  const f = await fixture({beforeStart: async () => {if (failing.start) throw failing.start;}, seed: async (_data, relay) => {
+    const scan = relay.storage.scanServiceHostCandidateShares.bind(relay.storage);
+    vi.spyOn(relay.storage, "scanServiceHostCandidateShares").mockImplementation((...args) => {
+      if (failing.discovery) throw failing.discovery;
+      return scan(...args);
+    });
+  }});
+  retainServiceActivation(f.raw, namespace, true);
+  const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: f.host,
+    resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
+  const stop = async () => {
+    const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {method: "DELETE",
+      headers: {"content-type": "application/json", authorization: "Bearer account-token"}, body: JSON.stringify({path: binding.currentPath, retire: true})}));
+    expect(response.status).toBe(409);
+    const body = await response.json() as {code: string; sessionHost: string};
+    expect(JSON.stringify(body)).not.toContain("private");
+    return {code: body.code, sessionHost: body.sessionHost};
+  };
+
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(discoveryFailure), {timeout: 10_000});
+  expect(f.startHost).not.toHaveBeenCalled();
+  expect(await stop(), "a discovery failure").toEqual({code: "host-not-loaded", sessionHost: "starting"});
+
+  Object.assign(failing, {discovery: undefined, start: startFailure}); f.host.reconcile();
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(startFailure), {timeout: 10_000});
+  expect(await stop(), "a failed start").toEqual({code: "host-start-failed", sessionHost: "couldn't start"});
+
+  failing.start = undefined; f.host.reconcile();
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
+  expect(await stop(), "a later start").toEqual({code: "host-not-loaded", sessionHost: "running, document not loaded yet"});
+  expect(f.enrollment()?.ownerStop).toBeNull();
+});
+
 it("restarts only a daemon that failed and gives the replacement the whole hosted set", async () => {
   const f = await fixture(); f.add(); await f.waitStarted(1);
   await f.waitUpdate(["docs/a.md", "docs/b.md"]);
