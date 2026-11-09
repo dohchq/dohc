@@ -231,7 +231,7 @@ it("keeps live edits, a sibling activation and a restore within budget while a w
     coldStartMs: Number(coldStartMs.toFixed(1)), budgets, baseline, pathological: loaded,
     wallSeconds: Number(((performance.now() - startedAt) / 1_000).toFixed(1))}, null, 2));
   // The writer did what it is here for: each cycle's note was built and refused, and nothing published.
-  expect(loaded.builds.length).toBeGreaterThanOrEqual(CYCLES / 2);
+  expect(loaded.builds.filter(build => build.kind.startsWith("refused:")).length).toBeGreaterThanOrEqual(CYCLES / 2);
   expect(raw.prepare("SELECT count(*) AS n FROM sync_relay_log WHERE origin_id LIKE 'service-host:first-open:%'").get()!.n).toBe(0);
   expect(loaded.activation.maxMs).toBeLessThanOrEqual(budgets.activationMs);
   expect(loaded.restore.maxMs).toBeLessThanOrEqual(budgets.restoreMs);
