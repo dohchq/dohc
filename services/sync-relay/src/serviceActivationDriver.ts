@@ -251,6 +251,12 @@ export class ServiceActivationDriver {
     if(block?.reason==="released-lineage-unsettled" || (block?.reason==="without-lineage" && this.#pursued.has(key)))return undefined;
     return block?.reason;
   }
+  /** How many of the workspace's targets a hosted pass left held. A later pull's held list frees them. */
+  heldIn(workspaceId:string){
+    let count=0;
+    for(const key of this.#held.keys())if(JSON.parse(key)[0]===workspaceId)count++;
+    return count;
+  }
   /** Why the hosted pass left this target held, until a capture succeeds. */
   holdReason(target:ServiceActivationTarget):ServiceHostedHold["reason"]|undefined{return this.#held.get(targetKey(target));}
   /**

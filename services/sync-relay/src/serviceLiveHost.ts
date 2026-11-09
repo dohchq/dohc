@@ -39,6 +39,7 @@ import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnroll
 import type {RetirementKey} from "./storage/serviceActivationRetirement.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
+import {HOSTED_RECOVERY_PROBE_MS, hostedRelayState, hostedReplicaQuiet, type HostedPullDuties, type HostedPullReason} from "./hostedPullWork.js";
 import {decodeHostedSyncResult, hostedWindowCovers, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
 import {withStreamedContributions, withStreamedMarkdown, type HeldReadInvalidated, type StreamedBlob} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
@@ -206,6 +207,12 @@ interface HostedAttachment {
   readonly firstOpen?: ServiceFirstOpenRequest;
   pulls: number; confirmed: number; readonly announced: Map<string, number>;
   readonly reached: Map<string, {pull: number; listed: boolean}>; dropped: number;
+  /** How the last pull ended, or undefined before the first. */
+  last?: "done" | "more" | "failed";
+  /** The relay state read before the last pull that ended with no more pages, and when the recovery probe pulls next. */
+  seen?: string; probeAt: number;
+  /** Whether the relay was written since a pull or pass last read this workspace's relay state. */
+  check: boolean;
 }
 // Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
 const reachedSince = (attached: HostedAttachment, objectId: string, required: number) => (attached.reached.get(objectId)?.pull ?? 0) >= required;
@@ -226,6 +233,8 @@ export async function startServiceLiveHost(options: {
    * `random` time the retries, unless a test injects others.
    */
   firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number};
+  /** Times the hosted recovery probe, unless a test injects another clock. */
+  nowMs?: () => number;
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
@@ -248,6 +257,9 @@ export async function startServiceLiveHost(options: {
   const consumers = new Map<string, LiveCommittedDelivery>();
   const documents = new LiveDocumentWork();
   const attachments = new Map<string, HostedAttachment>();
+  // Hosted pulls by workspace and why each ran, across attachments.
+  const pullCounts = new Map<string, Map<HostedPullReason, number>>();
+  const now = options.nowMs ?? Date.now;
   // An attached workspace whose replica checked its origin. Activation, restore and departures reach no other.
   const checked = (workspaceId: string) => {
     const attached = attachments.get(workspaceId);
@@ -395,7 +407,11 @@ export async function startServiceLiveHost(options: {
     }),() => Effect.sync(() => signal.removeEventListener("abort",abort)));
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     yield* Effect.acquireRelease(Effect.sync(() => {
-      const stop = changes ? observeRelayWrites(storage, () => changes.notify()) : () => {};
+      // Subscribed before any pull reads relay state, so no write between the two goes unnoticed.
+      const stop = changes || config.activation ? observeRelayWrites(storage, () => {
+        for (const attached of attachments.values()) attached.check = true;
+        changes?.notify();
+      }) : () => {};
       signal.addEventListener("abort",stop,{once: true});
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
@@ -447,16 +463,24 @@ export async function startServiceLiveHost(options: {
       const replica = new ServiceHostedReplication({client, workspace: handle, workspaceId: workspace.workspaceId, nextRequestId,
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
       const firstOpen = options.firstOpen && createFirstOpenClient({relay: attachment.relay, identity: attachment.identity, fetch: options.firstOpen.fetch});
-      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, firstOpen, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0, replica: {
-        pull: joined => pull(attached, joined), publish: joined => replica.publish(joined)}};
+      const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, firstOpen, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0,
+        probeAt: 0, check: true, replica: {pull: joined => pull(attached, joined, "activation"), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
     // Every pull of a hosted replica runs here. A page that leaves documents held clears their readiness,
     // and each page that read its documents says which still are, within its held list's window.
     // Within its departed list's window, it says which of the documents this host waits on are gone.
     // Owners dropped because a newly held list may leave some out are reported once per change in their count, until a complete list.
-    const pull = async (attached: HostedAttachment, joined: AbortSignal) => {
-      const number = ++attached.pulls, workspaceId = attached.hosted.connection.workspaceId;
+    // Each reads the relay state first, so a pull that ends with no more pages brought every change through it.
+    // A write during the pull leaves `check` set, and the next pass compares again.
+    const pull = async (attached: HostedAttachment, joined: AbortSignal, reason: HostedPullReason) => {
+      const workspaceId = attached.hosted.connection.workspaceId;
+      // Notices arrive in microtasks, so none lands between this read and clearing `check`.
+      const state = hostedRelayState(storage, workspaceId), number = ++attached.pulls;
+      attached.check = false;
+      const counts = pullCounts.get(workspaceId) ?? new Map<HostedPullReason, number>();
+      pullCounts.set(workspaceId, counts.set(reason, (counts.get(reason) ?? 0) + 1));
+      attached.last = "failed";
       const result = await attached.hosted.pull(joined, page => {
         if (!page.adoptedScope && activation) {
           const dropped = activation.hold(workspaceId, page.held, page.heldWindow, page.newlyHeld);
@@ -478,6 +502,8 @@ export async function startServiceLiveHost(options: {
         }
       });
       attached.confirmed = number;
+      attached.last = result.hasMore ? "more" : "done";
+      if (!result.hasMore) {attached.seen = state; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
       return result;
     };
     for (const [index, value] of reply.workspaces.entries()) install(config.workspaces[index]!, value);
@@ -1002,7 +1028,7 @@ export async function startServiceLiveHost(options: {
         // While a sibling is mid-activation the open skips catch-up, as awake documents
         // do, and converges once that sibling resolves. Waiting here would let one stuck
         // sibling keep every dormant document in the workspace from opening.
-        if (activation!.workspaceReady(workspaceId) && (await pull(attachments.get(workspaceId)!, joined)).hasMore) {
+        if (activation!.workspaceReady(workspaceId) && (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore) {
           throw new Error("Hosted replication has more pages.");
         }
         activation!.wake(row.target); touch(key);
@@ -1309,6 +1335,27 @@ export async function startServiceLiveHost(options: {
         firstOpen:target=>leaving.has(JSON.stringify([target.workspaceId,target.path]))?undefined:checked(target.workspaceId)?.firstOpen,
         lifetime:signal,firstOpenClock:options.firstOpen});
       registerRetained();
+      // What the workspace's replica waits on from its own pulls, which no relay write announces.
+      const pullDuties=(workspaceId:string,attached:HostedAttachment):HostedPullDuties=>{
+        const keys=(rows:Iterable<string>)=>[...rows].filter(key=>hosted.get(key)?.target.workspaceId===workspaceId).length;
+        const rows=(values:Iterable<{target:ServiceActivationTarget}>)=>[...values].filter(row=>row.target.workspaceId===workspaceId).length;
+        return {pulls:attached.pulls,confirmed:attached.confirmed,last:attached.last,listsWrapped:attached.hosted.listsWrapped,departedNone:attached.hosted.departedNone,
+          announced:[...attached.announced].map(([objectId,required])=>({required,reached:attached.reached.get(objectId)?.pull ?? 0})),
+          waiting:{parking:keys(parking.keys()),leaving:keys(leaving),recovering:keys(recovering),movedRestores:rows(movedRestores.values()),
+            retained:rows(retained.values()),retiring:storage.serviceActivationRetirements(workspaceId).length,held:activation!.heldIn(workspaceId)}};
+      };
+      // Why a ready workspace's replica pulls after its push, or undefined while it is quiet, its relay state is
+      // unchanged since its last full pull, and the recovery probe is not due.
+      const tailPull=(workspaceId:string,attached:HostedAttachment):HostedPullReason|undefined=>{
+        if(attached.seen===undefined)return "first";
+        if(!hostedReplicaQuiet(pullDuties(workspaceId,attached)))return "pending";
+        if(attached.check){
+          const state=hostedRelayState(storage,workspaceId);
+          attached.check=false;
+          if(state!==attached.seen)return "changed";
+        }
+        return now()>=attached.probeAt?"probe":undefined;
+      };
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
       const pass=async()=>{
         const bounds=config.activation!;
@@ -1386,14 +1433,20 @@ export async function startServiceLiveHost(options: {
             await activation!.activate(target,passSignal,settleTarget,catchUp);
           }
         });
-        // Every ready workspace pushes, then pulls. One with no documents still pulls, so its replica retires what left.
+        // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
+        // recovery probe. One with no documents still pulls while its replica has departures to finish.
         // One that is not ready only pulls, once a pass unless an activation above caught it up, so its held lists page
         // on and an ended hold is freed, however long another document holds readiness back. One whose replica has not
         // checked its origin does neither.
         for(const [workspaceId,attached] of [...attachments]){
           if(!attached.hosted.checked)continue;
-          if(activation!.workspaceReady(workspaceId))await step(async()=>{await attached.hosted.push(passSignal);await pull(attached,passSignal);});
-          else if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal));
+          if(activation!.workspaceReady(workspaceId))await step(async()=>{
+            await attached.hosted.push(passSignal);
+            // The pull uses the attachment standing now, not one the pass saw before the push.
+            const current=checked(workspaceId),reason=current && tailPull(workspaceId,current);
+            if(current && reason)await pull(current,passSignal,reason);
+          });
+          else if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal,"unready"));
         }
         // A diverged replica runs nothing more. Its workspace detaches for good, and its store stays.
         // It counts as diverged before the detach, which a lost reply or an exiting engine can fail.
@@ -1489,6 +1542,11 @@ export async function startServiceLiveHost(options: {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
         return hostedKey(document) === undefined && !retained.has(documentKey(document)) && !movedRestores.has(movedRestoreKey(document)) && required !== undefined && attached!.confirmed >= required &&
           reachedSince(attached!, document.objectId, required);
+      },
+      /** How many hosted pulls of the workspace this daemon started, in total and by why each ran. */
+      hostedPulls(workspaceId: string): {total: number; reasons: Partial<Record<HostedPullReason, number>>} {
+        const reasons = Object.fromEntries(pullCounts.get(workspaceId) ?? []);
+        return {total: Object.values(reasons).reduce((sum, count) => sum + count, 0), reasons};
       },
       /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
       settled(document: {workspaceId: string; objectId: string}): boolean {

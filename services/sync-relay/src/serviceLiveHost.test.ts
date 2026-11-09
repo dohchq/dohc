@@ -7247,7 +7247,7 @@ async function readyHostedHost(workspaceIds: readonly string[]) {
   const relayRows = (workspaceId: string) => f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 0, limit: 1000}).rows.map(row => row.relaySeq);
   const replicas = new Map(workspaceIds.map(workspaceId => [workspaceId, {cursor: 0, applied: [] as number[], read: [] as number[], next: 0, more: false}]));
   const hold = new Map<string, {entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>}>();
-  const pushWrites = new Map<string, number>();
+  const pushWrites = new Map<string, number>(), failures = {pulls: 0};
   let client!: ReturnType<typeof clientFrom>["client"];
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options); client = captured.client;
@@ -7264,6 +7264,7 @@ async function readyHostedHost(workspaceIds: readonly string[]) {
           return {result: {...pushReply, pushed: writes > 0 ? 1 : 0}} as never;
         }
         case "sync.pullHosted": {
+          if (failures.pulls > 0) {failures.pulls--; throw new Error("The relay did not answer.");}
           const page = f.storage.fetchLogPage({workspaceId, sinceRelaySeq: replica.cursor, limit: 100});
           Object.assign(replica, {read: page.rows.map(row => row.relaySeq), next: page.nextCursor, more: page.hasMore});
           const held = hold.get(workspaceId);
@@ -7301,7 +7302,7 @@ async function readyHostedHost(workspaceIds: readonly string[]) {
     hold.set(workspaceId, held);
     return held;
   };
-  return {f, raw, append, relayRows, replicas, pushWrites, pulls, passes, caughtUp, holdPull};
+  return {f, raw, append, relayRows, replicas, pushWrites, failures, pulls, passes, caughtUp, holdPull};
 }
 
 // Issue #1967: a ready workspace pulled its hosted replica on every 250 ms pass, with nothing new on the relay.
@@ -7319,6 +7320,7 @@ it("pulls a ready, unchanged hosted workspace once rather than on every pass", a
   notifyRelayWrite(h.f.storage);
   await h.passes(2);
   expect(h.pulls("workspace")).toBe(1);
+  expect(host.hostedPulls("workspace")).toEqual({total: 1, reasons: {first: 1}});
   h.caughtUp("workspace");
 });
 
@@ -7342,6 +7344,7 @@ it("pulls once for a burst of writes and once more for a write during a pull", a
   await vi.waitFor(() => h.caughtUp("workspace"));
   await h.passes(3);
   expect(h.pulls("workspace")).toBe(4);
+  expect(host.hostedPulls("workspace")).toEqual({total: 4, reasons: {first: 1, changed: 3}});
   h.caughtUp("workspace");
 });
 
@@ -7362,6 +7365,7 @@ it("pulls only the workspace a write reached, and each of two written in one tic
   await h.passes(3);
   expect(h.pulls("workspace-a")).toBe(3);
   expect(h.pulls("workspace-b")).toBe(2);
+  expect(host.hostedPulls("workspace-b")).toEqual({total: 2, reasons: {first: 1, changed: 1}});
 });
 
 // Proves: rows the host's own pushes write to the relay pull at most once each, and the workspace then goes quiet.
@@ -7378,4 +7382,39 @@ it("goes quiet after the host's own pushes write to the relay", async () => {
   expect(h.pulls("workspace")).toBe(settled);
   expect(h.relayRows("workspace")).toHaveLength(3);
   h.caughtUp("workspace");
+});
+
+// Proves: a relay change that sent no notice, as a write on another connection, reaches a quiet workspace
+// once the 30 s recovery probe is due, and not before.
+it("catches a relay change that sent no notice at the 30 s recovery probe", async () => {
+  const h = await readyHostedHost(["workspace"]);
+  let clock = 1_000_000;
+  const host = await startServiceLiveHost({...h.f, nowMs: () => clock});
+  cleanup.push(() => host.close());
+  await vi.waitFor(() => expect(h.pulls("workspace")).toBe(1));
+  await h.passes(2);
+  h.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','device',0,'workspace.init','{}',1)").run();
+  clock += 29_999;
+  await h.passes(5);
+  expect(h.pulls("workspace")).toBe(1);
+  expect(h.replicas.get("workspace")!.applied).toEqual([]);
+  clock += 1;
+  await vi.waitFor(() => {expect(h.relayRows("workspace")).toHaveLength(1); h.caughtUp("workspace");});
+  await h.passes(5);
+  expect(host.hostedPulls("workspace")).toEqual({total: 2, reasons: {first: 1, probe: 1}});
+});
+
+// Proves: a failed pull keeps its workspace pulling every pass, with no further relay change, until one succeeds.
+it("keeps pulling a ready workspace after a failed pull until one succeeds", async () => {
+  const h = await readyHostedHost(["workspace"]);
+  const host = await startServiceLiveHost(h.f);
+  cleanup.push(() => host.close());
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await vi.waitFor(() => expect(h.pulls("workspace")).toBe(1));
+  await h.passes(2);
+  h.failures.pulls = 2;
+  h.append("workspace");
+  await vi.waitFor(() => {expect(h.relayRows("workspace")).toHaveLength(1); h.caughtUp("workspace");});
+  await h.passes(3);
+  expect(host.hostedPulls("workspace")).toEqual({total: 4, reasons: {first: 1, changed: 1, pending: 2}});
 });

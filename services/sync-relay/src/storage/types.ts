@@ -696,6 +696,8 @@ export interface SyncRelayStorage {
   serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean): boolean;
   /** The document's open retirement obligation, if Stop recorded one its activation has not completed. */
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}): import("./serviceActivationRetirement").ServiceActivationRetirement | null;
+  /** The workspace's open retirement obligations, by object. */
+  serviceActivationRetirements(workspaceId: string): import("./serviceActivationRetirement").ServiceActivationRetirement[];
   /** Whether the document has a restore that has neither resumed nor been declined. */
   serviceRestoreInProgress(document: {workspaceId: string; objectId: string}): boolean;
   serviceActivationRetirementDecision(document: {workspaceId: string; objectId: string}, activation: import("./serviceActivationRetirement").RetirableServiceActivation):
