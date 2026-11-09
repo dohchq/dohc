@@ -6761,7 +6761,12 @@ function registerIpcHandlers(): void {
     setWorkspaceRemote: async (workspaceId, remote) => {
       await setWorkspaceRemote(workspaceId, remote);
       retryStopAndRestoreReleases?.();
-    }, usableRoot, readdir, mkdir, probeRelayWorkspace,
+    },
+    sendWorkspaceName: async (credentials, workspace) => {
+      await relayShareJsonWithCredentials(credentials, `/sync/workspaces/${encodeURIComponent(workspace.workspaceId)}/name`,
+        { method: "PUT", body: JSON.stringify({ name: basename(workspace.rootPath) }) });
+    },
+    usableRoot, readdir, mkdir, probeRelayWorkspace,
     createJoinedWorkspace, bootstrapJoinedWorkspace, refreshNativeWorkspaceSurfaces,
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });

@@ -1,5 +1,5 @@
 import { AgentLaunchProfile } from "../agents/agentToolCatalog";
-import { IDENTITY_HUES } from "../renderer/tokens";
+import { IDENTITY_HUES } from "@dohc/workspace-contracts/agent-hues";
 import { isSettingsObject } from "./settingsFile";
 import { AgentSettings, DEFAULT_AGENT_ID } from "./userSettings";
 

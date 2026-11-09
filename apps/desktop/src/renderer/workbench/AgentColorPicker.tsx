@@ -13,7 +13,7 @@ import {
 import type { ActorPresentation, DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { ipcErrorMessage } from "../ipcError";
 import { HueControl } from "../settings/SettingRow";
-import type { IdentityHue } from "../tokens";
+import type { IdentityHue } from "@dohc/workspace-contracts/agent-hues";
 import { MENU_ENTER, MENU_FRAME, menuEnterFrom } from "../ui/Menu";
 import { useDismiss } from "../ui/useDismiss";
 import { agentChoice, canChooseAgentColor, subscribePresentation } from "./actorPresentation";

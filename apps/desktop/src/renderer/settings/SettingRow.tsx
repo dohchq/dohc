@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { Check, LoaderCircle, Minus, Plus, RotateCcw } from "lucide-react";
-import { AGENT_HUES, IDENTITY_HUES, palette, type AgentHue, type IdentityHue } from "../tokens";
+import { AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "@dohc/workspace-contracts/agent-hues";
+import { palette } from "../tokens";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
 export function SettingRow(props: {

@@ -1,4 +1,4 @@
-import { IDENTITY_HUES, type IdentityHue } from "../tokens";
+import { IDENTITY_HUES, type IdentityHue } from "@dohc/workspace-contracts/agent-hues";
 
 // Spelled out so Tailwind sees every class.
 const VERSION_DOTS: Record<IdentityHue, string> = {

@@ -3,6 +3,7 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import { AGENT_URI_CHAR_LIMIT } from "@dohc/security-contract/wire-patterns";
 import { invalidLinkCapability, relayError } from "./errors";
 import { hashAgentCredential, servableFiles, type ValidatedLinkCapability } from "./linkSecurity";
+import type { PersonalAgents } from "./personalAgents";
 import { authorizeLinkShareAction } from "./shareAuthorization";
 import type { ShareSelector } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
@@ -17,6 +18,10 @@ import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnec
 //
 // Nothing is cached. Every request authenticates, and `fresh` authenticates
 // again. Every refusal is the bytes of a link that never existed.
+//
+// A personal agent's access token, sent the same way, resolves only through
+// `personal`, which looks only in the personal tables. A route accepts one
+// kind and never falls back to the other.
 
 export type LinkCredential =
   | { kind: "holder"; capabilityToken: string; capability: ValidatedLinkCapability }
@@ -44,6 +49,19 @@ export type LinkJsonResponse = (
   signal: AbortSignal,
 ) => Response;
 
+/** A personal agent, checked at its account's fence. The route then checks the workspace. */
+export interface PersonalAuthority {
+  kind: "personal";
+  agentId: string;
+  ownerUserId: string;
+  connectionId: string;
+  agentEpoch: number;
+  /** The fence epoch this check read. A write compares it again inside its transaction. */
+  fenceEpoch: number;
+  callerKey: string;
+  check: AgentAccessCheck;
+}
+
 export interface LinkAuthorityResolver {
   /** Authenticates the request. */
   resolve(request: Request): LinkAuthority;
@@ -51,6 +69,10 @@ export interface LinkAuthorityResolver {
   require(request: Request, callerLimiter: TokenBucketLimiter, grantLimiter: TokenBucketLimiter): LinkAuthority;
   /** Authenticates the same credential again, for the same link at the same generation. */
   fresh(authority: LinkAuthority): LinkAuthority;
+  /** Authenticates a personal agent's request at its account's current fence. 503 while the fence can't be read. */
+  personal(request: Request): Promise<PersonalAuthority>;
+  /** Authenticates the same personal credential again, for the same connection, at the current fence. */
+  freshPersonal(authority: PersonalAuthority): Promise<PersonalAuthority>;
 }
 
 const AGENT_SCHEME = /^DohcAgent (.+)$/u;
@@ -76,7 +98,9 @@ export function agentAccessCheck(token: unknown, resource: unknown, linkKey: str
 
 export function createLinkAuthorityResolver(input: {
   storage: Pick<SyncRelayStorage,
-    "authenticateAgentAuthority" | "findChannelCreateKind" | "getShare" | "getShareGrant" | "workspaceIsOwnedBy">;
+    | "authenticateAgentAuthority" | "findChannelCreateKind" | "getShare" | "getShareGrant" | "workspaceIsOwnedBy"
+    | "personalCredentialOwner" | "authenticatePersonalAuthority">;
+  personalAgents: Pick<PersonalAgents, "readFence">;
   linkKey: string | Uint8Array | undefined;
   publicEditRelease: PublicEditRelease | undefined;
   relayExchangeKeyConfigured: boolean;
@@ -126,14 +150,8 @@ export function createLinkAuthorityResolver(input: {
     };
   };
 
-  const resolve = (request: Request): LinkAuthority => {
-    if (!isAgentRequest(request)) {
-      // A holder never names an agent's address.
-      if (request.headers.has("x-dohc-agent-resource")) throw invalidLinkCapability();
-      const { capabilityToken, capability } = input.requireLinkCapability(request);
-      return holder(capabilityToken, capability);
-    }
-    // An agent never sends a holder's profile, and never comes from a browser.
+  // An agent never sends a holder's profile, and never comes from a browser.
+  const agentCheck = (request: Request): AgentAccessCheck => {
     if (!linkKey || !input.relayExchangeKeyConfigured || !input.hasValidRelayExchangeKey(request) ||
         request.headers.has("x-dohc-link-profile-secret") || request.headers.has("cookie")) {
       throw invalidLinkCapability();
@@ -141,7 +159,37 @@ export function createLinkAuthorityResolver(input: {
     const check = agentAccessCheck(AGENT_SCHEME.exec(request.headers.get("authorization") ?? "")?.[1],
       request.headers.get("x-dohc-agent-resource"), linkKey);
     if (!check) throw invalidLinkCapability();
-    return agent(check);
+    return check;
+  };
+
+  const resolve = (request: Request): LinkAuthority => {
+    if (!isAgentRequest(request)) {
+      // A holder never names an agent's address.
+      if (request.headers.has("x-dohc-agent-resource")) throw invalidLinkCapability();
+      const { capabilityToken, capability } = input.requireLinkCapability(request);
+      return holder(capabilityToken, capability);
+    }
+    return agent(agentCheck(request));
+  };
+
+  // The account's fence is read by primary key first, then storage checks the
+  // token, connection, agent epoch, that fence, account deletion, and address.
+  const personal = async (check: AgentAccessCheck, connectionId?: string): Promise<PersonalAuthority> => {
+    const owner = storage.personalCredentialOwner({ kind: "access", hash: check.accessTokenHash });
+    if (owner === null) throw invalidLinkCapability();
+    const fenceEpoch = await input.personalAgents.readFence(owner);
+    const connection = storage.authenticatePersonalAuthority(check, fenceEpoch, nowMs());
+    if (!connection || (connectionId !== undefined && connection.connectionId !== connectionId)) throw invalidLinkCapability();
+    return {
+      kind: "personal",
+      agentId: connection.agentId,
+      ownerUserId: connection.ownerUserId,
+      connectionId: connection.connectionId,
+      agentEpoch: connection.agentEpoch,
+      fenceEpoch,
+      callerKey: `personal:${connection.connectionId}`,
+      check,
+    };
   };
 
   return {
@@ -158,6 +206,13 @@ export function createLinkAuthorityResolver(input: {
       const { credential } = authority;
       if (credential.kind === "agent") return agent(credential.check, authority);
       return holder(credential.capabilityToken, input.requireFreshLinkRead(credential.capabilityToken, authority));
+    },
+    async personal(request) {
+      if (!isAgentRequest(request)) throw invalidLinkCapability();
+      return personal(agentCheck(request));
+    },
+    freshPersonal(authority) {
+      return personal(authority.check, authority.connectionId);
     },
   };
 }

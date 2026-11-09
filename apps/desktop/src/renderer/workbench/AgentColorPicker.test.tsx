@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
-import type { IdentityHue } from "../tokens";
+import type { IdentityHue } from "@dohc/workspace-contracts/agent-hues";
 import { AgentColorAvatar, AgentColorContext, AgentColorName, AgentColorScope, saveAgentColor } from "./AgentColorPicker";
 import { bindAgentColorUpdates, clearAgentColorOverrides, neutralPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ChatAvatar } from "./ChatAvatar";

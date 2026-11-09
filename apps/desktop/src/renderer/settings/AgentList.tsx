@@ -19,7 +19,7 @@ import {
   type DesktopUserSettings,
   type DesktopUserSettingsResult,
 } from "../../settings/userSettings";
-import type { AgentHue } from "../tokens";
+import type { AgentHue } from "@dohc/workspace-contracts/agent-hues";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { RestrictedAgentsBand } from "../RestrictedMode";

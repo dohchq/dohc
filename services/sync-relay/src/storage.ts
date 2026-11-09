@@ -135,6 +135,7 @@ import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
 import * as agentConnectionStorage from "./storage/agentConnections";
+import * as personalAgentStorage from "./storage/personalAgents";
 import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
@@ -1697,6 +1698,67 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   disconnectAgentConnection(input: Parameters<typeof agentConnectionStorage.disconnectAgentConnection>[1]): agentConnectionStorage.AgentConnectionRow | null {
     return agentConnectionStorage.disconnectAgentConnection(this, input);
+  }
+
+  beginPersonalAuthorization(input: Parameters<typeof personalAgentStorage.beginPersonalAuthorization>[1]): boolean {
+    return personalAgentStorage.beginPersonalAuthorization(this, input);
+  }
+
+  readPersonalAuthorization(requestHash: string, nowMs: number): personalAgentStorage.PersonalAuthorizationRow | null {
+    return personalAgentStorage.readPersonalAuthorization(this, requestHash, nowMs);
+  }
+
+  cancelPersonalAuthorization(requestHash: string, nowMs: number): personalAgentStorage.PersonalAuthorizationRow | null {
+    return personalAgentStorage.cancelPersonalAuthorization(this, requestHash, nowMs);
+  }
+
+  allowPersonalAuthorization(input: Parameters<typeof personalAgentStorage.allowPersonalAuthorization>[1]): personalAgentStorage.PersonalAuthorizationRow | null {
+    return personalAgentStorage.allowPersonalAuthorization(this, input);
+  }
+
+  personalCredentialOwner(credential: Parameters<typeof personalAgentStorage.personalCredentialOwner>[1]): string | null {
+    return personalAgentStorage.personalCredentialOwner(this, credential);
+  }
+
+  redeemPersonalAuthorizationCode(input: Parameters<typeof personalAgentStorage.redeemPersonalAuthorizationCode>[1]): personalAgentStorage.PersonalTokenGrant {
+    return personalAgentStorage.redeemPersonalAuthorizationCode(this, input);
+  }
+
+  refreshPersonalTokens(input: Parameters<typeof personalAgentStorage.refreshPersonalTokens>[1]): personalAgentStorage.PersonalTokenGrant {
+    return personalAgentStorage.refreshPersonalTokens(this, input);
+  }
+
+  // Opens no transaction, as the link agent check opens none.
+  authenticatePersonalAuthority(check: agentConnectionStorage.AgentAccessCheck, fenceEpoch: number, nowMs: number): personalAgentStorage.PersonalConnectionRow | null {
+    return personalAgentStorage.readPersonalAuthority(this, check, fenceEpoch, nowMs);
+  }
+
+  listPersonalAgents(ownerUserId: string): personalAgentStorage.PersonalRoster {
+    return personalAgentStorage.listPersonalAgents(this, ownerUserId);
+  }
+
+  changePersonalAgent(input: Parameters<typeof personalAgentStorage.changePersonalAgent>[1]): personalAgentStorage.PersonalAgentChangeResult {
+    return personalAgentStorage.changePersonalAgent(this, input);
+  }
+
+  revokePersonalCredentialsBelowFence(ownerUserId: string, epoch: number): string[] {
+    return personalAgentStorage.revokePersonalCredentialsBelowFence(this, ownerUserId, epoch);
+  }
+
+  signOutAccountPersonalAgents(ownerUserId: string): string[] {
+    return personalAgentStorage.signOutAccountPersonalAgents(this, ownerUserId);
+  }
+
+  readCredentialFencePosition(): number {
+    return personalAgentStorage.readCredentialFencePosition(this);
+  }
+
+  advanceCredentialFencePosition(changedAtMs: number): void {
+    personalAgentStorage.advanceCredentialFencePosition(this, changedAtMs);
+  }
+
+  setWorkspaceDisplayName(input: Parameters<typeof personalAgentStorage.setWorkspaceDisplayName>[1]): boolean {
+    return personalAgentStorage.setWorkspaceDisplayName(this, input);
   }
 
   fetchLogCoordinate(input: {

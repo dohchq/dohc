@@ -79,7 +79,8 @@ export function seedLinkAgent(raw: {prepare(sql: string): {run(...params: unknow
  */
 export function holderLinkAuthority(storage: Parameters<typeof createLinkAuthorityResolver>[0]["storage"], linkKey: string | Uint8Array, exchangeKey: string) {
   const holderOnly = () => { throw new Error("A link holder never reaches the agent resolver."); };
-  return createLinkAuthorityResolver({storage, linkKey, publicEditRelease: {version: 1}, relayExchangeKeyConfigured: true,
+  const personalAgents = {readFence: () => { throw new Error("A link route never reads a personal agent's fence."); }};
+  return createLinkAuthorityResolver({storage, personalAgents, linkKey, publicEditRelease: {version: 1}, relayExchangeKeyConfigured: true,
     hasValidRelayExchangeKey: request => request.headers.get("x-dohc-relay-exchange-key") === exchangeKey, nowMs: () => Date.now(),
     requireLinkCapability: holderOnly, requireFreshLinkRead: holderOnly});
 }

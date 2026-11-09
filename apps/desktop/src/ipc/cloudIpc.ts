@@ -79,6 +79,8 @@ export function registerCloudIpcHandlers<
   enrollWorkspaceKeyEnvelope: typeof enrollWorkspaceKeyEnvelope;
   installWorkspaceDataKey: typeof installWorkspaceDataKey;
   setWorkspaceRemote(workspaceId: string, remote: NonNullable<RegistryEntry["remote"]>): Promise<void>;
+  /** Tells the relay the workspace's folder name, which personal agent sign-in shows the owner. */
+  sendWorkspaceName(credentials: CloudCredentials, workspace: RegistryEntry): Promise<void>;
   usableRoot(rootPath: string): string;
   readdir(rootPath: string): Promise<string[]>;
   mkdir(rootPath: string, options: { recursive: true }): Promise<unknown>;
@@ -99,7 +101,7 @@ export function registerCloudIpcHandlers<
     requireEngineSessions, currentEngineSessions,
     withRendererWorkspaceOperation, receivedShareEngine, readWorkspaceSecretState,
     readWorkspaceDataKeyForEnrollment, assertWritableWorkspace, relayClientForWorkspace,
-    enrollWorkspaceKeyEnvelope, installWorkspaceDataKey, setWorkspaceRemote,
+    enrollWorkspaceKeyEnvelope, installWorkspaceDataKey, setWorkspaceRemote, sendWorkspaceName,
     usableRoot, readdir, mkdir, probeRelayWorkspace, createJoinedWorkspace,
     bootstrapJoinedWorkspace, refreshNativeWorkspaceSurfaces, openWorkspaceActivity,
     completeWorkspaceJoinBootstrap, desktopMarks,
@@ -272,6 +274,9 @@ export function registerCloudIpcHandlers<
           ownerUserId: credentials.userId,
         });
         operation.assertCurrent();
+        // Sync works without the name, so a failed send doesn't stop it.
+        void sendWorkspaceName(credentials, workspace).catch((error: unknown) =>
+          console.warn("[desktop] could not send the workspace name to the server:", error));
         await activity.enableCloud(workspace);
         operation.assertCurrent();
         return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));

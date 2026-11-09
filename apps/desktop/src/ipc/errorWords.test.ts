@@ -250,7 +250,7 @@ describe("error words", () => {
     expect(versionNameRefusal(acrossIpc(error, "desktop:create-workspace-version"))).toBe(refused);
   });
 
-  it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
     const error = new ReservedWorkspaceIdError(workspaceId);
     const expected = {
       title: "dohc can't open this folder",

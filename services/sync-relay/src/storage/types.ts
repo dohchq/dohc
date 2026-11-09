@@ -959,6 +959,21 @@ export interface SyncRelayStorage {
   recordAgentConnectionAction(connectionId: string, atMs: number): void;
   listAgentConnections(input: Parameters<typeof import("./agentConnections").listAgentConnections>[1]): import("./agentConnections").AgentConnectionPage;
   disconnectAgentConnection(input: Parameters<typeof import("./agentConnections").disconnectAgentConnection>[1]): import("./agentConnections").AgentConnectionRow | null;
+  beginPersonalAuthorization(input: Parameters<typeof import("./personalAgents").beginPersonalAuthorization>[1]): boolean;
+  readPersonalAuthorization(requestHash: string, nowMs: number): import("./personalAgents").PersonalAuthorizationRow | null;
+  cancelPersonalAuthorization(requestHash: string, nowMs: number): import("./personalAgents").PersonalAuthorizationRow | null;
+  allowPersonalAuthorization(input: Parameters<typeof import("./personalAgents").allowPersonalAuthorization>[1]): import("./personalAgents").PersonalAuthorizationRow | null;
+  personalCredentialOwner(credential: Parameters<typeof import("./personalAgents").personalCredentialOwner>[1]): string | null;
+  redeemPersonalAuthorizationCode(input: Parameters<typeof import("./personalAgents").redeemPersonalAuthorizationCode>[1]): import("./personalAgents").PersonalTokenGrant;
+  refreshPersonalTokens(input: Parameters<typeof import("./personalAgents").refreshPersonalTokens>[1]): import("./personalAgents").PersonalTokenGrant;
+  authenticatePersonalAuthority(check: import("./agentConnections").AgentAccessCheck, fenceEpoch: number, nowMs: number): import("./personalAgents").PersonalConnectionRow | null;
+  listPersonalAgents(ownerUserId: string): import("./personalAgents").PersonalRoster;
+  changePersonalAgent(input: Parameters<typeof import("./personalAgents").changePersonalAgent>[1]): import("./personalAgents").PersonalAgentChangeResult;
+  revokePersonalCredentialsBelowFence(ownerUserId: string, epoch: number): string[];
+  signOutAccountPersonalAgents(ownerUserId: string): string[];
+  readCredentialFencePosition(): number;
+  advanceCredentialFencePosition(changedAtMs: number): void;
+  setWorkspaceDisplayName(input: Parameters<typeof import("./personalAgents").setWorkspaceDisplayName>[1]): boolean;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;

@@ -2,6 +2,7 @@ import {parsePublicEditRelease} from "@dohc/security-contract";
 import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createAccountSessionResolver, createSessionActorResolver, UnauthorizedError, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
+import { createPostgresCredentialFence, type CredentialFence } from "@dohc/workspace-auth/credentialFence";
 import { readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
@@ -289,8 +290,9 @@ let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string
 let lookupUserDisplayName: (
   userId: string,
 ) => Promise<string | null> | string | null;
-// The test seam has no browser sign-ins, so it serves no push subscriptions.
-const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession} = testAuthSeam
+// The test seam has no browser sign-ins, so it serves no push subscriptions
+// and no personal agent sign-in.
+const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; credentialFence?: CredentialFence} = testAuthSeam
   ? {actor: createTestActorResolver()}
   : await (async () => {
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
@@ -309,10 +311,15 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession} =
         baseURL: process.env.SYNC_RELAY_AUTH_BASE_URL ?? `http://localhost:${requestedPort || 1788}`,
         secret,
       });
-      return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth)};
+      // Consent checks a password with Better Auth's own verifier, so it accepts exactly what sign-in accepts.
+      const credentialFence = createPostgresCredentialFence(pool, {
+        verifyPassword: async input => (await auth.$context).password.verify(input),
+      });
+      return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth), credentialFence};
   })();
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
+const credentialFence = accountResolvers.credentialFence;
 const pushConfig = (() => {
   try {return readPushConfig(process.env);}
   catch (error) {fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid push sender configuration."}`);}
@@ -400,6 +407,7 @@ const relayApplication = createSyncRelayHandler({
   storage,
   resolveActor,
   ...(resolveAccountSession ? {resolveAccountSession} : {}),
+  ...(credentialFence ? {credentialFence} : {}),
   ...(pushVapidPublicKey ? {pushVapidPublicKey} : {}),
   ...(pushConfig ? {pushHosts: pushConfig.hosts} : {}),
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
@@ -635,7 +643,7 @@ const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startO
   onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
 const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
 server.once("close",stopOwnerAdmission);
-server.once("close",()=>relayApplication.dispose());
+server.once("close",()=>void relayApplication.dispose());
 process.once("SIGINT",stopOwnerAdmission);
 process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
@@ -792,6 +800,8 @@ installShutdown(server, {
     await liveValidation.close();
     await datasetHost?.close();
     if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
+    // The fence listener holds a pool client, so it closes before the pool ends.
+    await relayApplication.dispose();
     storage.close();
     try {
       await pool?.end();

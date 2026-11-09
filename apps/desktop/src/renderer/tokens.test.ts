@@ -3,9 +3,9 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { IDENTITY_HUES } from "@dohc/workspace-contracts/agent-hues";
 import {
   CSS_TOKEN_NAMES,
-  IDENTITY_HUES,
   fonts,
   identityHues,
   palette,

@@ -142,6 +142,7 @@ async function harness() {
     delete registry.get(id)!.pausedRemote;
     delete registry.get(id)!.syncPause;
   });
+  const sendName = vi.fn<Dependencies["sendWorkspaceName"]>(async () => { steps.push("name"); });
   const enable = vi.fn<Dependencies["activity"]["enableCloud"]>(async () => { steps.push("enable"); });
   const notify = vi.fn(() => { steps.push("notify"); });
   const changing = vi.fn<Dependencies["notifyCloudSessionChangedWithKey"]>();
@@ -212,7 +213,7 @@ async function harness() {
       if (refusal) throw new Error(refusal);
     },
     relayClientForWorkspace: bindRelay, enrollWorkspaceKeyEnvelope: enroll,
-    installWorkspaceDataKey: installDataKey, setWorkspaceRemote: setRemote,
+    installWorkspaceDataKey: installDataKey, setWorkspaceRemote: setRemote, sendWorkspaceName: sendName,
     usableRoot: roots.usableRoot, readdir, mkdir, probeRelayWorkspace: probe,
     createJoinedWorkspace, bootstrapJoinedWorkspace: bootstrap,
     refreshNativeWorkspaceSurfaces: () => { steps.push("surfaces"); },
@@ -225,7 +226,7 @@ async function harness() {
   return {
     handlers, invoke, removeJoinedWorkspace, stopWorkspaceSync, stopOperation, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
     stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, installDataKey, probe, readdir, mkdir,
-    bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup, disposed,
+    bindRelay, setRemote, sendName, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup, disposed,
     retireRenderer: () => { rendererCurrent = false; },
     reopenRenderer: () => {
       rendererCurrent = false;
@@ -470,7 +471,22 @@ describe("registered cloud handlers", () => {
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }));
     expect(h.enroll).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }));
-    expect(h.steps).toEqual(["claim", "enroll", "remote", "enable"]);
+    expect(h.steps).toEqual(["claim", "enroll", "remote", "name", "enable"]);
+    expect(h.sendName).toHaveBeenCalledWith(credentials, expect.objectContaining({ workspaceId: "existing", rootPath: h.workspace.rootPath }));
+  });
+
+  it("starts sync when the server refuses the workspace name", async () => {
+    const h = await harness();
+    const refused = new Error("not found");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    h.sendName.mockRejectedValueOnce(refused);
+    try {
+      await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).resolves.toEqual(status);
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining("workspace name"), refused));
+      expect(h.enable).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("starts sync only after the remote and its folder record are written, and not when that write fails", async () => {
