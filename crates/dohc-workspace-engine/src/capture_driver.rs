@@ -785,7 +785,8 @@ const MAX_RESTART_ATTEMPTS: u32 = 8;
 /// having to close and reopen the workspace.
 const TERMINAL_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How often the driver rescans while paths sit in the quarantine. The
+/// How often the driver starts another degraded rescan cycle (up to
+/// `DEGRADED_RESCAN_BACKOFF` scans) while paths sit in the quarantine. The
 /// controller stops rescanning them after a few identical failures, and the
 /// watcher ignores the engine's own writes, so a failure that clears without
 /// a file event (a lock released, a restored store) needs this retry.
