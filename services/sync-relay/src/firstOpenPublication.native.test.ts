@@ -303,15 +303,21 @@ it.skipIf(engine.missing)("refuses a check the host's configuration can never ad
 it.skipIf(engine.missing)("frees the engine and keeps the host when the caller cancels at any point of the check", async () => {
   // The engine refuses this file, so every request reaches it. A held slot would wait out this deadline.
   const f = await fixture({markdown: AUTOLINK, service: {client: {...profile.client, requestDeadlineMs: 600_000}}});
+  const refused = {kind: "refused", reason: "unsupported-source", cause: "settlement-mismatch"};
+  let cancelled = 0;
   for (let turns = 0; turns < 24; turns++) {
     const abort = new AbortController();
     const response = f.post({}, {signal: abort.signal});
     for (let turn = 0; turn < turns; turn++) await new Promise(setImmediate);
     abort.abort(new Error("cancelled"));
-    expect((await response).status).not.toBe(200);
+    // The engine can answer within these turns; a check that ended before the abort answers as the engine did.
+    const answered = await response;
+    if (answered.status === 200) expect((await answered.json() as {outcome: FirstOpenOutcome}).outcome).toMatchObject(refused);
+    else cancelled++;
     expect(f.host!.invalidated.aborted).toBe(false);
-    expect(await f.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "settlement-mismatch"});
+    expect(await f.open()).toMatchObject(refused);
   }
+  expect(cancelled).toBeGreaterThan(0);
   nothingAppended(f);
 }, 120_000);
 
