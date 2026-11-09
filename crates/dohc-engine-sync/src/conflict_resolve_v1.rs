@@ -8569,6 +8569,103 @@ mod tests {
         assert_eq!(chosen, "incoming");
     }
 
+    /// H2c as two engines run it. The other machine's typing waited here for
+    /// the history this machine retired, so no conflict opened here. Its kept
+    /// copy and its next edit still converge here with no choice.
+    #[test]
+    fn the_peers_kept_copy_converges_where_its_typing_waited_and_no_conflict_opened() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, key) =
+            deleter_with_retired_history(&base, &[("peer", 1, &first[..])], 0);
+        assert_eq!(deferred_rows(&store), 1);
+        let edited = "base text\nTokyo";
+        let predecessor = dohc_engine_collab::Ydoc::wire();
+        predecessor.apply(&base).unwrap();
+        predecessor.apply(&first).unwrap();
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        let built = peer_kept_its_copy(&mut store, &key, (&claim, &predecessor), edited);
+        let transition = built.validated.payload.lineage_transition.as_ref();
+        let successor = transition.unwrap().successor.clone().unwrap();
+        let typing = dohc_engine_collab::Ydoc::wire();
+        typing
+            .apply(&stored_blob(&store, &successor.update_blob_sha256))
+            .unwrap();
+        let later = typing.plaintext_insert(15, "\nLater");
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+        envelope.origin_id = "peer-resolver".to_owned();
+        envelope.recorded_at_ms = 26;
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        let successor_claim = successor.lineage_claim_id;
+        apply_peer_ydoc(
+            &mut store,
+            ("peer-resolver", 1, 11),
+            &successor_claim,
+            &later,
+            false,
+        );
+
+        let text = "base text\nTokyo\nLater";
+        assert_eq!(active_claim(&store, &key), Some(successor_claim));
+        assert_eq!(projected_ydoc_text(&mut store, &key), text);
+        assert_eq!(text_keep_head(&mut store).text, text);
+        assert_eq!(deferred_rows(&store), 0);
+        let sql = "SELECT COUNT(*) FROM conflicts";
+        let conflicts: i64 = store
+            .read_with(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(conflicts, 0);
+    }
+
+    /// This machine closed its own conflict for the deleted note another way.
+    /// The other machine's kept copy opens a review here instead of being
+    /// taken up.
+    #[test]
+    fn a_kept_copy_over_a_deletion_asks_when_this_machine_closed_its_conflict() {
+        let (base, first, _, _) = peer_editor_history();
+        let (_scratch, mut store, key) =
+            deleter_with_retired_history(&base, &[("peer", 1, &first[..])], 0);
+        let edited = "base text\nTokyo";
+        open_deletion_conflict(&mut store, None, Some(peer_snapshot(edited)));
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET status='resolved',resolution='kept-current'",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .unwrap();
+        let predecessor = dohc_engine_collab::Ydoc::wire();
+        predecessor.apply(&base).unwrap();
+        predecessor.apply(&first).unwrap();
+        let claim = dohc_engine_storage::hex_sha256(&base);
+        let built = peer_kept_its_copy(&mut store, &key, (&claim, &predecessor), edited);
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value.clone());
+        envelope.origin_id = "peer-resolver".to_owned();
+        envelope.recorded_at_ms = 26;
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+
+        assert_eq!(text_keep_open_rows(&store), 1);
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "doc.md")
+            .unwrap();
+        assert!(head.is_none(), "{head:?}");
+    }
+
     /// This machine holds the history the other machine's choice replaced,
     /// but moved the note to `moved.md`. The import asks instead of giving
     /// the note back its old path beside the new one.
