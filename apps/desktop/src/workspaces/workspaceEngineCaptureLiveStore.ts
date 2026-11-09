@@ -206,6 +206,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   // One rename that refuses to replace, of a visible regular file, under a hold.
   duplicateFileUnderHold?: VersionedLiveAdapter["duplicateFileUnderHold"];
   moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
+  replaceFile?: VersionedLiveAdapter["replaceFile"];
 };
 
 export interface CaptureLiveStores {
@@ -1579,6 +1580,7 @@ export function createCaptureLiveStores(
 
     moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
       await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
+    replaceFile: input => runMutation(adapter => adapter.replaceFile(input)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);

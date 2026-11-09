@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { open, rename } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { atomicReplaceFile, atomicReplaceFileSync } from "./atomicReplaceFile";
 import { createTestScratch } from "./workspaces/testTemp";
@@ -149,6 +150,47 @@ describe("durable asynchronous replacement", () => {
     });
     expect(events).toEqual(platform === "win32" ? ["write", "rename"]
       : ["write", "rename", "open directory", "sync directory", "close directory"]);
+  });
+
+  it("renames the named temporary only after the writer has flushed it", async () => {
+    const directory = await createTestScratch("named-replace-");
+    const destination = join(directory, "notes.md");
+    const temporary = join(directory, ".dohc-write-named.tmp");
+    writeFileSync(destination, "old");
+    const events: string[] = [];
+    await atomicReplaceFile(destination, async (path) => {
+      expect(path).toBe(temporary);
+      const handle = await open(path, "wx");
+      await handle.writeFile("new");
+      await handle.sync();
+      events.push("sync");
+      await handle.close();
+    }, {
+      temporary,
+      rename: async (source, target) => {
+        events.push(`rename ${basename(source)}`);
+        await rename(source, target);
+      },
+    });
+    expect(events).toEqual(["sync", "rename .dohc-write-named.tmp"]);
+    expect(readFileSync(destination, "utf8")).toBe("new");
+    expect(readdirSync(directory)).toEqual(["notes.md"]);
+  });
+
+  it.each(["write", "rename"] as const)("removes the named temporary when the %s fails", async (failing) => {
+    const directory = await createTestScratch("named-replace-");
+    const destination = join(directory, "notes.md");
+    writeFileSync(destination, "old");
+    const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    await expect(atomicReplaceFile(destination, async (path) => {
+      writeFileSync(path, "ne");
+      if (failing === "write") throw error;
+    }, {
+      temporary: join(directory, ".dohc-write-named.tmp"),
+      rename: async () => { throw error; },
+    })).rejects.toBe(error);
+    expect(readFileSync(destination, "utf8")).toBe("old");
+    expect(readdirSync(directory)).toEqual(["notes.md"]);
   });
 
   it("keeps the default path free of directory sync", async () => {

@@ -49,6 +49,7 @@ export const WORKSPACE_METHOD = {
   captureRelease: "capture.release",
   captureDuplicateFile: "capture.duplicateFile",
   captureMoveFile: "capture.moveFile",
+  filesReplace: "files.replace",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
   automationsReleaseGroups: "automations.releaseGroups",
@@ -501,6 +502,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureDuplicateFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string; author?: WriteAuthor };
   [WORKSPACE_METHOD.captureMoveFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string };
+  /** `temporary` is the `.dohc-write-<id>.tmp` name beside `path` that the write goes through. */
+  [WORKSPACE_METHOD.filesReplace]: WorkspaceJsonObject & { path: string; temporary: string; bytesBase64: string };
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
   [WORKSPACE_METHOD.automationsReleaseGroups]: WorkspaceEmptyParams;
@@ -1445,6 +1448,7 @@ const WorkspaceResultSchemas = {
       reason: Schema.Literals(["destination-exists", "source-missing", "no-replace-unsupported"]),
     }),
   ]),
+  [WORKSPACE_METHOD.filesReplace]: mutableStruct({ replaced: Schema.Literal(true) }),
   /** True when the call inserted the pair or replaced its filter. */
   [WORKSPACE_METHOD.automationsSubscribe]: mutableStruct({
     subscribed: Schema.Boolean,
