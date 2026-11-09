@@ -125,13 +125,8 @@ describe("a note past read mode's size", () => {
 
   it("whose text is past the live limit, though its file is not, says it is too large, with no Edit anyway", async () => {
     // Each invalid byte in the file reads as U+FFFD, three bytes in the text.
-    const invalid = "�".repeat(760);
-    const text = `# Notes
-
-${Array.from({ length: 1000 }, (_, index) => `Paragraph ${index + 1} ${invalid}`).join("
-
-")}
-`;
+    const invalid = "\uFFFD".repeat(760);
+    const text = `# Notes\n\n${Array.from({ length: 1000 }, (_, index) => `Paragraph ${index + 1} of plain text ${invalid}`).join("\n\n")}\n`;
     expect(text.length).toBeLessThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     expect(utf8ByteLength(text)).toBeGreaterThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     const bridge = bridgeFor(text, "record");
