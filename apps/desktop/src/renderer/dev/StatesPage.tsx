@@ -3643,7 +3643,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="sync off: paused by an agent">
           <div className="w-[640px]">
-            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
+            <CloudSyncSettings workspaceId="ws-trip" agents={SYNC_PAUSING_AGENTS} cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
           </div>
         </Specimen>
         <Specimen label="sync off: paused under this computer's earlier id">
@@ -4127,6 +4127,9 @@ const SYNC_PAUSED_BY_ANOTHER: CloudStatusResult["syncPause"] = {
 const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
   author: { kind: "agent", agentId: "codex", onBehalfOf: "human-sam", depth: 1 },
+};
+const SYNC_PAUSING_AGENTS: NonNullable<ComponentProps<typeof CloudSyncSettings>["agents"]> = {
+  codex: { name: "Nova", hue: "olive", launch: { command: "node agent.mjs" }, changesFiles: true, enabled: true, timeoutMinutes: 30 },
 };
 const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
   status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop, onDeleteAccount: noop,

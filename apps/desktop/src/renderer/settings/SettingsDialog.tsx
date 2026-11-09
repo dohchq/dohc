@@ -810,7 +810,7 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("cloud")}>
             <SettingsSection>
               {props.cloud ? (
-                <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} />
+                <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} agents={userSettings.agents} />
               ) : null}
               {!props.sharedView && props.onOpenLiveDocuments ? (
                 <SettingRow
