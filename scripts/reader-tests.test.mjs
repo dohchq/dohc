@@ -1,11 +1,44 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { READER_PHASE, readerTestArgs, readerTestMismatches, readerTests } from "../tools/rust-engine-program/reader-tests.mjs";
 
 const crates = new URL("../crates/", import.meta.url);
+
+function checkConsolidatedTargets(root) {
+  for (const crate of readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory())) {
+    const directory = join(fileURLToPath(root), crate.name);
+    const manifest = join(directory, "Cargo.toml");
+    if (!existsSync(manifest)) continue;
+    const cargo = readFileSync(manifest, "utf8");
+    if (!/^autotests\s*=\s*false\s*$/mu.test(cargo) || !/^path\s*=\s*"tests\/integration\.rs"\s*$/mu.test(cargo)) continue;
+    const tests = join(directory, "tests");
+    const files = readdirSync(tests, { withFileTypes: true }).filter(entry => entry.isFile() && entry.name.endsWith(".rs") && entry.name !== "integration.rs").map(entry => entry.name).sort();
+    const modules = [...readFileSync(join(tests, "integration.rs"), "utf8").matchAll(/^(?:#\[path = "([^"]+\.rs)"\]\s*)?mod (\w+);/gmu)]
+      .map(match => match[1] ?? `${match[2]}.rs`).filter(path => files.includes(path)).sort();
+    assert.deepEqual(modules, files, `${crate.name}: register every top-level test file in tests/integration.rs`);
+  }
+}
+
+test("consolidated Rust targets register every top-level test file", t => {
+  checkConsolidatedTargets(crates);
+  const root = mkdtempSync(join(tmpdir(), "dohc-test-targets-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const crate = join(root, "fixture");
+  mkdirSync(join(crate, "tests"), { recursive: true });
+  writeFileSync(join(crate, "Cargo.toml"), '[package]\nautotests = false\n[[test]]\nname = "integration"\npath = "tests/integration.rs"\n');
+  writeFileSync(join(crate, "tests", "added.rs"), "#[test]\nfn added() {}\n");
+  writeFileSync(join(crate, "tests", "integration.rs"), "");
+  const url = pathToFileURL(root + "/");
+  assert.throws(() => checkConsolidatedTargets(url), /register every top-level test file/u);
+  writeFileSync(join(crate, "tests", "integration.rs"), '#[path = "added.rs"]\nmod added;\n');
+  checkConsolidatedTargets(url);
+  writeFileSync(join(crate, "tests", "integration.rs"), "mod added;\n");
+  checkConsolidatedTargets(url);
+});
 
 test("the phase selects a test by its ignore reason, under any attributes, in any folder", t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-reader-tests-"));
