@@ -995,6 +995,43 @@ describe("DocumentMenu", () => {
       expect(clear).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/^copy-markdown:/));
     });
 
+    it("reports a write that settles after another note opened, and clears after Export ran", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const { report, clear, wrapper } = notices();
+      const menu = (path: string, name: string) => (
+        <DocumentMenu workspaceId="ws-1" path={path} documentKey={path} suggestedName={name} getMarkdown={() => MARKDOWN} />
+      );
+      const view = render(menu("Plan.md", "Plan"), { wrapper });
+      const failed = deferredWrite();
+      writeText.mockImplementationOnce(() => failed.promise);
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      view.rerender(menu("Budget.md", "Budget"));
+      const failure = new Error("clipboard refused");
+      await act(async () => {
+        failed.reject(failure);
+        await failed.promise.catch(() => undefined);
+      });
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "dohc could not copy Plan as Markdown.", cause: failure }),
+      );
+      const { identity } = report.mock.calls[0]![0];
+
+      // Back on Plan, a Copy whose write lands after Export ran takes the row back.
+      view.rerender(menu("Plan.md", "Plan"));
+      const copied = deferredWrite();
+      writeText.mockImplementationOnce(() => copied.promise);
+      if (!screen.queryByRole("menu")) await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+      await act(async () => {
+        copied.resolve();
+        await copied.promise;
+      });
+      expect(clear).toHaveBeenLastCalledWith(identity);
+    });
+
     it("reports nothing for an attempt a later action superseded", async () => {
       const user = userEvent.setup();
       stubClipboard();

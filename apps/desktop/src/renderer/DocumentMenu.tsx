@@ -258,10 +258,10 @@ export function DocumentMenu(props: DocumentMenuProps) {
     if (attempts.isCurrent(attempt)) {
       showFeedback("copy-markdown", failure ? "Couldn't copy" : "Copied");
     }
-    // A later attempt that already answered speaks for the click the person
-    // moved on to, so only the newest action reports a failure. It reports
-    // with the menu open or closed, so its Try again outlasts the menu.
-    if (!actions.isCurrent(action) || !newest()) return;
+    // The write took this note's text, so its outcome is the note's, even
+    // after the menu closed, another action ran or another note opened. Only
+    // the note's newest Copy reports a failure or takes its notice back.
+    if (!newest()) return;
     if (failure) reportCopyFailure(failure);
     else clearNotice?.(copyNoticeIdentity(currentNote()));
   }
