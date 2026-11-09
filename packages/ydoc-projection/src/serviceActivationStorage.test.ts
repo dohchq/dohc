@@ -794,7 +794,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
     config:{targets:[target],validation:policy,validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
-    runDocument,
+    runDocument,lifetime:new AbortController().signal,
   })
   return {driver,target,pull}
 }
