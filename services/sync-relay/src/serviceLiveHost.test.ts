@@ -7230,9 +7230,10 @@ it.each(["running without this workspace", "running without this document"] as c
   });
 
 // A host of ready workspaces with no documents, passing every millisecond. Its mocked engine keeps each hosted
-// replica as the engine does: a pull reads the relay log after the replica's cursor, and its commit applies
-// those rows and moves the cursor. `hold` keeps a workspace's next pull in flight after it read its rows, until
-// released. `pushWrites` is how many of a workspace's next pushes each append a row, as the host's settled work does.
+// replica as the engine does: a pull reads the relay log after the replica's cursor and the hosted scope's
+// documents, and its commit applies those rows and that scope and moves the cursor. `holdPull` keeps a workspace's
+// next pull in flight before it reads the relay, or after, until released. `pushWrites` is how many of a
+// workspace's next pushes each append a row, as the host's settled work does.
 // Each workspace has one enrolled document, so the relay holds a hosted scope for it, unless `unscoped`.
 async function readyHostedHost(workspaceIds: readonly string[], {unscoped = false} = {}) {
   const f = await fixture();
@@ -7256,8 +7257,11 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
   const append = (workspaceId: string) => f.storage.appendLogBatch({workspaceId, originId: "device",
     ops: [parseLogOp({originSeq: f.storage.maxOriginSeq(workspaceId, "device") + 1, opKind: "workspace.init", recordedAtMs: 1, payload: {}})]});
   const relayRows = (workspaceId: string) => f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 0, limit: 1000}).rows.map(row => row.relaySeq);
-  const replicas = new Map(workspaceIds.map(workspaceId => [workspaceId, {cursor: 0, applied: [] as number[], read: [] as number[], next: 0, more: false}]));
-  const hold = new Map<string, {entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>}>();
+  const hostedNow = (workspaceId: string) => [...f.storage.readServiceHostFeedScope(workspaceId)?.hosted.keys() ?? []];
+  const replicas = new Map(workspaceIds.map(workspaceId => [workspaceId,
+    {cursor: 0, applied: [] as number[], read: [] as number[], next: 0, more: false, scope: [] as string[], reading: [] as string[]}]));
+  type Held = {entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>};
+  const holds = {read: new Map<string, Held>(), reply: new Map<string, Held>()};
   const pushWrites = new Map<string, number>(), failures = {pulls: 0};
   let client!: ReturnType<typeof clientFrom>["client"];
   spawn.mockImplementation(async options => {
@@ -7276,15 +7280,19 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
         }
         case "sync.pullHosted": {
           if (failures.pulls > 0) {failures.pulls--; throw new Error("The relay did not answer.");}
+          const gate = async (at: keyof typeof holds) => {
+            const held = holds[at].get(workspaceId);
+            if (held) {holds[at].delete(workspaceId); held.entered.resolve(); await held.release.promise;}
+          };
+          await gate("read");
           const page = f.storage.fetchLogPage({workspaceId, sinceRelaySeq: replica.cursor, limit: 100});
-          Object.assign(replica, {read: page.rows.map(row => row.relaySeq), next: page.nextCursor, more: page.hasMore});
-          const held = hold.get(workspaceId);
-          if (held) {hold.delete(workspaceId); held.entered.resolve(); await held.release.promise;}
+          Object.assign(replica, {read: page.rows.map(row => row.relaySeq), next: page.nextCursor, more: page.hasMore, reading: hostedNow(workspaceId)});
+          await gate("reply");
           return {result: hostedPass({fetched: page.rows.length, applied: page.rows.length, hasMore: page.hasMore})} as never;
         }
         case "sync.materializePendingCursor": return {result: {materialized: true}} as never;
         case "sync.commitCursor": {
-          replica.applied.push(...replica.read); replica.cursor = replica.next;
+          replica.applied.push(...replica.read); replica.cursor = replica.next; replica.scope = replica.reading;
           return {result: hostedCommit({hasMore: replica.more})} as never;
         }
       }
@@ -7302,15 +7310,16 @@ async function readyHostedHost(workspaceIds: readonly string[], {unscoped = fals
     const target = requests("sync.push", workspaceIds[0]!) + count;
     await vi.waitFor(() => expect(requests("sync.push", workspaceIds[0]!)).toBeGreaterThanOrEqual(target), {timeout: 20_000});
   };
-  // The replica applied every row the relay holds, and its cursor reached the last.
+  // The replica applied every row the relay holds and the hosted scope it holds now, and its cursor reached the last row.
   const caughtUp = (workspaceId: string) => {
     const rows = relayRows(workspaceId), replica = replicas.get(workspaceId)!;
     expect(replica.applied).toEqual(rows);
     expect(replica.cursor).toBe(rows.at(-1) ?? 0);
+    expect(replica.scope).toEqual(hostedNow(workspaceId));
   };
-  const holdPull = (workspaceId: string) => {
+  const holdPull = (workspaceId: string, at: keyof typeof holds = "reply") => {
     const held = {entered: deferred<void>(), release: deferred<void>()};
-    hold.set(workspaceId, held);
+    holds[at].set(workspaceId, held);
     return held;
   };
   return {f, raw, append, relayRows, replicas, pushWrites, failures, pulls, passes, caughtUp, holdPull};
@@ -7356,6 +7365,33 @@ it("pulls once for a burst of writes and once more for a write during a pull", a
   await h.passes(3);
   expect(h.pulls("workspace")).toBe(4);
   expect(host.hostedPulls("workspace")).toEqual({total: 4, reasons: {first: 1, changed: 3}});
+  h.caughtUp("workspace");
+});
+
+// A pull read a scope change that then went back before the pull ended, so the relay state read as when it began.
+// Proves: a notice that lands during a pull pulls once more on the next pass, whatever the relay state reads then.
+it("pulls once more for a scope change during a pull that went back before the pull ended", async () => {
+  const h = await readyHostedHost(["workspace"]);
+  const host = await startServiceLiveHost(h.f);
+  cleanup.push(() => host.close());
+  await vi.waitFor(() => h.caughtUp("workspace"));
+  await h.passes(2);
+  const enabled = (value: 0 | 1) => {
+    h.raw.prepare("UPDATE sync_relay_service_host_enrollments SET enabled=? WHERE workspace_id='workspace'").run(value);
+    notifyRelayWrite(h.f.storage);
+  };
+  const reading = h.holdPull("workspace", "read"), replying = h.holdPull("workspace", "reply");
+  h.append("workspace");
+  await reading.entered.promise;
+  enabled(0);
+  reading.release.resolve();
+  await replying.entered.promise;
+  expect(h.replicas.get("workspace")!.reading).toEqual([]);
+  enabled(1);
+  replying.release.resolve();
+  await vi.waitFor(() => h.caughtUp("workspace"));
+  await h.passes(3);
+  expect(host.hostedPulls("workspace")).toEqual({total: 3, reasons: {first: 1, changed: 2}});
   h.caughtUp("workspace");
 });
 
