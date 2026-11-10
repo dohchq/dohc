@@ -386,7 +386,7 @@ export function VersionsPage(props: {
   return (
     <div data-testid="versions-page" className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable]">
       {/* The document column, so the page lines up with the editor's text. */}
-      <div className="mx-auto flex w-full max-w-[832px] flex-1 flex-col px-14 pb-6">
+      <div className="mx-auto flex w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] flex-1 flex-col px-[var(--dohc-editor-gutter)] pb-6">
         <header className="flex shrink-0 items-start justify-between gap-4 pb-4 pt-10">
           <h2 className="m-0 flex h-8 items-center text-base font-semibold text-ink">Versions</h2>
           {ready && !onlyMain ? newVersion : null}

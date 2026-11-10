@@ -31,6 +31,14 @@
   --dohc-editor-font: var(--font-sans);
   --dohc-editor-font-size: 15px;
   --dohc-editor-number-suffix: 1;
+  /* The editor's side margin, which the title and properties rows share. A
+   * narrow pane keeps room left of the text for a three-digit list number
+   * with its period and space (about 0.6em a character in the editor fonts),
+   * 6px, the stacked hover buttons and 8px from the pane's edge. */
+  --dohc-editor-gutter: max(
+    56px,
+    (3 + var(--dohc-editor-number-suffix)) * 0.6 * var(--dohc-editor-font-size) + 32px
+  );
 
   --dohc-bg: #faf9f5;
   --dohc-panel: #f3f1ea;
@@ -583,7 +591,7 @@ body {
   /* Top matter (PageIdentity + inline properties) supplies the space above
    * the body now, so this only needs a small settle gap — not the old 40px
    * chasm that stacked under the title. */
-  padding: 6px 56px 120px;
+  padding: 6px var(--dohc-editor-gutter) 120px;
   color: var(--dohc-ink);
   cursor: text;
   font-family: var(--dohc-editor-font);
@@ -615,18 +623,19 @@ body {
  * of it. List markers and the quote bar hang LEFT of that line into the
  * gutter. A task list's checkboxes and a table's frame start ON the line
  * instead. Framed blocks below extend one --dohc-editor-block-inset past the
- * column on BOTH sides so their inner padding lands their text back on the
- * edge (degrades to a flush frame when the pane is too narrow for the
- * overhang). */
+ * column on BOTH sides, into the editor's side margin at every pane width, so
+ * their inner padding lands their text back on the edge. */
 .dohc-notion-editor > pre,
 .dohc-notion-editor > .dohc-callout,
 .dohc-notion-editor > .dohc-mermaid-preview {
-  max-width: calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset));
+  max-width: none;
+  margin-left: calc(max(0px, (100% - var(--dohc-editor-measure)) / 2) - var(--dohc-editor-block-inset));
+  margin-right: calc(max(0px, (100% - var(--dohc-editor-measure)) / 2) - var(--dohc-editor-block-inset));
 }
 
 /* The resizable TableView owns its chrome gutter and horizontal scrollbar.
  * At every pane width it reaches 22px past the column on each side, into the
- * editor's 56px padding, for the left row grips and the right add strip, so
+ * editor's side margin, for the left row grips and the right add strip, so
  * the table itself fills the reading column. */
 .dohc-notion-editor > .tableWrapper {
   width: calc(min(100%, var(--dohc-editor-measure)) + 44px);
@@ -1026,7 +1035,7 @@ body {
  * for the stack either, the cluster stays inside the pane. */
 .dohc-block-affordance {
   --dohc-block-hang: 0px;
-  --dohc-block-gutter: max(56px, 50% - var(--dohc-editor-measure) / 2);
+  --dohc-block-gutter: max(var(--dohc-editor-gutter), 50% - var(--dohc-editor-measure) / 2);
   --dohc-block-gap: min(
     max(10px, var(--dohc-block-hang) + 6px),
     var(--dohc-block-gutter) - 18px
@@ -1063,11 +1072,10 @@ body {
   --dohc-block-hang: 12px;
 }
 
-/* Framed blocks reach one block inset past the text edge once the gutter is
- * wider than the editor's 56px padding. A table's frame starts on the text
- * edge, and at every width its row grips and ⋯ button reach 22px past it. */
+/* Framed blocks reach one block inset past the text edge. A table's frame
+ * starts on the text edge, and its row grips and ⋯ button reach 22px past it. */
 .dohc-block-affordance[data-hang="frame"] {
-  --dohc-block-hang: clamp(0px, var(--dohc-block-gutter) - 56px, var(--dohc-editor-block-inset));
+  --dohc-block-hang: var(--dohc-editor-block-inset);
 }
 
 .dohc-block-affordance[data-hang="table"] {
@@ -1142,7 +1150,7 @@ body {
 
 /* Centered with the same measure as the content column (left 50% +
  * translate, since an absolute widget's static position ignores the
- * column's auto margins). 112px = the editor's horizontal padding. */
+ * column's auto margins). */
 .dohc-code-block-toolbar {
   position: absolute;
   z-index: 2;
@@ -1150,9 +1158,9 @@ body {
   transform: translateX(-50%);
   display: flex;
   /* Matches the widened code-block frame (measure + 2 block insets). */
-  width: min(
-    calc(var(--dohc-editor-measure) + 2 * var(--dohc-editor-block-inset)),
-    calc(100% - 112px)
+  width: calc(
+    min(var(--dohc-editor-measure), 100% - 2 * var(--dohc-editor-gutter))
+      + 2 * var(--dohc-editor-block-inset)
   );
   box-sizing: border-box;
   align-items: center;
@@ -2434,7 +2442,7 @@ body {
 .dohc-page-identity {
   box-sizing: border-box;
   width: 100%;
-  padding: 20px 56px 0;
+  padding: 20px var(--dohc-editor-gutter) 0;
   background: var(--dohc-bg);
 }
 
