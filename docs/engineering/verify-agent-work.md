@@ -103,7 +103,8 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks distribute the selected JavaScript inventory across pure and native shards, with shared desktop preparation and separate confinement proofs.
+PR checks distribute the selected JavaScript inventory across workers, with shared desktop preparation and separate confinement proofs.
+Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
 The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks the completed job times.
 A local `pnpm verify:pr` still runs the whole selected gate.
