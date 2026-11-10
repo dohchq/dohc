@@ -240,7 +240,7 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
   const db = (storage as StorageContext).db;
   const logRows = () => Number(db.prepare("SELECT COUNT(*) AS n FROM sync_relay_log WHERE workspace_id = ?").get(WORKSPACE)!.n);
   const before = logRows();
-  expect(await read("documentRead", { path: "docs/plan.md" })).toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama." });
+  expect(await read("documentRead", { path: "docs/plan.md" })).toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" });
   expect(await copy.push()).toBe(0);
   expect(logRows()).toBe(before);
 }, 120_000);

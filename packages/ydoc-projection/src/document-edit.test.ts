@@ -40,12 +40,13 @@ const paragraph = (text?: string) => text
   : { type: 'paragraph' }
 
 describe('documentMarkdown', () => {
-  test('reads an ordinary document as its file does, without the final newline', () => {
+  test('reads an ordinary document as its file does', () => {
     const markdown = '---\ntitle: Trip\n---\n\n# Kyoto\n\n- Day one\n- Day two\n\nA **bold** plan.'
     const doc = markdownToYDoc(markdown)
-    expect(markdownOf(doc)).toBe(markdown)
-    expect(`${markdownOf(doc)}\n`).toBe(yDocToMarkdown(doc))
-    expect(settledDocumentMarkdown('# Kyoto\n\n* Day one\n')).toBe('# Kyoto\n\n- Day one')
+    expect(markdownOf(doc)).toBe(`${markdown}\n`)
+    expect(markdownOf(doc)).toBe(yDocToMarkdown(doc))
+    expect(settledDocumentMarkdown('# Kyoto\n\n* Day one\n')).toBe('# Kyoto\n\n- Day one\n')
+    expect(markdownOf(new Y.Doc())).toBe('')
   })
 })
 
@@ -57,7 +58,7 @@ describe('documentEditUpdate', () => {
 
     edited(doc, { find: 'temples', replacement: 'temples and tea' })
 
-    expect(markdownOf(doc)).toBe('# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.')
+    expect(markdownOf(doc)).toBe('# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.\n')
     expect(body.toArray()).toEqual([heading, dayOne, dayTwo])
   })
 
@@ -68,7 +69,7 @@ describe('documentEditUpdate', () => {
       replacement: 'Fly home.\n\n## Friday 14\n\n- Sleep\n- Unpack',
     })
     expect(markdownOf(doc)).toBe(
-      '# Itinerary\n\n## Thursday\n\nFly home.\n\n## Friday 14\n\n- Sleep\n- Unpack',
+      '# Itinerary\n\n## Thursday\n\nFly home.\n\n## Friday 14\n\n- Sleep\n- Unpack\n',
     )
   })
 
@@ -82,9 +83,21 @@ describe('documentEditUpdate', () => {
   })
 
   test('adds text to a document with no blocks and to one with only an empty paragraph', () => {
-    expect(markdownOf(edited(new Y.Doc(), { replacement: 'First line.' }))).toBe('First line.')
+    expect(markdownOf(edited(new Y.Doc(), { replacement: 'First line.' }))).toBe('First line.\n')
     expect(markdownOf(edited(editorDoc([paragraph()]), { replacement: 'First line.' })))
       .toBe('First line.\n\n')
+  })
+
+  // An agent copies `find` from its read, which ends with the file's final
+  // newline. The writer still ends the saved file with one.
+  test('takes a find that ends with the final newline, and the file still ends with one', () => {
+    const doc = markdownToYDoc('Budget: 400 dollars')
+    expect(markdownOf(doc)).toBe('Budget: 400 dollars\n')
+    edited(doc, { find: '400 dollars\n', replacement: '450 dollars\n' })
+    expect(markdownOf(doc)).toBe('Budget: 450 dollars\n')
+    edited(doc, { find: '450 dollars\n', replacement: '450 euros' })
+    expect(markdownOf(doc)).toBe('Budget: 450 euros\n')
+    expect(yDocToMarkdown(doc)).toBe('Budget: 450 euros\n')
   })
 
   test('refuses text it cannot find once', () => {
@@ -135,7 +148,7 @@ describe('documentCreateUpdate', () => {
   test('writes the first text into a document with no blocks', () => {
     const doc = new Y.Doc()
     Y.applyUpdate(doc, documentCreateUpdate(state(doc), '# Kyoto\n\n- Day one\n- Day two', open)!)
-    expect(markdownOf(doc)).toBe('# Kyoto\n\n- Day one\n- Day two')
+    expect(markdownOf(doc)).toBe('# Kyoto\n\n- Day one\n- Day two\n')
     expect(yDocToMarkdown(doc)).toBe('# Kyoto\n\n- Day one\n- Day two\n')
   })
 
@@ -196,17 +209,17 @@ describe('an edit merged with a person typing', () => {
       1,
       ' More from the person.',
       { find: 'Agent edits here.', replacement: 'Agent edited this.' },
-    )).toBe('# Plan\n\nPerson writes here. More from the person.\n\nAgent edited this.')
+    )).toBe('# Plan\n\nPerson writes here. More from the person.\n\nAgent edited this.\n')
   })
 
   test('keeps the person text in the block the agent edits', () => {
     expect(merge('Budget: 400 dollars for food', 0, ' and drinks', { find: '400', replacement: '450' }))
-      .toBe('Budget: 450 dollars for food and drinks')
+      .toBe('Budget: 450 dollars for food and drinks\n')
   })
 
   test('keeps the person text when the agent adds a section at the end', () => {
     expect(merge('Intro.\n\nLast paragraph.', 1, ' Still typing.', { replacement: '## Added\n\nBy the agent.' }))
-      .toBe('Intro.\n\nLast paragraph. Still typing.\n\n## Added\n\nBy the agent.')
+      .toBe('Intro.\n\nLast paragraph. Still typing.\n\n## Added\n\nBy the agent.\n')
   })
 
   // A split keeps the typed block and gives the text after the split point to
@@ -219,24 +232,24 @@ describe('an edit merged with a person typing', () => {
       find: 'Budget: 400 dollars',
       replacement: 'Budget:\n\n400 dollars',
     })
-    expect(merged).toBe('Budget: PERSON\n\n400 dollars')
+    expect(merged).toBe('Budget: PERSON\n\n400 dollars\n')
   })
 })
 
 describe('an edit while someone has the document open', () => {
   test.each([
-    ['removes a block', 'Keep.\n\nDrop this.\n\nKeep too.', { find: '\n\nDrop this.', replacement: '' }, 'Keep.\n\nKeep too.'],
-    ["changes a block's kind", 'Budget: 400 dollars', { find: 'Budget: 400 dollars', replacement: '# Budget: 400 dollars' }, '# Budget: 400 dollars'],
-    ['joins two blocks', 'Budget:\n\n400 dollars', { find: 'Budget:\n\n400', replacement: 'Budget: 400' }, 'Budget: 400 dollars'],
-    ['removes a list item', '- one\n- two\n- three', { find: '- two\n', replacement: '' }, '- one\n- three'],
+    ['removes a block', 'Keep.\n\nDrop this.\n\nKeep too.', { find: '\n\nDrop this.', replacement: '' }, 'Keep.\n\nKeep too.\n'],
+    ["changes a block's kind", 'Budget: 400 dollars', { find: 'Budget: 400 dollars', replacement: '# Budget: 400 dollars' }, '# Budget: 400 dollars\n'],
+    ['joins two blocks', 'Budget:\n\n400 dollars', { find: 'Budget:\n\n400', replacement: 'Budget: 400' }, 'Budget: 400 dollars\n'],
+    ['removes a list item', '- one\n- two\n- three', { find: '- two\n', replacement: '' }, '- one\n- three\n'],
   ])('refuses one that %s, and applies it when nobody has it open', (_case, markdown, edit, whenClosed) => {
     expect(() => documentEditUpdate(state(markdownToYDoc(markdown)), edit, open)).toThrow(DOCUMENT_OPEN_REFUSAL)
     expect(markdownOf(edited(markdownToYDoc(markdown), edit, closed))).toBe(whenClosed)
   })
 
   test.each([
-    ['Above.\n\n---\n\nBelow.', '\n\n---', 'Above.\n\nBelow.'],
-    ['***\n\nBelow.', '***\n\n', 'Below.'],
+    ['Above.\n\n---\n\nBelow.', '\n\n---', 'Above.\n\nBelow.\n'],
+    ['***\n\nBelow.', '***\n\n', 'Below.\n'],
   ])('removes a leaf block, which nobody can type into: %j', (source, find, expected) => {
     expect(markdownOf(edited(markdownToYDoc(source), { find, replacement: '' }))).toBe(expected)
   })
