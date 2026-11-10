@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { ChatsLiveAdapter, type EngineTransport } from "@dohc/workspace-engine-client";
+import { ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
@@ -12,6 +13,7 @@ import { streamsRequestBody } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
+import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 // The reads run over the real server copies and operations, with each copy's
 // engine an in-memory stand-in for its chats and files.
@@ -273,6 +275,30 @@ describe("an account's reads through the server's copy", () => {
     expect(response.status).toBe(404);
     expect(await response.text()).not.toContain("Alfama");
   });
+  it("answers as missing when the workspace stops showing on the phone while the copy syncs", async () => {
+    const { storage, engine, h, holdSyncs, syncs } = await relay();
+    await seedTrip(engine);
+    const release = holdSyncs();
+    const pending = h(op("trip", "documentRead", { path: "docs/plan.md" }));
+    await expect.poll(() => syncs.length).toBe(1);
+    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+    release();
+    const response = await pending;
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("Alfama");
+  });
+
+  it("answers an unknown operation without reading its arguments", async () => {
+    const { h } = await relay();
+    let pulled = false;
+    const unread = new Request("http://relay.test/sync/trip/ops/changes", {
+      method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
+      body: new ReadableStream({ pull(controller) { pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
+        { highWaterMark: 0 }),
+    } as RequestInit & { duplex: "half" });
+    await denialBytes(await h(unread));
+    expect(pulled).toBe(false);
+  });
 });
 
 describe("an account's share of the server", () => {
@@ -347,42 +373,108 @@ describe("secret files through the server's copy", () => {
     expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
   });
 
-  it("lists a secret file's chats exactly as a missing file's, and names no secret file in a thread", async () => {
+  it("lists a secret file's chats exactly as a missing file's, and reads its threads and attachments as missing", async () => {
     const { engine, h } = await relay();
     const { onSecret } = await seedTrip(engine);
     expect(await answer(await h(op("trip", "fileChats", { path: "%2Eenv" }))))
       .toEqual({ ok: true, path: ".env", fileObjectId: null, threads: [] });
     expect(await answer(await h(op("trip", "fileChats", { path: "docs/missing.md" }))))
       .toEqual({ ok: true, path: "docs/missing.md", fileObjectId: null, threads: [] });
-    // A thread on a file the copy does not track names no path.
-    const onFile = await answer(await h(op("trip", "chat", { threadId: onSecret.id })));
-    expect(onFile).toMatchObject({ ok: true, thread: { title: "Keys" } });
-    expect(JSON.stringify(onFile)).not.toContain(".env");
+    // The thread's file is nowhere in the copy, as a secret file never is.
+    expect(await answer(await h(op("trip", "chat", { threadId: onSecret.id }))))
+      .toEqual({ ok: false, reason: `chat thread not found: ${onSecret.id}` });
+    expect(await answer(await h(op("trip", "chat", { threadId: "thread-nowhere" }))))
+      .toEqual({ ok: false, reason: "chat thread not found: thread-nowhere" });
+    for (const target of [onSecret.id, cliThreadId(onSecret.id)]) {
+      expect(await json(await h(op("trip", "show", { target, peek: true })))).toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${target}` });
+    }
+    const ambiguous = await json(await h(op("trip", "show", { target: "th_", peek: true })));
+    expect(ambiguous).toMatchObject({ code: "bad_request", error: expect.stringContaining("ambiguous thread or message prefix") });
+    expect(String(ambiguous.error)).not.toContain(cliThreadId(onSecret.id));
+    expect(JSON.stringify(await answer(await h(op("trip", "groupsFull"))))).not.toContain(onSecret.id);
+
     const shown = await answer(await h(op("trip", "show", { target: "th_stay", peek: true })));
     expect(shown.messages).toMatchObject([{ attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }] }]);
     const stream = await answer(await h(op("trip", "chat", { group: "planning" })));
-    expect(JSON.stringify(stream)).not.toContain(".env");
+    expect(JSON.stringify(stream)).not.toContain("object-env");
+  });
+
+  it("leaves out an attachment whose object is nowhere in the copy, whatever its hint says", async () => {
+    const { engine, h } = await relay();
+    const { planning } = await seedTrip(engine);
+    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    await chats.startChannelThread({
+      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-hint", messageId: "message-hint", author: { kind: "human", displayName: "Ana" },
+      authorActorKey: null, body: "Keys", attachments: [{ objectId: "object-env", pathHint: "docs/keys.md" }],
+    });
+    const shown = await answer(await h(op("trip", "show", { target: "th_hint", peek: true })));
+    expect(shown.messages).toMatchObject([{ body: "Keys", attachments: [] }]);
   });
 });
 
 describe("pages the relay hosts live", () => {
-  it("reads an edit the relay accepted before it settles, and writes nothing", async () => {
+  async function livePage(seed: (engine: TestEngine) => void = (engine) =>
+    engine.files.seedTextFile({ workspace: "workspace", path: "docs/a.md", text: "Hello\n", objectId: "object" })) {
     const f = registered({ deployment: true });
     cleanup.push(async () => f.close());
     f.storage.claimWorkspaceIdentity({ workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream" });
     const engine = new TestEngine();
-    engine.files.seedTextFile({ workspace: "workspace", path: "docs/a.md", text: "Hello\n" });
+    seed(engine);
     const run = await serverCopies(f.storage, engine);
     const h = testHandler(f.storage, { accountApi: true, resolveAccountSession, serverCopies: () => run.copies });
-    const read = async () => await answer(await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner"))));
+    const read = async () => await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner")));
+    const edit = () => expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "Lisbon"))).result.kind).toBe("accepted");
+    return { f, engine, read, edit };
+  }
+  const edited = { ok: true, path: "docs/a.md", markdown: "---\ntitle: Lisbon\n---\n\nHello" };
 
-    expect(await read()).toEqual({ ok: true, path: "docs/a.md", markdown: "Hello" });
-    const accepted = f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "Lisbon")));
-    expect(accepted.result.kind).toBe("accepted");
+  it("reads an edit the relay accepted before it settles, and writes nothing", async () => {
+    const { f, engine, read, edit } = await livePage();
+    expect(await answer(await read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Hello" });
+    edit();
     const journal = f.journalRows().journal.length;
-    expect(await read()).toEqual({ ok: true, path: "docs/a.md", markdown: "---\ntitle: Lisbon\n---\n\nHello" });
-
+    expect(await answer(await read())).toEqual(edited);
     expect(f.journalRows().journal).toHaveLength(journal);
     expect(new Set(engine.methods())).toEqual(new Set(["versions.active", "versionedText.read"]));
+  });
+
+  it("reads the object now at the path when an older object kept it as its stored path", async () => {
+    const { f, read, edit } = await livePage();
+    // An older object, moved away or replaced, whose current lineage still names docs/a.md.
+    f.write((db) => {
+      const columns = (db.prepare("PRAGMA table_info(sync_relay_live_documents)").all() as Array<{ name: string }>).map(({ name }) => name);
+      db.prepare(`INSERT INTO sync_relay_live_documents (${columns.join(",")}) SELECT ${columns.map((name) => name === "object_id" ? "'a-older-object'" : name).join(",")}
+        FROM sync_relay_live_documents WHERE object_id = 'object'`).run();
+    });
+    edit();
+    expect(await answer(await read())).toEqual(edited);
+  });
+
+  it("answers restore-in-progress, not the older file, while a restore keeps the relay from cutting the page", async () => {
+    const { f, read, edit } = await livePage();
+    edit();
+    const document = f.input.evidence.document;
+    const plan = f.storage.readStopRestorePlan({ operationId: "restore", ownerUserId: "owner", document, shareId: "share", grantId: "grant",
+      restorePointCursor: 0, restorePointReceiptDigest: document.lineageClaimId, maxOutputBytes: MAX_PAYLOAD_JSON_BYTES });
+    f.storage.beginStopRestore(plan.intent, 100);
+    expect(f.storage.advanceStopRestoreFence({ workspaceId: "workspace", ownerUserId: "owner", operationId: "restore" }, 110).phase).toBe("fenced");
+    const response = await read();
+    expect(response.status).toBe(409);
+    expect(await json(response)).toMatchObject({ ok: false, code: "restore-in-progress" });
+  });
+
+  it("reads the active version's settled file when it isn't main, or the page as missing when the copy doesn't hold it", async () => {
+    const named = await livePage();
+    const files = new VersionedLiveAdapter(named.engine, "workspace", { workspaceId: "workspace" });
+    const main = await files.getActiveVersion({ workspaceId: "workspace" });
+    const draft = await files.createNamedVersion({ workspaceId: "workspace", name: "Draft", fromVersionId: main!.id });
+    named.engine.files.seedTextFile({ workspace: "workspace", versionId: draft.id, path: "docs/a.md", text: "Draft\n", objectId: "object" });
+    await files.setActiveVersion({ workspaceId: "workspace", versionId: draft.id });
+    named.edit();
+    expect(await answer(await named.read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Draft" });
+
+    const absent = await livePage(() => undefined);
+    absent.edit();
+    expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md." });
   });
 });

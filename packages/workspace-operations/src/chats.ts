@@ -578,10 +578,7 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
   }
   const { threadId } = args;
   try {
-    const messages = await host.store.listMessages({
-      workspaceId: host.workspaceId,
-      threadId,
-    });
+    // The thread first, so a thread the store doesn't list reads as missing whatever its messages would answer.
     const threads = await host.store.listThreads({
       workspaceId: host.workspaceId,
     });
@@ -594,6 +591,10 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
         reason: `chat thread not found: ${threadId}`,
       };
     }
+    const messages = await host.store.listMessages({
+      workspaceId: host.workspaceId,
+      threadId,
+    });
     const currentPath = thread.linkedFile
       ? await host.filePath(thread.linkedFile.objectId)
       : null;

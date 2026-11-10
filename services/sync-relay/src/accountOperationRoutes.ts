@@ -1,6 +1,6 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { runAccountOperation } from "./accountOperations";
+import { isAccountOperation, runAccountOperation } from "./accountOperations";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { parseWorkspaceId } from "./requestInputs";
@@ -28,10 +28,11 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 
 /**
  * A signed-in account's reads of a workspace it owns, through this server's
- * copy of it. Only a Bearer session reaches them, and the route checks the
- * owner before it reads the arguments. The sign-in, its fence and the owner
- * are checked again once the copy is open, once it has synced, and before
- * the answer. A workspace the account does not own, one that does not exist,
+ * copy of it, while it shows on the phone. Only a Bearer session reaches
+ * them, and the route checks the operation and the owner before it reads the
+ * arguments. The sign-in, its fence, the owner and "Show on phone" are
+ * checked again once the arguments arrive, once the copy is open, once it
+ * has synced, and once the answer is ready. A workspace the account does not own, one that does not exist,
  * and an ID that cannot be one answer alike.
  */
 export function createAccountOperationRoute(options: {
@@ -51,11 +52,13 @@ export function createAccountOperationRoute(options: {
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
       throw new RelayError("server_busy", "This sign-in is reading faster than your server answers. Try again shortly.");
     }
-    if (!storage.workspaceIsOwnedBy(route.workspaceId, caller.userId)) throw notFound();
+    // The phone reaches a workspace its account owns while it shows on the phone.
+    const reaches = (userId: string) =>
+      storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
+    if (!isAccountOperation(route.operation) || !reaches(caller.userId)) throw notFound();
     const authorize = async () => {
       const current = await session(request);
-      if (current.sessionId !== caller.sessionId || current.userId !== caller.userId ||
-          !storage.workspaceIsOwnedBy(route.workspaceId, caller.userId)) throw notFound();
+      if (current.sessionId !== caller.sessionId || current.userId !== caller.userId || !reaches(caller.userId)) throw notFound();
     };
     let args: unknown;
     try {
@@ -71,7 +74,6 @@ export function createAccountOperationRoute(options: {
       // A Bearer session reads what shows on the phone, whatever the request says.
       visitor: { reason: "account", caller: caller.sessionId, signal: request.signal, phone: true },
     });
-    await authorize();
     return jsonResponse({ ok: true, result });
   };
 }

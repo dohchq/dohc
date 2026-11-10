@@ -576,6 +576,10 @@ export interface LiveUpdateJournalCut {
   readonly suffixCount: number;
   readonly suffixBytes: number;
 }
+export type AcceptedLiveDocument =
+  | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
+  | { readonly kind: "restoring" }
+  | { readonly kind: "none" };
 export type LiveUpdateJournalCutResult =
   | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
   | { readonly kind: "refused"; readonly reason: "baseline-missing" | "authority-refused" | "stale-binding" };
@@ -793,8 +797,12 @@ export interface SyncRelayStorage {
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
     authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
   automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding; shareId: string} | null;
-  /** The live document now at `path` in the workspace's main version, or null when none is. */
-  currentLiveDocument(workspaceId: string, path: string): LiveDocumentKey | null;
+  /**
+   * The accepted state of the live document now at `path` in main: its
+   * journal cut, "restoring" while a restore keeps the relay from cutting it,
+   * or "none" when the settled file is the page.
+   */
+  readAcceptedLiveDocument(workspaceId: string, path: string): AcceptedLiveDocument;
   automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;

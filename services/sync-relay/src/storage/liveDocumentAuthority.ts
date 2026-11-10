@@ -333,11 +333,18 @@ export type LiveObjectHostBindingResult =
   | { readonly kind: "current"; readonly binding: LiveObjectBinding; readonly host: LiveHostConnectionCoordinate }
   | Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
-/** The live document now at `path` in the workspace's main version, or null when none is. */
+/**
+ * The current lineage of the object now at `path` in the workspace's main
+ * version, or null when that object has none. An object that moved away or
+ * was replaced can keep `path` as its stored path, so the object is found
+ * first.
+ */
 export function currentLiveDocument(storage: StorageContext, workspaceId: string, path: string): LiveDocumentKey | null {
-  const row = storage.db.prepare(`SELECT object_id,lineage_claim_id FROM sync_relay_live_documents
-    WHERE workspace_id=? AND main_version_id='main' AND current_path=? AND lineage_state='current'`).get(workspaceId, path);
-  return row ? {workspaceId, mainVersionId: "main", objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id)} : null;
+  const objectId = storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path});
+  if (objectId === undefined) return null;
+  const row = storage.db.prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(workspaceId, objectId);
+  return row ? {workspaceId, mainVersionId: "main", objectId, lineageClaimId: String(row.lineage_claim_id)} : null;
 }
 
 /** Server-owned automation writes use owner standing, never a caller-supplied binding. */
