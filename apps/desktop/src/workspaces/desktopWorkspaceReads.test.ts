@@ -300,21 +300,41 @@ describe("desktop workspace reads", () => {
 
   // On a disk that ignores case, Notes.md is held behind notes.md, which owns
   // the one file and stays searchable.
-  it("searches a spelling's file while another spelling is held behind it", async (context) => {
-    const test = await fixture("standalone");
+  async function holdSpellingBehindOwner(mode: "standalone" | "mount") {
+    const test = await fixture(mode);
     await test.disk("probe.md", "");
     const ignoresCase = await readFile(join(test.rootPath, "PROBE.md")).then(() => true, () => false);
     await rm(join(test.rootPath, "probe.md"));
-    if (!ignoresCase) context.skip("this disk keeps case apart");
     test.canonical.set("notes.md", { kind: "text", bytes: Buffer.from("n\n") });
     test.canonical.set("Notes.md", { kind: "text", bytes: Buffer.from("N\n") });
-    await test.disk("notes.md", "n\n");
+    await test.disk(test.path("notes.md"), "n\n");
     await holdBack(test, ["Notes.md"]);
+    return { test, ignoresCase };
+  }
+
+  it("searches a spelling's file while another spelling is held behind it", async (context) => {
+    const { test, ignoresCase } = await holdSpellingBehindOwner("standalone");
+    if (!ignoresCase) context.skip("this disk keeps case apart");
     const view = await test.reads.ownedWorkspaceReadsFor(test.attached).prepareSearch();
     const listed = view.listing?.files.map((file) => file.path);
     expect(listed).toContain("notes.md");
     expect(listed).not.toContain("Notes.md");
     expect(view.allowPath("notes.md")).toBe(true);
+  });
+
+  // In a mount the held spelling resolves on disk to the spelling that owns
+  // its file, so opening it is refused by the spelling asked for.
+  it("refuses to open a mounted spelling held behind another", async (context) => {
+    const { test, ignoresCase } = await holdSpellingBehindOwner("mount");
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    // As main's ensureOwnedProjectionCurrent composes them for open and reveal.
+    const open = async (requested: string) => {
+      const routed = await test.reads.shareViewFilesTargetForPath(test.workspace, requested);
+      if (routed === null) throw new Error("Expected a shared path");
+      return test.repair.run({ rootPath: test.rootPath, target: routed.target, path: { resolved: routed.path, requested } });
+    };
+    await expect(open(test.path("Notes.md"))).rejects.toThrow(/Notes\.md and notes\.md as the same name/);
+    await expect(open(test.path("notes.md"))).resolves.toEqual(new Set(["Notes.md"]));
   });
 });
 

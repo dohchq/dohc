@@ -232,13 +232,28 @@ describe("createOwnedProjectionRepairer", () => {
       .resolves.toEqual(new Set(["Notes.md", "mine.md"]));
   });
 
-  it("refuses a held file the caller opens", async () => {
+  it.each([
+    { name: "a file held behind a local one", resolved: "mine.md", requested: "mine.md", refusal: "mine.md already has a file from this machine." },
+    { name: "a held spelling the disk resolves to its owner", resolved: "notes.md", requested: "shared-with-me/alex/Notes.md", refusal: "This machine treats Notes.md and notes.md as the same name." },
+    ...process.platform === "win32"
+      ? [{ name: "another case of a file held behind a local one", resolved: "MINE.md", requested: "MINE.md", refusal: "mine.md already has a file from this machine." }]
+      : [],
+  ])("refuses to open $name", async ({ name, resolved, requested, refusal }) => {
     const harness = owner({ statuses: [heldStatus, heldStatus], repair: holds });
     await expect(createOwnedProjectionRepairer(harness.files)({
-      rootPath: join(tmpdir(), "dohc-owned-projection-held-open"),
+      rootPath: join(tmpdir(), `dohc-owned-projection-open-${name.replaceAll(" ", "-")}`),
       target,
-      path: "mine.md",
-    })).rejects.toThrow("mine.md already has a file from this machine.");
+      path: { resolved, requested },
+    })).rejects.toThrow(refusal);
+  });
+
+  it("opens the spelling that owns a held spelling's file", async () => {
+    const harness = owner({ statuses: [heldStatus, heldStatus], repair: holds });
+    await expect(createOwnedProjectionRepairer(harness.files)({
+      rootPath: join(tmpdir(), "dohc-owned-projection-open-owner"),
+      target,
+      path: { resolved: "notes.md", requested: "shared-with-me/alex/notes.md" },
+    })).resolves.toEqual(new Set(["Notes.md", "mine.md"]));
   });
 
   it.each([
@@ -261,6 +276,7 @@ describe("createOwnedProjectionRepairer", () => {
     { name: "lets a write queued behind a no-op repair land", repair: validRepair, writeLands: true },
     { name: "lets a write queued behind a repair that only found held files land", repair: holds, after: heldStatus, writeLands: true },
     { name: "refuses a write queued behind a repair that restored a path", repair: { ...validRepair, repairedPaths: 1 } },
+    { name: "refuses a write queued behind a repair that held files and restored a path", repair: { ...holds, repairedPaths: 1 }, after: heldStatus },
     {
       name: "refuses a write queued behind a repair that found a damaged record",
       repair: damagedRecord,

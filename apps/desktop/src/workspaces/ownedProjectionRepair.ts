@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { unjournalablePathMessages, type UnjournalablePath } from "./shareViewRecords";
 import type {
   ShareViewFiles,
@@ -6,6 +7,7 @@ import type {
   ShareViewReconcileOutcome,
 } from "./shareViewFiles";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
+import { workspacePathKey } from "./workspacePathKey";
 
 type ProjectionOwner = Pick<ShareViewFiles, "projectionStatus" | "reconcile">;
 type RepairOutcome = Extract<ShareViewReconcileOutcome, { kind: "repair" }>;
@@ -22,8 +24,9 @@ export function createOwnedProjectionRepairer(files: ProjectionOwner) {
   return async function ensureOwnedProjectionTargetCurrent(input: {
     rootPath: string;
     target: ShareViewFilesTarget;
-    // A file the caller hands to the OS, refused while it is held.
-    path?: string;
+    // A file the caller hands to the OS, refused while it is held: its
+    // share-relative path as resolved on disk, and the workspace path asked for.
+    path?: { resolved: string; requested: string };
   }): Promise<ReadonlySet<string>> {
     const status = await files.projectionStatus(input.target);
     if (status.state === "unavailable") {
@@ -56,10 +59,27 @@ export function createOwnedProjectionRepairer(files: ProjectionOwner) {
         "This shared file is still being restored to its folder. Try again after the shared view finishes repairing.",
       );
     }
-    const requested = input.path === undefined ? undefined : after.held.get(input.path);
+    const requested = input.path && heldRequest(after.held, input.path);
     if (requested) throw new Error(unjournalablePathMessages([requested]).join(" "));
     return new Set(after.held.keys());
   };
+}
+
+// Resolving follows the disk's spelling, so on a disk that ignores case a held
+// spelling resolves to the spelling that owns its file. A local file blocks
+// every spelling of its name; a held spelling is refused only as asked for, so
+// the spelling that owns the file stays openable.
+function heldRequest(
+  held: ReadonlyMap<string, UnjournalablePath>,
+  path: { resolved: string; requested: string },
+): UnjournalablePath | undefined {
+  const depth = path.resolved.split("/").length;
+  const asked = posix.normalize(path.requested.replaceAll("\\", "/"))
+    .split("/").filter(Boolean).slice(-depth).join("/");
+  const key = workspacePathKey(path.resolved);
+  return [...held.values()].find(entry => entry.reason === "local-collision"
+    ? workspacePathKey(entry.path) === key
+    : entry.path === asked);
 }
 
 // The projection is current apart from its held files: no path waits for

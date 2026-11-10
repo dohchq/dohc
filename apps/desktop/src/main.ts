@@ -5879,7 +5879,7 @@ async function ensureOwnedProjectionCurrent(
     await ensureOwnedProjectionTargetCurrent({
       rootPath: operation.workspace.rootPath,
       target: routed.target,
-      path: routed.path,
+      path: { resolved: routed.path, requested: relativePath },
     });
   });
 }
