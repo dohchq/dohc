@@ -24,6 +24,19 @@ pub struct MarkdownRecoveryCandidate {
     pub fingerprint: String,
 }
 
+/// A held save, as a person reviews it: what the file holds now beside what
+/// saving the waiting change would write. Both come from the engine: `held`
+/// is the projection the settle would materialize.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldMarkdownChange {
+    pub path: String,
+    /// The file's text in History, which matches the disk while a save is
+    /// held; None when it has no text head.
+    pub file: Option<String>,
+    pub held: String,
+}
+
 impl ActorHandle {
     pub fn markdown_recovery_wake(&self) -> Arc<tokio::sync::Notify> {
         self.markdown_recovery.wake.clone()
@@ -94,6 +107,86 @@ impl ActorHandle {
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
         }).await
+    }
+
+    /// The paths in the active version whose save dohc holds. A dismissed
+    /// Notice leaves its hold here, because dismissal deletes no edits.
+    pub async fn held_markdown_paths(
+        &self,
+        workspace: String,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.run(move |store, _| {
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&workspace)?
+                .version_id;
+            let pending = store.read_with(|conn| obligations::pending_in(conn, &workspace))?;
+            let mut paths: Vec<String> = pending
+                .into_iter()
+                .filter(|owed| {
+                    owed.held_checkpoint_sha256.is_some() && owed.key.version_id == version
+                })
+                .map(|owed| owed.path)
+                .collect();
+            paths.sort();
+            paths.dedup();
+            Ok(paths)
+        })
+        .await
+    }
+
+    /// The held save at `path` in the active version, projected the way its
+    /// settle projects it; None when nothing there is held.
+    pub async fn held_markdown_change(
+        &self,
+        workspace: String,
+        path: String,
+    ) -> Result<Option<HeldMarkdownChange>, RuntimeError> {
+        self.run(move |store, cache| {
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&workspace)?
+                .version_id;
+            let pending = store.read_with(|conn| obligations::pending_in(conn, &workspace))?;
+            let Some(owed) = pending.into_iter().find(|owed| {
+                owed.held_checkpoint_sha256.is_some()
+                    && owed.key.version_id == version
+                    && owed.path == path
+            }) else {
+                return Ok(None);
+            };
+            let Some(marker) = dohc_engine_collab::read_marker(store, &owed.key)? else {
+                return Ok(None);
+            };
+            let cold;
+            let doc = match store.read_with(|conn| cache.doc_for_consumer(conn, &owed.key))? {
+                Some(doc) => doc,
+                None => {
+                    cold = match dohc_engine_collab::load_persisted(store, &owed.key)? {
+                        Some(persisted) => persisted.doc,
+                        None => return Ok(None),
+                    };
+                    &cold
+                }
+            };
+            let projection = store.read_with(|conn| {
+                dohc_engine_sync::project_ydoc_with_reader(
+                    conn,
+                    &owed.key,
+                    doc,
+                    marker.content_kind,
+                    cache.reader_resolver.as_deref(),
+                )
+                .map_err(RuntimeError::from)
+            })?;
+            let file = VersionedTextStore::new(store)
+                .read_text(&workspace, &version, &path)?
+                .map(|head| head.text);
+            Ok(Some(HeldMarkdownChange {
+                path,
+                file,
+                held: projection.content,
+            }))
+        })
+        .await
     }
 
     pub async fn markdown_recovery_candidates(

@@ -70,6 +70,8 @@ export const WORKSPACE_METHOD = {
   automationsScheduleMarks: "automations.scheduleMarks",
   syncRemoteChanges: "sync.remoteChanges",
   syncCollectionsWaiting: "sync.collectionsWaiting",
+  ydocHeldChanges: "ydoc.heldChanges",
+  ydocHeldChange: "ydoc.heldChange",
   automationsRunNow: "automations.runNow",
 } as const;
 
@@ -199,6 +201,7 @@ export type WatcherStatusResult =
  * it meanwhile. It waits in the engine's staging directory until
  * `keptCopies.save` moves it to a visible copy.
  */
+export type HeldChange = NonNullable<WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.ydocHeldChange]["change"]>;
 export type KeptCopy = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList]["keptCopies"][number];
 export type KeptCopiesListResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.keptCopiesList];
@@ -524,6 +527,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsScheduleMarks]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncRemoteChanges]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.syncCollectionsWaiting]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.ydocHeldChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.ydocHeldChange]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.automationsRunNow]: AutomationRunNowParams;
 };
 
@@ -1540,6 +1545,20 @@ const WorkspaceResultSchemas = {
   /** Collections updates wait for an ordinary pull to commit its last page. */
   [WORKSPACE_METHOD.syncCollectionsWaiting]: mutableStruct({
     waiting: Schema.Boolean,
+  }),
+  /** The notes in the active version whose save dohc holds. */
+  [WORKSPACE_METHOD.ydocHeldChanges]: mutableStruct({
+    paths: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
+  }),
+  /**
+   * One held save: `file` is the text the file holds, and `held` what saving
+   * the waiting change would write. Past the response cap only `tooLarge`.
+   */
+  [WORKSPACE_METHOD.ydocHeldChange]: mutableStruct({
+    change: Schema.NullOr(Schema.Union([
+      mutableStruct({ path: Schema.NonEmptyString, file: Schema.NullOr(Schema.String), held: Schema.String }),
+      mutableStruct({ path: Schema.NonEmptyString, tooLarge: Schema.Literal(true) }),
+    ])),
   }),
   [WORKSPACE_METHOD.automationsRunNow]: mutableStruct({
     claim: AutomationClaimSummarySchema,

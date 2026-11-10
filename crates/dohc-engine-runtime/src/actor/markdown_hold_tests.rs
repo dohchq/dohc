@@ -532,6 +532,95 @@ async fn markdown_hold_session_and_queue_preserve_edits_until_consented_once() {
 }
 
 #[tokio::test]
+async fn markdown_hold_held_change_stays_readable_after_its_notice_is_dismissed() {
+    let f = Fixture::new().await;
+    assert!(
+        f.actor
+            .held_markdown_paths("w".into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        f.actor
+            .held_markdown_change("w".into(), "note.md".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        f.settle(false, None).await,
+        Err(RuntimeError::MarkdownWriteHeld { .. })
+    ));
+    f.actor
+        .run(|store, _| {
+            let notices = dohc_engine_sync::list_refusal_notices(store, "w")?;
+            assert_eq!(notices.len(), 1);
+            dohc_engine_sync::dismiss_refusal_notice(
+                store,
+                "w",
+                &notices[0].notice_id,
+                &notices[0].refusal_coordinates,
+                &NoFaults,
+            )?;
+            assert!(dohc_engine_sync::list_refusal_notices(store, "w")?.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Dismissing the Notice deleted nothing: the save is still held.
+    assert_eq!(
+        f.actor.held_markdown_paths("w".into()).await.unwrap(),
+        ["note.md"]
+    );
+    let change = f
+        .actor
+        .held_markdown_change("w".into(), "note.md".into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(change.file.as_deref(), Some(f.source.as_str()));
+    assert_ne!(change.held, f.source);
+    assert!(change.held.contains("Accepted text remains available"));
+    assert!(
+        f.actor
+            .held_markdown_change("w".into(), "other.md".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    f.unchanged().await;
+    // What the review showed is exactly what consenting writes.
+    assert!(
+        f.settle(false, Some(f.consent()))
+            .await
+            .unwrap()
+            .settled()
+            .unwrap()
+            .materialized
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join("note.md")).unwrap(),
+        change.held
+    );
+    assert!(
+        f.actor
+            .held_markdown_paths("w".into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        f.actor
+            .held_markdown_change("w".into(), "note.md".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    f.supervisor.close(&f.db).unwrap();
+}
+
+#[tokio::test]
 async fn markdown_hold_missing_or_mismatched_source_bytes_keep_the_existing_head() {
     for missing in [false, true] {
         let f = Fixture::new().await;

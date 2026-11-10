@@ -635,6 +635,11 @@ impl EngineService {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.heldChanges" => self.ydoc_held_changes(&ctx, request.workspace).await?,
+            "ydoc.heldChange" => {
+                self.ydoc_held_change(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.close" => {
                 self.ydoc_close(&ctx, request.workspace, request.params)
                     .await?
