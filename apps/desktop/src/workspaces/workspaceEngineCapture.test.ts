@@ -1503,11 +1503,13 @@ describe("workspaceEngineCapture batch capture", () => {
       delete: null,
     } as unknown as Awaited<ReturnType<CaptureVersionedTextStore["resolveTextConflict"]>>);
     const failure = new Error("watcher baseline unavailable");
+    vi.spyOn(store, "listTextConflicts").mockResolvedValue({ conflicts: [], nextAfterConflictId: null });
     vi.spyOn(store, "reconcileCapture").mockRejectedValue(failure);
     const engine = capture(root, { store, rustEngineSessions: sessions });
     try {
-      await expect(engine.resolveConflict("incoming", { kind: "apply-incoming" })).rejects.toBe(failure);
+      const outcome = await engine.resolveConflict("incoming", { kind: "apply-incoming" }).catch((error: unknown) => error);
       expect(await readFile(join(root, "trip.txt"), "utf8")).toBe("chosen text");
+      expect(outcome).toBe(failure);
     } finally { await engine.stop(); }
   });
 
