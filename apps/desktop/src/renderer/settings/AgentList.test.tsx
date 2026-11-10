@@ -67,7 +67,49 @@ function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
   return { onSave, onOrder, onNotice, onError, onOpenSettingsFile, unmount, rerender:(more: Partial<Parameters<typeof AgentList>[0]>) => rerender(list(more)) };
 }
 
-const row = (name: string) => screen.getByRole("button", { name: `Rename ${name}` }).closest<HTMLElement>("[data-agent-id]")!;
+// The list's row for an agent, which opens its page.
+const row = (name: string) => {
+  const found = screen.queryAllByTestId("agent-row").find((element) => element.getAttribute("aria-label") === name);
+  if (!found) throw new Error(`No row for ${name}`);
+  return found;
+};
+const page = () => within(screen.getByTestId("agent-page"));
+const state = (name: string) => within(row(name)).getByTestId("agent-state").textContent;
+
+// Opens an agent's page from the list, going back first from another agent's page.
+async function openAgent(name: string) {
+  const open = screen.queryByTestId("agent-page");
+  if (open?.getAttribute("aria-label") === name) return page();
+  if (open) await userEvent.click(screen.getByTestId("agent-back"));
+  await userEvent.click(row(name));
+  return page();
+}
+async function back() {
+  await userEvent.click(screen.getByTestId("agent-back"));
+}
+async function chooseAction(name: string, action: string) {
+  await openAgent(name);
+  await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
+  await userEvent.click(screen.getByRole("menuitem", { name: action }));
+}
+const checkButton = () => page().getByRole<HTMLButtonElement>("button", { name: /^(Send test|Try again)$/ });
+async function check(name: string) {
+  await openAgent(name);
+  await userEvent.click(checkButton());
+}
+
+const sheet = () => within(screen.getByTestId("agent-add-sheet"));
+const runsWith = (id: "claude" | "codex" | "mcp") => screen.getByTestId<HTMLButtonElement>(`agent-runs-with-${id}`);
+async function openAdd() {
+  await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
+  return sheet();
+}
+async function addAgent(id: "codex" | "mcp") {
+  await openAdd();
+  if (id === "codex") await within(runsWith("codex")).findByText("Ready");
+  await userEvent.click(runsWith(id));
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+}
 
 it("lists the entries dohc could not use in the file's order", () => {
   expect(agentListRows(SETTINGS, [{ ...BROKEN, position: 0 }, { ...BROKEN, id: "last", position: 4 }])
@@ -75,44 +117,40 @@ it("lists the entries dohc could not use in the file's order", () => {
     .toEqual(["codex-two", "default", "codex", "terminal", "last"]);
 });
 
-it("shows each agent with its controls, and an agent you run with no Check and no switch", () => {
+it("lists every agent as a row that opens its page, and back returns to its row", async () => {
   renderList();
   expect(screen.getAllByTestId("agent-row").map((element) => element.dataset.agentId)).toEqual(["default", "codex", "terminal"]);
-  const claude = within(row("Claude Code"));
-  expect(claude.getByRole("button", { name: "Check" })).toBeTruthy();
-  expect(claude.getByRole("switch", { name: "Claude Code" }).getAttribute("aria-checked")).toBe("true");
+  // The list has no per-agent controls; each lives on the agent's page.
+  expect(screen.queryByTestId("agent-check")).toBeNull();
+  expect(screen.queryByRole("switch")).toBeNull();
+  const claude = await openAgent("Claude Code");
+  expect(document.activeElement).toBe(screen.getByTestId("agent-back"));
+  expect(claude.getByRole("button", { name: "Send test" })).toBeTruthy();
+  expect(claude.getByRole("switch", { name: "Run Claude Code on this computer" }).getAttribute("aria-checked")).toBe("true");
   expect(claude.getByRole("button", { name: "Claude Code actions" })).toBeTruthy();
-  const terminal = within(row("Claude in Terminal"));
+  expect(screen.queryByTestId("agent-row")).toBeNull();
+  await back();
+  expect(document.activeElement).toBe(row("Claude Code"));
+  const terminal = await openAgent("Claude in Terminal");
   expect(terminal.getByText("Through MCP")).toBeTruthy();
-  expect(terminal.queryByRole("button", { name: "Check" })).toBeNull();
+  expect(terminal.queryByRole("button", { name: "Send test" })).toBeNull();
   expect(terminal.queryByRole("switch")).toBeNull();
-  expect(terminal.getByRole("button", { name: "Claude in Terminal actions" })).toBeTruthy();
+  expect(terminal.getByRole("button", { name: "Copy MCP config" })).toBeTruthy();
 });
 
 it("says under each name what starts the agent and where it stands", () => {
   const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
   renderList({ settings: codexOff });
-  const state = (agent: string) => within(row(agent)).getByTestId("agent-state").textContent;
-  expect(state("Claude Code")).toBe("Your command·Not checked");
-  // Off says only its tool; the switch shows it off.
-  expect(state("Codex")).toBe("Codex");
+  expect(state("Claude Code")).toBe("Your command·On");
+  expect(state("Codex")).toBe("Codex·Off");
   expect(state("Claude in Terminal")).toBe("Through MCP");
 });
 
-it("names an agent's switch by the agent, says what a click does, and dims a row that's off", () => {
+it("names an agent's switch by the agent, says what a click does, and dims a row that's off", async () => {
   const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
   const { rerender } = renderList({ settings: codexOff });
-  const on = within(row("Claude Code")).getByRole("switch", { name: "Claude Code" });
-  expect(on.getAttribute("aria-checked")).toBe("true");
-  expect(on.title).toBe("Turn off Claude Code");
-  // Read after the name, so it leaves the name out.
-  expect(on.getAttribute("aria-description")).toBe("Turn off");
-  const off = within(row("Codex")).getByRole("switch", { name: "Codex" });
-  expect(off.getAttribute("aria-checked")).toBe("false");
-  expect(off.title).toBe("Turn on Codex");
-  expect(off.getAttribute("aria-description")).toBe("Turn on");
   // The off row's name and mark go muted; the on row keeps its ink.
-  const name = (agent: string) => within(row(agent)).getByRole("button", { name: `Rename ${agent}` });
+  const name = (agent: string) => within(row(agent)).getAllByText(agent)[0]!;
   const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;
   expect(name("Codex").className).toContain("text-muted");
   expect(name("Codex").className).not.toContain("text-ink");
@@ -120,10 +158,21 @@ it("names an agent's switch by the agent, says what a click does, and dims a row
   expect(name("Claude Code").className).toContain("text-ink");
   expect(mark("Claude Code").getAttribute("class")).not.toContain("opacity-50");
 
+  const on = (await openAgent("Claude Code")).getByRole("switch", { name: "Run Claude Code on this computer" });
+  expect(on.getAttribute("aria-checked")).toBe("true");
+  expect(on.title).toBe("Turn off Claude Code");
+  // Read after the name, so it leaves the name out.
+  expect(on.getAttribute("aria-description")).toBe("Turn off");
+  const off = (await openAgent("Codex")).getByRole("switch", { name: "Run Codex on this computer" });
+  expect(off.getAttribute("aria-checked")).toBe("false");
+  expect(off.title).toBe("Turn on Codex");
+  expect(off.getAttribute("aria-description")).toBe("Turn on");
+
   rerender({ settings: SETTINGS });
-  const turnedOn = within(row("Codex")).getByRole("switch", { name: "Codex" });
+  const turnedOn = page().getByRole("switch", { name: "Run Codex on this computer" });
   expect(turnedOn.getAttribute("aria-checked")).toBe("true");
   expect(turnedOn.title).toBe("Turn off Codex");
+  await back();
   expect(name("Codex").className).toContain("text-ink");
   expect(mark("Codex").getAttribute("class")).not.toContain("opacity-50");
 });
@@ -133,19 +182,18 @@ it("keeps an entry dohc could not use in its place, with its problem and a way t
     agentProblems: [BROKEN, { id: "Agent B", position: 4, problem: "dohc doesn't use `color`." }],
   });
   const rows = screen.getAllByTestId(/^agent-row/);
-  // An entry dohc could not use stays among the agents dohc starts.
-  expect(rows.map((element) => element.dataset.agentId)).toEqual(["default", "codex-two", "codex", "Agent B", "terminal"]);
+  expect(rows.map((element) => element.dataset.agentId)).toEqual(["default", "codex-two", "codex", "terminal", "Agent B"]);
   const broken = within(rows[1]!);
   expect(broken.getByText("codex")).toBeTruthy();
   expect(broken.getByTestId("agent-problem").textContent).toBe("Another agent has this name.");
-  expect(broken.getByRole("switch").getAttribute("aria-checked")).toBe("false");
-  expect((broken.getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
-  expect(broken.queryByRole("button", { name: /actions/ })).toBeNull();
-  expect(broken.queryByRole("button", { name: /Remove|Undo/ })).toBeNull();
+  // It has no page to open, nothing to switch and nothing to remove.
+  expect(rows[1]!.tagName).not.toBe("BUTTON");
+  expect(broken.queryByRole("switch")).toBeNull();
+  expect(broken.queryByRole("button", { name: /actions|Remove|Undo/ })).toBeNull();
   await userEvent.click(broken.getByRole("button", { name: "Open settings file" }));
   expect(onOpenSettingsFile).toHaveBeenCalledTimes(1);
   // Without a name the row shows the id, and the key is set in monospace.
-  const nameless = within(rows[3]!);
+  const nameless = within(rows[4]!);
   expect(nameless.getByText("Agent B")).toBeTruthy();
   expect(nameless.getByText("color").tagName).toBe("CODE");
 });
@@ -154,20 +202,25 @@ it("checks one agent, then says how long its reply took", async () => {
   const answer = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
   const { rerender } = renderList();
-  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await check("Codex");
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex" });
-  expect(within(row("Codex")).getByText("Checking")).toBeTruthy();
-  // Main runs one runner per workspace, so the other Check waits.
-  expect((within(row("Claude Code")).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(page().getByText("Checking")).toBeTruthy();
+  await back();
+  expect(state("Codex")).toBe("Codex·Checking");
+  // Main runs one runner per workspace, so the other agent's test waits.
+  await openAgent("Claude Code");
+  expect(checkButton().disabled).toBe(true);
   await act(async () => answer.resolve({ ok: true, detail: "Runner self-test passed." }));
-  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+  await openAgent("Codex");
+  expect(page().getByText(/^Replied in \d+ s$/)).toBeTruthy();
   // While agents are paused, an agent that is off keeps the check it ran,
   // and one that is on says Paused.
+  await back();
   const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
   rerender({ settings: codexOff });
   act(() => pausedListener?.({ paused: true }));
-  expect(within(row("Codex")).getByTestId("agent-state").textContent).toMatch(/^Codex·Replied in \d+ s$/);
-  expect(within(row("Claude Code")).getByTestId("agent-state").textContent).toBe("Your command·Paused");
+  expect(state("Codex")).toMatch(/^Codex·Replied in \d+ s$/);
+  expect(state("Claude Code")).toBe("Your command·Paused");
 });
 
 it("says an agent didn't reply, names it in Notices with why and its log, and offers Try again", async () => {
@@ -175,13 +228,13 @@ it("says an agent didn't reply, names it in Notices with why and its log, and of
     ok: false, detail: "Runner self-test timed out after 120 seconds.", logPath: "C:\\Logs\\check.log",
   });
   const { onError } = renderList();
-  await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
-  expect(await within(row("Claude Code")).findByText("Didn't reply.")).toBeTruthy();
+  await check("Claude Code");
+  expect(await page().findByText("Didn't reply.")).toBeTruthy();
   expect(onError).toHaveBeenCalledWith("Claude Code didn't reply to the check.", undefined, expect.any(Function), [
     ["Cause", "Runner self-test timed out after 120 seconds."],
     ["Log", "C:\\Logs\\check.log"],
   ], "agent-check:ws-1:default");
-  await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Try again" }));
+  await userEvent.click(page().getByRole("button", { name: "Try again" }));
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
 });
 
@@ -190,7 +243,7 @@ it("says an agent replied as Agent when its reply wasn't the check's", async () 
     ok: false, unconfirmed: true, detail: "Codex's Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in Codex's details.", logPath: "C:\\Logs\\check.log",
   });
   const { onError } = renderList();
-  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
   expect(onError).toHaveBeenCalledWith("Codex replied as Agent.", undefined, expect.any(Function), [
     ["Cause", "Codex's Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in Codex's details."],
@@ -201,17 +254,17 @@ it("says an agent replied as Agent when its reply wasn't the check's", async () 
 it("checks the agent again from the failed check's toast", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
   const { onError } = renderList();
-  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
   const retry = onError.mock.calls[0]![2] as () => Promise<void>;
   await act(() => retry());
   expect(bridgeMock.runnerSelfTest).toHaveBeenLastCalledWith({ workspaceId: "ws-1", agentId: "codex" });
-  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+  expect(page().getByText(/^Replied in \d+ s$/)).toBeTruthy();
 
-  // While Check can't start, Try again says why, and can be tried again.
+  // While a check can't start, Try again says why, and can be tried again.
   const running = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(running.promise);
-  await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
+  await check("Claude Code");
   await act(() => retry());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(3);
   expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
@@ -229,82 +282,81 @@ it("checks the agent again from the failed check's toast", async () => {
 it("checks again from the toast when the check couldn't start", async () => {
   bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
   const { onError } = renderList();
-  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
   await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
-  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+  expect(page().getByText(/^Replied in \d+ s$/)).toBeTruthy();
 });
 
 it("pauses every agent dohc starts that is on, and leaves the rest as they are", async () => {
   renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents, off: testAgent({ name: "Codex off", enabled: false }) } } });
-  await userEvent.click(screen.getByRole("button", { name: "Pause all" }));
+  await userEvent.click(screen.getByRole("button", { name: "Pause all agents" }));
   expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: true });
   act(() => pausedListener?.({ paused: true }));
-  expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Resume agents" }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.getByTestId("agents-paused").textContent).toBe("Paused until you resume or quit dohc.");
-  for (const name of ["Claude Code", "Codex"]) {
-    expect(within(row(name)).getByText("Paused")).toBeTruthy();
-    expect((within(row(name)).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
-  }
+  expect(state("Claude Code")).toBe("Your command·Paused");
+  expect(state("Codex")).toBe("Codex·Paused");
   // An agent that is off has nothing to pause.
-  expect(within(row("Codex off")).queryByText("Paused")).toBeNull();
-  expect(within(row("Claude in Terminal")).getByText("Through MCP")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+  expect(state("Codex off")).toBe("Your command·Off");
+  expect(state("Claude in Terminal")).toBe("Through MCP");
+  const codex = await openAgent("Codex");
+  expect(checkButton().disabled).toBe(true);
+  expect(codex.getByText("Paused")).toBeTruthy();
+  expect(codex.getByTestId("agents-check-note").textContent).toBe("Agents are paused. Resume them, then try again.");
+  await back();
+  await userEvent.click(screen.getByRole("button", { name: "Resume agents" }));
   expect(bridgeMock.setChatDispatchPaused).toHaveBeenLastCalledWith({ paused: false });
 });
 
-const ids = (testId: string) => within(screen.getByTestId(testId)).queryAllByTestId("agent-row").map((element) => element.dataset.agentId);
+const ids = () => screen.queryAllByTestId("agent-row").map((element) => element.dataset.agentId);
 
-it("puts the agents dohc starts and the agents you run in sections of their own, with Pause all on the first", () => {
+it("puts every agent in one list, with Pause and Add agent beside the title", () => {
   renderList();
-  const started = within(screen.getByTestId("agents-started"));
-  const yours = within(screen.getByTestId("agents-yours"));
-  expect(started.getByRole("heading", { name: "Started by dohc" })).toBeTruthy();
-  expect(yours.getByRole("heading", { name: "You run on this computer" })).toBeTruthy();
-  expect(ids("agents-started")).toEqual(["default", "codex"]);
-  expect(ids("agents-yours")).toEqual(["terminal"]);
-  expect(started.getByRole("button", { name: "Pause all" })).toBeTruthy();
-  expect(yours.queryByRole("button", { name: "Pause all" })).toBeNull();
-  // The Add tiles for tools stay with the agents dohc starts.
-  expect(started.getByRole("button", { name: /^Add Codex/ })).toBeTruthy();
-  expect(yours.queryByRole("button", { name: /^Add Codex/ })).toBeNull();
-  // Each agent you run has its own Copy MCP config; the page has none of its own.
-  expect(screen.getAllByRole("button", { name: "Copy MCP config" })).toHaveLength(1);
-  expect(within(row("Claude in Terminal")).getByRole("button", { name: "Copy MCP config" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy();
+  expect(ids()).toEqual(["default", "codex", "terminal"]);
+  expect(screen.getByRole("button", { name: "Pause all agents" })).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "Add agent" })).toHaveLength(1);
+  // An MCP config is on its agent's page, not on the list.
+  expect(screen.queryByRole("button", { name: "Copy MCP config" })).toBeNull();
 });
 
-it("shows Pause all only while there is an agent dohc starts", () => {
-  renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly } } });
-  expect(screen.queryByRole("button", { name: "Pause all" })).toBeNull();
-  expect(ids("agents-yours")).toEqual(["terminal"]);
+it("shows Pause only while there is an agent dohc starts, and says when there are no agents", () => {
+  const { rerender } = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly } } });
+  expect(screen.queryByRole("button", { name: "Pause all agents" })).toBeNull();
+  expect(ids()).toEqual(["terminal"]);
+  rerender({ settings: { ...SETTINGS, agents: {} } });
+  expect(screen.getByTestId("agents-empty").textContent).toBe("No agents yet.");
 });
 
 it("copies an MCP config that runs dohc's MCP server as the agent you run", async () => {
   const user = userEvent.setup();
   const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
   renderList({ config: { command: "dohc-mcp", args: ["--workspace", "Trip", "--home", "Home"], workspacePath: "Trip", home: "Home" } });
-  await user.click(within(row("Claude in Terminal")).getByRole("button", { name: "Copy MCP config" }));
-  expect(JSON.parse(writeText.mock.calls[0]![0])).toEqual({
-    mcpServers: { dohc: { command: "dohc-mcp", args: ["--workspace", "Trip", "--home", "Home", "--agent-id", "terminal"] } },
-  });
+  await user.click(row("Claude in Terminal"));
+  const expected = { mcpServers: { dohc: { command: "dohc-mcp", args: ["--workspace", "Trip", "--home", "Home", "--agent-id", "terminal"] } } };
+  expect(JSON.parse(page().getByTestId("mcp-config").textContent!)).toEqual(expected);
+  await user.click(page().getByRole("button", { name: "Copy MCP config" }));
+  expect(JSON.parse(writeText.mock.calls[0]![0])).toEqual(expected);
   writeText.mockRestore();
 });
 
-it("can't copy an MCP config the workspace doesn't have, and says why", () => {
+it("can't copy an MCP config the workspace doesn't have, and says why", async () => {
   renderList({ config: { unavailable: true, message: "dohc's MCP server isn't installed." } });
-  expect((within(row("Claude in Terminal")).getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled).toBe(true);
-  expect(within(screen.getByTestId("agents-yours")).getByTestId("mcp-unavailable").textContent).toBe("dohc's MCP server isn't installed.");
+  const terminal = await openAgent("Claude in Terminal");
+  expect((terminal.getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(terminal.getByTestId("mcp-unavailable").textContent).toBe("dohc's MCP server isn't installed.");
 });
 
 it("says an agent you run is listening while it waits for messages, and Through MCP once the wait ends", async () => {
   bridgeMock.readAgentsListening.mockResolvedValueOnce({ agentIds: ["terminal"] });
   renderList();
-  await vi.waitFor(() => expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Listening"));
+  await vi.waitFor(() => expect(state("Claude in Terminal")).toBe("Listening"));
   act(() => listeningListener?.({ agentIds: [] }));
-  expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Through MCP");
+  expect(state("Claude in Terminal")).toBe("Through MCP");
   act(() => listeningListener?.({ agentIds: ["terminal"] }));
-  expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Listening");
+  expect(state("Claude in Terminal")).toBe("Listening");
   // An agent dohc starts never reads as listening.
   act(() => listeningListener?.({ agentIds: ["terminal", "codex"] }));
   expect(within(row("Codex")).queryByText("Listening")).toBeNull();
@@ -316,42 +368,141 @@ it("takes a pushed answer over the first read of who is listening", async () => 
   renderList();
   act(() => listeningListener?.({ agentIds: [] }));
   await act(async () => read.resolve({ agentIds: ["terminal"] }));
-  expect(within(row("Claude in Terminal")).getByTestId("agent-state").textContent).toBe("Through MCP");
+  expect(state("Claude in Terminal")).toBe("Through MCP");
+});
+
+it("marks this workspace's changes as one agent's from that agent's page", async () => {
+  const onToggle = vi.fn();
+  const two = { ...SETTINGS, agents: { ...SETTINGS.agents, cursor: { ...mcpOnly, name: "Cursor", hue: "teal" as const } } };
+  const { rerender } = renderList({ settings: two, run: { activeRun: null, busy: false, onToggle } });
+  const terminal = await openAgent("Claude in Terminal");
+  expect(terminal.getByText("Mark changes as Claude in Terminal's")).toBeTruthy();
+  expect(terminal.getByTestId("mcp-status").dataset.state).toBe("stopped");
+  await userEvent.click(terminal.getByRole("button", { name: "Start run" }));
+  expect(onToggle).toHaveBeenCalledWith("terminal");
+
+  rerender({ settings: two, run: { activeRun: { id: "run-1", agentId: "terminal" }, busy: false, onToggle } });
+  expect(page().getByTestId("mcp-status").dataset.state).toBe("running");
+  expect(page().getByRole("button", { name: "Stop run" })).toBeTruthy();
+  await back();
+  expect(state("Claude in Terminal")).toBe("Marking changes");
+  // Another agent's page says whose run is on, and can stop it.
+  const cursor = await openAgent("Cursor");
+  expect(cursor.getByTestId("mcp-status").textContent).toBe("Running as Claude in Terminal");
+  expect(cursor.getByTestId("mcp-status").dataset.state).toBe("other");
+  rerender({ settings: two, run: { activeRun: { id: "run-1", agentId: "terminal" }, busy: true, onToggle } });
+  expect((page().getByRole("button", { name: "Stop run" }) as HTMLButtonElement).disabled).toBe(true);
+  // An agent dohc starts has no run of its own.
+  await openAgent("Codex");
+  expect(page().queryByTestId("mcp-enable-toggle")).toBeNull();
+});
+
+it("stops a run for an agent the list doesn't show from the list", async () => {
+  const onToggle = vi.fn();
+  const { rerender } = renderList({ run: { activeRun: { id: "run-1", agentId: "dohc-mcp" }, busy: false, onToggle } });
+  await userEvent.click(within(screen.getByTestId("agent-run-unlisted")).getByRole("button", { name: "Stop run" }));
+  expect(onToggle).toHaveBeenCalledWith("dohc-mcp");
+  // A listed agent's run is stopped from its page instead.
+  rerender({ run: { activeRun: { id: "run-1", agentId: "terminal" }, busy: false, onToggle } });
+  expect(screen.queryByTestId("agent-run-unlisted")).toBeNull();
 });
 
 it("adds an agent you run as Agent, then Agent 2, each off, in the next free color, with nothing to check", async () => {
   const teal = { ...SETTINGS, appearance: { ...SETTINGS.appearance, yourColor: "teal" as const } };
   const { onSave, rerender } = renderList({ settings: teal });
-  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  await openAdd();
+  await userEvent.click(runsWith("mcp"));
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
+  expect(sheet().getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("Agent");
+  expect(sheet().queryByRole("switch")).toBeNull();
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
   const first = onSave.mock.calls[0]![0];
   expect(Object.keys(first.agents)).toEqual(["default", "codex", "terminal", "agent"]);
   // Olive, blue and rose are the agents', teal is yours, so plum is next.
   expect(first.agents.agent).toEqual({ name: "Agent", hue: "plum", changesFiles: true, enabled: false, timeoutMinutes: 30 });
   expect(first.agents.agent).not.toHaveProperty("launch");
+  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
   rerender({ settings: first });
-  expect(ids("agents-yours")).toEqual(["terminal", "agent"]);
-  expect(within(row("Agent")).getByTestId("agent-state").textContent).toBe("Through MCP");
-  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  expect(ids()).toEqual(["default", "codex", "terminal", "agent"]);
+  expect(document.activeElement).toBe(row("Agent"));
+  expect(state("Agent")).toBe("Through MCP");
+  await addAgent("mcp");
   expect(onSave.mock.calls[1]![0].agents["agent-2"]).toMatchObject({ name: "Agent 2", hue: "rust", enabled: false });
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
 });
 
-it("gives an agent you run Rename, Details and Remove, and says in Details what it reaches", async () => {
-  renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename", "Details", "Remove"]);
-  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
-  const details = within(within(row("Claude in Terminal")).getByTestId("agent-details"));
-  expect(details.getByText("Reaches every workspace dohc opens on this computer.")).toBeTruthy();
-  expect(details.getByRole("radiogroup", { name: "Color of Claude in Terminal" })).toBeTruthy();
-  expect(details.queryByText("Stops after")).toBeNull();
+it("shows the MCP config an agent you run will use before it is added", async () => {
+  renderList({ config: { command: "dohc-mcp", args: ["--workspace", "Trip"], workspacePath: "Trip", home: "Home" } });
+  await openAdd();
+  await userEvent.click(runsWith("mcp"));
+  const connect = within(screen.getByTestId("agent-add-connect"));
+  expect(connect.getByText(/"--agent-id",\s*"agent"/)).toBeTruthy();
+  expect(connect.getByRole("button", { name: "Copy MCP config" })).toBeTruthy();
 });
 
-it("removes an agent you run, and Undo puts it back in its section", async () => {
-  const { onSave, onNotice, onOrder } = renderList();
+it("names a new agent, picks its color, and keeps a typed name when the choice changes", async () => {
+  const { onSave } = renderList();
+  await openAdd();
+  await within(runsWith("codex")).findByText("Ready");
+  const name = sheet().getByRole<HTMLInputElement>("textbox", { name: "Name" });
+  // The name follows the choice until the person types one.
+  expect(name.value).toBe("Codex 2");
+  await userEvent.click(runsWith("mcp"));
+  expect(name.value).toBe("Agent");
+  await userEvent.clear(name);
+  // An empty name says so only once Add agent is pressed.
+  expect(sheet().queryByRole("alert")).toBeNull();
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  expect(sheet().getByRole("alert").textContent).toBe("Enter an agent name.");
+  await userEvent.type(name, "codex");
+  expect(sheet().getByRole("alert").textContent).toBe("Another agent has this name.");
+  await userEvent.clear(name);
+  await userEvent.type(name, "Cursor");
+  expect(sheet().getByText("@Cursor")).toBeTruthy();
+  await userEvent.click(runsWith("codex"));
+  expect(name.value).toBe("Cursor");
+  await userEvent.click(sheet().getByRole("radio", { name: "Teal" }));
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  expect(onSave.mock.calls[0]![0].agents["codex-2"]).toMatchObject({ name: "Cursor", hue: "teal", enabled: true });
+});
+
+it("closes Add agent on Cancel without saving", async () => {
+  const { onSave } = renderList();
+  await openAdd();
+  await userEvent.click(sheet().getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+it("adds Codex off without checking it when Run on this computer is off", async () => {
+  const { onSave } = renderList();
+  await openAdd();
+  await within(runsWith("codex")).findByText("Ready");
+  await userEvent.click(sheet().getByRole("switch", { name: "Run on this computer" }));
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  expect(onSave.mock.calls[0]![0].agents["codex-2"]).toMatchObject({ enabled: false, launch: { tool: "codex" } });
+  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
+});
+
+it("gives an agent you run Rename and Remove, and says on its page what it reaches", async () => {
+  renderList();
+  await openAgent("Claude in Terminal");
   await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename", "Remove"]);
+  await userEvent.keyboard("{Escape}");
+  const details = within(page().getByTestId("agent-details"));
+  expect(details.getByText("Every workspace dohc opens on this computer")).toBeTruthy();
+  expect(details.getByRole("radiogroup", { name: "Color of Claude in Terminal" })).toBeTruthy();
+  expect(page().queryByText("Stops after")).toBeNull();
+});
+
+it("removes an agent you run, and Undo puts it back in its place", async () => {
+  const { onSave, onNotice, onOrder } = renderList();
+  await chooseAction("Claude in Terminal", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
+  // Its page closes, and focus goes to the Agents heading.
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default", "codex"]);
   const { default: claude, codex } = SETTINGS.agents;
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude!, codex: codex! } }, source: "stored" });
@@ -362,12 +513,13 @@ it("removes an agent you run, and Undo puts it back in its section", async () =>
 
 it("turns an agent off from its switch", async () => {
   const { onSave } = renderList();
-  await userEvent.click(within(row("Codex")).getByRole("switch"));
+  await userEvent.click((await openAgent("Codex")).getByRole("switch"));
   expect(onSave.mock.calls[0]![0].agents.codex?.enabled).toBe(false);
 });
 
 it("renames an agent in place, and refuses a name another agent has", async () => {
   const { onSave } = renderList();
+  await openAgent("Codex");
   await userEvent.click(screen.getByRole("button", { name: "Rename Codex" }));
   const field = screen.getByRole("textbox", { name: "Name of Codex" });
   await userEvent.clear(field);
@@ -381,25 +533,48 @@ it("renames an agent in place, and refuses a name another agent has", async () =
   expect(screen.queryByRole("textbox")).toBeNull();
 });
 
-it("shows how dohc starts an agent in its details", async () => {
+it("renames an agent from its menu", async () => {
   renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
-  const details = within(row("Codex")).getByTestId("agent-details");
-  expect(await within(details).findByText("Codex 0.98, signed in")).toBeTruthy();
-  expect(within(details).getByText("C:\\Tools\\codex.exe")).toBeTruthy();
-  expect(within(details).getByText("30 min")).toBeTruthy();
-  expect(within(details).getByRole("button", { name: "Use your own command" })).toBeTruthy();
+  await chooseAction("Codex", "Rename");
+  expect(screen.getByRole("textbox", { name: "Name of Codex" })).toBeTruthy();
+});
+
+it("shows how dohc starts an agent and what it can do on its page", async () => {
+  renderList();
+  const codex = await openAgent("Codex");
+  const details = within(codex.getByTestId("agent-details"));
+  expect(await details.findByText("Codex 0.98, signed in")).toBeTruthy();
+  expect(codex.getByTestId("agent-page-subtitle").textContent).toBe("@Codex·Codex 0.98, signed in");
+  expect(details.getByText("C:\\Tools\\codex.exe")).toBeTruthy();
+  expect(details.getByRole("button", { name: "Use your own command" })).toBeTruthy();
+  const can = within(codex.getByTestId("agent-can"));
+  expect(can.getByText("Edits without asking")).toBeTruthy();
+  expect(can.getByText("Replies only")).toBeTruthy();
+  expect(can.getByText("30 min")).toBeTruthy();
   expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(1);
-  await userEvent.click(within(details).getByRole("button", { name: "Details" }));
-  expect(within(row("Codex")).queryByTestId("agent-details")).toBeNull();
+  // An agent started by your own command has no tool, so its page doesn't say what a tool allows.
+  const claude = await openAgent("Claude Code");
+  expect(claude.queryByText("Edits without asking")).toBeNull();
+  expect(within(claude.getByTestId("agent-details")).getByText("node agent.mjs")).toBeTruthy();
+});
+
+it("changes when an agent stops, and refuses minutes it can't save", async () => {
+  const { onSave } = renderList();
+  const codex = await openAgent("Codex");
+  await userEvent.click(codex.getByRole("button", { name: "Change when Codex stops" }));
+  const field = codex.getByRole<HTMLInputElement>("spinbutton", { name: "Minutes before Codex stops" });
+  await userEvent.clear(field);
+  await userEvent.type(field, "0{Enter}");
+  expect(codex.getByRole("alert").textContent).toBe("Enter whole minutes from 1 to 1440.");
+  expect(onSave).not.toHaveBeenCalled();
+  await userEvent.clear(field);
+  await userEvent.type(field, "45{Enter}");
+  expect(onSave.mock.calls[0]![0].agents.codex?.timeoutMinutes).toBe(45);
 });
 
 it("keeps a tool's profile when its command is saved as shown, and adds your own flags to it", async () => {
   const { onSave } = renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
-  const details = within(row("Codex"));
+  const details = await openAgent("Codex");
   await userEvent.click(details.getByRole("button", { name: "Use your own command" }));
   const field = details.getByRole<HTMLInputElement>("textbox", { name: "Command that starts Codex" });
   expect(field.value).toBe("C:\\Tools\\codex.exe");
@@ -419,9 +594,7 @@ it("keeps a tool's profile when its command is saved as shown, and adds your own
 it("shows a tool's program with your own flags as its command", async () => {
   renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents,
     codex: testAgent({ name: "Codex", hue: "blue", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] } }) } } });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
-  const details = within(row("Codex"));
+  const details = within((await openAgent("Codex")).getByTestId("agent-details"));
   expect(await details.findByText("Codex 0.98, signed in")).toBeTruthy();
   expect(details.getByText("C:\\Tools\\codex.exe --model o3")).toBeTruthy();
   expect(details.queryByText("Program")).toBeNull();
@@ -429,11 +602,9 @@ it("shows a tool's program with your own flags as its command", async () => {
 });
 
 // An agent's swatches are squares, olive first, and set only that agent's color.
-it("sets an agent's color in its details", async () => {
+it("sets an agent's color on its page", async () => {
   const { onSave } = renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
-  const color = within(row("Codex")).getByRole("radiogroup", { name: "Color of Codex" });
+  const color = (await openAgent("Codex")).getByRole("radiogroup", { name: "Color of Codex" });
   const hues = within(color).getAllByRole("radio");
   expect(hues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
   for (const radio of hues) expect(radio.className).toContain("rounded-md");
@@ -442,24 +613,26 @@ it("sets an agent's color in its details", async () => {
   expect(onSave.mock.lastCall![0]).toEqual({ ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, hue: "plum" } } });
 });
 
-const tile = (name: string) => screen.getByRole<HTMLButtonElement>("button", { name: new RegExp(`^${name}`) });
-
-it("says what each tool needs before it can be added", async () => {
-  bridgeMock.detectAgentTools.mockResolvedValueOnce({
+it("says what each tool needs before it can be added, and offers another agent", async () => {
+  const found = deferred<AgentToolsResult>();
+  bridgeMock.detectAgentTools.mockReturnValueOnce(found.promise);
+  renderList();
+  await openAdd();
+  expect(within(runsWith("claude")).getByLabelText("Looking for Claude Code")).toBeTruthy();
+  await act(async () => found.resolve({
     workingDirectory: "C:\\Work",
     tools: [
       { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-out", probe: "detected" },
       { tool: "codex", executable: null, version: null, auth: "unknown", probe: "not-found" },
     ],
-  });
-  renderList();
-  expect(within(tile("Add Claude Code")).getByLabelText("Looking for Claude Code")).toBeTruthy();
-  await within(tile("Add Claude Code")).findByText("Sign in first");
-  expect(tile("Add Claude Code").disabled).toBe(true);
-  expect(within(tile("Add Codex")).getByText("Not found")).toBeTruthy();
-  expect(tile("Add Codex").disabled).toBe(true);
-  expect(screen.queryByRole("button", { name: /^Add one you run/ })).toBeNull();
-  expect(screen.getByText("Runs on this computer. Turn an agent on for one computer per workspace.")).toBeTruthy();
+  }));
+  await within(runsWith("claude")).findByText("Sign in first");
+  expect(runsWith("claude").disabled).toBe(true);
+  expect(within(runsWith("codex")).getByText("Not found")).toBeTruthy();
+  expect(runsWith("codex").disabled).toBe(true);
+  // With no tool ready, the sheet starts on another agent.
+  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
+  expect(runsWith("mcp").disabled).toBe(false);
 });
 
 // Codex can run without a saved login, through CODEX_API_KEY or another model
@@ -470,14 +643,15 @@ it("says Codex is ready when dohc can't tell whether it is signed in", async () 
     tools: [{ tool: "codex", executable: "C:\\Tools\\codex.exe", version: "0.98", auth: "unknown", probe: "detected" }],
   });
   renderList();
-  await within(tile("Add Codex")).findByText("Ready");
-  expect(tile("Add Codex").disabled).toBe(false);
+  await openAdd();
+  await within(runsWith("codex")).findByText("Ready");
+  expect(runsWith("codex").disabled).toBe(false);
+  expect(runsWith("codex").getAttribute("aria-checked")).toBe("true");
 });
 
 it("adds a tool that is ready, on, with an id and name of its own, then checks it", async () => {
   const { onSave } = renderList();
-  await within(tile("Add Codex")).findByText("Ready");
-  await userEvent.click(tile("Add Codex"));
+  await addAgent("codex");
   const agents = onSave.mock.calls[0]![0].agents;
   expect(Object.keys(agents)).toEqual(["default", "codex", "terminal", "codex-2"]);
   expect(agents["codex-2"]).toMatchObject({
@@ -488,32 +662,32 @@ it("adds a tool that is ready, on, with an id and name of its own, then checks i
 
 it("gives the first agent you add the default id", async () => {
   const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
-  await within(tile("Add Codex")).findByText("Ready");
-  await userEvent.click(tile("Add Codex"));
+  await addAgent("codex");
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
 });
 
 it("never gives an agent you run the default id, which Chats sets up as one dohc starts", async () => {
   const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
-  await userEvent.click(screen.getByRole("button", { name: /^Add an agent you run/ }));
+  await addAgent("mcp");
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["agent"]);
 });
 
-it("says on each tile that dohc couldn't look for tools, and looks again from the toast", async () => {
+it("says on each tool that dohc couldn't look for tools, and looks again from the toast", async () => {
   bridgeMock.detectAgentTools.mockRejectedValueOnce(new Error("probe failed"));
   const { onError } = renderList();
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("probe failed", expect.any(Error), expect.any(Function)));
-  for (const name of ["Add Claude Code", "Add Codex"]) {
-    expect(within(tile(name)).queryByLabelText(/^Looking for/)).toBeNull();
-    expect(within(tile(name)).getByText("Couldn't check")).toBeTruthy();
-    expect(tile(name).disabled).toBe(true);
+  await openAdd();
+  for (const tool of ["claude", "codex"] as const) {
+    expect(within(runsWith(tool)).queryByLabelText(/^Looking for/)).toBeNull();
+    expect(within(runsWith(tool)).getByText("Couldn't check")).toBeTruthy();
+    expect(runsWith(tool).disabled).toBe(true);
   }
   const retry = onError.mock.calls[0]![2] as () => Promise<void>;
   await act(() => retry());
   expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(2);
-  expect(within(tile("Add Codex")).getByText("Ready")).toBeTruthy();
-  expect(tile("Add Codex").disabled).toBe(false);
-  expect(within(tile("Add Claude Code")).getByText("Not found")).toBeTruthy();
+  expect(within(runsWith("codex")).getByText("Ready")).toBeTruthy();
+  expect(runsWith("codex").disabled).toBe(false);
+  expect(within(runsWith("claude")).getByText("Not found")).toBeTruthy();
 });
 
 it("marks the agent automations wake, and moves another one there with Undo", async () => {
@@ -522,10 +696,12 @@ it("marks the agent automations wake, and moves another one there with Undo", as
   expect(within(row("Claude Code")).getByTestId("agent-for-automations").textContent).toBe("For automations");
   // Not on the agent automations already wake, nor on one dohc cannot start.
   for (const name of ["Claude Code", "Claude in Terminal"]) {
+    await openAgent(name);
     await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
     expect(screen.queryByRole("menuitem", { name: "Use for automations" })).toBeNull();
     await userEvent.keyboard("{Escape}");
   }
+  await openAgent("Codex");
   await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
   expect(screen.getAllByRole("menuitem")[0]!.textContent).toBe("Use for automations");
   await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
@@ -547,12 +723,10 @@ it("keeps a later automations choice when an earlier one is undone", async () =>
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice, rerender } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+  await chooseAction("Codex", "Use for automations");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Codex.", expect.any(Function)));
   rerender({ settings: { ...SETTINGS, agents: { codex, default: claude, gemini } } });
-  await userEvent.click(screen.getByRole("button", { name: "Gemini actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+  await chooseAction("Gemini", "Use for automations");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Gemini.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini, codex, default: claude } }, source: "stored" });
   onNotice.mock.calls[0]![1]!();
@@ -574,8 +748,7 @@ it("shows no automations chip while only one agent can be started", () => {
 // The order since Remove stays: Undo moves only the agent it puts back.
 it("puts a removed agent back after the one it followed, in the order the file has then", async () => {
   const { onOrder, onNotice } = renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude in Terminal", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
   // Codex was then chosen for automations, so the file starts with it.
   const { default: claude, codex } = SETTINGS.agents;
@@ -588,8 +761,7 @@ it("puts a removed agent back after the one it followed, in the order the file h
   // wake, since it wasn't first.
   cleanup();
   const second = renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude in Terminal", "Remove");
   await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalled());
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude! } }, source: "stored" });
   second.onNotice.mock.calls[0]![1]!();
@@ -601,8 +773,7 @@ it("puts a removed first agent back in front of the one after it, so a later aut
   const claude = testAgent({ name: "Claude Code" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { codex, default: claude, gemini } } });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   // Gemini was then chosen for automations.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini, default: claude } }, source: "stored" });
@@ -621,8 +792,7 @@ it("gives automations back to the agent that woke them when its Remove is undone
   const codex = testAgent({ name: "Codex", hue: "blue" });
   // Claude in Terminal has no launch, so Claude Code wakes automations.
   const first = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
-  await userEvent.click(screen.getByRole("button", { name: "Claude Code actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude Code", "Remove");
   await vi.waitFor(() => expect(first.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, codex } }, source: "stored" });
   first.onNotice.mock.calls[0]![1]!();
@@ -635,8 +805,7 @@ it("gives automations back to the agent that woke them when its Remove is undone
     settings: { ...SETTINGS, agents: { default: claude, codex } }, agentProblems: [{ ...BROKEN, position: 0 }],
     onSave: async (settings) => ({ settings, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] }),
   });
-  await userEvent.click(screen.getByRole("button", { name: "Claude Code actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude Code", "Remove");
   await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex } }, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] });
   second.onNotice.mock.calls[0]![1]!();
@@ -647,8 +816,7 @@ it("puts an agent dohc can't start back above the automations agent when its Rem
   const claude = testAgent({ name: "Claude Code" });
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
-  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude in Terminal", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude, codex } }, source: "stored" });
   onNotice.mock.calls[0]![1]!();
@@ -662,8 +830,7 @@ it("undoes a Remove exactly when the file is back in the order the Remove left",
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await userEvent.click(screen.getByRole("button", { name: "Claude Code actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude Code", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   // Gemini, then Codex, were chosen for automations.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex, gemini } }, source: "stored" });
@@ -677,13 +844,11 @@ it.each([
 ] as const)("undoes two Removes, %s, and leaves automations with the agent that held them", async (_case, undos, files, orders) => {
   const agents = { codex: testAgent({ name: "Codex", hue: "blue" }), default: testAgent({ name: "Claude Code" }), gemini: testAgent({ name: "Gemini", hue: "teal" }) };
   const { onOrder, onNotice, rerender } = renderList({ settings: { ...SETTINGS, agents } });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   const { codex: _codex, ...afterCodex } = agents;
   rerender({ settings: { ...SETTINGS, agents: afterCodex } });
-  await userEvent.click(screen.getByRole("button", { name: "Claude Code actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Claude Code", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
   for (const [step, undo] of undos.entries()) {
     const file = Object.fromEntries(files[step]!.map((id) => [id, agents[id]]));
@@ -698,8 +863,7 @@ it("doesn't let Undo of a Remove take automations from the agent chosen since", 
   const codex = testAgent({ name: "Codex", hue: "blue" });
   const gemini = testAgent({ name: "Gemini", hue: "teal" });
   const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   // Gemini was then chosen for automations, and Claude Code removed.
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini } }, source: "stored" });
@@ -709,8 +873,7 @@ it("doesn't let Undo of a Remove take automations from the agent chosen since", 
 
 it("removes an agent, and Undo puts it back where it was", async () => {
   const { onSave, onOrder, onNotice } = renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   const saved = onSave.mock.calls[0]![0];
   expect(Object.keys(saved.agents)).toEqual(["default", "terminal"]);
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
@@ -726,22 +889,21 @@ it("says the agent stays when the saved file still lists it", async () => {
   const { onSave, onNotice, onError } = renderList();
   // Another window put Codex back before main saved the removal.
   onSave.mockResolvedValueOnce({ settings: SETTINGS, source: "stored" });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc didn't remove Codex because the settings file still lists it."));
+  // Its page stays open.
+  expect(page().getByRole("button", { name: "Rename Codex" })).toBeTruthy();
   // Or as an entry dohc can't use.
   const { codex: _codex, ...rest } = SETTINGS.agents;
   onSave.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex" }] });
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
   expect(onNotice).not.toHaveBeenCalled();
 });
 
 it("leaves an agent that came back after Undo read the file", async () => {
   const { onSave, onOrder, onNotice, onError } = renderList();
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
   bridgeMock.setUserSettings.mockRejectedValueOnce(new Error(
@@ -752,38 +914,51 @@ it("leaves an agent that came back after Undo read the file", async () => {
   expect(onOrder).not.toHaveBeenCalled();
 });
 
+it("goes back to the list when the open agent leaves the file", async () => {
+  const { rerender } = renderList();
+  await openAgent("Codex");
+  const { codex: _codex, ...rest } = SETTINGS.agents;
+  rerender({ settings: { ...SETTINGS, agents: rest } });
+  expect(screen.queryByTestId("agent-page")).toBeNull();
+  expect(ids()).toEqual(["default", "terminal"]);
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
+});
+
 const trust = (trusted: boolean | null) => ({ trusted, asking: false, onTrust: vi.fn() });
-const checkButton = (name: string) => within(row(name)).getByRole<HTMLButtonElement>("button", { name: /^(Check|Try again)$/ });
 
 it("holds Check back in Restricted Mode with the band's words, and adds an agent without checking it", async () => {
   const restricted = trust(false);
   const { onSave, onError } = renderList({ trust: restricted });
   const band = screen.getByTestId("restricted-agents-state");
   expect(band.textContent).toContain(AGENTS_RESTRICTED_MESSAGE);
-  // The band is the card's top strip.
-  expect(band.parentElement!.parentElement!.firstElementChild).toBe(band.parentElement);
-  expect(checkButton("Codex").disabled).toBe(true);
-  expect(checkButton("Codex").title).toBe(AGENTS_RESTRICTED_MESSAGE);
+  // The band sits above the agents.
+  expect(band.compareDocumentPosition(screen.getByTestId("agents")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.queryByTestId("agents-check-note")).toBeNull();
   await userEvent.click(within(band).getByRole("button", { name: "Trust workspace" }));
   expect(restricted.onTrust).toHaveBeenCalledOnce();
+  // The agent's page keeps the band, and its test waits.
+  const codex = await openAgent("Codex");
+  expect(screen.getByTestId("restricted-agents-state")).toBeTruthy();
+  expect(checkButton().disabled).toBe(true);
+  expect(checkButton().title).toBe(AGENTS_RESTRICTED_MESSAGE);
+  expect(codex.queryByTestId("agents-check-note")).toBeNull();
+  await back();
 
-  await within(tile("Add Codex")).findByText("Ready");
-  await userEvent.click(tile("Add Codex"));
+  await addAgent("codex");
   await vi.waitFor(() => expect(onSave).toHaveBeenCalledOnce());
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toContain("codex-2");
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
   expect(screen.queryByText("Didn't reply.")).toBeNull();
   // The switch still works.
-  await userEvent.click(within(row("Codex")).getByRole("switch", { name: "Codex" }));
+  await userEvent.click((await openAgent("Codex")).getByRole("switch", { name: "Run Codex on this computer" }));
   expect(onSave).toHaveBeenCalledTimes(2);
 });
 
 it("says Restricted Mode holds the check back when an old toast's Try again comes while restricted", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
   const { onError, rerender } = renderList({ trust: trust(true) });
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
   rerender({ trust: trust(false) });
   await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
@@ -793,12 +968,13 @@ it("says Restricted Mode holds the check back when an old toast's Try again come
   ], "agent-check:ws-1:codex");
 });
 
-it("turns Check on once the workspace is trusted, without checking", () => {
+it("turns Check on once the workspace is trusted, without checking", async () => {
   const { rerender } = renderList({ trust: trust(false) });
   rerender({ trust: trust(true) });
   expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
-  expect(checkButton("Codex").disabled).toBe(false);
-  expect(checkButton("Codex").title).toBe("");
+  await openAgent("Codex");
+  expect(checkButton().disabled).toBe(false);
+  expect(checkButton().title).toBe("");
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
 });
 
@@ -806,27 +982,28 @@ it("holds nothing back while trust is still being read, and Add's passing check 
   const onClearError = vi.fn();
   renderList({ trust: trust(null), onClearError });
   expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
-  expect(checkButton("Codex").disabled).toBe(false);
-  await within(tile("Add Codex")).findByText("Ready");
-  await userEvent.click(tile("Add Codex"));
+  await openAgent("Codex");
+  expect(checkButton().disabled).toBe(false);
+  await back();
+  await addAgent("codex");
   await vi.waitFor(() => expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex-2" }));
   await vi.waitFor(() => expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex-2"));
 });
 
-it("takes back only that agent's failed check when its check passes, from the row or the toast", async () => {
+it("takes back only that agent's failed check when its check passes, from its page or the toast", async () => {
   bridgeMock.runnerSelfTest
     .mockResolvedValueOnce({ ok: false, detail: "Claude Code timed out." })
     .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const onClearError = vi.fn();
   const { onError } = renderList({ onClearError });
-  await userEvent.click(checkButton("Claude Code"));
+  await check("Claude Code");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
   expect(onError.mock.calls.map((call) => call[4])).toEqual(["agent-check:ws-1:default", "agent-check:ws-1:codex"]);
   expect(onClearError).not.toHaveBeenCalled();
 
-  await userEvent.click(checkButton("Codex"));
+  await userEvent.click(checkButton());
   await vi.waitFor(() => expect(onClearError).toHaveBeenCalledWith("agent-check:ws-1:codex"));
   expect(onClearError).not.toHaveBeenCalledWith("agent-check:ws-1:default");
 
@@ -840,10 +1017,9 @@ it("takes back a removed agent's failed check, and Undo doesn't bring it back", 
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const onClearError = vi.fn();
   const { onSave, onError, onNotice, onOrder } = renderList({ onClearError });
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
@@ -853,12 +1029,13 @@ it("takes back a removed agent's failed check, and Undo doesn't bring it back", 
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
 });
 
-// Fix P: focus after the card's Trust workspace.
+// Fix P: focus after the band's Trust workspace.
 const trustButton = () => within(screen.getByTestId("restricted-agents-state")).getByRole("button", { name: "Trust workspace" });
 
-async function pressTrust(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
+async function pressTrust(fields: Partial<Parameters<typeof AgentList>[0]> = {}, open?: string) {
   const onTrust = vi.fn();
   const list = renderList({ trust: { trusted: false, asking: false, onTrust }, ...fields });
+  if (open) await openAgent(open);
   await userEvent.click(trustButton());
   expect(onTrust).toHaveBeenCalledOnce();
   // Main's dialog is open, and the band's button is off. Chromium then
@@ -868,24 +1045,20 @@ async function pressTrust(fields: Partial<Parameters<typeof AgentList>[0]> = {})
   return { ...list, onTrust };
 }
 
-it("moves focus to the first agent's Check when the card's Trust workspace trusts the workspace", async () => {
+it("moves focus to the first agent when the band's Trust workspace trusts the workspace", async () => {
   const { rerender, onTrust } = await pressTrust();
   rerender({ trust: { trusted: true, asking: false, onTrust } });
-  expect(document.activeElement).toBe(checkButton("Claude Code"));
+  expect(document.activeElement).toBe(row("Claude Code"));
 });
 
-it("moves focus to the first Add tile it can when there are no agents", async () => {
-  const empty = { ...SETTINGS, agents: {} };
-  const { rerender, onTrust } = await pressTrust({ settings: empty });
-  await within(tile("Add Codex")).findByText("Ready");
+it("moves focus to Send test when Trust workspace trusts the workspace from an agent's page", async () => {
+  const { rerender, onTrust } = await pressTrust({}, "Codex");
   rerender({ trust: { trusted: true, asking: false, onTrust } });
-  expect(document.activeElement).toBe(tile("Add Codex"));
+  expect(document.activeElement).toBe(checkButton());
 });
 
-it("moves focus to the Agents heading when trust turns on nothing", async () => {
-  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+it("moves focus to the Agents heading when there is no agent to go to", async () => {
   const { rerender, onTrust } = await pressTrust({ settings: { ...SETTINGS, agents: {} } });
-  await within(tile("Add Codex")).findByText("Not found");
   rerender({ trust: { trusted: true, asking: false, onTrust } });
   expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
 });
@@ -904,10 +1077,10 @@ it("leaves focus alone when trust comes from somewhere else, or the person moved
 
   cleanup();
   const pressed = await pressTrust();
-  const toggle = within(row("Codex")).getByRole("switch", { name: "Codex" });
-  act(() => toggle.focus());
+  const codex = row("Codex");
+  act(() => codex.focus());
   pressed.rerender({ trust: { trusted: true, asking: false, onTrust: pressed.onTrust } });
-  expect(document.activeElement).toBe(toggle);
+  expect(document.activeElement).toBe(codex);
 });
 
 // Fix P: a check that ends after the panel closes still reports.
@@ -916,7 +1089,7 @@ it("takes back the notice, or files it, when a check ends after the panel closed
   bridgeMock.runnerSelfTest.mockReturnValueOnce(first.promise);
   const onClearError = vi.fn();
   const passed = renderList({ onClearError });
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   passed.unmount();
   await act(async () => first.resolve({ ok: true, detail: "ok" }));
   expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
@@ -924,7 +1097,7 @@ it("takes back the notice, or files it, when a check ends after the panel closed
   const second = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(second.promise);
   const failed = renderList();
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   failed.unmount();
   await act(async () => second.resolve({ ok: false, detail: "Codex timed out." }));
   await vi.waitFor(() => expect(failed.onError).toHaveBeenCalledWith("Codex didn't reply to the check.", undefined, expect.any(Function), [
@@ -938,9 +1111,8 @@ it("files no notice for a check that fails after its agent was removed", async (
   bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
   const onClearError = vi.fn();
   const { onSave, onError, onNotice } = renderList({ onClearError });
-  await userEvent.click(checkButton("Codex"));
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await check("Codex");
+  await chooseAction("Codex", "Remove");
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
   await act(async () => answer.resolve({ ok: false, detail: "Configure a runner command first." }));
@@ -954,7 +1126,7 @@ it("files no notice when the agent was removed in a later panel, and files it wh
   const answer = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
   const first = renderList();
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   first.unmount();
   const { codex: _codex, ...rest } = SETTINGS.agents;
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored" });
@@ -967,7 +1139,7 @@ it("files no notice when the agent was removed in a later panel, and files it wh
   bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
   bridgeMock.getUserSettings.mockRejectedValueOnce(new Error("busy"));
   const second = renderList();
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(second.onError).toHaveBeenCalledWith(
     "dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
 });
@@ -979,13 +1151,13 @@ it("files a failed check when the file reads back recovered, or lists the agent 
     .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "recovered" });
   const { onError } = renderList();
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
 
   bridgeMock.getUserSettings.mockResolvedValueOnce({
     settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex", name: codex!.name }],
   });
-  await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await userEvent.click(page().getByRole("button", { name: "Try again" }));
   await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
 });
 
@@ -993,7 +1165,7 @@ it("files a failed check when the file reads back recovered, or lists the agent 
 it("asks main whether the workspace is restricted when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const { onError, unmount } = renderList({ trust: trust(true) });
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
   unmount();
   bridgeMock.readWorkspaceTrust.mockResolvedValueOnce({ workspaceId: "ws-1", trusted: false });
@@ -1008,7 +1180,7 @@ it("checks from a closed panel's Try again once the workspace was trusted elsewh
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const onClearError = vi.fn();
   const { onError, unmount, rerender } = renderList({ trust: trust(true), onClearError });
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
   // The panel last saw Restricted Mode, then closed; the workspace was trusted elsewhere.
   rerender({ trust: trust(false), onClearError });
@@ -1021,7 +1193,7 @@ it("checks from a closed panel's Try again once the workspace was trusted elsewh
 it("asks main whether agents are paused when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const { onError, unmount } = renderList();
-  await userEvent.click(checkButton("Codex"));
+  await check("Codex");
   await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
   unmount();
   bridgeMock.readChatDispatchPaused.mockResolvedValueOnce({ paused: true });
@@ -1036,7 +1208,8 @@ it("starts one check for a double click, without asking main first", async () =>
   const answer = deferred<RunnerSelfTestResult>();
   bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
   renderList();
-  await userEvent.dblClick(checkButton("Codex"));
+  await openAgent("Codex");
+  await userEvent.dblClick(checkButton());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
   expect(bridgeMock.readWorkspaceTrust).not.toHaveBeenCalled();
   await act(async () => answer.resolve({ ok: true, detail: "ok" }));

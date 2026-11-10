@@ -14,10 +14,10 @@ import {
   trustOpenWorkspace,
 } from "./helpers/workspace";
 
-// Screenshot harness (@ui-audit) for Settings › Agents: one agent on, one off
-// and one you run, then keyboard focus on the on agent's switch. Light and dark, cropped
-// to the Agents section. Not a regression test; it runs only when a shot
-// directory is set.
+// Screenshot harness (@ui-audit) for Settings › Agents: the list with one
+// agent on, one off and one you run, then the on agent's page, then keyboard
+// focus on its switch. Light and dark, cropped to the Agents section. Not a
+// regression test; it runs only when a shot directory is set.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture Settings › Agents screenshots");
 
@@ -49,7 +49,7 @@ async function shoot(page: Page, target: Locator, name: string): Promise<void> {
   await setTheme(page, "light");
 }
 
-test("@ui-audit Settings › Agents with an agent on and one off, and focus on a switch", async () => {
+test("@ui-audit Settings › Agents with an agent on and one off, its page, and focus on its switch", async () => {
   test.setTimeout(240_000);
   await mkdir(SHOT_DIR, { recursive: true });
   const temp = await createTempWorkspace();
@@ -66,19 +66,24 @@ test("@ui-audit Settings › Agents with an agent on and one off, and focus on a
     await page.getByTestId(settingsNavPin("agents")).click();
     const section = page.getByTestId(settingsSectionPin("agents"));
     const row = (id: string) => section.locator(`[data-testid="agent-row"][data-agent-id="${id}"]`);
-    // Found by role alone, so the same scene also shoots the build before this change.
-    const novaSwitch = row("default").getByRole("switch");
-    await expect(novaSwitch).toHaveAttribute("aria-checked", "true");
-    await expect(row("vega").getByRole("switch")).toHaveAttribute("aria-checked", "false");
-    // Both themes show the same settled section: the Add tiles have looked
-    // for their tools, and the MCP config has loaded or said why not.
-    await expect(section.getByLabel(/^Looking for /)).toHaveCount(0);
-    await expect(section.locator('[data-testid="mcp-config-copy"]:enabled, [data-testid="mcp-unavailable"]').first()).toBeVisible();
+    await expect(row("default").getByTestId("agent-state")).toContainText("On");
+    await expect(row("vega").getByTestId("agent-state")).toContainText("Off");
+    await expect(row("terminal").getByTestId("agent-state")).toHaveText("Through MCP");
+    await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents");
 
-    // Tab from the agent's name to its switch, past Check when it takes focus.
-    await row("default").getByRole("button", { name: "Rename Nova" }).focus();
-    for (let presses = 0; presses < 3 && !await novaSwitch.evaluate((element) => element === document.activeElement); presses += 1) {
+    // Nova's page: its switch, its test, what it can do and how dohc starts it.
+    await row("default").click();
+    const agentPage = section.getByTestId("agent-page");
+    await expect(agentPage).toHaveAttribute("data-agent-id", "default");
+    const novaSwitch = agentPage.getByRole("switch", { name: "Run Nova on this computer" });
+    await expect(novaSwitch).toHaveAttribute("aria-checked", "true");
+    await page.mouse.move(0, 0);
+    await shoot(page, section, "settings-agents-page");
+
+    // Tab from the back button to the switch.
+    await agentPage.getByTestId("agent-back").focus();
+    for (let presses = 0; presses < 6 && !await novaSwitch.evaluate((element) => element === document.activeElement); presses += 1) {
       await page.keyboard.press("Tab");
     }
     await expect(novaSwitch).toBeFocused();

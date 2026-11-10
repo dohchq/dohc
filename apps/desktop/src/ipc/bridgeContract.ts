@@ -5935,6 +5935,14 @@ export const AgentRunPayload = z.object({
 });
 export type AgentRunPayload = z.infer<typeof AgentRunPayload>;
 
+// A run a person starts in Settings for one agent they run. Main refuses an
+// id that names no agent they run, and the run's writes carry this id.
+export const StartAgentRunPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  agentId: AgentId,
+}).strict();
+export type StartAgentRunPayload = z.infer<typeof StartAgentRunPayload>;
+
 export const EndAgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
   runId: OPAQUE_ID,
@@ -7845,7 +7853,7 @@ export interface DohcDesktopBridge
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
-  startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
+  startAgentRun(payload: StartAgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;
   getMcpConfig(payload: AgentRunPayload): Promise<McpConfigResult>;
