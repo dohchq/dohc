@@ -26,7 +26,9 @@ Production operators must set five values:
 
 Each share link has its own MCP address, `/mcp/s/<secret>`, where `<secret>` is the text after `#` in the share URL.
 The address uses Streamable HTTP. It supports current per-request MCP and older stateless clients.
-The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
+The share page shows this address format beside a copy button after the link opens.
+Replace `<secret>` with the text after `#` in the original link. The viewer discards that secret after exchange.
+The share page also advertises `/api/mcp` through its HTTP `Link` header. That endpoint describes the address and how to sign in.
 
 An agent signs in with the standard MCP authorization (MCP 2025-06-18):
 
@@ -47,8 +49,8 @@ The consent page and its decision accept only this origin. The decision also nee
 These checks stop another site from allowing an agent through a person's browser. They do not protect the link. The MCP address gives the link's full access, so share it only as you share the link.
 
 The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
-On a Group share that is the Group's channel, read with `dohc_read_channel`.
-A read-write link also gets `dohc_post_channel`. It posts there under the name the agent reported when it signed in, and the owner sees the post marked as from an agent on the link.
+On a Group share, read with `dohc_read_group`.
+A read-write link also gets `dohc_post_group`. It posts there under the name the agent reported when it signed in, and the owner sees the post marked as from an agent on the link.
 On any other share it is the share discussion, which Comment and Edit links can also post to.
 The relay checks the grant again for every action, and a refusal arrives as a sentence the agent can act on.
 If a post's answer is lost, the tool says the post may have landed. Send it again with the same `idempotencyKey`; it posts once.

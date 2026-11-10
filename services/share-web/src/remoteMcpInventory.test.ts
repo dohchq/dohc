@@ -8,7 +8,7 @@ it.each(REMOTE_MCP_INVENTORY_CASES)("preserves main share-link MCP names and inp
   const files = condition.channel === null ? condition.key : `${condition.access}/current/live`;
   const expected = [...mainTools[files as Exclude<keyof typeof mainTools, "group-channel">], ...(condition.channel === null ? [] : mainTools["group-channel"])]
     .filter(tool => condition.access === "edit" || tool.name !== "dohc_list_changes")
-    .filter(tool => condition.channel === "read-write" || tool.name !== "dohc_post_channel")
+    .filter(tool => condition.channel === "read-write" || tool.name !== "dohc_post_group")
     .filter(tool => condition.channel === null || !["dohc_read_discussion", "dohc_post_discussion"].includes(tool.name))
     .sort((a, b) => a.name.localeCompare(b.name));
   expect(await advertisedRemoteTools(condition)).toEqual(expected);

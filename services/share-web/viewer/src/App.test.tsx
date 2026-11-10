@@ -427,6 +427,8 @@ describe("App", () => {
     await renderApp();
     const entry = container.querySelector('section[aria-labelledby="link-entry-title"]');
     expect(entry).not.toBeNull();
+    expect(entry?.querySelector("#link-agent-title")?.textContent).toBe("Use with an agent");
+    expect(entry?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
     const copy = entry?.textContent ?? "";
     expect(copy).toContain(access === "view" ? "You can read files and comments." :
       access === "comment" ? "You can read files and post comments." : "This link grants read, comment, and edit access.");
@@ -442,6 +444,21 @@ describe("App", () => {
     }
     expect(copy).toContain(access === "view" ? "Read the discussion in Comments." : "Use Comments to read or post comments.");
     expect(buttonNamed("Open in dohc")).toBeDefined();
+  });
+
+  it("hides agent guidance while loading and after a refusal", async () => {
+    let deliver: ((response: Response) => void) | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Promise<Response>(resolve => {deliver = resolve;})));
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<App />);
+    });
+    expect(container.textContent).toContain("Opening shared files");
+    expect(container.querySelector("#link-agent-title")).toBeNull();
+    await act(async () => deliver?.(new Response(null, {status: 404})));
+    await settle(() => container.textContent.includes("This link isn't available."));
+    expect(container.querySelector("#link-agent-title")).toBeNull();
+    expect(container.textContent).not.toContain("/mcp/s/");
   });
 
   it("opens a Collection's schema in the plain-text editor, not the live document editor", async () => {
@@ -1804,6 +1821,9 @@ describe("App", () => {
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");
     expect(container.textContent).not.toContain("This link isn't available.");
+    await settle(() => container.querySelector("#link-agent-title") !== null);
+    expect(container.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
+    expect(container.innerHTML).not.toContain(secret);
   });
 
   it.each(["exchange", "current"] as const)("renders server-supplied reload recovery for a share-web mismatch at %s", async (step) => {
