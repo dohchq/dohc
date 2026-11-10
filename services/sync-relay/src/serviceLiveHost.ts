@@ -832,6 +832,15 @@ export async function startServiceLiveHost(options: {
       }
       return false;
     };
+    // How far the relay's tip of what the retiring activation's engine applied has reached, as each
+    // reconciliation page moves it on. Undefined while this connection cannot read it.
+    const departedDeliveries = storage.createLiveCommittedDeliveryStore(history);
+    const retirementTip = (open: NonNullable<ReturnType<typeof storage.serviceActivationRetirement>>) => {
+      try {
+        return JSON.stringify(departedDeliveries.departedOwnerDelivery({host: coordinate, adoptionId: open.activationId,
+          document: parseLiveDocumentKey({workspaceId: open.workspaceId, mainVersionId: "main", objectId: open.objectId, lineageClaimId: open.lineageClaimId})})?.tip ?? null);
+      } catch {return undefined;}
+    };
     // A document whose activation retires leaves through its retirement alone,
     // whatever this daemon loaded, so it never waits on an ordinary unload. Once
     // it retired, its successor activates when its document is hosted again.
@@ -856,13 +865,18 @@ export async function startServiceLiveHost(options: {
       // the engine abandons a seed nothing applied, and holds the retirement on any other.
       if (heads.refused.has(open.lineageClaimId) && uncopiedOn(row, open.lineageClaimId)) return null;
       const attached = attachments.get(row.target.workspaceId), required = attached?.announced.get(row.objectId);
-      const step = await activation!.retire(row.target, row.objectId, joined, {
+      const tip = retirementTip(open), step = await activation!.retire(row.target, row.objectId, joined, {
         departed: () => required !== undefined && reachedSince(attached!, row.objectId, required),
         parked: () => required !== undefined && goneSince(attached!, row.objectId, required)}, movedRestores.has(key));
       // A seed the engine cannot abandon holds the retirement. No settlement may pass it, so the document
       // departs as an ordinary unload, with its accepted work kept for its owner's recovery copy.
       if (!step || step.kind === "held") return null;
-      if (step.kind === "pending") return step.reason;
+      if (step.kind === "pending") {
+        // A step that moved the tip on and still waits, as one that stopped at its work budget, wakes the pass
+        // that continues it. One that moved nothing waits for whatever it waits on, so it cannot wake itself again.
+        if (retirementTip(open) !== tip) wakePass();
+        return step.reason;
+      }
       // A retired document whose refusals this host kept stays, with its workspace attached, until no Try again
       // of them stays granted and its owner saved a recovery copy of each. Its rows go then.
       if (storage.serviceKeptEditsOf(document).keptEdits.length > 0) retained.set(documentKey(document), {target: row.target, objectId: row.objectId});
@@ -1339,72 +1353,80 @@ export async function startServiceLiveHost(options: {
       const changed = [...members].filter(([workspaceId, member]) => desired.has(workspaceId)
         ? !isDeepStrictEqual(desired.get(workspaceId), member.workspace) : obsolete(workspaceId, member.workspace))
         .map(([workspaceId]) => workspaceId);
-      // Whether this update left lifecycle work for a pass, which it then wakes.
+      // Whether this update left lifecycle work for a pass, which it then wakes, even when it fails partway, as
+      // when another workspace's attach fails. A later attempt finds that work already begun and leaves this unset.
       let lifecycle = false;
-      for (const [key, row] of movedDepartures)
-        if (!departing.has(key) || (!updated && changed.includes(row.target.workspaceId))) movedDepartures.delete(key);
-      // A document that left stays in passes, which settle, publish and unload it.
-      // One that returns before it is gone activates again; a recovered or parking one was never in activation passes.
-      for (const [key, document] of hosted) {
-        if (isDeepStrictEqual(wanted.get(key), document)) {
-          if (leaving.delete(key)) {
-            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); heldOf.delete(key); observed.delete(key);
-            activation.addTarget(document.target, document.objectId);
+      try {
+        for (const [key, row] of movedDepartures)
+          if (!departing.has(key) || (!updated && changed.includes(row.target.workspaceId))) movedDepartures.delete(key);
+        // A document that left stays in passes, which settle, publish and unload it.
+        // One that returns before it is gone activates again; a recovered or parking one was never in activation passes.
+        for (const [key, document] of hosted) {
+          if (isDeepStrictEqual(wanted.get(key), document)) {
+            if (leaving.delete(key)) {
+              recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); heldOf.delete(key); observed.delete(key);
+              activation.addTarget(document.target, document.objectId);
+            }
+          } else if (!changed.includes(document.target.workspaceId)) {
+            // A first open of a document that left would start a document someone stopped, or one this host lost access to.
+            if (!leaving.has(key)) lifecycle = true;
+            leaving.add(key); activation.cancelFirstOpen(document.target);
           }
-        } else if (!changed.includes(document.target.workspaceId)) {
-          // A first open of a document that left would start a document someone stopped, or one this host lost access to.
-          if (!leaving.has(key)) lifecycle = true;
-          leaving.add(key); activation.cancelFirstOpen(document.target);
         }
-      }
-      // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
-      for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
-      for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.root)) await attach(workspace, joined);
-      for (const [key, document] of wanted) {
-        if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
-      }
-      // Each membership update finds moved documents and unfinished departures that are not tracked yet.
-      // A fresh daemon also resumes departures still at their enrolled paths,
-      // settling, publishing and unloading work an earlier daemon left there.
-      // Moved documents use their frozen targets for retirement, restore or a recovery copy.
-      const tracked = new Set([...hosted.values(), ...movedDepartures.values(), ...movedRestores.values(), ...retained.values()]
-        .map(row => documentKey({workspaceId: row.target.workspaceId, objectId: row.objectId})));
-      for (const document of departing.values()) {
-        const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
-        if (!members.has(workspaceId) || tracked.has(documentKey({workspaceId, objectId: document.objectId}))) continue;
-        if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
-          retainMoved(document);
-          lifecycle = true;
-          continue;
+        // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
+        for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
+        for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.root)) await attach(workspace, joined);
+        for (const [key, document] of wanted) {
+          if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
         }
-        if (hosted.has(key) || (updated && listedDepartures.has(documentKey({workspaceId, objectId: document.objectId})))) continue;
-        const scope = {workspaceId, objectId: document.objectId}, retirement = storage.serviceActivationRetirement(scope);
-        if (!updated || retirement || storage.serviceRestoreInProgress(scope)) {
-          hosted.set(key, document); leaving.add(key); recovering.add(key); lifecycle = true;
-          // A retiring document keeps its target, which its unfinished restore continues through, until its retirement drops it.
-          if (retirement) activation.addTarget(document.target, document.objectId);
+        // Each membership update finds moved documents and unfinished departures that are not tracked yet.
+        // A fresh daemon also resumes departures still at their enrolled paths,
+        // settling, publishing and unloading work an earlier daemon left there.
+        // Moved documents use their frozen targets for retirement, restore or a recovery copy.
+        const tracked = new Set([...hosted.values(), ...movedDepartures.values(), ...movedRestores.values(), ...retained.values()]
+          .map(row => documentKey({workspaceId: row.target.workspaceId, objectId: row.objectId})));
+        for (const document of departing.values()) {
+          const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
+          if (!members.has(workspaceId) || tracked.has(documentKey({workspaceId, objectId: document.objectId}))) continue;
+          if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
+            retainMoved(document);
+            lifecycle = true;
+            continue;
+          }
+          if (hosted.has(key) || (updated && listedDepartures.has(documentKey({workspaceId, objectId: document.objectId})))) continue;
+          const scope = {workspaceId, objectId: document.objectId}, retirement = storage.serviceActivationRetirement(scope);
+          if (!updated || retirement || storage.serviceRestoreInProgress(scope)) {
+            hosted.set(key, document); leaving.add(key); recovering.add(key); lifecycle = true;
+            // A retiring document keeps its target, which its unfinished restore continues through, until its retirement drops it.
+            if (retirement) activation.addTarget(document.target, document.objectId);
+          }
         }
-      }
-      // A departing document is confirmed gone only by a pull that starts after this.
-      for (const [workspaceId, attached] of attachments) {
-        for (const objectId of attached.announced.keys()) {
-          if (!departing.has(documentKey({workspaceId, objectId}))) attached.announced.delete(objectId);
+        // A departing document is confirmed gone only by a pull that starts after this.
+        for (const [workspaceId, attached] of attachments) {
+          for (const objectId of attached.announced.keys()) {
+            if (!departing.has(documentKey({workspaceId, objectId}))) attached.announced.delete(objectId);
+          }
         }
+        for (const document of departing.values()) {
+          const attached = attachments.get(document.target.workspaceId);
+          if (attached && !attached.announced.has(document.objectId)) {attached.announced.set(document.objectId, attached.pulls + 1); lifecycle = true;}
+        }
+        registerRetained();
+        listedDepartures = new Set(departing.keys());
+        updated = true;
+      } finally {
+        // A moved document still listed, whose route a detachment ended, has it given back by the next pass,
+        // including after a detachment this update made before it failed. A check that fails wakes one anyway.
+        if (!lifecycle) {
+          try {
+            lifecycle = [...movedDepartures.values()].some(row => members.has(row.target.workspaceId) &&
+              !movedRestores.has(movedRestoreKey({workspaceId: row.target.workspaceId, objectId: row.objectId})) && movedHandoff(row).due);
+          } catch {lifecycle = true;}
+        }
+        // Only membership changes send updates, so a wake after one that failed runs one more pass, not a loop.
+        if (lifecycle) wakePass();
+        armIdle();
       }
-      for (const document of departing.values()) {
-        const attached = attachments.get(document.target.workspaceId);
-        if (attached && !attached.announced.has(document.objectId)) {attached.announced.set(document.objectId, attached.pulls + 1); lifecycle = true;}
-      }
-      // A moved document still listed, whose route a detachment ended, has it given back by the next pass.
-      for (const row of movedDepartures.values()) {
-        if (members.has(row.target.workspaceId) && !movedRestores.has(movedRestoreKey({workspaceId: row.target.workspaceId, objectId: row.objectId})) &&
-          movedHandoff(row).due) lifecycle = true;
-      }
-      registerRetained();
-      listedDepartures = new Set(departing.keys());
-      updated = true;
-      if (lifecycle) wakePass();
-      armIdle();
     }));
     // Detaches a workspace whose replica drained. Its caller then releases its enrollments and keeps the store.
     const detachDrained = (workspaceId: string, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
