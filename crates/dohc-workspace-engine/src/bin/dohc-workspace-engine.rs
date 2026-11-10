@@ -5273,15 +5273,20 @@ mod tests {
                     waker.wake();
                 }
             }
-            /// Waits until a write is waiting at the held gate.
+            /// Waits until a write is waiting at the held gate, and fails the
+            /// test if none arrives.
             async fn parked(&self) {
-                loop {
-                    let parked = self.0.parked.notified();
-                    if lock(&self.0.held).1.is_some() {
-                        return;
+                let waited = tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        let parked = self.0.parked.notified();
+                        if lock(&self.0.held).1.is_some() {
+                            return;
+                        }
+                        parked.await;
                     }
-                    parked.await;
-                }
+                })
+                .await;
+                assert!(waited.is_ok(), "no write reached the held gate within 30 s");
             }
         }
 
