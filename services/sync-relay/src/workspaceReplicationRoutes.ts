@@ -357,7 +357,7 @@ export function logCoordinateAnswer(row: SyncRelayLogRow | null, epochLogFloor: 
   };
 }
 
-function parseLogHold(value: string): number {
+export function parseLogHold(value: string): number {
   if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
     throw badRequest("hold must be a non-negative integer");
   }

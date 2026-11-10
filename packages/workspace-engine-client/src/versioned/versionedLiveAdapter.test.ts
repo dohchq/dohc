@@ -2169,6 +2169,25 @@ describe("VersionedLiveAdapter", () => {
   });
 });
 
+describe("readTextFile with maxBytes", () => {
+  it("answers a larger out-of-band file's metadata without fetching its body", async () => {
+    const loopback = new VersionedLoopbackEngine();
+    const text = "a".repeat(200 * 1024);
+    loopback.seedTextFile({ workspace: WORKSPACE, path: "big.txt", text });
+    loopback.seedTextFile({ workspace: WORKSPACE, path: "small.txt", text: "small" });
+    const methods: string[] = [];
+    const adapter = new VersionedLiveAdapter({
+      sendRequest: (request) => { methods.push(request.method); return loopback.sendRequest(request); },
+      close: () => undefined,
+    }, WORKSPACE, { workspaceId: WORKSPACE });
+    const main = await adapter.getMainVersion({ workspaceId: WORKSPACE });
+    const big = await adapter.readTextFile({ workspaceId: WORKSPACE, versionId: main!.id, path: "big.txt", maxBytes: 150 * 1024 });
+    expect(big).toMatchObject({ contentKind: "text", text: null, byteLength: text.length });
+    expect((await adapter.readTextFile({ workspaceId: WORKSPACE, versionId: main!.id, path: "small.txt", maxBytes: 150 * 1024 }))?.text).toBe("small");
+    expect(methods).not.toContain(VERSIONED_METHOD.textReadBlob);
+  });
+});
+
 describe("listTextFileMetadata under a folder", () => {
   const row = (path: string) => ({ path, objectId: path, contentKind: "text", sha256: "a".repeat(64), byteLength: 1, binarySha256: null,
     updatedAtMs: 1, latestMomentId: "moment", metadataOrigin: "api", hasYdocMarker: false });

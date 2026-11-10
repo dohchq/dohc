@@ -158,6 +158,8 @@ export function createPersonalAgents(input: {
   fence: CredentialFence | undefined;
   activity: Pick<DiscussionActivityHub, "wakeLog">;
   nowMs: () => number;
+  /** An account's fence changed, which ends its sign-ins from before it. */
+  onFence(userId: string): void;
 }): PersonalAgents {
   const { storage, fence, activity } = input;
   const running = new Set<PersonalRunningEntry>();
@@ -186,6 +188,7 @@ export function createPersonalAgents(input: {
   const applyFence = (change: CredentialFenceChange): void => {
     const revoked = storage.revokePersonalCredentialsBelowFence(change.userId, change.epoch);
     endAndWake(entry => entry.ownerUserId === change.userId && entry.fenceEpoch < change.epoch, revoked);
+    input.onFence(change.userId);
   };
 
   const catchUp = async (atGeneration: number): Promise<void> => {

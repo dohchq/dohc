@@ -21,6 +21,29 @@ export function observeRelayWrites(storage: object, changed: () => void): () => 
   };
 }
 
+const acceptedObservers = new WeakMap<object, Set<(workspaceId: string) => void>>();
+
+/** Hears each live edit the journal accepts, by its workspace. */
+export function observeAcceptedLiveUpdates(storage: object, accepted: (workspaceId: string) => void): () => void {
+  let listeners = acceptedObservers.get(storage);
+  if (!listeners) { listeners = new Set(); acceptedObservers.set(storage, listeners); }
+  listeners.add(accepted);
+  return () => {
+    listeners.delete(accepted);
+    if (listeners.size === 0) acceptedObservers.delete(storage);
+  };
+}
+
+/** Called where the journal accepts an edit. Listeners hear it after the write leaves SQLite; one rolled back wakes them for nothing. */
+export function notifyAcceptedLiveUpdate(storage: object, workspaceId: string): void {
+  if (!acceptedObservers.has(storage)) return;
+  queueMicrotask(() => {
+    for (const listener of [...(acceptedObservers.get(storage) ?? [])]) {
+      try { listener(workspaceId); } catch { /* One listener cannot suppress another's wake. */ }
+    }
+  });
+}
+
 /** Notify after leaving SQLite. Ambiguous failures also require a fresh authority check. */
 export function notifyRelayWrite(storage: object): void {
   if (!observers.has(storage) || queued.has(storage)) return;

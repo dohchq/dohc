@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import {createAccountDeletionRoute} from "./accountDeletionRoute";
 import {initializeAccountDeletion} from "./storage/accountDeletion";
 import type {StorageContext} from "./storage/context";
@@ -157,7 +158,7 @@ describe("the automation replica's credential", () => {
     const service = deriveServiceHostBearer(row, { key, namespace });
     expect(authorize({ bearer: service })).toBeNull();
 
-    const handler = createServiceHostReplication({ storage, prefix: "dohc-automation-v1.",
+    const handler = createServiceHostReplication({activity: new DiscussionActivityHub(),  storage, prefix: "dohc-automation-v1.",
       authorize: (input) => authorizeAutomationReplication(storage, { key, namespace, ...input }) });
     const get = (path: string, token = bearer) => handler(new Request(`https://relay.test${path}`, { headers: { authorization: `Bearer ${token}` } }));
     expect((await get(`/sync/${WORKSPACE}/bootstrap`)).status).toBe(200);

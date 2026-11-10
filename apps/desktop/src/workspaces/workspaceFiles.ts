@@ -21,7 +21,12 @@ import {
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
-import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
+import {
+  directoryMayContainListedFiles,
+  matchesFileListingScope,
+  workspaceDestinationError,
+  type WorkspaceFileListingScope,
+} from "@dohc/workspace-contracts/workspace-paths";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -62,11 +67,6 @@ import {
   workspaceTextLimitReason,
 } from "./workspaceTextLimits";
 import type { ZipEntry } from "./zipWriter";
-import {
-  directoryMayContainListedFiles,
-  matchesFileListingScope,
-  type WorkspaceFileListingScope,
-} from "./workspaceFileListingScope";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
 // the part realpath can resolve, so we can check containment before mkdir.

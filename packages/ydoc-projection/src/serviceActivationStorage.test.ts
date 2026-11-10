@@ -2109,7 +2109,7 @@ type Row=[string,Record<string,unknown>]
 async function retiringFeed(f:ReturnType<typeof fixture>,stopped=true){
   enroll(f);await completeActivation(f);const edit=admitEdit(f)
   const bearer=deriveServiceHostBearer(f.storage.currentServiceHostWorkspace('workspace')!,credential)
-  const handle=createServiceHostReplication({storage:f.storage,prefix:'dohc-service-v1.',hostedFeed:true,
+  const handle=createServiceHostReplication({activity: {wakeLog() {}}, storage:f.storage,prefix:'dohc-service-v1.',hostedFeed:true,
     authorize:input=>authorizeServiceHostReplication(f.storage,{...credential,...input})})
   const stop=()=>stopDocument(f,10)
   if(stopped)stop()

@@ -1,11 +1,13 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
+import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
+import { parseLogHold } from "./workspaceReplicationRoutes";
 
 export type AccountOperationRoute = { route: "account-operation"; workspaceId: string; operation: string };
 
@@ -28,12 +30,15 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 
 /**
  * A signed-in account's reads of a workspace it owns, through this server's
- * copy of it, while it shows on the phone. Only a Bearer session reaches
- * them, and the route checks the operation and the owner before it reads the
- * arguments. The sign-in, its fence, the owner and "Show on phone" are
- * checked again once the arguments arrive, once the copy is open, once it
- * has synced, and once the answer is ready. A workspace the account does not own, one that does not exist,
- * and an ID that cannot be one answer alike.
+ * copy of it, while it shows on the phone, and its change feed, at
+ * `GET .../ops/changes?since=&hold=`. Only a Bearer session reaches them,
+ * and the route checks the operation and the owner before it reads the
+ * arguments or the cursor. The sign-in, its fence, the owner and "Show on
+ * phone" are checked again once the arguments arrive, once the copy is open,
+ * once it has synced, after every wait, and once the answer is ready. A
+ * workspace the account does not own, one that does not exist, and an ID
+ * that cannot be one answer alike. Each read answers the feed's cursor for
+ * what its copy had synced.
  */
 export function createAccountOperationRoute(options: {
   storage: SyncRelayStorage;
@@ -42,12 +47,14 @@ export function createAccountOperationRoute(options: {
   nowMs(): number;
   /** Keyed by sign-in. */
   limiter: TokenBucketLimiter;
+  feedWaits: AccountFeedWaits;
 }) {
   const { storage, limiter } = options;
   const session = (request: Request) => bearerAccountSession(storage, options.resolveAccountSession, request);
 
   return async function respondToAccountOperation(request: Request, route: AccountOperationRoute): Promise<Response> {
-    if (request.method !== "POST") throw relayError("method_not_allowed");
+    const feed = route.operation === "changes" && request.method === "GET";
+    if (!feed && request.method !== "POST") throw relayError("method_not_allowed");
     const caller = await session(request);
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
       throw new RelayError("server_busy", "This sign-in is reading faster than your server answers. Try again shortly.");
@@ -55,11 +62,21 @@ export function createAccountOperationRoute(options: {
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
-    if (!isAccountOperation(route.operation) || !reaches(caller.userId)) throw notFound();
+    if (!(feed || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
     const authorize = async () => {
       const current = await session(request);
       if (current.sessionId !== caller.sessionId || current.userId !== caller.userId || !reaches(caller.userId)) throw notFound();
     };
+    if (feed) {
+      const url = new URL(request.url);
+      const hold = url.searchParams.get("hold");
+      const answer = await readAccountFeed(storage, options.feedWaits, {
+        workspaceId: route.workspaceId, userId: caller.userId, caller: caller.sessionId, since: url.searchParams.get("since"),
+        holdMs: hold === null ? 0 : parseLogHold(hold), signal: request.signal, authorize,
+      });
+      await authorize();
+      return jsonResponse({ ok: true, ...answer });
+    }
     let args: unknown;
     try {
       args = await readBoundedJson(request, ACCOUNT_OPERATION_MAX_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]));
@@ -69,11 +86,11 @@ export function createAccountOperationRoute(options: {
     await authorize();
     const copies = options.copies();
     if (copies === undefined) throw notFound();
-    const result = await runAccountOperation({ storage, copies }, {
+    const { result, cursor } = await runAccountOperation({ storage, copies }, {
       owner: caller.userId, workspaceId: route.workspaceId, operation: route.operation, args, authorize,
       // A Bearer session reads what shows on the phone, whatever the request says.
       visitor: { reason: "account", caller: caller.sessionId, signal: request.signal, phone: true },
     });
-    return jsonResponse({ ok: true, result });
+    return jsonResponse({ ok: true, result, cursor });
   };
 }

@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import * as Y from "yjs";
 import {markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
 import {afterEach, expect, it, vi} from "vitest";
@@ -212,7 +213,7 @@ it.each(["POST", "revoked share", "grant generation", "epoch", "stream", "owner"
       if (reason === "stream") f.write(db => db.exec("UPDATE sync_relay_workspaces SET stream_identity='new'"));
       if (reason === "owner") f.write(db => db.exec("UPDATE sync_relay_workspaces SET owner_user_id='new'"));
       if (reason === "replaced lease") f.principal.issue("workspace", "replacement");
-      if (reason === "non-replica") handle = createServiceHostReplication({storage: f.storage,
+      if (reason === "non-replica") handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage,
         prefix: "dohc-service-v1.", authorize: () => "owner"});
       if (reason === "non-replica") request = new Request(request, {headers: {authorization: "Bearer dohc-service-v1.test"}});
       if (reason === "external") handle = createSyncRelayHandler({storage: f.storage, resolveActor: async (_request, workspaceId) => ({userId: "owner", workspaceId})});

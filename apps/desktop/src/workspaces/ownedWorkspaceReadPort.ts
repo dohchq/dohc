@@ -1,7 +1,7 @@
 import { workspacePathKey } from "./workspacePathKey";
 import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
-import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import type { WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 
 export interface OwnedWorkspaceSearchSource {
   target: ShareViewFilesTarget;

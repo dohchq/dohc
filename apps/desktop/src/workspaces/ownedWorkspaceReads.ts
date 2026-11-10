@@ -13,7 +13,7 @@ import {
   type ShareViewFilesWorkspaceRecord,
 } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
-import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
+import type { WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
 
 /** Compose the production read port from the workspace's owner records. */
 export function createOwnedWorkspaceReads(input: {

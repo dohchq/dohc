@@ -1,3 +1,4 @@
+import {notifyAcceptedLiveUpdate} from "../relayWriteChanges";
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {parseAutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import {automationPressAdmissionAllowed, automationGrantAdmissionAllowed} from "./automationPresses";
@@ -853,6 +854,7 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
     raw.validation_checkpoint_sha256===checkpointDigest && raw.checkpoint_length===(checkpointBytes?.byteLength??null));
   storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
   registerLiveDeliveryEvent(storage, document, host.hostId, raw);
+  notifyAcceptedLiveUpdate(storage, document.workspaceId);
   return {metadata:storedMetadata,updateBytes};
 }
 

@@ -1,3 +1,4 @@
+import type { DiscussionActivityHub } from "./discussionActivity";
 import { jsonResponse } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
@@ -234,9 +235,10 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
  * service host credential for the workspace owner; this decides scope.
  * A row or blob outside the scope answers exactly as an absent one.
  */
-export function createServiceHostFeed(storage: SyncRelayStorage, lookupUserDisplayName?: LogAuthorNameLookup) {
+export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<DiscussionActivityHub, "wakeLog">, lookupUserDisplayName?: LogAuthorNameLookup) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} }, { watched: () => false },
+  const replication = createWorkspaceReplicationRoutes(storage, Date.now,
+    { wakeLog: (workspaceId) => activity.wakeLog(workspaceId), wait: async () => {} }, { watched: () => false },
     lookupUserDisplayName);
   const blobReach = createBlobReach(storage);
   const currentScope = (workspaceId: string) => {

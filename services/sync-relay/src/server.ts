@@ -55,6 +55,7 @@ import {
   type ServerRuns,
 } from "./automationServerRoutes";
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
+import { createAccountFeedWaits } from "./accountFeed";
 import { createAccountOperationRateLimiter, createAccountOperationRoute } from "./accountOperationRoutes";
 import type { ServerCopies } from "./serverCopies";
 import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
@@ -489,8 +490,11 @@ export function createSyncRelayHandler({
   const respondToAutomationServer = createAutomationServerRoutes(storage, serverRuns, nowMs, automationHostRateLimiter);
   const respondToAccountWorkspaces = accountApi && resolveAccountSession
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
+  const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
   const respondToAccountOperation = accountApi && resolveAccountSession
-    ? createAccountOperationRoute({ storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter }) : undefined;
+    ? createAccountOperationRoute({
+      storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter, feedWaits: accountFeedWaits,
+    }) : undefined;
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
@@ -656,7 +660,9 @@ export function createSyncRelayHandler({
     return fresh;
   };
 
-  const personalAgents = createPersonalAgents({ storage, fence: credentialFence, activity: discussionActivity, nowMs });
+  const personalAgents = createPersonalAgents({
+    storage, fence: credentialFence, activity: discussionActivity, nowMs, onFence: (userId) => accountFeedWaits.wakeAccount(userId),
+  });
 
   // The routes share-web's MCP tool loop calls take a link holder's
   // capability or a connected agent's access token through this one resolver.
@@ -1208,6 +1214,7 @@ export function createSyncRelayHandler({
     personalAgents,
     dispose() {
       replicaLinkReads?.close();
+      accountFeedWaits.close();
       return personalAgents.dispose();
     },
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {

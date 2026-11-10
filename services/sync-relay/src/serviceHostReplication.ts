@@ -6,6 +6,7 @@ import {badRequest, errorResponse, notFound} from "./errors";
 import {jsonResponse} from "@dohc/service-http";
 import {REPLICA_LIVE_JOURNAL_MAX_ROWS} from "./storage/liveUpdateJournal";
 import type {LogAuthorNameLookup} from "./relayLogInputs";
+import type {DiscussionActivityHub} from "./discussionActivity";
 
 /**
  * Replication for a credential this server derived for its own replica.
@@ -13,11 +14,13 @@ import type {LogAuthorNameLookup} from "./relayLogInputs";
  * Workspace replicas can also read the accepted live journal. With
  * `hostedFeed`, the credential also reads the service host's scoped feed
  * under `/sync/:workspaceId/hosted/`. Credentials never enter an account
- * resolver or share route.
+ * resolver or share route. A write wakes the workspace's waits through
+ * `activity`, the hub every other log route wakes.
  */
 export function createServiceHostReplication(options: {
   storage: SyncRelayStorage;
   prefix: string;
+  activity: Pick<DiscussionActivityHub, "wakeLog">;
   authorize(input: {workspaceId: string; bearer: string; method: string; pathname: string}): string | null;
   revalidate?: (input: {workspaceId: string; bearer: string; method: string; pathname: string}) => string | null;
   onLogRead?: (input: {workspaceId: string; bearer: string}, rows: readonly SyncRelayLogRow[]) => void;
@@ -29,11 +32,12 @@ export function createServiceHostReplication(options: {
   replicaLiveJournal?: boolean;
 }) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}},
+  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now,
+    {wakeLog: workspaceId => options.activity.wakeLog(workspaceId), wait: async () => {}},
     {watched: () => false}, undefined, (request, workspaceId, rows) => options.onLogRead?.({workspaceId,
       bearer: (request.headers.get("authorization") ?? "").slice(7)}, rows));
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
-  const feed = options.hostedFeed ? createServiceHostFeed(options.storage, options.lookupUserDisplayName) : undefined;
+  const feed = options.hostedFeed ? createServiceHostFeed(options.storage, options.activity, options.lookupUserDisplayName) : undefined;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url), parts = url.pathname.split("/");

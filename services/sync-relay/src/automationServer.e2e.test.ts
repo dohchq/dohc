@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
@@ -105,7 +106,7 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
   const server = { label: "My dohc server" };
   // The relay as main.ts mounts it while it runs automations.
   const relay = createSyncRelayHandler({ storage, resolveActor: testActor, automationServer: server });
-  const replicas = createServiceHostReplication({
+  const replicas = createServiceHostReplication({activity: new DiscussionActivityHub(), 
     storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
     authorize: (credential) => authorizeAutomationReplication(storage, { key, namespace, ...credential }),
   });

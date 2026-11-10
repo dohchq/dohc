@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import * as Y from "yjs";
 import {DatabaseSync} from "node:sqlite";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -214,7 +215,7 @@ it.skipIf(engine.missing)("writes an automation's records and posts on the serve
   const key = new Uint8Array(32).fill(7), namespace = "automation-record-e2e";
   // The relay as main.ts mounts it, with the automation replica's credential beside the owner's.
   const relay = createSyncRelayHandler({ storage, resolveActor: testActor });
-  const replicas = createServiceHostReplication({
+  const replicas = createServiceHostReplication({activity: new DiscussionActivityHub(), 
     storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
     authorize: (credential) => authorizeAutomationReplication(storage, { key, namespace, ...credential }),
   });
@@ -309,7 +310,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   attachLiveJournalHistory(storage as StorageContext, history);
   const serverHost = {label: "Test server"};
   const relay = createSyncRelayHandler({storage, resolveActor: testActor, automationServer: serverHost});
-  const replicas = createServiceHostReplication({storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+  const replicas = createServiceHostReplication({activity: new DiscussionActivityHub(), storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
     authorize: credential => authorizeAutomationReplication(storage, {key, namespace, ...credential})});
   const http = serveFetchHandler({handler: request => request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`) ? replicas(request) : relay(request),
     streamBody: streamsRequestBody, maxBodyBytes: () => 21 * 1024 * 1024, oversized: () => new Response(null, {status: 413}), failure: () => new Response(null, {status: 500})});

@@ -37,6 +37,11 @@ export function ownerLogWaitGroup(workspaceId: string): string {
   return `owner-log:${workspaceId}`;
 }
 
+/** An account's change feed for one workspace waits apart from both. */
+export function accountFeedWaitGroup(workspaceId: string): string {
+  return `account-feed:${workspaceId}`;
+}
+
 // This hub is only a bounded wake signal. SQLite owns revisions and activity
 // data, so losing this object on restart cannot invalidate a saved watermark.
 export class DiscussionActivityHub {
@@ -75,11 +80,12 @@ export class DiscussionActivityHub {
     this.waiters.wake(shareId, undefined);
   }
 
-  /** The workspace log changed: wakes its link readers and its owner's devices. */
+  /** The workspace log changed: wakes its link readers, its owner's devices, its personal agents, and its account change feeds. */
   wakeLog(workspaceId: string): void {
     this.waiters.wake(linkLogWaitGroup(workspaceId), undefined);
     this.waiters.wake(ownerLogWaitGroup(workspaceId), undefined);
     this.personal.wake(ownerLogWaitGroup(workspaceId), undefined);
+    this.waiters.wake(accountFeedWaitGroup(workspaceId), undefined);
   }
 
   stats(): { shares: number; waiters: number } {

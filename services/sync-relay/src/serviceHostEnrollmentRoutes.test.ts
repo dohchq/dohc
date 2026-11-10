@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import {createHash} from "node:crypto";
 import {EventEmitter} from "node:events";
 import type {ServerResponse} from "node:http";
@@ -28,7 +29,7 @@ const queue = (outboxId: string, of = identity) => ({workspaceId: scope.workspac
 // One page of a refused queue as the service host's engine answers it. The desktop assembles the pages.
 const keptPage = (kept: ServiceKeptEdits, cursor: JsonValue | undefined): JsonValue => ({kind: "page", outboxId: kept.outboxId, after: cursor ?? null});
 const key = new Uint8Array(32).fill(17), namespace = "service-route-test";
-const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({activity: new DiscussionActivityHub(), storage, prefix: "dohc-service-v1.",
   hostedFeed: true, authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
 async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);

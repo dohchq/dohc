@@ -701,10 +701,16 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.decodeUtf8(new Uint8Array(delivery.blob.bytes));
   }
 
+  /**
+   * The file at the path, with its text. With `maxBytes`, a text file the
+   * daemon keeps out of band and that is larger answers its metadata with a
+   * null `text`, and its body is never fetched.
+   */
   async readTextFile(input: {
     workspaceId: string;
     versionId: string;
     path: string;
+    maxBytes?: number;
   }): Promise<VersionedTextReadValue | null> {
     this.assertWorkspace(input.workspaceId);
     const result = await this.request(VERSIONED_METHOD.textRead, {
@@ -712,6 +718,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       path: input.path,
     });
     if (result?.contentKind === "text" && result.text === null) {
+      if (input.maxBytes !== undefined && result.byteLength > input.maxBytes) return result;
       const text = await this.readTextBlob({
         workspaceId: input.workspaceId,
         sha256: result.blobSha256,

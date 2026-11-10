@@ -127,6 +127,7 @@ import * as pushStorage from "./storage/pushSubscriptions";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
+import * as accountFeedStorage from "./storage/accountFeed";
 import * as collectionWriteStorage from "./storage/collectionWrites";
 import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
 import * as automationPressStorage from "./storage/automationPresses";
@@ -914,6 +915,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   setShowOnPhone(input: { ownerUserId: string; workspaceId: string; showOnPhone: boolean }) {
     return accountWorkspaceStorage.setShowOnPhone(this, input);
+  }
+
+  accountFeedStanding(workspaceId: string) {
+    return accountFeedStorage.accountFeedStanding(this, workspaceId);
+  }
+
+  accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }) {
+    return accountFeedStorage.accountFeedLogRows(this, input);
+  }
+
+  accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }) {
+    return accountFeedStorage.accountFeedJournalRows(this, input);
+  }
+
+  accountFeedThreadPaths(workspaceId: string, threadId: string) {
+    return accountFeedStorage.accountFeedThreadPaths(this, workspaceId, threadId);
   }
 
   currentAutomationWorkspace(workspaceId: string) {

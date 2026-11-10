@@ -1,5 +1,5 @@
 import { serverOperationArgsSchemas, type CliResultByVerb, type ServerOperation } from "@dohc/cli/protocol";
-import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -7,10 +7,13 @@ import {
   failure, listFileChats, listGroups, listGroupsWithThreads, listGroupThreads, OperationError, readChat, readThreadDispatchState,
   showChat, type ChatReadStore, type ChatsHost,
 } from "@dohc/workspace-operations/chats";
-import { readDocument, type DocumentsHost } from "@dohc/workspace-operations/documents";
+import {
+  listFiles, readDocument, readText, type DocumentsHost, type FileListResult, type FilesHost, type TextReadResult,
+} from "@dohc/workspace-operations/documents";
 import { documentMarkdown, settledDocumentMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import * as Y from "yjs";
+import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
 import { replicaChatStore } from "./automationChatWrites";
 import type { AutomationReplica } from "./automationReplicas";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
@@ -22,7 +25,18 @@ import type { SyncRelayStorage } from "./storage";
 // this runs the read on the copy and keeps the engine's own failures, and
 // every secret file, out of the answer.
 
-export type AccountOperationResult = CliResultByVerb[ServerOperation];
+export type AccountOperationResult =
+  | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText">]
+  | FileListResult
+  | TextReadResult
+  | PageTooLargeResult;
+
+/** A page whose file is over the desktop's editor limit, refused before the server fetches its body. */
+export type PageTooLargeResult = { ok: false; reason: string; refusal: "too-large" };
+
+class PageTooLarge extends OperationError {
+  constructor() { super("This page is too large to open here."); }
+}
 
 export interface AccountOperationInput {
   /** The account that owns the workspace, from the caller's credential. */
@@ -44,18 +58,18 @@ type ParsedOperation = { [Operation in ServerOperation]: {
 
 // The server's own path rules: the copies live on its disk.
 const PLATFORM = process.platform;
-const secret = (path: string | undefined) => path !== undefined && classifyEngineFilePathForRead(path, PLATFORM).kind === "secret";
 
-/** Whether `name` is an operation this server answers. `changes` is not one: it names 2b's change feed. */
+/** Whether `name` is an operation this server answers. `changes` is not one: it names the change feed. */
 export function isAccountOperation(name: string): name is ServerOperation {
   return Object.hasOwn(serverOperationArgsSchemas, name);
 }
 
 /**
  * Runs one read on the server's copy of `workspaceId` and answers its
- * result. An unknown operation, a workspace the owner cannot open, and a
- * copy whose owner changed reject with not-found; a full server rejects
- * with server_busy; arguments outside the operation's schema, and the
+ * result, with the change feed's cursor for what the copy had synced. An
+ * unknown operation, a workspace the owner cannot open, and a copy whose
+ * owner changed reject with not-found; a full server rejects with
+ * server_busy; arguments outside the operation's schema, and the
  * operation's own refusals, reject with bad_request.
  *
  * The caller's duties:
@@ -70,15 +84,17 @@ export function isAccountOperation(name: string): name is ServerOperation {
 export async function runAccountOperation(
   server: { storage: SyncRelayStorage; copies: ServerCopies },
   input: AccountOperationInput,
-): Promise<AccountOperationResult> {
+): Promise<{ result: AccountOperationResult; cursor: string }> {
   const request = parseOperation(input.operation, input.args);
   return await server.copies.withServerCopy(input.owner, input.workspaceId, input.visitor, async (replica) => {
     await input.authorize();
+    // The sync brings the copy at least this far.
+    const cursor = currentAccountFeedCursor(server.storage, input.workspaceId);
     await replica.sync(input.visitor.signal);
     await input.authorize();
     const result = await answer(server.storage, replica, input.workspaceId, request);
     await input.authorize();
-    return result;
+    return { result, cursor };
   });
 }
 
@@ -93,6 +109,8 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
   const chats = serverChats(storage, replica, workspaceId);
   try {
     switch (request.operation) {
+      case "listFiles": return await listFiles(serverFiles(replica, workspaceId), request.args, PLATFORM);
+      case "readText": return await readText(serverFiles(replica, workspaceId), request.args.path, PLATFORM);
       case "groups": return await listGroups(chats);
       case "threads": return await listGroupThreads(chats, { group: request.args.group, reader: null });
       case "groupsFull": return await listGroupsWithThreads(chats);
@@ -107,6 +125,7 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
   } catch (error) {
     if (error instanceof RelayError) throw error;
     // A document read rejects, so its failure is worded here, by the rule the chat host's results follow.
+    if (error instanceof PageTooLarge) return { ok: false, reason: error.message, refusal: "too-large" };
     if (request.operation === "documentRead") return failure(error, `failed to read document: ${request.args.path}`, "operation-only");
     if (error instanceof OperationError) throw badRequest(error.message);
     throw error;
@@ -145,14 +164,14 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
       for (const [index, objectId] of batch.entries()) {
         const found = results[index];
         if (found?.status === "found") {
-          known.set(objectId, secret(found.path) ? { kind: "hidden" } : { kind: "placed", path: found.path });
+          known.set(objectId, hiddenFile(found.path) ? { kind: "hidden" } : { kind: "placed", path: found.path });
           continue;
         }
         const last = storage.objectLastKnownPath(workspaceId, objectId);
         const hints = last === undefined
           ? (await chats.listThreadsForFile({ workspaceId, objectId })).map((thread) => thread.linkedFile?.pathHint)
           : [last];
-        known.set(objectId, hints.some(secret) ? { kind: "hidden" } : { kind: "unavailable" });
+        known.set(objectId, hints.some(hiddenFile) ? { kind: "hidden" } : { kind: "unavailable" });
       }
     }
     return known;
@@ -161,7 +180,7 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
     workspaceId,
     store: withoutSecretFiles(chats, place),
     fileObjectId: async (path) => {
-      if (secret(path)) return null;
+      if (hiddenFile(path)) return null;
       const [found] = (await files.resolveFiles({ workspaceId, targets: [{ path }], signal: replica.signal })).results;
       return found?.status === "found" ? found.objectId : null;
     },
@@ -179,7 +198,7 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
 /** The store without the threads and attachments that name a secret file, by their hint or by where `place` puts their object. */
 function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
   const hidden = (placed: ReadonlyMap<string, Placement>, objectId: string | undefined, hint: string | undefined) =>
-    secret(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
+    hiddenFile(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
   const threads = async <Thread extends Pick<ChatThread, "linkedFile">>(rows: Thread[]): Promise<Thread[]> => {
     const placed = await place(rows.flatMap((thread) => thread.linkedFile ? [thread.linkedFile.objectId] : []));
     return rows.filter((thread) => !hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint));
@@ -214,18 +233,21 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
  * before it settles into the file. While a restore keeps the relay from
  * cutting that state, the read answers restore-in-progress rather than an
  * older file. Any other page reads as its settled file in the active version.
- * A lossy note reads as its file, as on the desktop. Nothing here writes to
- * the copy or sends anything.
+ * A lossy note reads as its file, as on the desktop. A page whose file is
+ * over the desktop's editor limit is refused before its body is fetched.
+ * Nothing here writes to the copy or sends anything.
  */
 function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): DocumentsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   return {
     async read(path) {
       const missing = new OperationError(`No document at ${path}.`);
-      if (secret(path)) throw missing;
+      if (hiddenFile(path)) throw missing;
       if (liveDocumentKindForPath(path) !== "richdoc") throw new OperationError(`${path} is not a Markdown document.`);
       const version = await files.getActiveVersion({ workspaceId });
-      const file = version === null ? null : await files.readTextFile({ workspaceId, versionId: version.id, path });
+      const file = version === null ? null
+        : await files.readTextFile({ workspaceId, versionId: version.id, path, maxBytes: LIVE_MARKDOWN_MAX_BYTES });
+      if (file?.contentKind === "text" && (file.text === null || file.byteLength > LIVE_MARKDOWN_MAX_BYTES)) throw new PageTooLarge();
       if (file?.contentKind !== "text" || typeof file.text !== "string") throw missing;
       if (isLossyMarkdown(file.text)) return { path, markdown: file.text };
       const live = version?.kind === "main" ? storage.readAcceptedLiveDocument(workspaceId, path) : { kind: "none" as const };
@@ -235,5 +257,34 @@ function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, 
       }
       return { path, markdown: settledDocumentMarkdown(file.text) };
     },
+  };
+}
+
+/**
+ * The files in the copy's active version. A hidden file is never listed, and
+ * reads as missing without asking the engine. A text file over the desktop's
+ * editor limit is refused before its body is fetched.
+ */
+function serverFiles(replica: AutomationReplica, workspaceId: string): FilesHost {
+  const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
+  return {
+    async list() {
+      const version = await files.getActiveVersion({ workspaceId });
+      if (version === null) return [];
+      return (await files.listTextFileMetadata({ workspaceId, versionId: version.id }))
+        .filter((file) => !hiddenFile(file.path))
+        .map(({ path, objectId, contentKind, byteLength }) => ({ path, objectId, contentKind, byteLength }));
+    },
+    async readText(path) {
+      if (hiddenFile(path)) return { kind: "missing" };
+      const version = await files.getActiveVersion({ workspaceId });
+      const file = version === null ? null
+        : await files.readTextFile({ workspaceId, versionId: version.id, path, maxBytes: LIVE_MARKDOWN_MAX_BYTES });
+      if (file === null) return { kind: "missing" };
+      if (file.contentKind !== "text") return { kind: "binary" };
+      if (file.text === null || file.byteLength > LIVE_MARKDOWN_MAX_BYTES) return { kind: "too-large", maxBytes: LIVE_MARKDOWN_MAX_BYTES };
+      return { kind: "text", text: file.text };
+    },
+    errorDetail: "operation-only",
   };
 }

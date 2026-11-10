@@ -29,6 +29,7 @@ import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
+import { DiscussionActivityHub } from "./discussionActivity";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import type { HeldDocumentHost } from "./heldDocumentRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
@@ -353,8 +354,10 @@ if (copiesOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST
 }
 const automationServer = automationsOn ? {label: automationServerLabel(process.env.DOHC_SERVER_NAME)} : undefined;
 const automationReplicaKey = copiesOn ? {key: Buffer.from(linkKey!), namespace: deployment!.history.namespace} : undefined;
+// One wait hub for every route that writes the log, so a write any of them takes wakes every wait on it.
+const discussionActivity = new DiscussionActivityHub();
 const automationReplication = automationReplicaKey
-  ? createServiceHostReplication({storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+  ? createServiceHostReplication({storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX, activity: discussionActivity,
     authorize: input => authorizeAutomationReplication(storage, {...automationReplicaKey, ...input})}) : undefined;
 // One limit per person for notices to others, shared by the route and this server's automations.
 const noticePostRateLimiter = new TokenBucketLimiter(NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_REFILL_PER_SECOND, NOTICE_POST_MAX_SENDERS);
@@ -363,7 +366,7 @@ let copies: ServerCopies | undefined;
 const serviceReplication = selfHostedLive && deployment && linkKey
   ? (() => {
       const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
-      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, activity: discussionActivity,
         authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input}),
         lookupUserDisplayName: userId => lookupUserDisplayName(userId)});
     })() : undefined;
@@ -412,6 +415,7 @@ const presence = new PresenceHub();
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
+  discussionActivity,
   ownerRestoreHost: () => ownerRestoreHost?.(),
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
