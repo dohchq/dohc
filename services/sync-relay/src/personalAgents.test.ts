@@ -1427,7 +1427,7 @@ describe("a personal agent's wait", () => {
     expect(JSON.stringify(answer)).not.toContain("keys/");
   });
 
-  it("names a file's path after a rename, and no path once the file is gone or the relay never saw it", async () => {
+  it("names a file's path after a rename, and leaves out a file that is gone or the relay never saw", async () => {
     const f = await fixture();
     const agent = await signIn(f);
     await putBlob(f.h, OWNER, WS_A, "plan");
@@ -1453,7 +1453,7 @@ describe("a personal agent's wait", () => {
 
     const answer = await waitOnce(f, agent);
     expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([
-      ["moved", "notes/moved.md"], ["gone", null], ["unknown", null], ["old-path", null],
+      ["moved", "notes/moved.md"],
     ]);
   });
 

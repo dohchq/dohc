@@ -449,17 +449,16 @@ export function createPersonalAgentToolRoutes(input: {
     }
   }
 
-  // The current path of the file a thread is on, or null when the file is
-  // gone. Undefined when it is on a file no share can serve, a secret file
-  // included, or when its create binds no one file. A path binding names its
-  // file even when the relay holds no object there, as for a secret file.
-  const filePathOf = (workspaceId: string, threadId: string): string | null | undefined => {
+  // The current path of the file a thread is on, when a share could serve
+  // that file. Undefined for a secret file, a file that is gone or the relay
+  // never saw, and a create that binds no one file. A secret file never has
+  // an object at the relay, so a gone or unknown file may be one.
+  const filePathOf = (workspaceId: string, threadId: string): string | undefined => {
     const binding = storage.findThreadCreateFileBinding(workspaceId, threadId);
     if (!binding) return undefined;
-    if (binding.kind === "path" && visibleSharePath(MAIN_FILES, binding.path) === null) return undefined;
-    const path = binding.kind === "object" ? storage.objectCurrentPath(workspaceId, binding.objectId) ?? null
-      : storage.objectIdAtPath(workspaceId, binding.path) ? binding.path : null;
-    return path === null ? null : visibleSharePath(MAIN_FILES, path) ?? undefined;
+    const path = binding.kind === "object" ? storage.objectCurrentPath(workspaceId, binding.objectId)
+      : storage.objectIdAtPath(workspaceId, binding.path) ? binding.path : undefined;
+    return typeof path === "string" ? visibleSharePath(MAIN_FILES, path) ?? undefined : undefined;
   };
 
   function forAgent(row: SyncRelayLogRow, workspaceId: string, scope: PersonalScope, mention: string, dm: string): PersonalWaitMessage | null {
@@ -474,8 +473,8 @@ export function createPersonalAgentToolRoutes(input: {
     if (channelWireId !== dm && !mentions(read.message.body, mention) &&
         !storage.personalAgentPostedIn({ agentId: scope.connection.agentId, workspaceId, threadId })) return null;
     const filePath = channelWireId === null ? filePathOf(workspaceId, threadId) : null;
-    // A thread on a file no share can serve, a secret file included, stays
-    // out, as it does through a share link.
+    // A thread on a file no share can serve stays out, as it does through a
+    // share link.
     if (filePath === undefined) return null;
     return { ...linkChatMessage(read.message), workspaceId, channelWireId, filePath };
   }
