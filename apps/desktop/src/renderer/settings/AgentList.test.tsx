@@ -7,7 +7,8 @@ import type { AgentsListeningEvent, ChatDispatchPausedEvent, RunnerSelfTestResul
 import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
-import { AgentList, agentListRows } from "./AgentList";
+import { AgentList } from "./AgentList";
+import { agentListRows } from "./agentRemoval";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let listeningListener: ((event: AgentsListeningEvent) => void) | null = null;

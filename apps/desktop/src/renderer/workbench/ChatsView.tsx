@@ -131,6 +131,7 @@ import { archivedChatsFor } from "../../settings/archivedChats";
 import { Menu } from "../ui/Menu";
 import { isContextMenuKey } from "../ui/keys";
 import { chatRowMenuItems, type ChatRowMenuTarget } from "./chatRowMenu";
+import { removeAgentWithUndo } from "../settings/agentRemoval";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { extractChatFileReferences, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -570,6 +571,8 @@ export function ChatsView(props: {
   onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, notice?: ChatErrorNotice) => void;
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string, undo?: () => void) => void;
+  // Takes back the toast and Notices row of this identity.
+  onClearError?: (identity: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
@@ -3603,38 +3606,40 @@ export function ChatsView(props: {
     },
     [props.onError, props.onSaveUserSettings, props.userSettings],
   );
-  // Settings removes an agent the same way: its chat stays, in Archived, and
-  // Undo puts the agent back in its place if nothing took its id since.
+  // Settings removes an agent the same way, with the same Undo. Its chat
+  // stays, in Archived.
   const removeAgent = useCallback(
     async (agentId: string): Promise<void> => {
       const settings = props.userSettings;
       const entry = settings?.agents[agentId];
-      if (!settings || !entry || !props.onSaveUserSettings) return;
-      const order = Object.keys(settings.agents);
-      const { [agentId]: _removed, ...agents } = settings.agents;
-      try {
-        await props.onSaveUserSettings({ ...settings, agents }, settings);
-      } catch (error) {
-        props.onError(ipcErrorMessage(error, `dohc could not remove ${entry.name}.`), error);
-        return;
-      }
-      props.onNotice?.(`Removed ${entry.name}.`, () => void (async () => {
-        try {
-          const file = await bridge().getUserSettings();
-          const current = file.settings;
-          if (Object.hasOwn(current.agents, agentId)) {
-            props.onError(`Undo didn't replace the new ${current.agents[agentId]!.name}, so the one you removed stays removed.`);
-            return;
+      if (!settings || !entry) return;
+      await removeAgentWithUndo({
+        workspaceId,
+        settings,
+        agent: { id: agentId, name: entry.name },
+        save: async (next) => {
+          try {
+            return await bridge().setUserSettings({ settings: next, base: settings });
+          } catch (error) {
+            props.onError(ipcErrorMessage(error, `dohc could not remove ${entry.name}.`), error);
+            return null;
           }
-          await bridge().setUserSettings({ settings: { ...current, agents: { ...current.agents, [agentId]: entry } }, base: current });
-          const now = new Set([...Object.keys(current.agents), agentId]);
-          await bridge().orderAgents({ order: order.filter((id) => now.has(id)) });
-        } catch (error) {
-          props.onError(ipcErrorMessage(error, `dohc could not bring back ${entry.name}.`), error);
-        }
-      })());
+        },
+        order: async (order, failure) => {
+          try {
+            await bridge().orderAgents({ order: [...order] });
+            return true;
+          } catch (error) {
+            props.onError(ipcErrorMessage(error, failure ?? `dohc could not put ${entry.name} back in its place.`), error);
+            return false;
+          }
+        },
+        onError: props.onError,
+        onClearError: props.onClearError,
+        onNotice: props.onNotice,
+      });
     },
-    [props.onError, props.onNotice, props.onSaveUserSettings, props.userSettings],
+    [props.onClearError, props.onError, props.onNotice, props.userSettings, workspaceId],
   );
   // The members dialog, opened from a group's menu in the sidebar.
   const [membersFor, setMembersFor] = useState<{ workspaceId: string; channel: ChatChannelRecord; session: number } | null>(null);
@@ -5325,7 +5330,7 @@ export function ChatsView(props: {
             archived,
             removed,
             enabled: agent?.launch === undefined ? null : agent.enabled,
-            canRemove: agent !== undefined && !!props.onSaveUserSettings,
+            canRemove: agent !== undefined,
           },
         })}
         trailing={
@@ -5430,7 +5435,7 @@ export function ChatsView(props: {
               </ul>
             </div>
           ) : null}
-          {dmAvailable || dms.length > 0 ? (
+          {dmAvailable || activeDms.length > 0 ? (
             <div data-testid="chats-dms-section">
               <div className="group mt-4 flex h-6 items-center pl-3 pr-2">
                 <SectionLabel as="p" className="min-w-0 flex-1">

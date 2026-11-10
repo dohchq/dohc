@@ -164,10 +164,12 @@ describe("ChatsView archive and row menus", () => {
       fileThreads: [],
     });
     const { scout, ...withoutScout } = settings.agents;
-    bridgeMock.getUserSettings.mockResolvedValue({ settings: { ...settings, agents: withoutScout } });
-    bridgeMock.setUserSettings.mockResolvedValue({ settings });
+    const removed = { ...settings, agents: withoutScout };
+    bridgeMock.getUserSettings.mockResolvedValue({ settings: removed });
+    bridgeMock.setUserSettings.mockResolvedValueOnce({ settings: removed }).mockResolvedValueOnce({ settings });
     bridgeMock.orderAgents.mockResolvedValue({ settings });
-    renderView(vi.fn(), vi.fn(), { userSettings: settings, onSaveUserSettings, onNotice, onSetupAgent: vi.fn() });
+    const onClearError = vi.fn();
+    renderView(vi.fn(), vi.fn(), { userSettings: settings, onSaveUserSettings, onNotice, onClearError, onSetupAgent: vi.fn() });
 
     const row = await screen.findByTestId("chats-my-agent");
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
@@ -178,17 +180,20 @@ describe("ChatsView archive and row menus", () => {
       { ...settings, agents: { ...settings.agents, scout: { ...scout, enabled: false } } }, settings,
     ]);
 
+    // Remove works as it does in Settings: the agent's failed check goes, and
+    // Undo puts it back where it was.
     fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
     await user.click(screen.getByTestId("chat-row-menu-remove-agent"));
-    await waitFor(() => expect(onSaveUserSettings).toHaveBeenCalledTimes(2));
-    expect(onSaveUserSettings.mock.lastCall).toEqual([{ ...settings, agents: withoutScout }, settings]);
+    await waitFor(() => expect(onNotice).toHaveBeenCalledOnce());
+    expect(bridgeMock.setUserSettings).toHaveBeenCalledExactlyOnceWith({ settings: removed, base: settings });
+    expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:workspace-a:scout");
     const [words, undo] = onNotice.mock.lastCall!;
     expect(words).toBe("Removed Ranger.");
     undo();
     await waitFor(() => expect(bridgeMock.orderAgents).toHaveBeenCalledWith({ order: ["default", "scout"] }));
-    expect(bridgeMock.setUserSettings).toHaveBeenCalledWith({
+    expect(bridgeMock.setUserSettings).toHaveBeenLastCalledWith({
       settings: { ...settings, agents: { ...withoutScout, scout } },
-      base: { ...settings, agents: withoutScout },
+      base: removed,
     });
   });
 
