@@ -22,15 +22,21 @@ const CAMERA_FILL = "#000000";
 const FRAME = "#ffffff";
 
 // Connect's scanner for a computer's Connect a phone code, as a system sheet over Connect. Each opening starts afresh:
-// `session` changes, so the camera is asked for again and no earlier scan counts.
-export function ScanSheet({ open, session, onClose, onScanned }: {
+// `session` changes, so the camera is asked for again and no earlier scan counts. `onGone` comes once the sheet has
+// left the screen: at the end of its slide on iOS, and as it hides on Android, whose Modal has no onDismiss.
+export function ScanSheet({ open, session, onClose, onScanned, onGone }: {
   open: boolean;
   session: number;
   onClose(): void;
   onScanned(origin: string): void;
+  onGone(): void;
 }) {
+  useEffect(() => {
+    if (!open && Platform.OS !== "ios") onGone();
+  }, [open, onGone]);
   return (
-    <Modal visible={open} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+    <Modal visible={open} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}
+      onDismiss={Platform.OS === "ios" ? onGone : undefined}>
       <ScanContent key={session} active={open} onClose={onClose} onScanned={onScanned} />
     </Modal>
   );

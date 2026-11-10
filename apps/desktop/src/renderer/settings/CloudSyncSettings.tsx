@@ -290,9 +290,8 @@ export function CloudSyncSettings(props: {
   const syncPause = sync.workspaceSynced ? undefined : sync.syncPause;
   const needsServer = !status.connected && !sync.workspaceSynced;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
-  // The server a phone can connect to. An expired sign-in keeps it: the phone
-  // signs in to the server on its own.
-  const phoneServer = status.connected || props.cloud.signInExpired === true
+  // The server a phone can connect to, while this computer is signed in to it.
+  const phoneServer = status.connected
     ? canonicalCloudOrigin(status.serverUrl ?? "", bridge().insecureLoopbackServersForTests)
     : null;
 

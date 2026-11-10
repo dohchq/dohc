@@ -1,6 +1,6 @@
 import { phoneConnectCode } from "@dohc/workspace-contracts/phone-connect";
 import { describe, expect, it } from "vitest";
-import { cameraAccess, readScannedCode, scanReader, type CameraPermission } from "./scan";
+import { cameraAccess, pendingScan, readScannedCode, scanReader, type CameraPermission } from "./scan";
 
 const read = (text: string) => readScannedCode(text, { developmentServer: false });
 const readInDevelopment = (text: string) => readScannedCode(text, { developmentServer: true });
@@ -54,6 +54,20 @@ describe("scanReader", () => {
   it("starts again for each scanner", () => {
     expect(scanReader({ developmentServer: false })("https://dohc.example.com")).toEqual({ origin: "https://dohc.example.com" });
     expect(scanReader({ developmentServer: false })("https://dohc.example.com")).toEqual({ origin: "https://dohc.example.com" });
+  });
+});
+
+describe("pendingScan", () => {
+  it("gives the scanned origin once, when the sheet has gone", () => {
+    const pending = pendingScan();
+    pending.hold("https://dohc.example.com");
+    expect(pending.take()).toBe("https://dohc.example.com");
+    // Android reports the sheet gone on each render while it's hidden.
+    expect(pending.take()).toBeNull();
+  });
+
+  it("gives nothing for a sheet closed without a scan", () => {
+    expect(pendingScan().take()).toBeNull();
   });
 });
 

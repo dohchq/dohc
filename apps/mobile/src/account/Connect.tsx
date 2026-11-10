@@ -12,6 +12,7 @@ import { useTheme } from "../theme";
 import { useAccount } from "./AccountProvider";
 import { Button } from "./Button";
 import { ProblemLine } from "./ProblemLine";
+import { pendingScan } from "./scan";
 import { ScanSheet } from "./ScanSheet";
 
 type Phase =
@@ -42,6 +43,7 @@ export function Connect() {
   const field = useRef<TextInputInstance>(null);
   // The scanner's sheet. Each opening is a new session, so it asks for the camera again and forgets earlier scans.
   const [scan, setScan] = useState({ open: false, session: 0 });
+  const [pending] = useState(pendingScan);
 
   // Leaving this screen ends a sign-in still in progress. Once signed in, it has nothing to end.
   useEffect(() => () => account.cancelSignIn(), [account]);
@@ -77,11 +79,16 @@ export function Connect() {
     }
   }
 
-  // A scanned address goes in the field and connects, as Connect server would.
-  function scanned(origin: string) {
+  // A scanned address goes in the field at once, and connects, as Connect server would, once the sheet has gone.
+  function scanFound(origin: string) {
+    pending.hold(origin);
     setScan(current => ({ ...current, open: false }));
     setAddress(origin);
-    void connect(origin);
+  }
+
+  function scannerGone() {
+    const origin = pending.take();
+    if (origin !== null) void connect(origin);
   }
 
   function cancel() {
@@ -148,7 +155,7 @@ export function Connect() {
           </View>
         )}
       </ScrollView>
-      <ScanSheet open={scan.open} session={scan.session} onClose={() => setScan(current => ({ ...current, open: false }))} onScanned={scanned} />
+      <ScanSheet open={scan.open} session={scan.session} onClose={() => setScan(current => ({ ...current, open: false }))} onScanned={scanFound} onGone={scannerGone} />
     </View>
   );
 }

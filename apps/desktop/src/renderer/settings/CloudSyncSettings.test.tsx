@@ -216,11 +216,14 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByRole("img", { name: /^QR code/ })).toBeNull();
   });
 
-  it("keeps the Connect a phone code once the sign-in expired, since the phone signs in on its own", () => {
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: true })} />);
+  // A dead session reads as signed out, with no server, so the page offers
+  // its sign-in instead.
+  it("shows no Connect a phone code once the sign-in expired", () => {
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SIGNED_OUT_OWNED, { signInExpired: true })} />);
 
-    const code = within(screen.getByTestId("settings-row-connect-phone")).getByRole("img", { name: "QR code for dohc.hollis.studio" });
-    expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
+    expect(screen.getByTestId("settings-cloud-connect")).toBeTruthy();
+    expect(screen.queryByTestId("settings-row-connect-phone")).toBeNull();
+    expect(screen.queryByRole("img", { name: /^QR code/ })).toBeNull();
   });
 
   it("offers Delete account in More actions beside Disconnect, for the account the row shows", async () => {
