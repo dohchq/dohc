@@ -127,17 +127,25 @@ await import(${JSON.stringify(pathToFileURL(join(root, "main.js")).href)});
     expect((await read(otherId)).status).toBe(200);
     expect(child.exitCode).toBeNull();
     expect(await run([...args.slice(0, -1), "Retry"], env)).toMatchObject({code: 0, stdout: result.stdout});
+    const lift = ["--publication-id", publicationId, "--lift-hold"];
+    expect(await run(lift, env)).toMatchObject({code: 0, stderr: "", stdout: expect.stringContaining("The publication stays disabled.")});
+    expect(await run(lift, env)).toMatchObject({code: 3, stdout: "", stderr: expect.stringContaining("No app publishing hold matches")});
+    expect((await read(publicationId)).status).toBe(404);
   } finally {await stop(child);}
   const reopened = openRelayDeployment(config);
-  try {expect(reopened.storage.readAppPublication({...owner, publicationId, limits})).toMatchObject({active: false, operatorTakedown: {reason: "Confirmed phishing"}});}
+  try {
+    expect(reopened.storage.readAppPublication({...owner, publicationId, limits})).toMatchObject({active: false, operatorTakedown: {reason: "Confirmed phishing"}});
+    expect(reopened.storage.publishAppPublication({...request(), candidate: {...request().candidate, sourceRevision: digest("after the lift")}}).active).toBe(true);
+  }
   finally {reopened.storage.close();}
 }, 90_000);
 
 it("returns bad-input and connection failures separately and explains the command", async () => {
-  for (const args of [[], ["--publication-id", "bad", "--reason", "Malware"], ["--publication-id", "a".repeat(64), "--reason", " "], ["--other", "value"]]) {
+  for (const args of [[], ["--publication-id", "bad", "--reason", "Malware"], ["--publication-id", "a".repeat(64), "--reason", " "], ["--other", "value"],
+    ["--publication-id", "a".repeat(64), "--lift-hold", "--reason", "Malware"], ["--lift-hold"]]) {
     expect(await run(args)).toMatchObject({code: 2, stdout: "", stderr: expect.stringContaining("Invalid takedown arguments")});
   }
   expect(await run(["--publication-id", "a".repeat(64), "--reason", "Malware"], {SYNC_RELAY_DB_PATH: join(root, "missing.sqlite"), DOHC_RELAY_DEPLOYMENT_CONFIG: undefined}))
     .toMatchObject({code: 1, stdout: "", stderr: expect.stringContaining("Check that the relay is running")});
-  expect(await run(["--help"])).toMatchObject({code: 0, stderr: "", stdout: expect.stringContaining("Other publications keep serving.")});
+  expect(await run(["--help"])).toMatchObject({code: 0, stderr: "", stdout: expect.stringContaining("--publication-id ID --lift-hold")});
 });

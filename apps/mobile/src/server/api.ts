@@ -56,11 +56,14 @@ export interface AccountWorkspace {
   readonly showOnPhone: boolean;
 }
 
+/** One entry of the account's workspace list, as the server sends it and the phone saves it, or null. */
+export const accountWorkspace = (item: unknown): AccountWorkspace | null =>
+  isFields(item) && text(item.workspaceId, 256) && textOrNull(item.name) && typeof item.canOpen === "boolean" && typeof item.showOnPhone === "boolean"
+    ? { workspaceId: item.workspaceId, name: item.name, canOpen: item.canOpen, showOnPhone: item.showOnPhone }
+    : null;
+
 export function listWorkspaces(client: ServerClient): Promise<AccountWorkspace[]> {
-  return client.send("GET", "/sync/account/workspaces", body => each(okAnswer(body)?.workspaces, item =>
-    isFields(item) && text(item.workspaceId, 256) && textOrNull(item.name) && typeof item.canOpen === "boolean" && typeof item.showOnPhone === "boolean"
-      ? { workspaceId: item.workspaceId, name: item.name, canOpen: item.canOpen, showOnPhone: item.showOnPhone }
-      : null));
+  return client.send("GET", "/sync/account/workspaces", body => each(okAnswer(body)?.workspaces, accountWorkspace));
 }
 
 /** Resolves the setting as the server stored it. */

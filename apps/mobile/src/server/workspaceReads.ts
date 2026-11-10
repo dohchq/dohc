@@ -18,7 +18,7 @@ export interface Read<T> {
 
 /** A cursor as the server writes one: the log floor, the log and the live-edit journal. */
 const CURSOR = /^(0|[1-9]\d{0,15})\.(0|[1-9]\d{0,15})\.(0|[1-9]\d{0,15})$/;
-const isCursor = (value: unknown): value is string => typeof value === "string" && CURSOR.test(value);
+export const isCursor = (value: unknown): value is string => typeof value === "string" && CURSOR.test(value);
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const string = (value: unknown, max = 1_048_576): value is string => typeof value === "string" && value.length <= max;
 

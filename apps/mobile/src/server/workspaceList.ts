@@ -30,6 +30,14 @@ export function workspaceGap(list: WorkspaceList, currentWorkspaceId: string | n
   return { kind: list.workspaces.some(entry => entry.showOnPhone) ? "none-synced" : "none-shown" };
 }
 
+/** The list as this phone saved it for one sign-in (src/server/workspaceData.ts, `ReadCache.savedList`). */
+export interface SavedList {
+  /** The list last saved, or null. It never rejects. */
+  load(): Promise<readonly AccountWorkspace[] | null>;
+  /** The list as the server answered it, or as a change on this phone left it: it's saved, and decides what the cache keeps. */
+  listed(workspaces: readonly AccountWorkspace[]): void;
+}
+
 export interface WorkspaceListStore {
   state(): WorkspaceList;
   subscribe(listener: () => void): () => void;
@@ -42,7 +50,11 @@ export interface WorkspaceListStore {
 // server answers; a failed change goes back to the value the server last confirmed. A list read that started before a
 // change can't land over it: starting a change drops every read in flight, and once no change is waiting, the list
 // is read again.
-export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">): WorkspaceListStore {
+//
+// Given a saved list, the store shows it until the server answers, or with the problem when the server's answer
+// fails, so a relaunch opens a workspace from the cache before any request lands. Only the server's list, and changes
+// made on this phone, are saved and decide what the cache keeps.
+export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">, saved?: SavedList | null): WorkspaceListStore {
   let state: WorkspaceList = { status: "loading" };
   const listeners = new Set<() => void>();
   const reads = requestGenerations();
@@ -54,13 +66,22 @@ export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">
     for (const listener of listeners) listener();
   }
 
+  /** The list as the server or this phone has it now. */
+  function settle(workspaces: readonly AccountWorkspace[], problem: ServerProblemKind | null) {
+    if (!signIn.isCurrent()) return;
+    saved?.listed(workspaces);
+    set({ status: "ready", workspaces, problem, pending: new Set(pending) });
+  }
+
   function setEntry(workspaceId: string, showOnPhone: boolean, problem: ServerProblemKind | null) {
     if (state.status !== "ready") return;
-    set({
-      status: "ready", problem, pending: new Set(pending),
-      workspaces: state.workspaces.map(entry => entry.workspaceId === workspaceId ? { ...entry, showOnPhone } : entry),
-    });
+    settle(state.workspaces.map(entry => entry.workspaceId === workspaceId ? { ...entry, showOnPhone } : entry), problem);
   }
+
+  void saved?.load().then(found => {
+    if (found === null || state.status === "ready") return;
+    set({ status: "ready", workspaces: found, problem: state.status === "failed" ? state.problem : null, pending: new Set() });
+  });
 
   /** Reads the list. A read after changes keeps the problem a failed change showed. */
   function read(afterChanges: boolean) {
@@ -68,8 +89,7 @@ export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">
     listWorkspaces(signIn.client).then(
       workspaces => {
         if (!reads.isLatest(request) || pending.size > 0) return;
-        const problem = afterChanges && state.status === "ready" ? state.problem : null;
-        set({ status: "ready", workspaces, problem, pending: new Set() });
+        settle(workspaces, afterChanges && state.status === "ready" ? state.problem : null);
       },
       (error: unknown) => {
         const problem = shownProblem(error);
