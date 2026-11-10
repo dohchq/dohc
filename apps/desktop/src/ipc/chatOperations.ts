@@ -177,7 +177,7 @@ export const chatOperations = {
     payload: SendChatMessagePayload, result: SendChatMessageResult,
   },
   resolveChatDecision: {
-    capabilityId: "chat.reply", channel: "desktop:resolve-chat-decision",
+    capabilityId: "chat.decision.resolve", channel: "desktop:resolve-chat-decision",
     scope: "workspace", guard: "trusted-sender",
     handlerCheck: { check: "chatsIpc.withRendererWorkspaceOperation", reason: ANSWER_ADMISSION },
     payload: ResolveChatDecisionPayload, result: ResolveChatDecisionResult,

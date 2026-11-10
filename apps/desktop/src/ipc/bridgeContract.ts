@@ -2346,8 +2346,8 @@ export const SendChatMessageResult = z.union([
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
 // Marks a question or poll answered with a reply that already saved, after
-// the answer failed. It posts nothing. The reply must be this window's own,
-// in the question's thread.
+// the answer failed. It posts nothing. The reply must be one this person
+// wrote from a window on this device, in the question's thread.
 export const ResolveChatDecisionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: OPAQUE_ID,

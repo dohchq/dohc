@@ -523,9 +523,10 @@ export function createChatWrites(dependencies: {
 
   // Marks a question answered with a reply that already saved, when the
   // answer failed after the reply landed. It posts nothing. The reply must be
-  // in the question's thread and carry the key this session gives the writer,
-  // which only a reply this device wrote for them keeps. A question another
-  // reply answered stays as that reply left it, and this refuses.
+  // in the question's thread, written from a window rather than the CLI, and
+  // carry the key this session gives the writer, which only a reply this
+  // device wrote for them keeps. A question another reply answered stays as
+  // that reply left it, and this refuses.
   async function answerWith(place: ChatWritePlace, input: {
     writer: PersonWriter;
     threadId: string;
@@ -545,7 +546,7 @@ export function createChatWrites(dependencies: {
       writer: input.writer,
       displayName: author.displayName,
     });
-    if (reply.threadId !== input.threadId || reply.id === input.messageId || authorActorKey === null ||
+    if (reply.threadId !== input.threadId || reply.id === input.messageId || reply.origin !== undefined || authorActorKey === null ||
       reply.authorActorKey !== authorActorKey || reply.authorUserId !== admission.authorUserId) {
       throw new Error("Only your own reply in this thread can answer its question.");
     }
@@ -558,6 +559,8 @@ export function createChatWrites(dependencies: {
     }));
     if (decision.resolvedByMessageId !== reply.id) throw new Error("Another reply already answered this question.");
     afterWrite(workspaceId, target, false);
+    // No new message reaches the other views, so they hear of the answer here.
+    notifyRenderer(workspaceId);
     return decision;
   }
 

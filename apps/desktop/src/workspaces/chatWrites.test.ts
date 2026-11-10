@@ -730,6 +730,8 @@ describe("chat writes", () => {
       // The answer syncs. No new message means nothing to dispatch.
       expect(test.effects.queueCloudSync).toHaveBeenCalledWith("workspace");
       expect(test.effects.scanChatDispatch).not.toHaveBeenCalled();
+      // Other views showing the question hear that it was answered.
+      expect(test.effects.notifyRenderer).toHaveBeenCalledExactlyOnceWith("workspace");
     });
 
     it("answers with a reply written signed out while still signed out", async () => {
@@ -745,6 +747,7 @@ describe("chat writes", () => {
       ["a reply another device wrote, which keeps no key here", ({ authorActorKey: _key, ...reply }) => reply],
       ["a reply under another relay author", (reply) => ({ ...reply, authorUserId: "user-2" })],
       ["the question itself", (reply) => ({ ...reply, id: "question" })],
+      ["a reply the CLI wrote as the writer", (reply) => ({ ...reply, origin: "cli" })],
     ];
     it.each(notTheWritersReply)("refuses %s", async (_case, change) => {
       const test = fixture();
