@@ -61,6 +61,20 @@ describe("Overlay", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("leaves an IME's Escape to its composition", () => {
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <input aria-label="Name" />
+      </Overlay>,
+    );
+
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Escape", isComposing: true });
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Escape", keyCode: 229 });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("closes on ⌘W on macOS, before the menu can close the tab behind it", () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
     const onClose = vi.fn();

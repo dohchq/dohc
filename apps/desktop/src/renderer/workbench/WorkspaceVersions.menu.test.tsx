@@ -268,11 +268,13 @@ describe("VersionMenu", () => {
     await user.type(screen.getByTestId("version-new-input"), "Ideas");
     await user.click(screen.getByTestId("version-new-cancel"));
     expect(screen.queryByTestId("version-new-dialog")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("version-menu-button"));
     await user.click(screen.getByTestId("version-menu-button"));
     await user.click(screen.getByTestId("version-new"));
     expect(screen.getByTestId<HTMLInputElement>("version-new-input").value).toBe("");
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("version-new-dialog")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("version-menu-button"));
     expect(bridgeMock.createWorkspaceVersion).not.toHaveBeenCalled();
   });
 

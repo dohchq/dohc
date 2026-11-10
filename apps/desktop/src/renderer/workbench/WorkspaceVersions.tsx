@@ -649,7 +649,6 @@ export function VersionMenu(props: {
       testId: "version-item",
       data: { "data-version-id": version.id, "data-version-name": version.name },
       onSelect: () => {
-        setMenu(false);
         props.versions.requestSwitch(version.id);
       },
     })),
@@ -659,7 +658,6 @@ export function VersionMenu(props: {
       icon: <Plus size={14} aria-hidden />,
       testId: "version-new",
       onSelect: () => {
-        setMenu(false);
         props.versions.openCreate();
       },
     },
@@ -673,7 +671,6 @@ export function VersionMenu(props: {
         icon: <Diff size={14} aria-hidden />,
         testId: "version-compare",
         onSelect: () => {
-          setMenu(false);
           props.onOpenCompare(active.id);
         },
       },
@@ -685,7 +682,6 @@ export function VersionMenu(props: {
         disabled: !active.canMergeIntoMain,
         description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
         onSelect: () => {
-          setMenu(false);
           props.versions.openMerge(active);
         },
       },
@@ -699,7 +695,6 @@ export function VersionMenu(props: {
       icon: <Share2 size={14} aria-hidden />,
       testId: "version-share",
       onSelect: () => {
-        setMenu(false);
         share({ id: active?.id ?? "main", name: activeName });
       },
     });
@@ -713,7 +708,6 @@ export function VersionMenu(props: {
       icon: <Layers size={14} aria-hidden />,
       testId: "version-all",
       onSelect: () => {
-        setMenu(false);
         openAll();
       },
     });
@@ -727,7 +721,6 @@ export function VersionMenu(props: {
         open={menuOpen}
         onOpenChange={setMenu}
         width={256}
-        closeOnPick={false}
         items={items}
         trigger={(trigger) => (
           <button
