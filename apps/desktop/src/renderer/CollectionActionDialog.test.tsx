@@ -51,7 +51,10 @@ describe("CollectionActionDialog", () => {
   });
   it("retains the exact request and key after uncertain results", async () => {
     const invoke = vi.fn<CollectionActionDialogProps["invoke"]>().mockRejectedValueOnce(new Error("connection closed")).mockResolvedValue({ result: null }); setup({ invoke });
-    fireEvent.click(screen.getByRole("button", { name: "Run action" })); fireEvent.click(await screen.findByRole("button", { name: "Try again" })); await screen.findByText("Action completed"); expect(invoke.mock.calls[1]![0]).toEqual(invoke.mock.calls[0]![0]);
+    fireEvent.click(screen.getByRole("button", { name: "Run action" }));
+    // The cause stays readable and copyable beside the uncertainty warning.
+    await screen.findByText("connection closed"); expect(screen.getByRole("button", { name: "Copy details" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" })); await screen.findByText("Action completed"); expect(invoke.mock.calls[1]![0]).toEqual(invoke.mock.calls[0]![0]);
   });
   it("unlocks refused input without replaying its failed key", async () => {
     const invoke = vi.fn<CollectionActionDialogProps["invoke"]>().mockRejectedValueOnce(Object.assign(new Error("invalid prize"), { code: "operation_refused" })).mockResolvedValue({ result: null });
