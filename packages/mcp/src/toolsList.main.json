@@ -2182,6 +2182,25 @@
       }
     },
     {
+      "name": "dohc_discard_protected_copy",
+      "description": "Remove one entry from `protectedCopies` in dohc_list_kept_copies for good. The kept change was never in History, so it cannot be brought back. The protected file does not change. `status` is `discarded` with the file's `path`.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_disconnect_link_agent",
       "description": "End one agent's connection through a share link. The link and its other agents keep working. Requires the original workspace and its signed-in owner account. Find connectionId with dohc_list_link_agents.",
       "inputSchema": {
@@ -3740,6 +3759,25 @@
       }
     },
     {
+      "name": "dohc_restore_protected_copy",
+      "description": "Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_retry_automation_run",
       "description": "Try a failed automation run again, as Try again does in dohc. It resumes after the last step that finished. If the automation changed since the run failed, it refuses unless startOver is true, which runs it from the first step and can repeat changes the run already made. Only the computer that ran it can try a run again; anywhere else the refusal names that computer.",
       "inputSchema": {
@@ -3812,44 +3850,6 @@
             "type": "integer",
             "minimum": -9007199254740991,
             "maximum": 9007199254740991
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "$schema": "http://json-schema.org/draft-07/schema#"
-      },
-      "execution": {
-        "taskSupport": "forbidden"
-      }
-    },
-    {
-      "name": "dohc_restore_protected_copy",
-      "description": "Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "$schema": "http://json-schema.org/draft-07/schema#"
-      },
-      "execution": {
-        "taskSupport": "forbidden"
-      }
-    },
-    {
-      "name": "dohc_discard_protected_copy",
-      "description": "Remove one entry from `protectedCopies` in dohc_list_kept_copies for good. The kept change was never in History, so it cannot be brought back. The protected file does not change. `status` is `discarded` with the file's `path`.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
           }
         },
         "required": [

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { openedLocalState } from "../testing/preparedLocalState";
+import { describe, expect, it, vi } from "vitest";
+import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
 import { PROTECTED_COPIES_PATH, ProtectedCopyIdError, ProtectedCopyReadError, protectedWriteCopies } from "./protectedWriteCopies";
 
@@ -64,6 +64,23 @@ describe("protected write copies", () => {
     expect(errors.map((error) => (error as ProtectedCopyReadError).path).sort())
       .toEqual([`${PROTECTED_COPIES_PATH}/${id}.json`, `${PROTECTED_COPIES_PATH}/${wrongName}.json`].sort());
     await expect(copies.read(id)).rejects.toThrow(`dohc could not read ${PROTECTED_COPIES_PATH}/${id}.json.`);
+  });
+
+  // #3496: right after launch, the sync client's first request closes the
+  // engine's binding and opens it again. A list in between showed a red toast.
+  it("lists kept changes while the engine opens the workspace again", async () => {
+    const opens = fakeLocalStateOpens();
+    const workspace = { workspaceId: "protected-copy-reopen", rootPath: await createTestScratch("protected-copy-") };
+    await opens.open(workspace);
+    const copies = protectedWriteCopies(workspace);
+    expect(await copies.keep(".env", "TOKEN=mine", "main")).toBe(true);
+
+    opens.close(workspace);
+    const reopen = opens.start(workspace);
+    const listing = copies.list();
+    await vi.waitFor(() => expect(opens.waits()).toBe(1));
+    await reopen.finish();
+    expect((await listing).map(([path]) => path)).toEqual([".env"]);
   });
 
   it("refuses an id that is not one dohc made", async () => {
