@@ -54,6 +54,7 @@ import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
   ColorControl,
   HueControl,
+  ResetButton,
   SettingRow,
   SettingsSection,
   StepperControl,
@@ -1092,7 +1093,11 @@ export function SettingsDialog(props: {
                   }}
                   testIdPrefix="general-preferred-name"
                 >
-                  <div data-testid="settings-row-your-color">
+                  <div data-testid="settings-row-your-color" className="flex items-center gap-2">
+                    {/* Reset gives the choice back to dohc. */}
+                    <ResetButton
+                      onReset={userSettings.appearance.yourColor === null ? undefined : () => void saveAppearance({ yourColor: null })}
+                    />
                     <HueControl
                       label="Your color"
                       shape="person"

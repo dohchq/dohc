@@ -32,15 +32,6 @@ export function SettingRow(props: {
   // don't fit beside that wrap under the text.
   // mr-4 and the row's gap-x-2 keep 24 px between the text and what follows it.
   const first = props.compact ? "mr-4 min-w-0 flex-[1_1_8rem]" : "mr-4 min-w-0 flex-[1_1_15rem]";
-  // Reset and the place a row keeps for it share one footprint: the same
-  // label, drawn invisible while the row is unchanged.
-  const resetPlace = `flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[12px] ${props.top ? "mt-1" : ""}`;
-  const resetFace = (
-    <>
-      <RotateCcw size={12} strokeWidth={2} aria-hidden />
-      Reset
-    </>
-  );
   const text = (
     <div className={`${props.lead ? "min-w-0 flex-1" : first}${props.top ? " pt-1.5" : ""}`}>
       <div className="flex items-center gap-2">
@@ -87,24 +78,39 @@ export function SettingRow(props: {
           they never move or wrap when it appears. The place is its own item:
           when the controls wrap under the text, it stays at the end of the
           text's line and the controls start at the text's left edge. */}
-      {props.onReset && !props.modified ? (
-        <span aria-hidden className={`invisible ${resetPlace}`}>
-          {resetFace}
-        </span>
-      ) : null}
-      {props.onReset && props.modified ? (
-        <button
-          type="button"
-          onClick={props.onReset}
-          className={`text-muted transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
-        >
-          {resetFace}
-        </button>
+      {props.onReset ? (
+        <ResetButton onReset={props.modified ? props.onReset : undefined} className={props.top ? "mt-1" : ""} />
       ) : null}
       <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
         {props.children}
       </div>
     </div>
+  );
+}
+
+/**
+ * Reset, labeled. Without `onReset` it keeps its place, drawn invisible, so
+ * the controls beside it never move when it appears.
+ */
+export function ResetButton(props: { onReset?: () => void; className?: string }) {
+  const place = `flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[12px] ${props.className ?? ""}`;
+  const face = (
+    <>
+      <RotateCcw size={12} strokeWidth={2} aria-hidden />
+      Reset
+    </>
+  );
+  if (!props.onReset) {
+    return (
+      <span aria-hidden className={`invisible ${place}`}>
+        {face}
+      </span>
+    );
+  }
+  return (
+    <button type="button" onClick={props.onReset} className={`text-muted transition-colors hover:bg-hover hover:text-ink ${place}`}>
+      {face}
+    </button>
   );
 }
 

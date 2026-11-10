@@ -784,6 +784,11 @@ describe("SettingsDialog", () => {
     await user.click(within(yours).getByRole("radio", { name: "Teal" }));
     expect(saved()?.appearance.yourColor).toBe("teal");
     expect(within(yours).getByRole("radio", { name: "Teal" }).getAttribute("aria-checked")).toBe("true");
+    // Reset gives the choice back to dohc.
+    await user.click(within(yours).getByRole("button", { name: "Reset" }));
+    expect(saved()?.appearance.yourColor).toBeNull();
+    await waitFor(() => expect(within(yours).queryByRole("button", { name: "Reset" })).toBeNull());
+    await user.click(within(yours).getByRole("radio", { name: "Teal" }));
 
     // A person's swatches are round with no olive.
     const personHues = within(yours).getAllByRole("radio");
