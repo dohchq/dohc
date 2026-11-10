@@ -168,9 +168,17 @@ describe("useSyncFailureNotice", () => {
 
       // A failure that needs the person still shows at once.
       view.rerender({ workspaceId: "ws-a", failure: null });
-      view.rerender({ workspaceId: "ws-a", failure: { cause: "unknown", detail: "Error: no", sinceMs: Date.now(), attempts: 1 } });
+      const since = Date.now();
+      view.rerender({ workspaceId: "ws-a", failure: { cause: "unknown", detail: "Error: no", sinceMs: since, attempts: 1 } });
       expect(view.toasts()).toHaveLength(1);
       expect(view.toasts()[0]!.message).toBe("dohc could not sync this workspace.");
+
+      // When its next pass finds the server busy, the row and toast say so at once.
+      act(() => vi.advanceTimersByTime(1_000));
+      view.rerender({ workspaceId: "ws-a", failure: busy(since, 2) });
+      expect(view.rows()).toHaveLength(1);
+      expect(view.rows()[0]!.message).toBe("The server is busy. dohc keeps trying to sync this workspace.");
+      expect(view.toasts()).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

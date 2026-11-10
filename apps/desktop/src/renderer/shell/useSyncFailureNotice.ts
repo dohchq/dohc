@@ -166,7 +166,8 @@ export function useSyncFailureNotice(input: {
     // raise a toast, because the attempts did not grow.
     const key = failedPassKey(current);
     if (filedRef.current?.key === key) return;
-    if (current.cause === "server-busy") {
+    // A failure that already shows its row changes it to the busy words now.
+    if (current.cause === "server-busy" && shownFailures.get(workspaceId)?.sinceMs !== current.sinceMs) {
       const waitMs = current.sinceMs + BUSY_SERVER_NOTICE_MS - Date.now();
       if (waitMs > 0) {
         const timer = setTimeout(() => setBusyWaitsEnded((ended) => ended + 1), waitMs);
