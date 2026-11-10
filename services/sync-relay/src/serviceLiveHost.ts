@@ -216,6 +216,11 @@ interface HostedAttachment {
   seen?: string; probeAt: number;
   /** Whether the relay was written since a pull or pass last read this workspace's relay state. */
   check: boolean;
+  /**
+   * Whether the relay was written while that last pull ran. It may have read a change that went back before it
+   * ended, which `seen` cannot show, so the next pass pulls again.
+   */
+  overlapped: boolean;
 }
 // Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
 const reachedSince = (attached: HostedAttachment, objectId: string, required: number) => (attached.reached.get(objectId)?.pull ?? 0) >= required;
@@ -236,7 +241,7 @@ export async function startServiceLiveHost(options: {
    * `random` time the retries, unless a test injects others.
    */
   firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number};
-  /** Times the hosted recovery probe, unless a test injects another clock. */
+  /** Times the hosted recovery probe on a monotonic clock, unless a test injects another. */
   nowMs?: () => number;
 }) {
   const { storage, history } = options;
@@ -262,7 +267,7 @@ export async function startServiceLiveHost(options: {
   const attachments = new Map<string, HostedAttachment>();
   // Hosted pulls by workspace and why each ran, across attachments.
   const pullCounts = new Map<string, Map<HostedPullReason, number>>();
-  const now = options.nowMs ?? Date.now;
+  const now = options.nowMs ?? (() => performance.now());
   // An attached workspace whose replica checked its origin. Activation, restore and departures reach no other.
   const checked = (workspaceId: string) => {
     const attached = attachments.get(workspaceId);
@@ -467,7 +472,7 @@ export async function startServiceLiveHost(options: {
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
       const firstOpen = options.firstOpen && createFirstOpenClient({relay: attachment.relay, identity: attachment.identity, fetch: options.firstOpen.fetch});
       const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, firstOpen, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0,
-        probeAt: 0, check: true, replica: {pull: joined => pull(attached, joined, "activation"), publish: joined => replica.publish(joined)}};
+        probeAt: 0, check: true, overlapped: false, replica: {pull: joined => pull(attached, joined, "activation"), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
     // Every pull of a hosted replica runs here. A page that leaves documents held clears their readiness,
@@ -475,7 +480,7 @@ export async function startServiceLiveHost(options: {
     // Within its departed list's window, it says which of the documents this host waits on are gone.
     // Owners dropped because a newly held list may leave some out are reported once per change in their count, until a complete list.
     // Each reads the relay state first, so a pull that ends with no more pages brought every change through it.
-    // A write during the pull leaves `check` set, and the next pass compares again.
+    // A write during the pull leaves `check` set, and the next pass pulls again. Pulls only read the relay.
     const pull = async (attached: HostedAttachment, joined: AbortSignal, reason: HostedPullReason) => {
       const workspaceId = attached.hosted.connection.workspaceId;
       // Notices arrive in microtasks, so none lands between this read and clearing `check`.
@@ -506,7 +511,7 @@ export async function startServiceLiveHost(options: {
       });
       attached.confirmed = number;
       attached.last = result.hasMore ? "more" : "done";
-      if (!result.hasMore) {attached.seen = state; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
+      if (!result.hasMore) {attached.seen = state; attached.overlapped = attached.check; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
       return result;
     };
     for (const [index, value] of reply.workspaces.entries()) install(config.workspaces[index]!, value);
@@ -1354,6 +1359,7 @@ export async function startServiceLiveHost(options: {
         if(!hostedReplicaQuiet(pullDuties(workspaceId,attached)))return "pending";
         // Its last full pull found no hosted scope, so no reading says when the feed answers again.
         if(attached.seen===undefined)return "unscoped";
+        if(attached.overlapped)return "changed";
         if(attached.check){
           const state=hostedRelayState(storage,workspaceId);
           attached.check=false;
