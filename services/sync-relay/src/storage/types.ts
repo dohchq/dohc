@@ -993,6 +993,11 @@ export interface SyncRelayStorage {
   readCredentialFencePosition(): number;
   advanceCredentialFencePosition(changedAtMs: number): void;
   setWorkspaceDisplayName(input: Parameters<typeof import("./personalAgents").setWorkspaceDisplayName>[1]): boolean;
+  readPersonalScope(credential: import("./personalAgentChat").PersonalCredential, nowMs: number): import("./personalAgentChat").PersonalScope | null;
+  readPersonalReach(credential: import("./personalAgentChat").PersonalCredential, workspaceId: string, nowMs: number): import("./personalAgents").PersonalReach | null;
+  appendPersonalChatPost(input: Parameters<typeof import("./personalAgentChat").appendPersonalChatPost>[1]): import("./personalAgentChat").AppendPersonalChatPostResult;
+  personalAgentPostedIn(input: Parameters<typeof import("./personalAgentChat").personalAgentPostedIn>[1]): boolean;
+  readPersonalWaitWindow(input: Parameters<typeof import("./personalAgentChat").readPersonalWaitWindow>[1]): import("./personalAgentChat").PersonalWaitWindow;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;

@@ -1415,6 +1415,8 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "link_discussion_paused"
         | "notice_refused"
         | "password_incorrect"
+        | "personal_agent_out_of_reach"
+        | "personal_agent_view_only"
         | "sign_in_again" => RelayError::Forbidden,
         "link_read_rate_limited" => RelayError::LinkReadRateLimited,
         "method_not_allowed" => RelayError::MethodNotAllowed,

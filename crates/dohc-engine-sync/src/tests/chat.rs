@@ -1777,6 +1777,743 @@ fn a_thread_that_takes_a_link_thread_id_is_refused() {
     assert_eq!(stored, (thread_id.clone(), "link".to_owned()));
 }
 
+/// A personal agent, and the relay's origin for its chat.
+const PERSONAL_AGENT: &str = "p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PERSONAL_ORIGIN: &str = "relay:personal-agent:p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// The personal agent's DM as the relay appends it when a workspace enters
+/// the agent's reach.
+fn personal_dm_payload(agent_id: &str) -> serde_json::Value {
+    json!({
+        "channelId": format!("personal-dm:{agent_id}"),
+        "name": "Helper",
+        "slug": format!("my-agent-{agent_id}"),
+        "kind": "agent",
+        "createdAtMs": 10,
+        "wireId": format!("channel_wire_agent_v1_{agent_id}"),
+    })
+}
+
+/// The personal agent's post in the imported Group, as the relay writes it.
+fn personal_message_payload(message_id: &str, thread_id: &str) -> serde_json::Value {
+    json!({
+        "messageId": message_id,
+        "threadId": thread_id,
+        "authorKind": "agent",
+        "authorDisplayName": "Helper",
+        "authorUserId": "ana",
+        "authorAgentId": PERSONAL_AGENT,
+        "agentConnectionId": "connection-1",
+        "body": "Done",
+        "createdAtMs": 30,
+    })
+}
+
+fn personal_thread_payload(thread_id: &str, wire_id: &str) -> serde_json::Value {
+    json!({
+        "threadId": thread_id,
+        "title": "",
+        "createdAtMs": 25,
+        "channelWireId": wire_id,
+        "lane": "chat"
+    })
+}
+
+/// The stored connection columns of a message, link first.
+fn message_connections(engine: &EngineStore, message_id: &str) -> (Option<String>, Option<String>) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT agent_connection_id, personal_agent_connection_id FROM chat_messages \
+                 WHERE workspace_id = 'ws' AND message_id = ?1",
+                [message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("message connections")
+}
+
+/// The chats of one agent in `ws`.
+fn agent_chats(engine: &EngineStore, agent_id: &str) -> Vec<String> {
+    engine
+        .read_with(|conn| {
+            let mut statement = conn
+                .prepare("SELECT channel_id FROM chat_channels WHERE workspace_id = 'ws' AND agent_id = ?1")
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            let rows = statement
+                .query_map([agent_id], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            rows.collect::<Result<Vec<String>, _>>()
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("agent chats")
+}
+
+/// The relay writes a personal agent's DM, a new thread and a post from the
+/// agent's origin. The post is the agent's for its account, names its
+/// connection, and applies the same on a named recipient's computer and
+/// after waiting for its thread.
+#[test]
+fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
+    use dohc_engine_domain::LinkedChatStore;
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let wire = dohc_engine_domain::chats::agent_channel_wire_id(PERSONAL_AGENT);
+    let applied = || ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
+    let ops = [
+        envelope(
+            PERSONAL_ORIGIN,
+            0,
+            "chat.channel.create",
+            personal_dm_payload(PERSONAL_AGENT),
+        ),
+        envelope(
+            PERSONAL_ORIGIN,
+            1,
+            "chat.thread.create",
+            personal_thread_payload("personal-thread:t", &wire),
+        ),
+        envelope(
+            PERSONAL_ORIGIN,
+            2,
+            "chat.message.append",
+            personal_message_payload("personal-message:dm", "personal-thread:t"),
+        ),
+        envelope(
+            PERSONAL_ORIGIN,
+            3,
+            "chat.message.append",
+            personal_message_payload("personal-message:group", "thread-imported"),
+        ),
+    ];
+    for op in &ops {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind),
+            applied()
+        );
+    }
+    assert_eq!(
+        agent_chats(&engine, PERSONAL_AGENT),
+        vec![format!("personal-dm:{PERSONAL_AGENT}")]
+    );
+    let read = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "personal-message:dm")
+        .expect("read the personal post");
+    assert_eq!(
+        (
+            read.author_kind,
+            read.author_user_id.as_deref(),
+            read.author_agent_id.as_deref(),
+            read.link_author,
+        ),
+        (
+            ChatActorKind::Agent,
+            Some("ana"),
+            Some(PERSONAL_AGENT),
+            None
+        )
+    );
+    for message_id in ["personal-message:dm", "personal-message:group"] {
+        assert_eq!(
+            message_connections(&engine, message_id),
+            (None, Some("connection-1".to_owned())),
+            "{message_id}"
+        );
+    }
+
+    // A named recipient stores the owner's op under the share.
+    let shared = envelope(
+        &format!("shared:s:{PERSONAL_ORIGIN}"),
+        0,
+        "chat.message.append",
+        personal_message_payload("personal-message:shared", "thread-imported"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &shared, &NoFaults).expect("shared"),
+        applied()
+    );
+
+    // A post that waits for its thread replays with its connection.
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(
+            PERSONAL_ORIGIN,
+            4,
+            "chat.message.append",
+            personal_message_payload("personal-message:early", "personal-thread:late"),
+        ),
+        &NoFaults,
+    )
+    .expect("parked personal post");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(
+            PERSONAL_ORIGIN,
+            5,
+            "chat.thread.create",
+            personal_thread_payload("personal-thread:late", "channel-imported"),
+        ),
+        &NoFaults,
+    )
+    .expect("late thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(
+        message_connections(&engine, "personal-message:early"),
+        (None, Some("connection-1".to_owned()))
+    );
+}
+
+/// The personal origin's post must be its agent's, for an account, through a
+/// connection. The engine can't know the workspace owner, so the relay checks
+/// the account. Each refusal is recorded and acked.
+#[test]
+fn a_personal_agent_post_that_is_not_the_agents_own_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let post = || personal_message_payload("personal-message:forged", "thread-imported");
+    let mut forged = Vec::new();
+    for (field, value) in [
+        ("authorKind", json!("human")),
+        ("authorKind", json!("automation")),
+        ("authorAgentId", json!("p-bbbbbbbbbbbbbbbbbbbbbbbbbb")),
+        ("authorAgentId", json!("helper")),
+        ("agentConnectionId", json!("")),
+        ("agentConnectionId", json!(" connection-1")),
+        ("authorOwnerDisplayName", json!("Ana")),
+        ("origin", json!("cli")),
+        ("chainDepth", json!(1)),
+        ("linkGrantId", json!("grant-1")),
+        ("messageId", json!("forged")),
+        (
+            "body",
+            json!("a".repeat(dohc_engine_domain::chats::MAX_LINK_MESSAGE_BODY_BYTES + 1)),
+        ),
+    ] {
+        let mut payload = post();
+        payload[field] = value;
+        forged.push(payload);
+    }
+    for field in ["authorUserId", "authorAgentId", "agentConnectionId"] {
+        let mut payload = post();
+        payload.as_object_mut().expect("payload").remove(field);
+        forged.push(payload);
+    }
+    for (seq, payload) in forged.into_iter().enumerate() {
+        let op = envelope(PERSONAL_ORIGIN, seq as i64, "chat.message.append", payload);
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+    // The agent's post, from another agent's origin.
+    let other = envelope(
+        "relay:personal-agent:p-bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        0,
+        "chat.message.append",
+        post(),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &other, &NoFaults));
+    let stored: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE message_id IN ('forged', 'personal-message:forged')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("forged count");
+    assert_eq!(stored, 0);
+}
+
+/// A personal agent posts in a Group, in its own chat, or on a file. A post in
+/// a person's DM or another agent's chat is refused, and so is a waiting post
+/// whose thread arrives in one.
+#[test]
+fn a_personal_agent_posts_only_where_the_relay_lets_it() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let applied = || ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
+    let other = "p-bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let other_origin = format!("relay:personal-agent:{other}");
+    let own_wire = dohc_engine_domain::chats::agent_channel_wire_id(PERSONAL_AGENT);
+    let other_wire = dohc_engine_domain::chats::agent_channel_wire_id(other);
+    let dm_thread = |thread_id: &str| {
+        json!({
+            "threadId": thread_id,
+            "title": "",
+            "createdAtMs": 21,
+            "channelSlug": "ben",
+            "channelWireId": "dm-person-wire"
+        })
+    };
+    let setup = [
+        envelope(
+            "peer",
+            3,
+            "chat.channel.create",
+            json!({
+                "channelId": "dm-person",
+                "name": "Ben",
+                "slug": "ben",
+                "kind": "dm",
+                "createdAtMs": 11,
+                "wireId": "dm-person-wire"
+            }),
+        ),
+        envelope("peer", 4, "chat.thread.create", dm_thread("thread-dm")),
+        envelope(
+            "peer",
+            5,
+            "chat.thread.create",
+            json!({
+                "threadId": "thread-file",
+                "title": "About a file",
+                "createdAtMs": 22,
+                "linkedObjectId": "object-a",
+                "linkedAtMs": 22
+            }),
+        ),
+        envelope(
+            &other_origin,
+            0,
+            "chat.channel.create",
+            personal_dm_payload(other),
+        ),
+        envelope(
+            &other_origin,
+            1,
+            "chat.thread.create",
+            personal_thread_payload("personal-thread:other", &other_wire),
+        ),
+        envelope(
+            PERSONAL_ORIGIN,
+            0,
+            "chat.channel.create",
+            personal_dm_payload(PERSONAL_AGENT),
+        ),
+        envelope(
+            PERSONAL_ORIGIN,
+            1,
+            "chat.thread.create",
+            personal_thread_payload("personal-thread:own", &own_wire),
+        ),
+    ];
+    for op in &setup {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind),
+            applied()
+        );
+    }
+    for (seq, (message_id, thread_id)) in [
+        ("personal-message:own", "personal-thread:own"),
+        ("personal-message:group", "thread-imported"),
+        ("personal-message:file", "thread-file"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = envelope(
+            PERSONAL_ORIGIN,
+            2 + seq as i64,
+            "chat.message.append",
+            personal_message_payload(message_id, thread_id),
+        );
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &op, &NoFaults).expect(message_id),
+            applied(),
+            "{thread_id}"
+        );
+    }
+    for (seq, (message_id, thread_id)) in [
+        ("personal-message:dm", "thread-dm"),
+        ("personal-message:other", "personal-thread:other"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = envelope(
+            PERSONAL_ORIGIN,
+            5 + seq as i64,
+            "chat.message.append",
+            personal_message_payload(message_id, thread_id),
+        );
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+
+    // A post that waits for its thread is checked when the thread arrives.
+    let early = envelope(
+        PERSONAL_ORIGIN,
+        7,
+        "chat.message.append",
+        personal_message_payload("personal-message:early", "thread-dm-late"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &early, &NoFaults).expect("waiting post"),
+        applied()
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let late = envelope("peer", 6, "chat.thread.create", dm_thread("thread-dm-late"));
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = apply_chat_envelope(&mut engine, &late, &NoFaults).expect("late DM thread");
+    assert!(sharing_declined.is_empty());
+    assert_eq!(primary, ApplyDisposition::Applied(Vec::new()));
+    assert_eq!(
+        refusals,
+        vec![ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: PERSONAL_ORIGIN.to_owned(),
+            origin_seq: 7,
+            op_kind: "chat.message.append".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: "pending personal agent post is in a chat it can't post in".to_owned(),
+            },
+        }]
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+
+    // A thread that arrives before its chat stands in a Group until the
+    // chat's create arrives, so a post there waits for the create.
+    for (seq, (thread_id, wire_id)) in [
+        ("thread-before-dm", "dm-later-wire"),
+        ("thread-before-group", "group-later-wire"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let thread = envelope(
+            "peer",
+            7 + seq as i64,
+            "chat.thread.create",
+            json!({
+                "threadId": thread_id,
+                "title": "Early",
+                "createdAtMs": 23,
+                "channelWireId": wire_id
+            }),
+        );
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &thread, &NoFaults).expect(thread_id),
+            applied()
+        );
+        let post = envelope(
+            PERSONAL_ORIGIN,
+            8 + seq as i64,
+            "chat.message.append",
+            personal_message_payload(&format!("personal-message:{thread_id}"), thread_id),
+        );
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &post, &NoFaults).expect(thread_id),
+            applied()
+        );
+    }
+    assert_eq!(pending_chat_coordinate_count(&engine), 2);
+    let later_chat = |seq: i64, kind: &str, wire_id: &str| {
+        envelope(
+            "peer",
+            seq,
+            "chat.channel.create",
+            json!({
+                "channelId": wire_id,
+                "name": "Later",
+                "slug": wire_id,
+                "kind": kind,
+                "createdAtMs": 24,
+                "wireId": wire_id
+            }),
+        )
+    };
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = apply_chat_envelope(
+        &mut engine,
+        &later_chat(9, "dm", "dm-later-wire"),
+        &NoFaults,
+    )
+    .expect("the DM's create");
+    assert!(sharing_declined.is_empty());
+    assert_eq!(primary, ApplyDisposition::Applied(Vec::new()));
+    assert_eq!(
+        refusals,
+        vec![ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: PERSONAL_ORIGIN.to_owned(),
+            origin_seq: 8,
+            op_kind: "chat.message.append".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: "pending personal agent post is in a chat it can't post in".to_owned(),
+            },
+        }],
+        "a post in a thread whose DM hadn't arrived lands in the DM"
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    assert_eq!(
+        apply_chat_envelope(
+            &mut engine,
+            &later_chat(10, "channel", "group-later-wire"),
+            &NoFaults
+        )
+        .expect("the Group's create"),
+        applied()
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(
+        message_connections(&engine, "personal-message:thread-before-group"),
+        (None, Some("connection-1".to_owned()))
+    );
+
+    let stored: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE message_id IN \
+                 ('personal-message:dm', 'personal-message:other', 'personal-message:early', \
+                  'personal-message:thread-before-dm')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("refused post count");
+    assert_eq!(stored, 0);
+}
+
+/// The personal origin carries only its agent's DM, new threads under the
+/// personal prefix, and posts. Anything else from it is refused.
+#[test]
+fn a_personal_agent_origin_carries_only_its_chat() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    for (seq, (kind, payload)) in [
+        ("moment.append", json!({"momentId": "moment-1"})),
+        ("chat.reaction.set", json!({"messageId": "message-imported", "emoji": "👍", "authorId": "ana", "state": "on", "atMs": 1})),
+        ("chat.decision.set", json!({"messageId": "message-imported", "state": "open", "atMs": 1})),
+        ("chat.follow.set", json!({"ownerUserId": "ana", "targetKind": "thread", "targetId": "thread-imported", "state": "on", "atMs": 1})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = envelope(PERSONAL_ORIGIN, seq as i64, kind, payload);
+        assert_invalid_refusal!(apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        ));
+    }
+    // Only its own agent's DM, and only threads it names as the relay does.
+    let mut group = personal_dm_payload(PERSONAL_AGENT);
+    group["kind"] = json!("channel");
+    group["slug"] = json!("helper");
+    group.as_object_mut().expect("payload").remove("wireId");
+    for (seq, (kind, payload)) in [
+        (
+            "chat.channel.create",
+            personal_dm_payload("p-bbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        ),
+        ("chat.channel.create", personal_dm_payload("helper")),
+        ("chat.channel.create", group),
+        (
+            "chat.thread.create",
+            personal_thread_payload("thread-forged", "channel-imported"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = envelope(PERSONAL_ORIGIN, 4 + seq as i64, kind, payload);
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+    let channels: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_channels WHERE workspace_id = 'ws' AND channel_id <> 'channel-imported'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("channel count");
+    assert_eq!(channels, 0);
+    // The next op from the origin still applies.
+    assert_eq!(
+        apply_chat_envelope(
+            &mut engine,
+            &envelope(
+                PERSONAL_ORIGIN,
+                8,
+                "chat.channel.create",
+                personal_dm_payload(PERSONAL_AGENT)
+            ),
+            &NoFaults
+        )
+        .expect("the agent's DM"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+}
+
+/// No other origin writes as a personal agent: not its id, a connection, or
+/// either personal prefix. A thread a device takes first under the personal
+/// prefix is refused, so the relay's own thread still applies.
+#[test]
+fn no_other_origin_writes_as_a_personal_agent() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let mut forged = Vec::new();
+    // A device's agent post that names the personal agent, with or without
+    // its connection.
+    let mut named = personal_message_payload("forged-named", "thread-imported");
+    named
+        .as_object_mut()
+        .expect("payload")
+        .remove("agentConnectionId");
+    forged.push(named);
+    forged.push(personal_message_payload(
+        "forged-connected",
+        "thread-imported",
+    ));
+    // A device's own agent, naming a connection.
+    let mut connected = personal_message_payload("forged-own", "thread-imported");
+    connected["authorAgentId"] = json!("helper");
+    forged.push(connected);
+    // A human post that takes the personal message prefix.
+    let mut taken = personal_message_payload("personal-message:taken", "thread-imported");
+    taken["authorKind"] = json!("human");
+    let fields = taken.as_object_mut().expect("payload");
+    fields.remove("authorAgentId");
+    fields.remove("agentConnectionId");
+    forged.push(taken);
+    // The fixture wrote the peer's first three ops.
+    for (origin, first) in [("peer", 3), ("shared:s:peer", 0), (LINK_ORIGIN, 0)] {
+        for (seq, payload) in forged.iter().enumerate() {
+            let op = envelope(
+                origin,
+                first + seq as i64,
+                "chat.message.append",
+                payload.clone(),
+            );
+            assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+        }
+    }
+    let taken = envelope(
+        "peer",
+        7,
+        "chat.thread.create",
+        personal_thread_payload("personal-thread:taken", "channel-imported"),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &taken, &NoFaults));
+
+    let applied = ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
+    let thread = envelope(
+        PERSONAL_ORIGIN,
+        0,
+        "chat.thread.create",
+        personal_thread_payload("personal-thread:taken", "channel-imported"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("relay thread"),
+        applied
+    );
+    // A computer's own agent still posts as itself.
+    let mut own = personal_message_payload("own-agent", "personal-thread:taken");
+    own["authorAgentId"] = json!("helper");
+    own.as_object_mut()
+        .expect("payload")
+        .remove("agentConnectionId");
+    assert_eq!(
+        apply_chat_envelope(
+            &mut engine,
+            &envelope("peer", 8, "chat.message.append", own),
+            &NoFaults
+        )
+        .expect("an agent you run"),
+        applied
+    );
+    assert_eq!(message_connections(&engine, "own-agent"), (None, None));
+}
+
+/// A computer that already holds the personal agent's DM and the relay's
+/// create of it end with one chat, whichever arrives first. A repeat create
+/// adds nothing.
+#[test]
+fn a_relay_dm_and_a_dm_already_held_are_one_chat() {
+    use dohc_engine_domain::LinkedChatStore;
+
+    let relay_dm = |seq: i64| {
+        envelope(
+            PERSONAL_ORIGIN,
+            seq,
+            "chat.channel.create",
+            personal_dm_payload(PERSONAL_AGENT),
+        )
+    };
+    let applied = ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
+
+    // The computer made the DM first.
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let held = LinkedChatStore::new(&mut engine)
+        .ensure_agent_channel("ws", "dm-here", PERSONAL_AGENT, "Helper", 5, &NoFaults)
+        .expect("the DM this computer holds");
+    assert_eq!(held.channel_id, "dm-here");
+    for seq in [0, 1] {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &relay_dm(seq), &NoFaults).expect("relay DM"),
+            applied
+        );
+    }
+    assert_eq!(
+        agent_chats(&engine, PERSONAL_AGENT),
+        vec!["dm-here".to_owned()]
+    );
+    let wire = dohc_engine_domain::chats::agent_channel_wire_id(PERSONAL_AGENT);
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(
+            PERSONAL_ORIGIN,
+            2,
+            "chat.thread.create",
+            personal_thread_payload("personal-thread:t", &wire),
+        ),
+        &NoFaults,
+    )
+    .expect("relay thread in the held DM");
+    let channel: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_threads WHERE workspace_id = 'ws' AND thread_id = 'personal-thread:t'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("the thread's chat");
+    assert_eq!(channel, "dm-here");
+
+    // The relay's create arrived first.
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &relay_dm(0), &NoFaults).expect("relay DM"),
+        applied
+    );
+    let held = LinkedChatStore::new(&mut engine)
+        .ensure_agent_channel("ws", "dm-here", PERSONAL_AGENT, "Helper", 30, &NoFaults)
+        .expect("the relay's DM");
+    let relay_channel = format!("personal-dm:{PERSONAL_AGENT}");
+    assert_eq!(held.channel_id, relay_channel);
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &relay_dm(1), &NoFaults).expect("repeat"),
+        applied
+    );
+    assert_eq!(agent_chats(&engine, PERSONAL_AGENT), vec![relay_channel]);
+}
+
 /// A desktop that predates an author kind refuses its messages for good, the
 /// way this build refuses a kind newer than itself: the refusal is recorded
 /// and acked, nothing is stored, and the workspace's next op applies.

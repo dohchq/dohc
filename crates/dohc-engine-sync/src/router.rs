@@ -158,6 +158,26 @@ pub(crate) fn apply_replication_envelope_in_batch(
             },
         ));
     }
+    if dohc_engine_domain::chats::replicated_source_origin(&envelope.origin_id)
+        .starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ORIGIN_PREFIX)
+        && !matches!(
+            envelope.op_kind.as_str(),
+            "chat.channel.create" | "chat.thread.create" | "chat.message.append"
+        )
+    {
+        // A personal agent's origin carries only its DM, its new threads and
+        // its posts; chat apply checks each of those against the origin.
+        return plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| {
+                Err(SyncError::InvalidInput {
+                    reason: "personal agent origin carries only its chat",
+                })
+            },
+        ));
+    }
     let Some(route) = OWNED_OP_ROUTES
         .iter()
         .find_map(|(kind, route)| (*kind == envelope.op_kind).then_some(*route))

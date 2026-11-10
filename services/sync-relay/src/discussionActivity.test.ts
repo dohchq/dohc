@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   DiscussionActivityCapacityError,
   DiscussionActivityHub,
+  linkLogWaitGroup,
+  ownerLogWaitGroup,
 } from "./discussionActivity";
 
 describe("DiscussionActivityHub", () => {
@@ -77,6 +79,31 @@ describe("DiscussionActivityHub", () => {
       holdMs: 1,
       shouldPark: () => true,
     });
+    expect(hub.stats()).toEqual({ shares: 0, waiters: 0 });
+  });
+
+  it("keeps personal agent waits in their own pool, woken by the workspace log", async () => {
+    const hub = new DiscussionActivityHub({ maxTotalWaiters: 1, maxPersonalWaiters: 1 });
+    const personal = hub.wait(ownerLogWaitGroup("ws-a"), "personal:conn-a:ws-a", {
+      holdMs: 60_000,
+      personal: true,
+      shouldPark: () => true,
+    });
+    expect(() =>
+      hub.wait(ownerLogWaitGroup("ws-b"), "personal:conn-b:ws-b", {
+        holdMs: 60_000,
+        personal: true,
+        shouldPark: () => true,
+      }),
+    ).toThrow(DiscussionActivityCapacityError);
+    // A full personal pool leaves a link reader its place.
+    const reader = hub.wait(linkLogWaitGroup("ws-a"), "link:reader", {
+      holdMs: 60_000,
+      shouldPark: () => true,
+    });
+    expect(hub.stats().waiters).toBe(2);
+    hub.wakeLog("ws-a");
+    await Promise.all([personal, reader]);
     expect(hub.stats()).toEqual({ shares: 0, waiters: 0 });
   });
 });

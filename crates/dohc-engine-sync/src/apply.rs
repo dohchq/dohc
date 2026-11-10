@@ -4,23 +4,26 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 
 use dohc_engine_domain::chats::{
-    DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, agent_channel_slug,
-    agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
-    chat_thread_display_title, free_agent_channel_slug, index_replicated_chat_message_search_rows,
-    is_agent_channel_slug, is_agent_id, normalize_reported_agent, replicated_source_origin,
+    DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, PERSONAL_AGENT_ID_PREFIX,
+    PERSONAL_AGENT_ORIGIN_PREFIX, PERSONAL_THREAD_ID_PREFIX, agent_channel_slug,
+    agent_channel_wire_id, agent_id_for_channel_wire_id, bump_chat_conversation_revision,
+    channel_collision_slug, chat_thread_display_title, free_agent_channel_slug,
+    index_replicated_chat_message_search_rows, is_agent_channel_slug, is_agent_id,
+    normalize_reported_agent, personal_agent_may_post_in, replicated_source_origin,
     truncate_slug_base, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
     ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution, FollowTargetKind,
-    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ThreadMessageResolution, attachment_id_for,
-    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
-    is_reaction_emoji_verbatim, normalize_agent_owner_name, normalize_author_user_id,
-    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
-    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    validate_addressable_plaintext_path, validate_replicated_link_author,
+    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
+    ThreadMessageResolution, attachment_id_for, channel_slug_for_name, encode_poll_options,
+    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
+    normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_channel_group,
+    normalize_channel_name, normalize_display_name, normalize_feed_identity,
+    normalize_poll_options, normalize_reaction_author_id, normalize_replicated_chat_id,
+    parse_mention_handles, replay_ready_pending_chat_coordinates, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message, validate_addressable_plaintext_path,
+    validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;
@@ -1036,6 +1039,18 @@ fn apply_channel(
         .wire_id
         .as_deref()
         .and_then(agent_id_for_channel_wire_id);
+    // A personal agent's origin creates only that agent's own chat.
+    if replicated_source_origin(&op.origin_id)
+        .strip_prefix(PERSONAL_AGENT_ORIGIN_PREFIX)
+        .is_some_and(|origin_agent| {
+            !origin_agent.starts_with(PERSONAL_AGENT_ID_PREFIX)
+                || payload.wire_id.as_deref() != Some(agent_channel_wire_id(origin_agent).as_str())
+        })
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "personal agent origin creates only its own chat",
+        });
+    }
     let default_agent_slug = agent_channel_slug(DEFAULT_AGENT_ID);
     let reserved_violated = match agent_id {
         Some(agent_id) => {
@@ -1323,6 +1338,15 @@ fn apply_thread(
     {
         return Err(SyncError::InvalidInput {
             reason: "chat thread id is reserved for link posts",
+        });
+    }
+    // The same holds for a personal agent's new thread, and its origin makes
+    // no other thread.
+    if payload.thread_id.starts_with(PERSONAL_THREAD_ID_PREFIX)
+        != replicated_source_origin(&op.origin_id).starts_with(PERSONAL_AGENT_ORIGIN_PREFIX)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread id is reserved for personal agent posts",
         });
     }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
@@ -1666,22 +1690,27 @@ fn apply_message(
     }
     let body = normalize_body(&payload.body)
         .map_err(|error| map_chat_rule(error, "chat message body is invalid"))?;
-    let link_author = validate_replicated_link_author(
+    let relay_author = validate_replicated_link_author(
         &op.origin_id,
         &payload.message_id,
         &payload.author_kind,
         payload.link_grant_id.as_deref(),
         payload.link_principal_id.as_deref(),
         payload.agent_connection_id.as_deref(),
-        author_user_id.is_some()
-            || owner_name.is_some()
+        author_user_id.as_deref(),
+        payload.author_agent_id.as_deref(),
+        owner_name.is_some()
             || payload.origin.is_some()
             || payload.chain_depth.is_some()
-            || payload.author_agent_id.is_some()
             || author_reported.is_some(),
         &body,
     )
     .map_err(|error| map_chat_rule(error, "chat message link author is invalid"))?;
+    let (link_author, personal_connection) = match &relay_author {
+        ReplicatedMessageAuthor::Device => (None, None),
+        ReplicatedMessageAuthor::Link(link) => (Some(link), None),
+        ReplicatedMessageAuthor::PersonalAgent { connection_id, .. } => (None, Some(connection_id)),
+    };
     let thread_exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2)",
@@ -1692,6 +1721,25 @@ fn apply_message(
     if !thread_exists {
         return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id)
             .map(|()| Vec::new());
+    }
+    // A personal agent posts only where the relay lets it, never in a
+    // person's DM or another agent's chat. Until the create of the thread's
+    // chat arrives, the post waits for it.
+    if let ReplicatedMessageAuthor::PersonalAgent { agent_id, .. } = &relay_author {
+        match personal_agent_may_post_in(tx, &op.workspace_id, &payload.thread_id, agent_id)
+            .map_err(SyncError::corrupt)?
+        {
+            Some(true) => {}
+            Some(false) => {
+                return Err(SyncError::InvalidInput {
+                    reason: "personal agent post is in a chat it can't post in",
+                });
+            }
+            None => {
+                return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id)
+                    .map(|()| Vec::new());
+            }
+        }
     }
     let previous: i64 = tx
         .query_row(
@@ -1720,12 +1768,12 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, personal_agent_connection_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name,
-            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id,
+            link_author.map(|link| &link.grant_id), link_author.map(|link| &link.principal_id), payload.author_agent_id,
             author_reported.as_ref().map(|reported| serde_json::to_string(reported).expect("a reported agent serializes")),
-            link_author.as_ref().and_then(|link| link.agent_connection_id.as_ref())],
+            link_author.and_then(|link| link.agent_connection_id.as_ref()), personal_connection],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

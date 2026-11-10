@@ -63,6 +63,7 @@ import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { createAgentChatRoutes } from "./agentChatRoutes";
 import { createAgentConnectionRoutes } from "./agentConnectionRoutes";
+import { createPersonalAgentToolRoutes } from "./personalAgentRoutes";
 import { createPersonalAgents, respondToWorkspaceName, type PersonalAgents } from "./personalAgents";
 import type { CredentialFence } from "@dohc/workspace-auth/credentialFence";
 import { accountDisplayName } from "./accountDisplayName";
@@ -785,6 +786,17 @@ export function createSyncRelayHandler({
     reads: { chatResolverFor },
   });
 
+  const respondToPersonalAgentTools = createPersonalAgentToolRoutes({
+    storage,
+    linkAuthority,
+    personalAgents,
+    nowMs,
+    activity: discussionActivity,
+    limiter: linkReadRateLimiter,
+    admitBlobBytes: admitLinkBlobBytes,
+    maxFiles: linkCurrentFileLimit,
+  });
+
   const respondToLinkChat = createLinkChatRoutes({
     storage,
     linkKey,
@@ -883,6 +895,9 @@ export function createSyncRelayHandler({
       }
       if (route.route === "agent-chat") {
         return await respondToAgentChat(request, route);
+      }
+      if (route.route === "personal-agent-tools") {
+        return await respondToPersonalAgentTools(request, route);
       }
       if (route.route === "link-redeem") {
         if (request.method !== "POST") throw relayError("method_not_allowed");

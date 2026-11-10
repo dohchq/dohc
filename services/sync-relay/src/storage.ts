@@ -137,6 +137,7 @@ import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
 import * as agentConnectionStorage from "./storage/agentConnections";
 import * as personalAgentStorage from "./storage/personalAgents";
+import * as personalAgentChatStorage from "./storage/personalAgentChat";
 import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
@@ -1795,6 +1796,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   setWorkspaceDisplayName(input: Parameters<typeof personalAgentStorage.setWorkspaceDisplayName>[1]): boolean {
     return personalAgentStorage.setWorkspaceDisplayName(this, input);
+  }
+
+  readPersonalScope(credential: personalAgentChatStorage.PersonalCredential, nowMs: number): personalAgentChatStorage.PersonalScope | null {
+    return personalAgentChatStorage.readPersonalScope(this, credential, nowMs);
+  }
+
+  readPersonalReach(credential: personalAgentChatStorage.PersonalCredential, workspaceId: string, nowMs: number): personalAgentStorage.PersonalReach | null {
+    return personalAgentChatStorage.readPersonalReach(this, credential, workspaceId, nowMs);
+  }
+
+  appendPersonalChatPost(input: Parameters<typeof personalAgentChatStorage.appendPersonalChatPost>[1]): personalAgentChatStorage.AppendPersonalChatPostResult {
+    return personalAgentChatStorage.appendPersonalChatPost(this, input);
+  }
+
+  personalAgentPostedIn(input: Parameters<typeof personalAgentChatStorage.personalAgentPostedIn>[1]): boolean {
+    return personalAgentChatStorage.personalAgentPostedIn(this, input);
+  }
+
+  readPersonalWaitWindow(input: Parameters<typeof personalAgentChatStorage.readPersonalWaitWindow>[1]): personalAgentChatStorage.PersonalWaitWindow {
+    return personalAgentChatStorage.readPersonalWaitWindow(this, input);
   }
 
   fetchLogCoordinate(input: {

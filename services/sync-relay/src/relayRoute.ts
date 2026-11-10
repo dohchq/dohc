@@ -11,6 +11,7 @@ import type {LinkAppCollectionRoute} from "./appCollectionRoutes";
 import type {OwnerAppPublicationRoute} from "./ownerAppPublicationRoutes";
 import type {OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import type {OwnerRestoreRoute} from "./ownerRestoreRoutes";
+import type {PersonalAgentToolRoute} from "./personalAgentRoutes";
 import {MAX_HELD_OBJECT_ID_CHARS, type HeldDocumentRoute} from "./heldDocumentRoutes";
 import type {LinkChatRoute} from "./linkChatRoutes";
 import type {LinkReadRoute} from "./linkReadRoutes";
@@ -37,6 +38,7 @@ type SyncRelayRoute =
   | AgentConnectionRoute
   | WorkReferenceRoute
   | AgentChatRoute
+  | PersonalAgentToolRoute
   | AppBackendRoute
   | DatasetRoute
   | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" | "press" }
@@ -130,6 +132,13 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts.length === 4 && parts[0] === "sync" && parts[1] === "link" && parts[2] === "agent-chat") {
     if (parts[3] === "post" || parts[3] === "wait") return { route: "agent-chat", action: parts[3] };
+    throw notFound();
+  }
+  if (parts.length === 4 && parts[0] === "sync" && parts[1] === "link" && parts[2] === "personal-agent") {
+    const action = parts[3];
+    if (action === "post" || action === "wait" || action === "chat" || action === "files" || action === "blob") {
+      return { route: "personal-agent-tools", action };
+    }
     throw notFound();
   }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {

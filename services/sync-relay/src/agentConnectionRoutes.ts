@@ -507,7 +507,8 @@ export function createAgentConnectionRoutes(input: {
         nowMs: tokens.issuedAtMs,
       });
       // Signing in again ended the agent's other connections; their running work ends with them.
-      if (result.ok) personal.endAgent(result.connection.agentId, []);
+      // A workspace new to reach has the agent's DM.
+      if (result.ok) personal.endAgent(result.connection.agentId, result.newlyReached);
       else if (result.endedConnectionId) personal.endConnection(result.endedConnectionId);
       return result.ok;
     }

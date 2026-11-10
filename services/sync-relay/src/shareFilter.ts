@@ -20,6 +20,7 @@ import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
 import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 
 // PR 18 share grants: the server-side filter that decides which replicated
 // ops (and which blobs) a share RECIPIENT may see. This module is the
@@ -782,6 +783,18 @@ function pickServed(
   return served;
 }
 
+// A personal agent's post also names its agent, which only the relay writes.
+// Every desktop refuses such a post without it. The ids of agents a desktop
+// runs stay on the owner's computers.
+function servedChatPayload(record: Record<string, unknown>, opKind: keyof typeof SERVED_CHAT_FIELDS): Record<string, unknown> {
+  const served = pickServed(record, SERVED_CHAT_FIELDS[opKind]);
+  if (opKind === "chat.message.append" && typeof record.authorAgentId === "string" &&
+      record.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX)) {
+    served.authorAgentId = record.authorAgentId;
+  }
+  return served;
+}
+
 // The chat branch of the fail-closed share filter (MU-C4). Strict allowlist,
 // scoped to exactly the granted channel's wire id:
 //   - chat.channel.create for the granted wireId (the join bootstrap);
@@ -864,7 +877,7 @@ function filterChatOpForChannelShare(
     }
     return {
       allowed: true,
-      payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
+      payload: servedChatPayload(record, opKind as keyof typeof SERVED_CHAT_FIELDS),
       blobSha256s: [],
     };
   }
@@ -1046,7 +1059,7 @@ function filterFileChatOpForPathShare(
   // Outside-selector attachments stay opaque, without an object id or path.
   return {
     allowed: true,
-    payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
+    payload: servedChatPayload(record, opKind as keyof typeof SERVED_CHAT_FIELDS),
     blobSha256s: [],
   };
 }

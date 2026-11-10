@@ -3,7 +3,7 @@ import { type SyncRelayLogRow, type ThreadFileBinding, type ObjectMomentRow } fr
 import { SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
 import { rowToLogRow, rowToObjectMomentRow } from "./rows";
 import { asRecord } from "@dohc/workspace-core";
-import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 
 export function listObjectMomentLogRowsByBlob(storage: StorageContext, input: {
     workspaceId: string;
@@ -135,10 +135,10 @@ export function findThreadCreateChannelWireId(
       const record = asRecord(payload);
       if (!record || record.threadId !== threadId) continue;
       // The earliest matching op is authoritative, whatever it says: a string
-      // channelWireId with no linked-file owner is the binding; anything else
-      // (a file-linked/both-owned thread or a pre-wire-id slug binding) is "no
-      // shareable binding" — fail closed.
-      return record.linkedObjectId === undefined &&
+      // channelWireId with no linked-file owner, by object or by path, is the
+      // binding; anything else (a file-linked/both-owned thread or a
+      // pre-wire-id slug binding) is "no shareable binding" — fail closed.
+      return record.linkedObjectId === undefined && record.linkedPath === undefined &&
         typeof record.channelWireId === "string" &&
         record.channelWireId.length > 0
         ? record.channelWireId
@@ -192,7 +192,7 @@ export function findChannelCreateKind(
         (record.kind !== "channel" && record.kind !== "dm" && record.kind !== "agent") ||
         typeof record.createdAtMs !== "number" ||
         !Number.isFinite(record.createdAtMs) ||
-        ((record.kind === "agent") !== (record.wireId === AGENT_CHANNEL_WIRE_ID))
+        ((record.kind === "agent") !== (agentIdForChannelWireId(channelWireId) !== null))
       ) {
         return null;
       }

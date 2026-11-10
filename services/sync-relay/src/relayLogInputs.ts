@@ -39,6 +39,21 @@ export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
 export const LINK_CHAT_MESSAGE_ID_PREFIX = "link-message:";
 export const LINK_CHAT_THREAD_ID_PREFIX = "link-thread:";
 
+// A personal agent's chat posts and Collection writes, one origin per agent.
+// Only the relay writes them, so no push can speak as that agent.
+export const PERSONAL_AGENT_ORIGIN_PREFIX = "relay:personal-agent:";
+export const PERSONAL_COLLECTION_ORIGIN_PREFIX = "relay:personal-collection:";
+
+export function personalAgentOrigin(agentId: string): string {
+  return `${PERSONAL_AGENT_ORIGIN_PREFIX}${agentId}`;
+}
+
+// The IDs of a personal agent's message and new thread, as for link posts.
+export const PERSONAL_MESSAGE_ID_PREFIX = "personal-message:";
+export const PERSONAL_THREAD_ID_PREFIX = "personal-thread:";
+// Every personal agent id starts with this. A settings file can't use it.
+export const PERSONAL_AGENT_ID_PREFIX = "p-";
+
 // Clients can publish their agent and automation authors, or an exact
 // unattributed coverage marker. The marker claims no identity. The relay
 // alone mints human, public, named, and link attribution.
@@ -75,6 +90,9 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection file writes");
+  }
+  if (originId.startsWith(PERSONAL_AGENT_ORIGIN_PREFIX) || originId.startsWith(PERSONAL_COLLECTION_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for personal agent writes");
   }
 }
 
@@ -274,10 +292,12 @@ export function assertChatAuthorship(
     if (!opKind.startsWith("chat.")) continue;
     const policy = CHAT_OP_POLICY[opKind];
     if (!policy) throw relayError("unknown_chat_op"); // fail-closed: an unrecognized chat op.
-    // Only the relay names a link post's message and new thread.
+    // Only the relay names a link or personal post's message and new thread.
     const reserved = op.payload && typeof op.payload === "object" ? op.payload as Record<string, unknown> : {};
-    if ((opKind === "chat.message.append" && String(reserved.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX)) ||
-        (opKind === "chat.thread.create" && String(reserved.threadId).startsWith(LINK_CHAT_THREAD_ID_PREFIX))) {
+    if ((opKind === "chat.message.append" && [LINK_CHAT_MESSAGE_ID_PREFIX, PERSONAL_MESSAGE_ID_PREFIX]
+          .some(prefix => String(reserved.messageId).startsWith(prefix))) ||
+        (opKind === "chat.thread.create" && [LINK_CHAT_THREAD_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX]
+          .some(prefix => String(reserved.threadId).startsWith(prefix)))) {
       throw relayError("authorship_mismatch");
     }
     if (policy.kind === "structural") continue;
@@ -289,9 +309,10 @@ export function assertChatAuthorship(
     }
     const bag = payload as Record<string, unknown>;
     // Only the relay writes a link post, from the link holder's own session
-    // or the agent connection it signed in.
+    // or the agent connection it signed in, and a personal agent's post.
     if (opKind === "chat.message.append" && (bag.authorKind === "link" ||
-        ["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(bag, key)))) {
+        ["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(bag, key)) ||
+        String(bag.authorAgentId).startsWith(PERSONAL_AGENT_ID_PREFIX))) {
       throw relayError("authorship_mismatch");
     }
     const claimed = bag[policy.field];
