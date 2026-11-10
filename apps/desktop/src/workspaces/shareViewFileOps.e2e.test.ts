@@ -1162,6 +1162,9 @@ describe("share-view file operations through the real store", () => {
     "leaves a picked file inside a .dohc folder out of a shared workspace's import",
     async () => {
       const view = await harness("dohc-share-import-metadata-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/note.md", text: "granter\n" },
+      ]);
       const sourceDir = await createTestScratch("dohc-share-import-metadata-src-");
       roots.push(sourceDir);
       const kept = join(sourceDir, ".dohc", "local", "protected-copies");
@@ -1173,16 +1176,16 @@ describe("share-view file operations through the real store", () => {
         ...scope(view),
         absolutePaths: [join(kept, "copy.json"), join(sourceDir, "plain.md")],
         screenAgainstRoots: null,
-        targetDir: undefined,
+        targetDir: "docs",
       });
 
       expect(outcome).toEqual({
-        imported: ["plain.md"],
+        imported: ["docs/plain.md"],
         skipped: 1,
         skippedSources: [{ path: "copy.json", reason: "workspace-data" }],
       });
-      expect(await storePaths(view)).toEqual(["plain.md"]);
-      expect(await exists(join(view.rootPath, "copy.json"))).toBe(false);
+      expect(await storePaths(view)).toEqual(["docs/note.md", "docs/plain.md"]);
+      expect(await exists(join(view.rootPath, "docs", "copy.json"))).toBe(false);
     },
     60_000,
   );

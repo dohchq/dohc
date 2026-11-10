@@ -2964,7 +2964,7 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(errors).not.toHaveBeenCalled();
       const rows = damage === "malformed receipt" ? originalRows : null;
       expect(outside).toHaveBeenCalledExactlyOnceWith(rows, expect.stringContaining(broken));
-      expect(await engine.listKeptCopies()).toEqual({ ...native, ...(rows === null ? {} : { outsideWriteCopies: rows }) });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, ...(rows === null ? {} : { outsideWriteCopies: rows }), protectedCopies: [] });
       await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
       await engine.flush();
       expect(outside).toHaveBeenCalledOnce();
@@ -3010,11 +3010,11 @@ describe("workspaceEngineCapture batch capture", () => {
       await engine.listKeptCopies();
       expect(outside).toHaveBeenCalledOnce();
       await opens.open(workspace);
-      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows, protectedCopies: [] });
       expect(outside).toHaveBeenLastCalledWith(rows, null);
       opens.close(workspace);
       await rm(join(root, rows[0]![1]));
-      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows });
+      expect(await engine.listKeptCopies()).toEqual({ ...native, outsideWriteCopies: rows, protectedCopies: [] });
       expect(outside).toHaveBeenLastCalledWith(rows, expect.stringContaining("dohc has not finished opening this workspace"));
     } finally {
       await engine.stop();
@@ -4177,9 +4177,9 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     const { secretStore } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions);
     try {
       await engine.runRelaySync(page(async () => undefined));
-      const { protectedCopies = [] } = await engine.listKeptCopies();
-      expect(protectedCopies).toEqual([[".env", expect.any(String), expect.any(Number)]]);
-      const id = protectedCopies[0]![1];
+      const kept = await protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root }).list();
+      expect(kept).toEqual([[".env", expect.any(String), expect.any(Number)]]);
+      const id = kept[0]![1];
 
       await expect(engine.restoreProtectedCopy(id)).resolves.toEqual({ path: ".env", status: "restored" });
       expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
