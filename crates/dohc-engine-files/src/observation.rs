@@ -296,7 +296,20 @@ pub(crate) struct ContentCheck {
 fn content_digest(path: &std::path::Path, cap: u64) -> Option<[u8; 32]> {
     use sha2::Digest;
     use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
+    // An ordinary open of a FIFO waits for a writer and would stall the feed,
+    // so the open doesn't block and only a regular file is read.
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        rustix::fs::open(path, flags, Mode::empty()).map(std::fs::File::from)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path);
+    let mut file = file.ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut hasher = sha2::Sha256::new();
     let mut buffer = vec![0; 64 * 1024];
     let mut bytes = 0u64;
