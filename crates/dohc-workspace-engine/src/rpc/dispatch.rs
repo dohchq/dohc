@@ -535,7 +535,10 @@ impl EngineService {
                 ))
                 .await?
             }
-            "documents.heldChange" => self.held_note_change(request.workspace, request.params).await?,
+            "documents.heldChange" => {
+                self.held_note_change(request.workspace, request.params)
+                    .await?
+            }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
             }
