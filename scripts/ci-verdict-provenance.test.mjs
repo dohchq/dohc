@@ -389,7 +389,8 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
       `cargo-${tool}@${env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
   }
   assert.equal(jobs.javascript.needs, "changes");
-  assert.equal(jobs.rust.needs, "changes");
+  assert.deepEqual(jobs.rust.needs, ["changes", "javascript"]);
+  assert.equal(jobs["rust-archive"].needs, "changes", "Rust compilation can overlap JavaScript");
   assert.equal(jobs["rust-policy"].needs, "changes");
   for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
     const steps = jobs[name].steps;
@@ -404,7 +405,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   assert.equal(workers.env.GITHUB_TOKEN, "${{ github.token }}");
   assert.equal(workers.steps.find(step => step.name === "Run the complete assigned inventory").run, "node scripts/verification/cloud.mjs worker ${{ matrix.shard }}");
   const tests = jobs["rust-tests"];
-  assert.equal(tests.needs, "changes", "Rust setup must overlap the archive build");
+  assert.deepEqual(tests.needs, ["changes", "javascript"], "archive waits must not occupy JavaScript runner slots");
   for (const job of [tests, jobs.rust]) {
     assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
     const install = job.steps.findIndex(step => step.name === "Install dependencies");
@@ -492,6 +493,13 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     assert.equal(workflowExpression(jobs.javascript.if, context), gate !== "rust");
     assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
     assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), true);
+    for (const result of ["success", "failure", "skipped"]) {
+      const selected = {...context, needs: {changes: {result: "success", outputs: {}}, javascript: {result}}};
+      for (const name of ["rust-tests", "rust"]) {
+        assert.match(jobs[name].if, /^always\(\)/, "a skipped JavaScript gate must allow Rust-only runs");
+        assert.equal(workflowExpression(jobs[name].if, selected), gate !== "js");
+      }
+    }
   }
 });
 
