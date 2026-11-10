@@ -87,3 +87,5 @@ export {
   type OwnerYDocOutboxEntry,
   type OwnerYDocOutboxRecovery,
 } from "./ydoc/ownerYDocOutbox";
+
+export type { HeldNoteChangeInput, HeldNoteChangeResult } from "./workspace/workspaceWireContract";

@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import type { HistoryCursor, HistoryMomentMetadata } from "@dohc/workspace-engine-client";
 import {
   VersionedTextStoreError,
@@ -195,6 +196,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
   // Old versions of files kept on a drive that cannot tell dohc whether a
   // program still has one open, and the step that deletes listed ones.
+  heldNoteChange(input: HeldNoteChangeInput): Promise<HeldNoteChangeResult>;
   listRetainedCopies(): Promise<RetainedCopiesListResult>;
   deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
@@ -1557,6 +1559,10 @@ export function createCaptureLiveStores(
 
     async saveKeptCopy(id: number) {
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
+    },
+
+    async heldNoteChange(input) {
+      return await runMutation(async adapter => await adapter.heldNoteChange(input));
     },
 
     async listRetainedCopies() {

@@ -31,6 +31,7 @@ const conflictPage = { conflicts: [conflict], nextAfterConflictId: "next-conflic
 const keptCopy = { id: 7, path: "notes.md", keptAtMs: 5 };
 
 const requests = [
+  [ops.heldNoteChange.channel, {workspaceId, path: "notes.md", action: "review"}],
   [ops.listWorkspaceVersions.channel, { workspaceId }],
   [ops.createWorkspaceVersion.channel, { workspaceId, name: "Draft" }],
   [ops.switchWorkspaceVersion.channel, { workspaceId, versionId }],
@@ -49,6 +50,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
   const handlers = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
   const steps: string[] = [];
   const operations = {
+    heldNoteChange: vi.fn<Operations["heldNoteChange"]>(),
     listVersions: vi.fn<Operations["listVersions"]>().mockResolvedValue(snapshot),
     createVersion: vi.fn<Operations["createVersion"]>(async () => { steps.push("create"); return snapshot; }),
     switchVersion: vi.fn<Operations["switchVersion"]>(async () => { steps.push("switch"); return { activeVersionId: versionId, changedFileCount: 2 }; }),

@@ -37,6 +37,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "workReferences.make"
                 | "workReferences.resolve"
                 | "documents.keepRetainedVersion"
+                | "documents.heldChange"
                 | "capture.reconcile"
                 | "capture.retryHeld"
                 | "capture.importRecovery"
@@ -534,6 +535,7 @@ impl EngineService {
                 ))
                 .await?
             }
+            "documents.heldChange" => self.held_note_change(request.workspace, request.params).await?,
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
             }
@@ -1475,6 +1477,7 @@ mod tests {
         request.workspace = Some(attached_handle.clone());
         for method in [
             "workspace.open",
+            "documents.heldChange",
             "capture.importRecovery",
             "ydoc.open",
             "sync.recoverOrigin",
@@ -1732,6 +1735,7 @@ mod tests {
             "conflicts.open",
             "conflicts.resolve",
             "documents.keepRetainedVersion",
+            "documents.heldChange",
             "engine.ping",
             "files.replace",
             "history.page",

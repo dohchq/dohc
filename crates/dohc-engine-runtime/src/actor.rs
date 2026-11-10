@@ -43,6 +43,8 @@ pub use link_rewrites::RewriteStop;
 mod journal;
 mod live_application;
 mod markdown_recovery;
+mod held_change;
+pub use held_change::{HeldChangeAction, HeldChangeResult};
 mod materialization;
 mod relay;
 #[cfg(unix)]

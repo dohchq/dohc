@@ -258,6 +258,9 @@
     ],
     "notices": [
       "notice.list"
+    ],
+    "heldNoteChange": [
+      "document.held.change"
     ]
   },
   "public": {
@@ -364,6 +367,7 @@
     "chat file-mentions": "chat.read",
     "file duplicate": "file.duplicate",
     "chat links": "chat.read",
-    "notices list": "notice.list"
+    "notices list": "notice.list",
+    "document held-change": "document.held.change"
   }
 }

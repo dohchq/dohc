@@ -146,7 +146,7 @@ interface DesktopCliServerDependencies<State> {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
-      | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
+      | "heldNoteChange" | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
       | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
       | "createVersion" | "switchVersion" | "mergeVersionIntoMain" | "resolveConflict"
       | "changePathsAs"
@@ -646,6 +646,7 @@ export function createDesktopCliServer<State>(
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),
             },
+            heldNoteChange: input => capture.heldNoteChange(input),
             retainedCopies: {
               list: () => capture.listRetainedCopies(),
               delete: (copies) => capture.deleteRetainedCopies(copies),

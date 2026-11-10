@@ -97,6 +97,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_read_file: ["file.read"],
   dohc_search_files: ["file.search"],
   dohc_read_document: ["document.read"],
+  dohc_held_note_change: ["document.held.change"],
   dohc_edit_document: ["document.edit"],
   dohc_create_document: ["document.create"],
   dohc_write_file: ["file.write"],
@@ -1927,10 +1928,12 @@ function cliFailureReason(error: unknown, verb: CliVerb): string {
   return failureReason(error, DOHC_TRANSPORT_UNAVAILABLE_REASON);
 }
 
+type CliToolArgs<Args> = Args extends unknown ? Omit<Args, "cwd" | "actor" | "agentId"> : never;
+
 async function requestCli<Verb extends CliVerb>(
   ctx: ToolContext,
   verb: Verb,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor" | "agentId">,
+  args: CliToolArgs<Extract<CliRequestWithoutToken, { verb: Verb }>["args"]>,
   signal?: AbortSignal,
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
@@ -2493,6 +2496,17 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "documentRead", { path: resolved.normalized });
+}
+
+export async function heldNoteChange(ctx: ToolContext, args: {path: string; action: "review" | "drop" | "undo"; token?: string}) {
+  if (ctx.shareAccess !== undefined) return {ok: false as const, reason: "Only the local owner can drop held edits. Open the owning workspace."};
+  if (args.action !== "review" && !/^[0-9a-f]{64}$/u.test(args.token ?? "")) {
+    return {ok: false as const, reason: "Review the held change first, then use its token for Drop or Undo."};
+  }
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return {ok: false as const, reason: resolved.reason};
+  return requestCli(ctx, "heldNoteChange", args.action === "review" ? {path: resolved.normalized, action: args.action}
+    : {path: resolved.normalized, action: args.action, token: args.token ?? ""});
 }
 
 export async function editDocument(

@@ -358,6 +358,15 @@ const retryKeptEditsArgsSchema = z
   .strict();
 const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
+const heldNoteChangeArgsSchema = z.discriminatedUnion("action", [
+  z.object({...argsBase, path: documentPathArg, action: z.literal("review")}).strict(),
+  z.object({...argsBase, path: documentPathArg, action: z.enum(["drop", "undo"]), token: z.string().regex(/^[0-9a-f]{64}$/u)}).strict(),
+]);
+const heldNoteChangeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ok: z.literal(true), path: z.string(), token: z.string(), authors: z.array(z.unknown()), held: z.boolean(), historyMomentId: z.string().nullable()}).strict(),
+  z.object({ok: z.literal(false), reason: z.string()}).strict(),
+]);
+
 const documentEditArgsSchema = z
   .object({
     allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
@@ -648,6 +657,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
+  z.object({...requestBase, verb: z.literal("heldNoteChange"), args: heldNoteChangeArgsSchema}).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -741,6 +751,7 @@ export const CLI_CAPABILITIES = {
   saveRecoveryCopy: ["share.live.document.recovery.save"],
   retryKeptEdits: ["share.live.document.retry"],
   stopAgain: ["share.live.document.stop"],
+  heldNoteChange: ["document.held.change"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1934,6 +1945,7 @@ export const cliResultSchemas = {
   saveRecoveryCopy: saveRecoveryCopyResultSchema,
   retryKeptEdits: retryKeptEditsResultSchema,
   stopAgain: stopAgainResultSchema,
+  heldNoteChange: heldNoteChangeResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

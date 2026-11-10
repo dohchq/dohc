@@ -43,6 +43,7 @@ type CliCommandBody =
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
+  | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
@@ -297,6 +298,22 @@ function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"
 }
 
 const DOCUMENT_VERBS = {
+  "held-change": {
+    capabilityId: "document.held.change",
+    summary: "Review, drop, or undo a held change on the owner's computer.",
+    operands: "<path>",
+    flags: [{name: "--action", value: "review|drop|undo", text: "Review returns the token needed for Drop."},
+      {name: "--token", value: "token", text: "Use the review token for Drop or the Drop token for Undo."}],
+    parse: (input: VerbInput): CliCommandBody => {
+      const path = parsePath(input, "document held-change");
+      const action = lastValue(input, "--action") ?? "review";
+      const token = lastValue(input, "--token");
+      if (action !== "review" && action !== "drop" && action !== "undo") fail("--action must be review, drop, or undo");
+      if (action !== "review" && !token) fail("Drop and Undo require --token");
+      if (token !== undefined && !/^[0-9a-f]{64}$/u.test(token)) fail("--token must be the 64-character token returned by Review or Drop");
+      return {verb: "heldNoteChange", path, action, ...(token ? {token} : {})};
+    },
+  },
   read: {
     capabilityId: "document.read",
     summary: "Read the current Markdown, including edits in an open editor.",

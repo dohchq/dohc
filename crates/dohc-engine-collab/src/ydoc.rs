@@ -1807,6 +1807,88 @@ impl Ydoc {
         })
     }
 
+    pub fn reset_held_content_to_file(
+        &self,
+        content_kind: ContentKind,
+        source: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        if content_kind != ContentKind::Richdoc {
+            return self.rewrite_content_to_markdown(content_kind, source);
+        }
+        self.stage_source_preserving_edit_bounded(
+            source,
+            Some(crate::limits::MAX_YDOC_UPDATE_BYTES * 3),
+            true,
+            true,
+            None,
+            |staged| {
+                staged.doc.get_or_insert_map(ROOT_META).remove(
+                    &mut staged.doc.transact_mut(),
+                    MARKDOWN_SOURCE_READER_META_KEY,
+                );
+                staged.rewrite_content_to_markdown_as(
+                    content_kind,
+                    source,
+                    MarkdownReading::Source,
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    pub fn restore_held_content(
+        &self,
+        content_kind: ContentKind,
+        point: &Ydoc,
+    ) -> Result<Vec<u8>, CollabError> {
+        if content_kind != ContentKind::Richdoc {
+            return self
+                .rewrite_content_to_markdown(content_kind, &point.project(content_kind)?.content);
+        }
+        let before = self.doc.transact().state_vector();
+        let staged = Ydoc::wire();
+        let max_bytes = crate::limits::MAX_YDOC_UPDATE_BYTES;
+        let full = self
+            .encode_full_state_bounded(max_bytes)
+            .ok_or(CollabError::ConfiguredByteBudgetExceeded)?;
+        staged.apply(&full)?;
+        restore_copy::copy(point, &staged, crate::limits::MAX_YDOC_UPDATE_BYTES)?;
+        let waiting_text = point.project(content_kind)?.content;
+        staged.keep_frontmatter_source_of(&waiting_text)?;
+        let source = point.doc.get_or_insert_map(ROOT_META);
+        let source_txn = point.doc.transact();
+        let target = staged.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = staged.doc.transact_mut();
+            for key in [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
+            ] {
+                match source.get(&source_txn, key) {
+                    Some(Out::Any(value)) => {
+                        target.insert(&mut txn, key, value);
+                    }
+                    None => {
+                        target.remove(&mut txn, key);
+                    }
+                    _ => return Err(CollabError::MarkdownNotRepresentable),
+                }
+            }
+        }
+        if staged.project(content_kind)?.content != waiting_text {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        let delta = staged.doc.transact().encode_state_as_update_v1(&before);
+        if delta.len() > max_bytes || staged.encode_full_state_bounded(max_bytes).is_none() {
+            return Err(CollabError::ConfiguredByteBudgetExceeded);
+        }
+        Ydoc::validate_update(&delta)?;
+        self.apply(&delta)?;
+        Ok(delta)
+    }
+
     pub(crate) fn rewrite_richdoc_preserving_source_bounded(
         &self,
         markdown: &str,

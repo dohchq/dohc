@@ -3310,6 +3310,19 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  const documentReports = useMemo(() => {
+    const owner = workspaceId;
+    const current = () => workspaceIdRef.current === owner;
+    const whileCurrent = (run?: (() => void) | null) => run && (() => { if (current()) run(); });
+    return {
+      onError: (message: string, error: unknown, retry: (() => void) | null, identity?: string) => {
+        if (current()) reportButtonError(message, error, whileCurrent(retry) ?? null, identity);
+      },
+      onNotice: (message: string, undo?: () => void) => {
+        if (current()) showSuccessNotice(message, whileCurrent(undo) ?? undefined);
+      },
+    };
+  }, [workspaceId, reportButtonError, showSuccessNotice]);
   // The Explorer's notices and failures, held to their workspace rather than
   // to the Explorer, which the side panel unmounts while the workspace stays
   // open. Undo and Try again run only while that workspace is open here.
@@ -7126,8 +7139,8 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 appFolder={appEntries.get(tabPath) ?? null}
                 onRunApp={openAppTab}
-                onButtonError={reportButtonError}
-                onButtonNotice={showSuccessNotice}
+                onButtonError={documentReports.onError}
+                onButtonNotice={documentReports.onNotice}
                 onClosePath={closePathTabs}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}

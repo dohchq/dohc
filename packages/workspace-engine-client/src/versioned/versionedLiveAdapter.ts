@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "../workspace/workspaceWireContract";
 import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult, HistoryLinkRewriteResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
@@ -1723,6 +1724,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async saveKeptCopy(id: number): Promise<KeptCopySaveResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.keptCopiesSave, { id });
+  }
+
+  async heldNoteChange(input: HeldNoteChangeInput): Promise<HeldNoteChangeResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.heldNoteChange, input);
   }
 
   async listRetainedCopies(): Promise<RetainedCopiesListResult> {

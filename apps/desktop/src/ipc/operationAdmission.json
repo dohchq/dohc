@@ -1,4 +1,5 @@
 {
+  "desktop:held-note-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:import-to-database": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation + assertWritableWorkspace" } },
   "desktop:undo-database-import": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation + withExclusiveWorkspaceOperation" } },
   "desktop:dataset": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "datasetHandler.withRendererWorkspaceOperation" } },

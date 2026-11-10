@@ -22,6 +22,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "resolveConflict"
   | "listKeptCopies"
   | "saveKeptCopy"
+  | "heldNoteChange"
   | "listRetainedCopies"
   | "deleteRetainedCopies"
 >;
@@ -62,6 +63,16 @@ export function workspaceVersionHandlers(dependencies: {
   }
 
   return {
+    async heldNoteChange(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      const result = await capture.heldNoteChange(input);
+      if (input.action !== "review") {
+        notifyRenderer({workspaceId: input.workspaceId});
+        dependencies.onRefusalsChanged?.();
+        activity.queueCloudSync(input.workspaceId);
+      }
+      return result;
+    },
     async listWorkspaceVersions(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const snapshot = await capture.listVersions();

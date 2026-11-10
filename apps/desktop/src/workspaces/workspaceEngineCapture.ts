@@ -1,3 +1,4 @@
+import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
@@ -741,6 +742,7 @@ export interface WorkspaceEngineCapture {
   // Old versions of files kept on a drive that cannot tell dohc whether a
   // program still has one open. dohc never deletes them itself; these list
   // and delete them for a person or agent who accepted that risk.
+  heldNoteChange(input: HeldNoteChangeInput): Promise<HeldNoteChangeResult>;
   listRetainedCopies(): Promise<RetainedCopiesListResult>;
   deleteRetainedCopies(copies: readonly RetainedCopy[]): Promise<RetainedCopiesDeleteResult>;
   resolveConflict(
@@ -7233,6 +7235,11 @@ export function createWorkspaceEngineCapture(
 
     async saveKeptCopy(id) {
       return await (await engineStore()).saveKeptCopy(id);
+    },
+
+    async heldNoteChange(input) {
+      const result = await (await engineStore()).heldNoteChange(input);
+      return result;
     },
 
     async listRetainedCopies() {

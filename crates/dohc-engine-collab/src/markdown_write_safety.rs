@@ -89,6 +89,11 @@ impl MarkdownConversionConsent {
         ))
     }
 
+    pub fn revoke(&self) {
+        self.consumed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn committed(&self) {
         self.consumed
             .store(true, std::sync::atomic::Ordering::Release);

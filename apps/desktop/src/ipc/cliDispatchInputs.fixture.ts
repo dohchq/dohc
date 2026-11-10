@@ -28,6 +28,7 @@ const jsonFields: Readonly<Record<string, unknown>> = {
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  "document held-change": ["note.md"],
   "links edges": [],
   "links in": ['{"path":"a.md"}'],
   "links resolve": ["a.md", '[{"kind":"wikilink","literal":"b"}]'],
