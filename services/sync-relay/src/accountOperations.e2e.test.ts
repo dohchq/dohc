@@ -136,7 +136,7 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
   const key = new Uint8Array(32).fill(7), namespace = "account-operations-e2e";
   let copies: ServerCopies | undefined;
   // The relay as main.ts mounts it with the account API on.
-  const relay = createSyncRelayHandler({ storage, resolveActor: testActor, resolveAccountSession, accountApi: true, serverCopies: () => copies });
+  const relay = createSyncRelayHandler({ storage, resolveActor: testActor, resolveAccountSession, serverCopies: () => copies });
   const replicas = createServiceHostReplication({activity: new DiscussionActivityHub(), 
     storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
     authorize: (credential) => authorizeAutomationReplication(storage, { key, namespace, ...credential }),

@@ -214,7 +214,7 @@ Both services must use the same `BETTER_AUTH_SECRET`.
 
 To keep server data on an attached disk, set it up before the first start.
 You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
-The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
+The disk holds the relay database with its files, the continuity record, the server's session host, and its copies of workspaces for automations and the phone.
 It also holds the working space for [hourly snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
 A snapshot runs only while the disk has free space for two copies of the relay database, plus headroom for the relay's own writes.
 Caddy's certificates stay in a Docker volume on the host.
@@ -495,7 +495,8 @@ node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
 
-Turning automations off deletes all server automation copies and their local claims and run history at startup.
+Turning automations off deletes server automation copies and their local claims and run history at startup.
+A copy the phone has also read stays for one day after the restart or the phone's last read, then goes with its run history.
 Save a private deployment archive first if you need to preserve that history.
 The bundle cannot restore or view archived run history.
 The synced workspace files remain in the relay.
