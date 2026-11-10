@@ -212,14 +212,14 @@ export async function prepareHostileRestoreProof(input: {
         classification: unexpiredAtResponse ? "OBSERVED" : "NOT_OBSERVED", pass: unexpiredAtResponse && oldTicketStatus === 404}; save();
       await stale.close();
       const replay = await connect(input.allowedContext, await ticket(input.allowedContext, "grant-1"), "accepted-history-only");
-      await replay.sync(); expect(yDocToMarkdown(replay.doc)).toBe("Hello");
+      await replay.sync(); expect(yDocToMarkdown(replay.doc)).toBe("Hello\n");
       const acceptedOutcome = await replay.submit(accepted, deliveryIds.accepted);
       await settle(); const acceptedSnapshot = persisted("accepted-history-replay");
       const originalProvenanceRetained = beforeStop.provenance.every(row => acceptedSnapshot.provenance.some(after => JSON.stringify(after) === JSON.stringify(row))) &&
         beforeStop.nativeProvenance.every(row => acceptedSnapshot.nativeProvenance.some(after => JSON.stringify(after) === JSON.stringify(row)));
       const originalHistoryRetained = beforeStop.history.every(row => acceptedSnapshot.history.some(after => JSON.stringify(after) === JSON.stringify(row)));
       cases.acceptedHistory = {originalBinding, currentBinding: replay.binding, outcome: acceptedOutcome, snapshot: acceptedSnapshot, originalProvenanceRetained, originalHistoryRetained,
-        pass: acceptedOutcome.kind === "result" && acceptedOutcome.result === "success" && acceptedSnapshot.markdown === "Hello" && originalProvenanceRetained && originalHistoryRetained &&
+        pass: acceptedOutcome.kind === "result" && acceptedOutcome.result === "success" && acceptedSnapshot.markdown === "Hello\n" && originalProvenanceRetained && originalHistoryRetained &&
           acceptedSnapshot.applications.some(row => row.delivery_id === deliveryIds.accepted) &&
           acceptedSnapshot.applications.filter(row => row.delivery_id === deliveryIds.accepted).every(row => row.first_seen_count === 0)}; save();
       await replay.close();
@@ -236,7 +236,7 @@ export async function prepareHostileRestoreProof(input: {
         retainedDraft: {path: join(root, "hostile-offline-before-restore.yjs"), sha256: hash(offlineBytes)},
         journalAdmitted: offlineSnapshot.journal.some(row => row.delivery_id === deliveryIds.offline),
         nativeApplied: offlineSnapshot.applications.some(row => row.delivery_id === deliveryIds.offline),
-        contentChanged: offlineSnapshot.markdown !== "Hello"}; save();
+        contentChanged: offlineSnapshot.markdown !== "Hello\n"}; save();
       await staleDraft.close();
       const fresh = await connect(input.allowedContext, await ticket(input.allowedContext, "grant-1"), "fresh-baseline-control");
       await fresh.sync(); expect(fresh.binding?.restoreFenceGeneration).toBe(2); const before = Y.encodeStateVector(fresh.doc);
