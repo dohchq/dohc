@@ -1757,7 +1757,9 @@ export function DesktopWorkspaceShell(props: {
   // waits for a launch with room.
   const openUnseenWhatsNew = async () => {
     const id = workspaceIdRef.current;
-    const hasRoom = () => allTabs(wbRef.current).length < MAX_OPEN_TABS;
+    const hasRoom = () =>
+      allTabs(wbRef.current).length < MAX_OPEN_TABS ||
+      activeGroup(wbRef.current).tabs.some((tab) => tab.path === WHATS_NEW_TAB_PATH);
     if (!(await claimUnseenWhatsNew(hasRoom)) || workspaceIdRef.current !== id) return;
     openVirtualTab(WHATS_NEW_TAB_PATH);
     // At the tab limit it does not open, and the restored file still shows.

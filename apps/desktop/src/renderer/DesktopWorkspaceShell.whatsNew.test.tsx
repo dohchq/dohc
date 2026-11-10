@@ -53,6 +53,13 @@ describe("What's new after an update", () => {
     expect(localStorage.getItem(SEEN_KEY)).toBe("an-older-release");
   });
 
+  it("shows a saved What's new tab at the limit and takes the release", async () => {
+    const tabs = [WHATS_NEW_TAB_PATH, ...Array.from({ length: MAX_OPEN_TABS - 1 }, (_, index) => `note-${index}.md`)];
+    renderShell(makeBridge(Promise.resolve(storedStateWithTabs(tabs, "note-0.md"))));
+    expect(await screen.findByTestId("whats-new-page")).toBeTruthy();
+    expect(localStorage.getItem(SEEN_KEY)).not.toBe("an-older-release");
+  });
+
   it("opens once the saved tabs come back after a failed read", async () => {
     const refused = () => new Error("dohc has not finished opening this workspace.");
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
