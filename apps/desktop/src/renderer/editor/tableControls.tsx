@@ -2119,7 +2119,10 @@ export function makeTableControlsPlugin(
         update(view, prevState) {
           const { range } = documentChange(prevState.doc, view.state.doc);
           const docChanged = range !== null;
-          if (docChanged) followColumnResize(view, prevState);
+          // Not only on docChanged: a synced change replaces the whole
+          // document even when nothing in it changed, and that still loses a
+          // column resize's handle.
+          followColumnResize(view, prevState);
           const resize = columnResizingPluginKey.getState(view.state);
           if (
             docChanged && resize?.activeHandle === -1 &&

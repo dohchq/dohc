@@ -452,6 +452,24 @@ describe("table gestures while the note changes", () => {
     expect(tableTextGrid(editor)).toEqual(before);
   });
 
+  it("finishes a column width resize after a synced change that leaves the note as it was", async () => {
+    const { editor, collaborator } = await setup();
+    const handle = startColumnResize(editor);
+
+    // A synced change replaces the whole document with new nodes, even when
+    // nothing in it changed.
+    const same = editor.state.schema.nodeFromJSON(editor.state.doc.toJSON());
+    editor.view.dispatch(editor.state.tr.replaceWith(0, editor.state.doc.content.size, same.content));
+    expect(columnResizingPluginKey.getState(editor.state)?.activeHandle).toBe(handle);
+    expect(columnResizingPluginKey.getState(editor.state)?.dragging).toBeTruthy();
+    mouse(window, "mousemove", 259);
+    mouse(window, "mouseup", 259);
+
+    expect(errors).toEqual([]);
+    expect(widths(editor)).toEqual(Array.from({ length: 3 }, () => [null, [160], null]));
+    expect(widths(collaborator)).toEqual(widths(editor));
+  });
+
   function deleteColumnOf(editor: Editor, label: string) {
     let cell = -1;
     editor.state.doc.descendants((node, pos) => {
