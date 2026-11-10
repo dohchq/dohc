@@ -64,7 +64,11 @@ impl ObservedEntry {
         // A time with a fraction of a second comes from a clock that steps
         // every few milliseconds. A whole second may come from a volume that
         // keeps only whole or even seconds, such as FAT.
-        let step_ms = if latest.subsec_nanos() == 0 { 2000 } else { 100 };
+        let step_ms = if latest.subsec_nanos() == 0 {
+            2000
+        } else {
+            100
+        };
         let latest_ms = i64::try_from(latest.as_millis()).unwrap_or(i64::MAX);
         latest_ms == 0 || latest_ms.saturating_add(step_ms) > started_ms
     }
@@ -575,7 +579,10 @@ impl ObservationFeed {
             .iter()
             .filter(|(path, check)| {
                 check.digest.is_some_and(|digest| {
-                    state.racy.get(*path).is_some_and(|before| *before != digest)
+                    state
+                        .racy
+                        .get(*path)
+                        .is_some_and(|before| *before != digest)
                 })
             })
             .map(|(path, _)| path.as_str())
@@ -851,7 +858,8 @@ mod tests {
     fn cursor_before_first_listing_requires_resync() {
         let feed = ObservationFeed::new();
         let cursor = feed.changes_since(None).cursor;
-        feed.publish(Vec::new(), BTreeMap::new(), &[], 10, FOLDS).unwrap();
+        feed.publish(Vec::new(), BTreeMap::new(), &[], 10, FOLDS)
+            .unwrap();
         let changes = feed.changes_since(Some(&cursor));
         assert!(changes.ready && changes.resync);
     }
@@ -1354,6 +1362,40 @@ mod tests {
         assert!(f.scan(&cursor).is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_policy_file_is_listed_without_being_read() {
+        let f = Fixture::new();
+        let cursor = f.cursor();
+        let fifo = f.root.path().join(".dohc/visibility.toml");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // Opening a FIFO to read it waits for a writer. The scan runs on its
+        // own thread, so a scan that opens the FIFO fails this test instead of
+        // hanging it.
+        std::thread::scope(|scope| {
+            let (sent, scanned) = std::sync::mpsc::channel();
+            let (f, cursor) = (&f, &cursor);
+            scope.spawn(move || {
+                let _ = sent.send(f.scan(cursor));
+            });
+            let facts = scanned.recv_timeout(std::time::Duration::from_secs(10));
+            if facts.is_err() {
+                // A writer releases the waiting open, so the thread can end.
+                drop(std::fs::OpenOptions::new().write(true).open(&fifo));
+            }
+            assert_eq!(
+                facts.expect("the scan waits on the FIFO"),
+                vec![fact(".dohc/visibility.toml", FileChangeKind::Appeared)]
+            );
+        });
+    }
+
     #[test]
     fn observation_symlink_leaf_does_not_follow_target() {
         let f = Fixture::new();
@@ -1383,7 +1425,8 @@ mod tests {
             #[cfg(any(windows, target_vendor = "apple"))]
             key: "dir/a".to_owned(),
         };
-        feed.publish(vec![entry], BTreeMap::new(), &[], 200_000, FOLDS).unwrap();
+        feed.publish(vec![entry], BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let cursor = feed.changes_since(None).cursor;
         feed.publish(
             vec![],
@@ -1397,7 +1440,8 @@ mod tests {
         )
         .unwrap();
         assert!(feed.changes_since(Some(&cursor)).facts.is_empty());
-        feed.publish(vec![], BTreeMap::new(), &[], 200_000, FOLDS).unwrap();
+        feed.publish(vec![], BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         assert_eq!(
             feed.changes_since(Some(&cursor)).facts,
             vec![fact("dir/a", FileChangeKind::Disappeared)]
@@ -1444,7 +1488,8 @@ mod tests {
     #[test]
     fn observation_escaped_facts_fit_the_response_budget() {
         let feed = ObservationFeed::new();
-        feed.publish(vec![], BTreeMap::new(), &[], 200_000, FOLDS).unwrap();
+        feed.publish(vec![], BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let cursor = feed.changes_since(None).cursor;
         let listing: Vec<_> = (0..400)
             .map(|i| ObservedEntry {
@@ -1458,7 +1503,8 @@ mod tests {
                 key: format!("{i}-{}", "\u{0001}\"\\".repeat(100)),
             })
             .collect();
-        feed.publish(listing.clone(), BTreeMap::new(), &[], 200_000, FOLDS).unwrap();
+        feed.publish(listing.clone(), BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let response = feed.changes_since(Some(&cursor));
         assert!(!response.resync);
         assert_eq!(response.facts.len(), 400);
@@ -1475,7 +1521,8 @@ mod tests {
                 e
             })
             .collect();
-        feed.publish(larger, BTreeMap::new(), &[], 200_000, FOLDS).unwrap();
+        feed.publish(larger, BTreeMap::new(), &[], 200_000, FOLDS)
+            .unwrap();
         let response = feed.changes_since(Some(&cursor));
         assert!(response.resync);
         assert!(response.facts.is_empty());
