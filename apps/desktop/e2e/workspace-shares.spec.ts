@@ -846,7 +846,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       const api = (window as unknown as {
         dohcDesktop: {
           getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-          startAgentRun(payload: { workspaceId: string }): Promise<unknown>;
+          startAgentRun: DohcDesktopBridge["startAgentRun"];
           startSitePreview: DohcDesktopBridge["startSitePreview"];
           getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
           openEngineYDocSession(payload: {
@@ -869,7 +869,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           return error instanceof Error ? error.message : String(error);
         }
       };
-      const agent = await capture(() => api.startAgentRun({ workspaceId }));
+      const agent = await capture(() => api.startAgentRun({ workspaceId, agentId: "default" }));
       const sitePreview = await capture(() =>
         api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev", holderId: "e2e", restart: false }),
       );

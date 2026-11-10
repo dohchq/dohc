@@ -3815,11 +3815,12 @@ async function openWorkspaceActivityUnderEngineStoreLock(
 
 async function startAgentRunWithWorkspaceActivity(
   workspace: CreatedWorkspace,
+  agentId: string,
 ): Promise<AgentRunRecord> {
   let run: AgentRunRecord | undefined;
   await openWorkspaceActivity(workspace, {
     whileEngineStoreLockHeld: async () => {
-      run = await agentIntegration.startAgentRun(workspace.workspaceId);
+      run = await agentIntegration.startAgentRun(workspace.workspaceId, agentId);
     },
   });
   if (!run) throw new Error("The agent run did not start.");
@@ -7276,6 +7277,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     linkedChatStoreFor, agentDispatchStoreHandleFor, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
+    agentYouRun: async (agentId) => agentYouRun((await readCachedUserSettingsFile(stateDir())).settings, agentId),
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
     senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
     openWorkspaceActivity,

@@ -18,9 +18,9 @@ import {
 
 // Screenshot harness (@ui-audit) for agents you run, light and dark: Settings ›
 // Agents with one agent dohc starts and two you run, one of them Listening;
-// a row's menu; its Details, in the whole dialog; the Undo just after Remove;
-// and the reply in the agent's chat under its name and color. Not a regression
-// test; it runs only when a shot directory is set.
+// Add agent with Another agent chosen; an agent you run's page and its menu;
+// the Undo just after Remove; and the reply in the agent's chat under its name
+// and color. Not a regression test; it runs only when a shot directory is set.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture agents you run screenshots");
 
@@ -79,34 +79,40 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     const dialog = page.getByTestId(desktopPins.settingsDialog);
     const section = page.getByTestId(settingsSectionPin("agents"));
     const row = (id: string) => section.locator(`[data-testid="agent-row"][data-agent-id="${id}"]`);
-    await expect(section.getByTestId("agents-started").getByTestId("agent-row")).toHaveCount(1);
-    await expect(section.getByTestId("agents-yours").getByTestId("agent-row")).toHaveCount(2);
+    await expect(section.getByTestId("agent-row")).toHaveCount(3);
     await expect(row("terminal").getByTestId("agent-state")).toHaveText("Listening");
     await expect(row("scout").getByTestId("agent-state")).toHaveText("Through MCP");
-    // Both themes show the same settled section: the Add tiles have looked
-    // for their tools, and each Copy MCP config is ready.
-    await expect(section.getByLabel(/^Looking for /)).toHaveCount(0);
-    await expect(section.locator('[data-testid="mcp-config-copy"]:enabled')).toHaveCount(2);
     await page.mouse.move(0, 0);
     await shoot(page, section, "agents-you-run-a-settings");
 
-    // The row's menu: Rename, Details and Remove.
-    await row("scout").getByRole("button", { name: "Scout actions" }).click();
-    await expect(page.getByRole("menuitem")).toHaveText(["Rename", "Details", "Remove"]);
-    await shoot(page, dialog, "agents-you-run-b-menu");
-
-    await page.getByRole("menuitem", { name: "Details" }).click();
-    await expect(row("scout")).toContainText("Reaches every workspace dohc opens on this computer.");
-    // With Details open, the section is taller than the dialog's scrolling body,
-    // so the shot is the whole dialog with Scout's row in view.
-    await row("scout").scrollIntoViewIfNeeded();
-    await expect(row("scout")).toBeInViewport({ ratio: 1 });
+    // Add agent with Another agent chosen shows the MCP config it will use.
+    await section.getByTestId("agent-add").click();
+    const sheet = page.getByTestId("agent-add-sheet");
+    // Both themes show the same settled sheet: it has looked for each tool,
+    // and its Copy MCP config is ready.
+    await expect(sheet.getByLabel(/^Looking for /)).toHaveCount(0);
+    await sheet.getByTestId("agent-runs-with-mcp").click();
+    await expect(sheet.locator('[data-testid="agent-add-config-copy"]:enabled')).toHaveCount(1);
     await page.mouse.move(0, 0);
-    await shoot(page, dialog, "agents-you-run-c-details");
+    await shoot(page, page, "agents-you-run-b-add");
+    await sheet.getByRole("button", { name: "Cancel" }).click();
+    await expect(sheet).toHaveCount(0);
 
-    // Just after Remove, its toast offers Undo.
-    await row("scout").getByRole("button", { name: "Scout actions" }).click();
+    // Scout's page: how to connect it, the run that marks its changes, and its menu.
+    await row("scout").click();
+    const agentPage = section.getByTestId("agent-page");
+    await expect(agentPage).toHaveAttribute("data-agent-id", "scout");
+    await expect(agentPage.locator('[data-testid="mcp-config-copy"]:enabled')).toHaveCount(1);
+    await expect(agentPage.getByTestId("mcp-status")).toHaveAttribute("data-state", "stopped");
+    await page.mouse.move(0, 0);
+    await shoot(page, dialog, "agents-you-run-c-page");
+    await agentPage.getByRole("button", { name: "Scout actions" }).click();
+    await expect(page.getByRole("menuitem")).toHaveText(["Rename", "Remove"]);
+    await shoot(page, dialog, "agents-you-run-c-menu");
+
+    // Just after Remove, the list is back and its toast offers Undo.
     await page.getByRole("menuitem", { name: "Remove" }).click();
+    await expect(agentPage).toHaveCount(0);
     await expect(row("scout")).toHaveCount(0);
     const toasts = page.getByTestId("notice-toasts");
     await expect(toasts).toContainText("Removed Scout.");

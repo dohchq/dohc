@@ -151,12 +151,18 @@ test("MCP config copies the canonical workspace path", async () => {
     // Each agent you run copies its own config, with the workspace's real
     // path in forward-slash form and the agent's id.
     const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
-    const yours = desktop.page.getByTestId("agents-yours");
-    await yours.getByRole("button", { name: /^Add an agent you run/ }).click();
-    const added = yours.getByTestId("agent-row");
+    const page = desktop.page;
+    await page.getByTestId("agent-add").click();
+    const sheet = page.getByTestId("agent-add-sheet");
+    await sheet.getByTestId("agent-runs-with-mcp").click();
+    await sheet.getByTestId("agent-add-name").fill("Terminal");
+    await sheet.getByTestId("agent-add-confirm").click();
+    await expect(sheet).toHaveCount(0);
+    const added = page.locator('[data-testid="agent-row"][aria-label="Terminal"]');
     await expect(added).toHaveCount(1);
     const agentId = await added.getAttribute("data-agent-id");
-    const copy = added.getByTestId("mcp-config-copy");
+    await added.click();
+    const copy = page.getByTestId("agent-page").getByTestId("mcp-config-copy");
     await expect(copy).toBeEnabled();
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await copy.click({ timeout: remainingMs() });

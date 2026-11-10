@@ -111,10 +111,10 @@ describe("AgentIntegration", () => {
         setAgentRun: (_id, run) => setSlot(run),
       });
 
-      const run = await integration.startAgentRun("ws");
-      expect(run).toMatchObject({ status: "running", agentId: "dohc-mcp", onBehalfOf: "person-local" });
+      const run = await integration.startAgentRun("ws", "terminal");
+      expect(run).toMatchObject({ status: "running", agentId: "terminal", onBehalfOf: "person-local" });
       // The watcher slot now carries this run's attribution.
-      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: run.id, depth: 0 });
+      expect(slots.at(-1)).toEqual({ agentId: "terminal", onBehalfOf: "person-local", agentRunId: run.id, depth: 0 });
 
       // The record is durable and inspectable on disk.
       const persisted = JSON.parse(await readFile(runsPath(root), "utf8"));
@@ -138,7 +138,7 @@ describe("AgentIntegration", () => {
         now: () => 1_700_000_000_000,
         createId: () => "run_fixed_0001",
       });
-      const run = await integration.startAgentRun("ws");
+      const run = await integration.startAgentRun("ws", "terminal");
       expect(run).toMatchObject({ id: "run_fixed_0001", startedAt: 1_700_000_000_000 });
       const persisted = JSON.parse(await readFile(runsPath(root), "utf8"));
       expect(persisted[0]).toMatchObject({ id: "run_fixed_0001", startedAt: 1_700_000_000_000 });
@@ -152,7 +152,7 @@ describe("AgentIntegration", () => {
         setAgentRun: (_id, run) => setSlot(run),
       });
 
-      const run = await integration.startAgentRun("ws");
+      const run = await integration.startAgentRun("ws", "terminal");
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
         activeRun: { id: run.id },
       });
@@ -171,12 +171,12 @@ describe("AgentIntegration", () => {
         rootFor: () => root,
         setAgentRun: (_id, run) => setSlot(run),
       });
-      const a = await integration.startAgentRun("ws");
-      const b = await integration.startAgentRun("ws");
+      const a = await integration.startAgentRun("ws", "terminal");
+      const b = await integration.startAgentRun("ws", "terminal");
       // End the older run A: B still owns the workspace, so its attribution
       // slot must stay set (not silently cleared to local).
       await integration.endAgentRun("ws", a.id);
-      expect(slots.at(-1)).toEqual({ agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: b.id, depth: 0 });
+      expect(slots.at(-1)).toEqual({ agentId: "terminal", onBehalfOf: "person-local", agentRunId: b.id, depth: 0 });
       expect(await integration.getAgentRunStatus("ws")).toMatchObject({
         activeRun: { id: b.id },
       });
@@ -201,12 +201,12 @@ describe("AgentIntegration", () => {
         setAgentRun,
         onRunEnded,
       });
-      const run = await integration.startAgentRun("ws");
+      const run = await integration.startAgentRun("ws", "terminal");
       const path = runsPath(root);
       await writeFile(path, source);
       const bytes = await readFile(path);
       setAgentRun.mockClear();
-      await expect(integration.startAgentRun("ws")).rejects.toThrow(/agent run history/);
+      await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(/agent run history/);
       await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
         activeRun: { id: run.id, status: "running" },
       });
@@ -236,13 +236,13 @@ describe("AgentIntegration", () => {
     await withWorkspace(async ({ root, setSlot }) => {
       const setAgentRun = vi.fn((_id: string, run: ActiveAgentRun | null) => setSlot(run));
       const integration = createAgentIntegration({ rootFor: () => root, setAgentRun });
-      const run = await integration.startAgentRun("ws");
+      const run = await integration.startAgentRun("ws", "terminal");
       const path = runsPath(root);
       const bytes = await readFile(path);
       setAgentRun.mockClear();
       historyRead.failure = Object.assign(new Error("temporarily unreadable"), { code: "EACCES" });
       try {
-        await expect(integration.startAgentRun("ws")).rejects.toThrow(/could not read/);
+        await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(/could not read/);
         await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
           activeRun: { id: run.id },
         });
@@ -260,7 +260,7 @@ describe("AgentIntegration", () => {
         activeRun: null,
       });
       await integration.endAgentRun("ws", run.id);
-      const next = await integration.startAgentRun("ws");
+      const next = await integration.startAgentRun("ws", "terminal");
       const runs = JSON.parse(await readFile(path, "utf8"));
       expect(runs).toHaveLength(2);
       expect(runs[0]).toMatchObject({ id: run.id, status: "complete" });
@@ -275,8 +275,8 @@ describe("AgentIntegration", () => {
         rootFor: () => root,
         setAgentRun,
       });
-      const older = await integration.startAgentRun("ws");
-      const newer = await integration.startAgentRun("ws");
+      const older = await integration.startAgentRun("ws", "terminal");
+      const newer = await integration.startAgentRun("ws", "terminal");
       const path = runsPath(root);
       await writeFile(path, "corrupt history\n");
       setAgentRun.mockClear();
@@ -305,7 +305,7 @@ describe("AgentIntegration", () => {
           setSlot(run);
         },
       });
-      const run = await integration.startAgentRun("ws");
+      const run = await integration.startAgentRun("ws", "terminal");
       const path = runsPath(root);
       await writeFile(path, "corrupt history\n");
       refuseClear = true;
@@ -367,8 +367,8 @@ describe("AgentIntegration", () => {
         }),
       });
 
-      const a = await integration.startAgentRun("ws");
-      const starting = integration.startAgentRun("ws");
+      const a = await integration.startAgentRun("ws", "terminal");
+      const starting = integration.startAgentRun("ws", "terminal");
       await installed.promise;
       expect(state.activeRun?.id).toBe(a.id);
       const ending = integration.endAgentRun("ws", a.id);
@@ -389,10 +389,10 @@ describe("AgentIntegration", () => {
   it("a newer run waits behind an older run's queued attribution clear", async () => {
     await withWorkspace(async ({ root }) => {
       const race = heldClearRace(root, "queued");
-      const a = await race.integration.startAgentRun("ws");
+      const a = await race.integration.startAgentRun("ws", "terminal");
       const ending = race.integration.endAgentRun("ws", a.id);
       await race.clearHeld;
-      const starting = race.integration.startAgentRun("ws");
+      const starting = race.integration.startAgentRun("ws", "terminal");
       await race.laterCaptureCalled;
       // B's own clear of A queues behind the held one, so B cannot install yet.
       expect(race.state.activeRun?.id).toBe(a.id);
@@ -408,10 +408,10 @@ describe("AgentIntegration", () => {
   it("an older run's late attribution clear never drops a newer run that installed around it", async () => {
     await withWorkspace(async ({ root }) => {
       const race = heldClearRace(root, "independent");
-      const a = await race.integration.startAgentRun("ws");
+      const a = await race.integration.startAgentRun("ws", "terminal");
       const ending = race.integration.endAgentRun("ws", a.id);
       await race.clearHeld;
-      const b = await race.integration.startAgentRun("ws");
+      const b = await race.integration.startAgentRun("ws", "terminal");
       expect(race.state.activeRun?.id).toBe(b.id);
       expect(race.slot()?.agentRunId).toBe(b.id);
       race.releaseClear();
@@ -440,7 +440,7 @@ describe("AgentIntegration", () => {
             throw primary;
           },
         });
-        await expect(integration.startAgentRun("ws")).rejects.toBe(primary);
+        await expect(integration.startAgentRun("ws", "terminal")).rejects.toBe(primary);
         expect(await readFile(path, "utf8")).toBe("external corrupt history\n");
         expect(logged).toHaveBeenCalledWith(
           "[desktop] Could not record the failed agent run",
@@ -461,7 +461,7 @@ describe("AgentIntegration", () => {
         rootFor: () => root,
         setAgentRun: (_id, run) => setSlot(run),
       });
-      await expect(integration.startAgentRun("ws")).rejects.toThrow(/invalid JSON/);
+      await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(/invalid JSON/);
       await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({
         activeRun: null,
         lastRun: null,
@@ -482,7 +482,7 @@ describe("AgentIntegration", () => {
         setAgentRun: (_id, run) => setSlot(run),
         onRunEnded: (input) => ended.push(input),
       });
-      const run = await integration.startAgentRun("ws");
+      const run = await integration.startAgentRun("ws", "terminal");
       await integration.endAgentRun("ws", "no-such-run", "complete");
       expect(ended).toEqual([]);
       await integration.endAgentRun("ws", run.id, "failed");
@@ -502,7 +502,7 @@ describe("AgentIntegration", () => {
       rootFor: () => null,
       setAgentRun: () => {},
     });
-    await expect(integration.startAgentRun("nope")).rejects.toThrow("This workspace is not open. Open it again.");
+    await expect(integration.startAgentRun("nope", "terminal")).rejects.toThrow("This workspace is not open. Open it again.");
   });
 
   it("records a failed start when the workspace attribution slot is occupied", async () => {
@@ -513,7 +513,7 @@ describe("AgentIntegration", () => {
           if (run) throw new Error("slot occupied");
         },
       });
-      await expect(integration.startAgentRun("ws")).rejects.toThrow(
+      await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(
         "slot occupied",
       );
       await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
@@ -555,7 +555,7 @@ describe("AgentIntegration", () => {
         },
       });
 
-      const starting = integration.startAgentRun("ws");
+      const starting = integration.startAgentRun("ws", "terminal");
       await setStarted.promise;
       currentState = successorState;
       allowSettle.resolve();
@@ -588,7 +588,7 @@ describe("AgentIntegration", () => {
         }),
       });
 
-      await expect(integration.startAgentRun("ws")).rejects.toThrow(
+      await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(
         "This workspace was closed. Open it again.",
       );
       expect(setAgentRun).not.toHaveBeenCalled();
@@ -654,7 +654,7 @@ describe("AgentIntegration", () => {
   it("marks a run its process left running as interrupted when the next process starts", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
       const before = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, run) => setSlot(run) });
-      const run = await before.startAgentRun("ws");
+      const run = await before.startAgentRun("ws", "terminal");
       // The process dies here: nothing ends the run.
       const after = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, next) => setSlot(next), now: () => 99 });
       await expect(after.getAgentRunStatus("ws")).resolves.toEqual({
@@ -758,7 +758,7 @@ describe("AgentIntegration", () => {
           rootFor: () => root,
           setAgentRun: (_id, run) => setSlot(run),
         });
-        await expect(integration.startAgentRun("ws")).rejects.toThrow(refusal);
+        await expect(integration.startAgentRun("ws", "terminal")).rejects.toThrow(refusal);
         // The escape target stayed untouched: no run log, no temp files.
         expect(await readdir(outside)).toEqual([]);
       } finally {
@@ -825,13 +825,13 @@ describe("AgentIntegration", () => {
 
           const sync = fileSync(rootA, rootB);
 
-          await a.startAgentRun("ws");
-          await b.startAgentRun("ws");
+          await a.startAgentRun("ws", "terminal");
+          await b.startAgentRun("ws", "terminal");
           await sync("a");
           await b.endAgentRun("ws", "b-1");
           await a.endAgentRun("ws", "a-1");
-          await a.startAgentRun("ws");
-          await b.startAgentRun("ws");
+          await a.startAgentRun("ws", "terminal");
+          await b.startAgentRun("ws", "terminal");
           await sync("b");
           await a.endAgentRun("ws", "a-2", "failed");
           await b.endAgentRun("ws", "b-2");
@@ -867,7 +867,7 @@ describe("AgentIntegration", () => {
           onRunEnded: ended,
         });
 
-        const run = await integration.startAgentRun("ws");
+        const run = await integration.startAgentRun("ws", "terminal");
         await integration.endAgentRun("ws", run.id);
         await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
           activeRun: null,

@@ -2,7 +2,7 @@ import { normalizeRootPath } from "@dohc/workspace-core";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload,
+  ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload, StartAgentRunPayload,
   EndAgentRunPayload, StartAgentRunResult, AgentRunStatusResult, McpConfigResult,
   StopAgentRunPayload,
   ChatDispatchStateForThreadPayload, ChatDispatchStateForThreadResult,
@@ -40,7 +40,9 @@ export function createAgentRunsIpc<
   agentDispatchStoreHandleFor(workspace: Workspace): { store: Pick<LiveAgentDispatchStoreHandle["store"], "runRecordsForThread"> };
   assertAgentRunnableWorkspace(workspaceId: string): void;
   assertChatRunnerIdle(workspaceId: string): void;
-  startAgentRunWithWorkspaceActivity(workspace: Workspace): Promise<AgentRunRecord>;
+  startAgentRunWithWorkspaceActivity(workspace: Workspace, agentId: string): Promise<AgentRunRecord>;
+  // The agent you run with this id, read from settings now, or null.
+  agentYouRun(agentId: string): Promise<{ id: string } | null>;
   agentIntegration: Pick<AgentIntegration, "endAgentRun" | "getAgentRunStatus">;
   mcpShareAccessOf(shareView: unknown): ShareAccess | null;
   mcpConfigFor(rootPath: string, shareAccess: ShareAccess | null): Promise<McpConfigResult>;
@@ -117,15 +119,21 @@ export function createAgentRunsIpc<
           return AgentToolsResult.parse({ workingDirectory, tools });
         });
     });
-    // Enabling agents starts a local run: the workspace must already be open (the
-    // watcher must be live for the run slot to attach), so open it first.
+    // A person starts a run for one agent they run, so History marks the
+    // workspace's changes as that agent's. Settings, not the caller, says
+    // which agents they run. The workspace must already be open (the watcher
+    // must be live for the run slot to attach), so open it first.
     registerHandler(CHANNELS.startAgentRun, workspaceHandler(async (event, payload, operation) => {
-      const input = AgentRunPayload.parse(payload);
+      const input = StartAgentRunPayload.parse(payload);
       const workspace = operation.workspace;
       assertAgentRunnableWorkspace(workspace.workspaceId);
       assertChatRunnerIdle(workspace.workspaceId);
+      if (!(await dependencies.agentYouRun(input.agentId))) {
+        throw new Error("dohc could not start a run because this agent isn't one you run. Add it under Another agent in Settings › Agents.");
+      }
+      operation.assertCurrent();
       return StartAgentRunResult.parse(
-        await startAgentRunWithWorkspaceActivity(workspace),
+        await startAgentRunWithWorkspaceActivity(workspace, input.agentId),
       );
     }));
 
