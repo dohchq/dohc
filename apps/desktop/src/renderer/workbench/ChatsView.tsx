@@ -126,7 +126,7 @@ import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { agentMentionId, listAgents, runnableAgents, withAgent, type DesktopUserSettings } from "../../settings/userSettings";
+import { agentMentionId, listAgents, runnableAgents, withAgent, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { archivedChatsFor } from "../../settings/archivedChats";
 import { Menu } from "../ui/Menu";
 import { isContextMenuKey } from "../ui/keys";
@@ -3610,12 +3610,22 @@ export function ChatsView(props: {
   // stays, in Archived.
   const removeAgent = useCallback(
     async (agentId: string): Promise<void> => {
-      const settings = props.userSettings;
-      const entry = settings?.agents[agentId];
-      if (!settings || !entry) return;
+      const name = props.userSettings?.agents[agentId]?.name ?? agentId;
+      // The file, with the entries dohc could not use, so Undo knows where the agent sat.
+      let file: DesktopUserSettingsResult;
+      try {
+        file = await bridge().getUserSettings();
+      } catch (error) {
+        props.onError(ipcErrorMessage(error, `dohc could not remove ${name}.`), error);
+        return;
+      }
+      const settings = file.settings;
+      const entry = settings.agents[agentId];
+      if (!entry) return;
       await removeAgentWithUndo({
         workspaceId,
         settings,
+        agentProblems: file.agentProblems,
         agent: { id: agentId, name: entry.name },
         save: async (next) => {
           try {

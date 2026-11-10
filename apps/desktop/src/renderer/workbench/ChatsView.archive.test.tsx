@@ -165,7 +165,9 @@ describe("ChatsView archive and row menus", () => {
     });
     const { scout, ...withoutScout } = settings.agents;
     const removed = { ...settings, agents: withoutScout };
-    bridgeMock.getUserSettings.mockResolvedValue({ settings: removed });
+    // An entry dohc could not use sits between the two, so Undo must put Scout back after it.
+    const agentProblems = [{ id: "old", position: 1, problem: "This agent has no command." }];
+    bridgeMock.getUserSettings.mockResolvedValueOnce({ settings, agentProblems }).mockResolvedValue({ settings: removed, agentProblems });
     bridgeMock.setUserSettings.mockResolvedValueOnce({ settings: removed }).mockResolvedValueOnce({ settings });
     bridgeMock.orderAgents.mockResolvedValue({ settings });
     const onClearError = vi.fn();
@@ -190,7 +192,7 @@ describe("ChatsView archive and row menus", () => {
     const [words, undo] = onNotice.mock.lastCall!;
     expect(words).toBe("Removed Ranger.");
     undo();
-    await waitFor(() => expect(bridgeMock.orderAgents).toHaveBeenCalledWith({ order: ["default", "scout"] }));
+    await waitFor(() => expect(bridgeMock.orderAgents).toHaveBeenCalledWith({ order: ["default", "old", "scout"] }));
     expect(bridgeMock.setUserSettings).toHaveBeenLastCalledWith({
       settings: { ...settings, agents: { ...withoutScout, scout } },
       base: removed,
