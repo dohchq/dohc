@@ -8058,3 +8058,92 @@ it("runs no idle sweep or lifecycle retry, and pulls nothing, over 100 passes of
   expect(o.host.settled(o.sibling)).toBe(true);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
+
+// Proves: a retirement that stops at its work budget after its tip moved on wakes the pass that reconciles the
+// next pages, until it settles once through the last and retires, with no periodic pass. Seventeen edits two to
+// a page take nine pages, four a pass: the confirmation the first pass's pull finds wakes only the second.
+it("reconciles a retirement's applications across work budgets and settles once through the last page, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({maxApplications: 2, polls});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  const seed = o.tip();
+  o.lost.pending = true;
+  const edits = Array.from({length: 17}, (_, index) => o.acceptEdit(`budget-${index}`));
+  // The engine applied each, though the relay's tip has none of them.
+  for (const edit of edits) o.applied.set(edit.deliveryId, {...edit, localYDocSequence: edit.journalCursor + 1});
+  o.stop();
+  const sent = o.ownerCalls().length, from = o.client().sendRequest.mock.calls.length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  const requests = o.client().sendRequest.mock.calls.slice(from).map(call => (call as unknown[])[0] as {method: string; params: {afterReceipt?: unknown}});
+  const reconciles = requests.filter(request => request.method === "liveApplication.reconcileActivation");
+  expect(reconciles.slice(0, 9).map(request => request.params.afterReceipt)).toEqual([seed, ...[1, 3, 5, 7, 9, 11, 13, 15].map(index => edits[index])]);
+  expect(o.tip()).toEqual(edits[16]);
+  expect(retiringSettles(o, sent)).toEqual([["liveApplication.settle", {retirement: expect.objectContaining({acceptedThrough: edits[16]!.journalCursor}), terminalReceipt: edits[16]}]]);
+  expect(retiredRow(o).boundary.terminalReceipt).toEqual(edits[16]);
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: a membership update that fails partway, here at another workspace's origin check, still wakes the pass
+// that starts the departure it began, though each later attempt finds that departure already begun. Once the
+// other workspace attaches, the departure is announced and the stopped document retires, with no periodic pass.
+it("starts a stopped document's departure while another workspace's update keeps failing, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), key = retiringKey(o, tip);
+  const second = {...o.workspace, root: join(o.f.root, "workspace-2"), workspaceId: "workspace-2"};
+  await mkdir(second.root);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  o.stop();
+  const sent = o.ownerCalls().length;
+  const update = () => o.host.update({workspaces: [o.workspace, second], documents: [], departing: [o.sibling]});
+  o.replies.create = new Error("Relay unreachable.");
+  await expect(update()).rejects.toThrow("Relay unreachable.");
+  await expect(update()).rejects.toThrow("Relay unreachable.");
+  expect(o.host.automationLedger("workspace-2")).toBeNull();
+  // The pass the first failed update woke settles and publishes what the stopped document applied.
+  await vi.waitFor(() => expect(retiringSettles(o, sent)).toContainEqual(["liveApplication.settle", {retirement: key, terminalReceipt: tip}]), {timeout: 10_000});
+  // No pull after an update has confirmed it left, so it stays.
+  expect(o.calls(sent)).not.toContain("liveApplication.releaseActivation");
+  expect(o.host.retains(o.sibling)).toBe(true);
+  o.replies.create = undefined;
+  await update();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]);
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
+// Proves: a retirement whose departure was already confirmed, and whose publication then pushed a page and has
+// more, wakes the pass that pushes the rest and retires it. Nothing else it waits on changes then, so only the
+// publication's own wake moves it on, with no periodic pass.
+it("retires a confirmed stopped document once a publication that had more pages finishes, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), key = retiringKey(o, tip);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  // Settlement that has not reached the file keeps the retirement from publishing while its departure is confirmed.
+  o.settlement.materialized = false;
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  // The first pass settles and its pull confirms the departure, which wakes a second pass that settles again.
+  await vi.waitFor(() => expect(retiringSettles(o, sent).length).toBeGreaterThanOrEqual(2), {timeout: 10_000});
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  expect(o.calls(sent)).not.toContain("liveApplication.releaseActivation");
+  o.settlement.materialized = true;
+  // The next publication pushes one change and has more; the push after it pushes the rest.
+  let pushes = 0;
+  o.replies.push = {hasMore: true, pushed: 1};
+  o.requestListeners.add(method => {if (method === "sync.push" && ++pushes === 2) o.replies.push = {};});
+  await polls.run(o.f);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(pushes).toBeGreaterThanOrEqual(2);
+  expect(retiringSettles(o, sent).at(-1)).toEqual(["liveApplication.settle", {retirement: key, terminalReceipt: tip}]);
+  expect(o.calls(sent).at(-1)).toBe("liveApplication.releaseActivation");
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toBeNull();
+  expect(o.host.retains(o.sibling)).toBe(false);
+});
