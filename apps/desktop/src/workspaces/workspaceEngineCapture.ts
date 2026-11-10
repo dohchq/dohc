@@ -96,7 +96,7 @@ import {
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, type Stats } from "node:fs";
-import { lstat, mkdir, open, readFile, realpath, rm, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, realpath, rm, rmdir, type FileHandle } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -1875,6 +1875,20 @@ export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineRe
     const name = createHash("sha256").update(basename(target).toLowerCase()).digest("hex").slice(0, 16);
     return join(dirname(target), `.dohc-write-${name}.tmp`);
   }
+  // A page that turns folder `d` into a file deletes what `d` held, then
+  // writes `d`, and a rename can't replace a folder. The folder goes only
+  // when it holds nothing but empty folders, as the engine's materializer
+  // clears one. A file or link in it keeps it, and the write fails as before.
+  // Answers its folders deepest first, or undefined when anything else is in it.
+  async function emptyFolderTree(folder: string): Promise<string[] | undefined> {
+    const folders: string[] = [];
+    for (const entry of await readdir(folder, { withFileTypes: true })) {
+      const inner = entry.isDirectory() ? await emptyFolderTree(join(folder, entry.name)) : undefined;
+      if (!inner) return undefined;
+      folders.push(...inner);
+    }
+    return [...folders, folder];
+  }
   // Text and bytes take the same four checks in the same order, so they take
   // one path through them. FileHandle.writeFile defaults a string to UTF-8
   // and ignores the encoding for a Uint8Array, so one call serves both. Two
@@ -1894,6 +1908,15 @@ export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineRe
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
     const replaced = await assertLeafNotSymlink(target);
+    // rmdir refuses a folder that filled since the walk, so no file goes. A
+    // folder swapped for a link since the walk resolves elsewhere and stops it.
+    if (replaced?.isDirectory()) {
+      const real = await realpath(target);
+      for (const folder of await emptyFolderTree(target) ?? []) {
+        if (await realpath(folder) !== join(real, relative(target, folder))) throw new Error(`${workspacePath} changed on disk while dohc cleared it.`);
+        await rmdir(folder);
+      }
+    }
     if (replaceFile) {
       await replaceFile(workspacePath, basename(temporaryFor(target)), data);
       return;
