@@ -2697,6 +2697,9 @@ async fn markdown_hold_replaced_lineage_retires_old_debt_and_requires_a_new_gran
         .await
         .unwrap();
     assert_ne!(next_claim, f.claim);
+    // Recovery retires the old row without writing, so the review shows no
+    // held change rather than the replacement lineage's document.
+    assert_eq!(f.held_change("note.md").await, None);
     assert!(matches!(
         f.settle(false, Some(grant.clone())).await,
         Err(RuntimeError::Collab(CollabError::LineageWriteStale { .. }))
