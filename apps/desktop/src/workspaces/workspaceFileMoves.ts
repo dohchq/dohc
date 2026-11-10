@@ -16,12 +16,12 @@ import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolic
 import { assertMoveParentCase, checkCaseRename, deleteIdentityUnavailable, deletePath, moveIdentityUnavailable, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
+import { beginPendingRecovery, finishDeleteRecovery, removeRecoveryRecord, saveRecoveryRecord, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
-import { finishMoveRecovery, finishFolderMoveRecovery, moveBack, moveWord } from "./workspaceMoveRecovery";
+import { finishMoveRecovery, finishFolderMoveRecovery, listStoppedMoves, moveBack, moveWord, type StoppedMove } from "./workspaceMoveRecovery";
 import { scheduleLinkRewrite, type LinkRewriteContext } from "./workspaceLinkRewrites";
 import { ICloudCheckRefusal } from "./workspaceICloudOnly";
-import { WORKSPACE_TRASH } from "./workspaceTrash";
+import { WORKSPACE_TRASH, workspaceTrashForWrite } from "./workspaceTrash";
 
 // The workspace's id and attachment name the engine open whose `.dohc/local`
 // holds the workspace trash.
@@ -414,12 +414,20 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
 
           const recovery = (await lstat(source)).isDirectory() ? undefined
             : await stageDeleteRecovery(operationId, source, from.relative, [...recorded]);
+          let stopped: StoppedMove | undefined;
+          if (dest) {
+            const entry = await lstat(source, { bigint: true });
+            stopped = { operationId, from: from.relative, to: to.relative, place: destBase, staged: `${Date.now()}-${randomUUID()}-`,
+              ...(entry.ino ? { moved: `${entry.dev}:${entry.ino}` } : {}) };
+          }
           const change: MoveProgress = { staged: undefined, sourceStaged: undefined, destDeleted: [], moved: false, renamed: [] };
           try {
-            if (dest) {
+            if (dest && stopped) {
               // The replaced destination waits in the workspace trash, so the
-              // move can still put it back.
-              change.staged = await moveIntoWorkspaceTrash(workspace, join(rootPath, destBase));
+              // move can still put it back, or the next open after a stop can.
+              const staging = `move ${basename(destBase)} to the workspace trash`;
+              await saveRecoveryRecord(workspace, stopped, "replace", staging);
+              change.staged = await moveIntoWorkspaceTrash(workspace, join(rootPath, destBase), stopped.staged);
               markChanged();
               for (const sub of dest.files) {
                 const path = under(destBase, sub);
@@ -477,9 +485,12 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
               await engine!.rename(file, rebase(file));
               change.renamed.push(file);
             }
+            // A record that outlived a finished move would put it back at the next open.
+            if (stopped) await removeRecoveryRecord(workspace, operationId, "replace");
           } catch (error) {
             const undone = await undoMove(workspace, engine, change, from.relative, fromFiles, recorded, rebase, source, target,
               join(rootPath, destBase), caseOnly, input);
+            if (stopped) await removeRecoveryRecord(workspace, operationId, "replace").catch(() => undefined);
             gone = [...undone.destDeleted, ...undone.sourceDeleted];
             const rowless = undone.rowlessSource.map(({ path, atTarget }) =>
               atTarget ? shownTo(rebase(path)) : from.path + path.slice(from.relative.length));
@@ -636,6 +647,43 @@ async function undoMove(workspace: PathChangeWorkspace, engine: AuthoredPathChan
     ? fromFiles.filter(file => !recorded.has(file)).map(path => ({ path, atTarget: where(path) === "target" }))
     : [];
   return { notes: notes.length ? ` ${notes.join(" ")}` : " dohc put everything back.", destLeft, destDeleted, sourceDeleted, rowlessSource };
+}
+
+// Finishes putting back each replacing move dohc stopped during, as a failed
+// move puts itself back: the moved entry, while it is still where the move put
+// it, then the replaced entry. Nothing that appeared since is replaced, and what
+// cannot go back stays in the workspace trash. History records what changes as
+// local file edits. A record stays for the next open while that open could
+// still finish: the replaced entry waits and its place is free, or the moved
+// entry still holds it.
+export async function putBackStoppedMoves(workspace: PathChangeWorkspace, markChanged: () => void): Promise<void> {
+  const root = workspace.rootPath;
+  for (const record of await listStoppedMoves(root)) {
+    try {
+      const trash = await workspaceTrashForWrite(workspace, `put back the replaced ${record.to}`);
+      const name = (await readdir(trash)).find(entry => entry.startsWith(record.staged));
+      const from = join(root, record.from), to = join(root, record.to), place = join(root, record.place);
+      const identity = (path: string) => lstat(path, { bigint: true }).then(at => `${at.dev}:${at.ino}`, () => undefined);
+      // A stop between its link and unlink leaves the moved file at both names.
+      // Its folder may lead outside the workspace now, under the same path.
+      const movedStays = async () => record.moved !== undefined && await identity(to) === record.moved &&
+        [undefined, record.moved].includes(await identity(from)) && await checkPlacement(root, to).then(() => true, () => false);
+      if (name !== undefined) {
+        // The moved entry keeps a visible name throughout, so a stop here hides nothing.
+        if (await movedStays()) {
+          await placeBack(root, to, from, "", true);
+          markChanged();
+        }
+        if (!await exists(place)) {
+          await placeBack(root, join(trash, name), place);
+          markChanged();
+        }
+      }
+      if (name === undefined || !await exists(join(trash, name)) || (await exists(place) && !await movedStays())) {
+        await removeRecoveryRecord(workspace, record.operationId, "replace");
+      }
+    } catch { /* The next open tries again. */ }
+  }
 }
 
 export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(

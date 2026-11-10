@@ -3,6 +3,24 @@ use dohc_engine_collab::reader_resolver::{self, PreparedFold};
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
 use rusqlite::OptionalExtension;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+// A reader that misses a capture's deadline has likely hung. Later captures on
+// the actor skip it for this long instead of each waiting out a deadline, and
+// their notes take the fallback the missed note took (#2585).
+const HUNG_READER_COOLDOWN: Duration = Duration::from_secs(30);
+
+fn hung_until(actor: &ActorHandle) -> std::sync::MutexGuard<'_, Option<Instant>> {
+    actor
+        .reader_hung_until
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn reader_ready(actor: &ActorHandle) -> bool {
+    actor.reader_configured.load(Ordering::Acquire)
+        && hung_until(actor).is_none_or(|until| Instant::now() >= until)
+}
 
 pub(super) fn stale() -> RuntimeError {
     dohc_engine_sync::SyncError::RetryableState {
@@ -127,7 +145,9 @@ fn needs_reader(source: &str) -> bool {
         {
             return true;
         }
-        if list && !item || list_gap && item || matches!(line, b"---" | b"-" | b"+") {
+        // A line of only dashes can underline a setext heading.
+        let dashes = line.trim_ascii_end().iter().all(|byte| *byte == b'-');
+        if list && !item || list_gap && item || dashes || line == b"+" {
             return true;
         }
         list = item;
@@ -157,7 +177,7 @@ pub(super) async fn prepare(
     root: &std::path::Path,
     deadline: &mut Option<std::time::Instant>,
 ) -> Arc<Vec<PreparedFold>> {
-    if !actor.reader_configured.load(Ordering::Acquire) {
+    if !reader_ready(actor) {
         return Arc::new(Vec::new());
     }
     prepare_eligible(actor, eligible(&inputs), root, deadline).await
@@ -197,6 +217,9 @@ async fn prepare_eligible(
         Ok((resolver, preparations))
     }).await else { return Arc::new(Vec::new()); };
     let mut folds = Vec::new();
+    // A reader that answered a note here is alive; missing the deadline after
+    // that means the batch ran out of time.
+    let mut answered = false;
     if let Some(resolver) = resolver {
         for (preparation, input) in preparations {
             if !file_matches(root, &input) {
@@ -205,13 +228,18 @@ async fn prepare_eligible(
             let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 break;
             };
-            let Ok(fold) = tokio::time::timeout(remaining, preparation.construct(&resolver)).await
-            else {
-                break;
-            };
-            if let Some(fold) = fold {
-                folds.push(fold);
+            match tokio::time::timeout(remaining, preparation.construct(&resolver)).await {
+                Ok(Some(fold)) => folds.push(fold),
+                // The resolver's own timeout can answer None as this one runs out.
+                Ok(None) if Instant::now() < deadline => {}
+                _ => {
+                    if !answered {
+                        *hung_until(actor) = Some(Instant::now() + HUNG_READER_COOLDOWN);
+                    }
+                    break;
+                }
             }
+            answered = true;
         }
     }
     #[cfg(test)]
@@ -225,7 +253,7 @@ pub(super) fn prepare_blocking(
     root: &std::path::Path,
     deadline: &mut Option<std::time::Instant>,
 ) -> Arc<Vec<PreparedFold>> {
-    if !actor.reader_configured.load(Ordering::Acquire) {
+    if !reader_ready(actor) {
         return Arc::new(Vec::new());
     }
     let eligible = eligible(&inputs);

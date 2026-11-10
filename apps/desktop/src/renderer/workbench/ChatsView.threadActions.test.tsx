@@ -11,6 +11,7 @@ import {
   thread,
   message,
   bridgeMock,
+  chatDispatchPausedCallbacks,
   emitWorkspaceActivity,
   mentionRoster,
   renderView,
@@ -628,6 +629,7 @@ describe("ChatsView dispatch state", () => {
         liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
+        waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["message-1"] },
       })
       .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false });
     renderView();
@@ -638,6 +640,8 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "agent working · 2 queued",
     );
+    // The post asked Nova while it worked on another run.
+    expect((await screen.findByTestId("chats-waiting")).textContent).toBe("Nova will reply when it's free.");
     const announcement = screen.getByTestId("chats-dispatch-announcement");
     expect(announcement.getAttribute("role")).toBe("status");
     expect(announcement.textContent).toBe("Agent working, 2 queued");
@@ -649,9 +653,35 @@ describe("ChatsView dispatch state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
     );
+    expect(screen.queryByTestId("chats-waiting")).toBeNull();
     // The region stays mounted with no text, ready for the next run.
     expect(screen.getByTestId("chats-dispatch-announcement")).toBe(announcement);
     expect(announcement.textContent).toBe("");
+  });
+
+  it("hides a post's waiting line while this computer pauses agent replies, and reads it again on resume", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      liveRunId: null, liveTriggerMessageId: null,
+      pendingCount: 1,
+      paused: false,
+      waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["message-1"] },
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-waiting");
+
+    act(() => chatDispatchPausedCallbacks.forEach((callback) => callback({ paused: true })));
+    expect(screen.queryByTestId("chats-waiting")).toBeNull();
+    const reads = bridgeMock.chatDispatchStateForThread.mock.calls.length;
+    await user.click(await screen.findByTestId("chats-resume-computer-dispatch"));
+    // No activity follows the resume, so the thread reads its dispatch itself.
+    await waitFor(() => expect(bridgeMock.chatDispatchStateForThread.mock.calls.length).toBeGreaterThan(reads));
+    expect((await screen.findByTestId("chats-waiting")).textContent).toBe("Nova will reply when it's free.");
   });
 
   it("shows a paused status and resumes the open thread in place", async () => {

@@ -115,19 +115,19 @@ describe("recovery pruning", () => {
     expect(await readdir(root)).toEqual([".dohc"]);
   });
 
-  it("removes expired recovery records while keeping recent records and staged contents", async () => {
+  it("removes expired recovery records while keeping recent records, unfinished moves and staged contents", async () => {
     const root = await opened("prune-existing-");
     const trash = join(root, ".dohc", "local", "trash");
     await mkdir(trash, { recursive: true });
     const recent = `move-${"b".repeat(64)}.json`;
+    // A move dohc stopped during still waits for an open to put it back.
+    const unfinished = `replace-${"c".repeat(64)}.json`;
     const staged = "delete-staged-notes";
-    for (const name of [expiredName, recent, staged]) await writeFile(join(trash, name), name);
-    await utimes(join(trash, expiredName), old, old);
-    await utimes(join(trash, staged), old, old);
+    for (const name of [expiredName, recent, unfinished, staged]) await writeFile(join(trash, name), name);
+    for (const name of [expiredName, unfinished, staged]) await utimes(join(trash, name), old, old);
     await scheduledPrune(root)();
     await expect(access(join(trash, expiredName))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(join(trash, recent), "utf8")).toBe(recent);
-    expect(await readFile(join(trash, staged), "utf8")).toBe(staged);
+    for (const name of [recent, unfinished, staged]) expect(await readFile(join(trash, name), "utf8")).toBe(name);
   });
 
   it.each([false, true])("prunes only once the workspace's open prepares .dohc/local, and never the old .dohc/trash (opened=%s)", async open => {

@@ -181,6 +181,7 @@ export function createAgentRunsIpc<
         await chatDispatchService.dispatchStateForThread(
           input.workspaceId,
           input.threadId,
+          input.postThreadIds ?? [],
         ),
       );
     }));

@@ -194,7 +194,9 @@ impl Default for Deadlines {
             startup: Duration::from_secs(5),
             request: Duration::from_secs(10),
             queue: Duration::from_secs(10),
-            idle: Duration::from_secs(30),
+            // A cold start made the first sync after 30 s idle take about 2 s on a
+            // Windows desktop (#3356). An idle reader holds about 66 MiB.
+            idle: Duration::from_secs(10 * 60),
         }
     }
 }

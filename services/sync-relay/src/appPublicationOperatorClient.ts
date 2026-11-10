@@ -1,7 +1,7 @@
 import { createConnection } from "node:net";
-import { OPERATOR_MAX_RESPONSE_BYTES, OPERATOR_TIMEOUT_MS, type DisablePublicationRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
+import { OPERATOR_MAX_RESPONSE_BYTES, OPERATOR_TIMEOUT_MS, type OperatorRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
 
-export function requestPublicationTakedown(path: string, request: DisablePublicationRequest, secret: string, timeoutMs = OPERATOR_TIMEOUT_MS): Promise<OperatorResponse> {
+export function requestPublicationTakedown(path: string, request: OperatorRequest, secret: string, timeoutMs = OPERATOR_TIMEOUT_MS): Promise<OperatorResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     const deadline = setTimeout(() => socket.destroy(new Error("Publication takedown timed out. Check the relay before retrying.")), timeoutMs);
