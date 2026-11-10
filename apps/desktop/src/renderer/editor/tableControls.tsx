@@ -345,6 +345,49 @@ function tableAtCellPos(
   return null;
 }
 
+// Where `pos`, inside a table, lands after the note changes from `before` to
+// `doc`, or null when the change touched that table. A synced change replaces
+// the whole document, so its own mapping loses every position; comparing the
+// two documents finds the table unchanged.
+function positionInUnchangedTable(before: PMNode, doc: PMNode, pos: number): number | null {
+  const { range, mapping } = documentChange(before, doc);
+  if (!range) return pos;
+  const table = tableAtCellPos(before, pos);
+  if (!table) return null;
+  const unchanged = table.pos + table.node.nodeSize <= range.from || table.pos >= range.toBefore;
+  return unchanged ? mapping.map(pos) : null;
+}
+
+// A row or column drag and a row resize hold positions in their table. After
+// a change elsewhere in the note, moves them with the table and reports that
+// the gesture can go on. A gesture that hasn't started dragging reads its
+// positions when it starts.
+function followTableGesture(runtime: TableControlsRuntime, before: PMNode, doc: PMNode): boolean {
+  const drag = runtime.activeDrag;
+  const resize = runtime.activeRowResize;
+  const held = drag?.cellPos ?? resize?.rowPos;
+  if (held === undefined) return true;
+  const moved = positionInUnchangedTable(before, doc, held);
+  if (moved === null) return false;
+  if (drag) drag.cellPos = moved;
+  if (resize) resize.rowPos = moved;
+  return true;
+}
+
+// prosemirror-tables maps a column resize's handle through each change, so a
+// synced change loses it. While the column's table is unchanged, puts the
+// handle back and keeps the resize going.
+function followColumnResize(view: EditorView, prevState: EditorState): void {
+  const resize = columnResizingPluginKey.getState(view.state);
+  const handle = columnResizingPluginKey.getState(prevState)?.activeHandle ?? -1;
+  if (!resize?.dragging || resize.activeHandle !== -1 || handle === -1) return;
+  const moved = positionInUnchangedTable(prevState.doc, view.state.doc, handle);
+  if (moved === null) return;
+  // Setting the handle ends the resize, so the resize goes on in a second step.
+  view.dispatch(view.state.tr.setMeta(columnResizingPluginKey, { setHandle: moved }));
+  view.dispatch(view.state.tr.setMeta(columnResizingPluginKey, { setDragging: resize.dragging }));
+}
+
 function setTableRowHeights(
   view: EditorView,
   tablePos: number,
@@ -2013,9 +2056,12 @@ export function makeTableControlsPlugin(
       if (!transactions.some((tr) => tr.docChanged)) return null;
       const resize = columnResizingPluginKey.getState(state);
       if (!resize?.dragging) return null;
+      const handle = columnResizingPluginKey.getState(oldState)?.activeHandle ?? -1;
+      // After a change outside the column's table, the view puts a lost
+      // handle back (followColumnResize).
+      if (handle > -1 && positionInUnchangedTable(oldState.doc, state.doc, handle) !== null) return null;
       // prosemirror-tables moves the handle of a deleted cell onto the next
       // cell. Deleting or replacing the cell deletes across its first position.
-      const handle = columnResizingPluginKey.getState(oldState)?.activeHandle ?? -1;
       const mapping = new Mapping();
       transactions.forEach((tr) => mapping.appendMapping(tr.mapping));
       const cellGone = handle > -1 && mapping.mapResult(handle + 1, -1).deletedAcross;
@@ -2073,6 +2119,7 @@ export function makeTableControlsPlugin(
         update(view, prevState) {
           const { range } = documentChange(prevState.doc, view.state.doc);
           const docChanged = range !== null;
+          if (docChanged) followColumnResize(view, prevState);
           const resize = columnResizingPluginKey.getState(view.state);
           if (
             docChanged && resize?.activeHandle === -1 &&
@@ -2080,7 +2127,9 @@ export function makeTableControlsPlugin(
           ) {
             clearColumnResizePreview(view);
           }
-          if (docChanged) runtime.cancelPointer?.();
+          if (docChanged && !followTableGesture(runtime, prevState.doc, view.state.doc)) {
+            runtime.cancelPointer?.();
+          }
           if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;
