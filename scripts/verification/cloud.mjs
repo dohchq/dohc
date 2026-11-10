@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
 import { changedFiles, desktopProofCommand, passedSpecTitles, postgres, readSelfHostDeliveryProof } from "./verify.mjs";
 import { selectsRepositoryTests } from "./selection.mjs";
-import { JS_SHARDS, assertTaskCoverage, javascriptGroups, javascriptTasks, partitionTasks } from "./shards.mjs";
+import { JS_SHARDS, assertTaskCoverage, javascriptGroups, javascriptTasks, partitionJavascript } from "./shards.mjs";
 import { runBounded } from "./js-tests.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
@@ -32,7 +32,7 @@ async function runJavascript(groups, record, save, availability) {
   const tasks = groups.flatMap(group => group.tasks);
   const selected = new Map(tasks.map(task => [task.id, task]));
   groups = [...groups];
-  groups.sort((a, b) => b.weight - a.weight);
+  groups.sort((a, b) => Number(b.native) - Number(a.native) || b.weight - a.weight);
   const step = async (name, action) => {
     const row = { name }; record.steps.push(row);
     return timed(row, action, save);
@@ -144,7 +144,7 @@ export async function cloudJavascript(part, index = 0) {
       process.env.DOHC_TEST_ENGINE_BINARY = stagedEnginePath;
       const tasks = await step("test inventory", cloudPlan);
       record.planned = tasks.map(task => task.id);
-      const shard = partitionTasks(javascriptGroups(tasks), JS_SHARDS)[index];
+      const shard = partitionJavascript(javascriptGroups(tasks))[index];
       record.assigned = shard.flatMap(group => group.tasks.map(task => task.id));
       save();
       process.env.DOHC_QA_OUTPUT = output;

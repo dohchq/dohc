@@ -166,7 +166,7 @@ test("preparation reuses artifacts after a verification-only edit", async t => {
     assert.equal(second.status, 0, second.stderr);
     assert.equal(JSON.parse(second.stdout.trim().split("\n").at(-1)).desktopPrepared, true);
     const builds = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse).filter(call => call.command === "cargo" || call.args.at(-1) === "build");
-    assert.equal(builds.length, 3);
+    assert.equal(builds.length, 4);
   });
 });
 

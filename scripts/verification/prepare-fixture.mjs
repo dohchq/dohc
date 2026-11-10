@@ -9,7 +9,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
     writeFileSync(join(root, path), contents);
   };
   put("package.json", '{"type":"module"}\n');
-  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\n");
+  put(".gitignore", "node_modules/\ntarget/\n.dohc-dev/\napps/desktop/dist/\napps/desktop/resources/\nservices/share-web/viewer/dist/\nservices/sync-relay/dist/\n");
   put("pnpm-lock.yaml", "new-lock");
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
@@ -41,6 +41,12 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
         const executable=join(repoRoot,'target/debug/dohc-workspace-engine'+(process.platform==='win32'?'.exe':''));
         put(executable,'engine'); chmodSync(executable,0o755);
         return {stdout:JSON.stringify({reason:'compiler-artifact',target:{name:'dohc-workspace-engine'},executable})};
+      }
+      if(command==='pnpm' && args[1]==='@dohc/sync-relay') {
+        assert.deepEqual(args,['--filter','@dohc/sync-relay','build']);
+        put(join(repoRoot,'services/sync-relay/dist/main.js'),'relay');
+        put(join(repoRoot,'services/sync-relay/dist/liveValidationWorker.js'),'worker');
+        return {};
       }
       if(command==='pnpm' && args[1]==='@dohc/share-web') {
         assert.deepEqual(args,['--filter','@dohc/share-web','build']);

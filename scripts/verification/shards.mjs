@@ -6,7 +6,7 @@ import { desktopProofTags } from "./verify.mjs";
 
 const slash = path => path.replaceAll("\\", "/");
 const fileId = path => slash(relative(repoRoot, path));
-export const JS_SHARDS = 10;
+export const JS_SHARDS = 16;
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 
@@ -40,6 +40,12 @@ export function partitionTasks(tasks, count) {
     shard.weight += task.weight;
   }
   return shards.map(shard => shard.tasks);
+}
+
+export function partitionJavascript(groups, count = JS_SHARDS) {
+  const native = partitionTasks(groups.filter(group => group.native), count);
+  const pure = partitionTasks(groups.filter(group => !group.native), count);
+  return native.map((groups, index) => [...groups, ...pure[index]]);
 }
 
 export function assertTaskCoverage(expected, records) {

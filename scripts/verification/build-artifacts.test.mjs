@@ -19,7 +19,7 @@ function scratch(t, prefix) {
 
 function artifacts(t) {
   const fixture = scratch(t, "dohc-artifacts-");
-  for (const directory of ["apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist"]) {
+  for (const directory of ["apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist", "services/sync-relay/dist"]) {
     mkdirSync(join(fixture.root, directory), { recursive: true });
   }
   fixture.write(node, "node");
@@ -28,6 +28,25 @@ function artifacts(t) {
   for (const name of ["agentProbeOwner.exe", "agentProbeRelay.mjs", "manifest.json"]) fixture.write(`${probe}/${name}`, name);
   return fixture;
 }
+
+test("the prepared relay process rejects changed or missing runtime files", t => {
+  const { root, write } = artifacts(t);
+  write("services/sync-relay/dist/main.js", "relay");
+  write("services/sync-relay/dist/liveValidationWorker.js", "worker");
+  const fingerprint = () => artifactFingerprint("desktop", root, "linux", "x64");
+  const prepared = fingerprint();
+  for (const name of ["main.js", "liveValidationWorker.js"]) {
+    const path = `services/sync-relay/dist/${name}`;
+    write(path, "drift");
+    assert.notEqual(fingerprint(), prepared, `${name} changed`);
+    rmSync(join(root, path));
+    assert.notEqual(fingerprint(), prepared, `${name} deleted`);
+    write(path, name === "main.js" ? "relay" : "worker");
+    assert.equal(fingerprint(), prepared);
+  }
+  rmSync(join(root, "services/sync-relay/dist"), { recursive: true });
+  assert.throws(fingerprint, { code: "ENOENT" });
+});
 
 for (const [platform, arch] of [["win32", "x64"], ["darwin", "arm64"], ["linux", "x64"]]) {
   test(`a ${platform} ${arch} desktop artifact rejects reader drift and missing generations`, t => {

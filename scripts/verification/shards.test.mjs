@@ -3,10 +3,10 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { assertTaskCoverage, javascriptGroups, nativeTestFiles, partitionTasks } from "./shards.mjs";
+import { assertTaskCoverage, javascriptGroups, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
 import { aggregateJavascript, aggregateRust } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_PARTITION_PAIRS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
 
@@ -76,10 +76,13 @@ test("execution groups preserve files, projects, native prerequisites, and comma
   assertTaskCoverage(tasks, partitionTasks(groups, JS_SHARDS).map((groups, part) => ({ part, verdict: "PASS", completed: groups.flatMap(group => group.tasks.map(task => task.id)) })));
 });
 
-test("paired Rust workers retain all sixteen nextest partitions exactly once", () => {
-  assert.deepEqual(RUST_PARTITION_PAIRS.flat().toSorted((a, b) => a - b), Array.from({ length: 16 }, (_, index) => index));
-  assert.equal(RUST_PARTITION_PAIRS.length, RUST_SHARDS);
-  assert.ok(RUST_PARTITION_PAIRS[0].includes(0));
+test("native preparation does not leave one worker with most of the native work", () => {
+  const groups = [false, true].flatMap(native => [90, 70, 50, 30].map((weight, index) => ({ id: `${native}-${index}`, native, weight })));
+  const shards = partitionJavascript(groups, 2);
+  for (const native of [false, true]) {
+    assert.deepEqual(shards.map(shard => shard.filter(group => group.native === native).reduce((total, group) => total + group.weight, 0)), [120, 120]);
+  }
+  assertTaskCoverage(groups, shards.map((shard, part) => ({ part, verdict: "PASS", completed: shard.map(group => group.id) })));
 });
 
 test("JavaScript receipts reject missing, failed, duplicated, or different-head work", () => {
