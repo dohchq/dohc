@@ -18,7 +18,7 @@ import { OptionColorPicker } from "../colorPicker";
 import { recordLabel } from "../recordLabel";
 import { asText, FieldValue, fieldDisplayText } from "../table/cells";
 import type { CollectionCellChange } from "../table/TableView";
-import { isPastDate, OptionPill, optionColor, optionTone, shortDate } from "../values";
+import { OptionPill, optionColor, optionTone, shortDate } from "../values";
 
 export interface BoardViewProps {
   schema: CollectionSchema;
@@ -122,7 +122,7 @@ function CardProperty({ field, indexed, personLabel }: {
   }
   if (field.type === "date" && typeof value === "string" && indexed?.validation.status !== "flagged") {
     return (
-      <span className={`inline-flex items-center gap-1 text-[12px] ${isPastDate(value) ? "text-danger" : "text-muted"}`}>
+      <span className="inline-flex items-center gap-1 text-[12px] text-muted">
         <CalendarDays size={13} strokeWidth={1.9} aria-hidden />
         {shortDate(value)}
       </span>
@@ -261,7 +261,13 @@ function ColumnMenu({ label, color, onColor }: { label: string; color: OptionCol
     return () => document.removeEventListener("pointerdown", away);
   }, [open]);
   return (
-    <div ref={root} className="relative">
+    <div
+      ref={root}
+      className="relative"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
       <button
         ref={trigger}
         type="button"
@@ -385,7 +391,7 @@ function BoardColumn({
         ) : (
           <span className="truncate text-[12px] font-medium text-muted">{label}</span>
         )}
-        <span className="text-[12px] tabular-nums text-subtle">{count ?? records.length}</span>
+        <span data-testid="board-column-count" className="text-[12px] tabular-nums text-subtle">{count ?? records.length}</span>
         <span className="ml-auto flex items-center">
           {color && onColor ? <ColumnMenu label={label} color={color} onColor={onColor} /> : null}
           {onNew ? (

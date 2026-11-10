@@ -172,7 +172,7 @@ function FieldHeader(props: {
         onClick={props.onSort}
         {...(mark ? tooltip.focusProps : {})}
       >
-        <FieldTypeIcon type={props.type} />
+        <FieldTypeIcon type={props.type} className="shrink-0 text-subtle" />
         <span className="truncate">{props.name}</span>
         {mark ? (
           <span aria-hidden="true" data-testid="table-field-mark" className="inline-flex shrink-0">
@@ -350,7 +350,7 @@ export function TableView({
                   className="flex h-8 shrink-0 items-center gap-2 border-b border-r border-line px-2 text-[12px] text-muted last:border-r-0"
                   style={{ width: columnWidth(index) }}
                 >
-                  <FieldTypeIcon type={field.type} />
+                  <FieldTypeIcon type={field.type} className="shrink-0 text-subtle" />
                   <span className="truncate">{field.name}</span>
                 </div>
               );

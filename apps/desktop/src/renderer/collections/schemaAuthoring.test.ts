@@ -122,6 +122,10 @@ describe("schema mutations", () => {
       options: ["Todo"],
       colors: { Todo: "gray" },
     });
+    // A chosen color lands over the colors already in the file.
+    expect(setFieldOptions(FULL, "Status", ["Todo", "Done"], { Todo: "gray" }).fields[4]).toMatchObject({
+      colors: { Todo: "gray", Done: "teal" },
+    });
     expect(setFieldOptions(FULL, "Name", ["x"]).fields[0]).toEqual({
       name: "Name",
       type: "text",

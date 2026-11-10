@@ -74,8 +74,9 @@ function keptColors(
 }
 
 /**
- * Replaces a select or multi-select field's options and their colors. Without
- * `colors`, options keep the colors they had. Other fields pass through.
+ * Replaces a select or multi-select field's options. `colors` holds the colors
+ * someone chose; other options keep the colors they have. Other fields pass
+ * through.
  */
 export function setFieldOptions(
   schema: CollectionSchema,
@@ -88,7 +89,7 @@ export function setFieldOptions(
     fields: schema.fields.map((field) => {
       if (field.name !== name || (field.type !== "select" && field.type !== "multi-select")) return field;
       const { colors: _previous, ...rest } = field;
-      return { ...rest, options, ...keptColors(options, colors ?? field.colors) };
+      return { ...rest, options, ...keptColors(options, { ...field.colors, ...colors }) };
     }),
   };
 }

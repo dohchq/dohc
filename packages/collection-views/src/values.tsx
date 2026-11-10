@@ -6,12 +6,12 @@ import {
   List,
   ListChecks,
   MousePointerClick,
+  Paperclip,
   Type,
   User,
 } from "lucide-react";
 import {
   chosenOptionColor,
-  type CollectionFieldType,
   type FieldDefinition,
   type OptionColor,
 } from "@dohc/workspace-contracts";
@@ -101,19 +101,12 @@ export function shortDate(value: string, today: Date = new Date()): string {
   return Number(year) === today.getFullYear() ? text : `${text}, ${year}`;
 }
 
-/** A stored date before today, compared as calendar days. */
-export function isPastDate(value: string, today: Date = new Date()): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return false;
-  const local = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-  return value < local;
-}
-
+/** A field type's icon. Dataset fields add types such as attachment. */
 export function FieldTypeIcon({
   type,
-  className = "shrink-0 text-subtle",
+  className = "shrink-0 text-muted",
 }: {
-  type: CollectionFieldType;
+  type: string;
   className?: string;
 }) {
   const Icon = type === "number" ? Hash
@@ -121,6 +114,7 @@ export function FieldTypeIcon({
     : type === "checkbox" ? CheckSquare
     : type === "select" ? List
     : type === "multi-select" ? ListChecks
+    : type === "attachment" ? Paperclip
     : type === "relation" || type === "url" ? Link
     : type === "person" ? User
     : type === "button" ? MousePointerClick

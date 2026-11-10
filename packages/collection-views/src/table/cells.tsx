@@ -8,7 +8,7 @@ import type {
 import type { CollectionQueryExecutor } from "../store";
 import { useAcknowledgedSelection } from "../useAcknowledgedSelection";
 import { RelationPicker } from "../relation/RelationPicker";
-import { isPastDate, OptionPill, optionColor, PersonChip, shortDate } from "../values";
+import { OptionPill, optionColor, PersonChip, shortDate } from "../values";
 
 export interface FieldCellProps {
   field: FieldDefinition;
@@ -515,7 +515,7 @@ export function FieldValue({
     }
     case "date": {
       const date = asText(value);
-      return <span className={`truncate text-[13px] ${isPastDate(date) ? "text-danger" : ""}`}>{shortDate(date)}</span>;
+      return <span className="truncate text-[13px]">{shortDate(date)}</span>;
     }
     case "number":
       return <span className="ml-auto truncate text-[13px] tabular-nums">{asText(value)}</span>;

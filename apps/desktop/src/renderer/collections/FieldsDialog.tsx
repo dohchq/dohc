@@ -77,8 +77,8 @@ export function FieldsDialog(props: {
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [editOptions, setEditOptions] = useState("");
-  // Colors chosen while editing, by option. Options without one keep the
-  // color their name picks.
+  // Colors chosen while editing, by option. Saving lays them over the colors
+  // in the file then, so a color someone else set meanwhile stays.
   const [editColors, setEditColors] = useState<Record<string, OptionColor>>({});
   const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft("", props.addType));
   const { pending, error, setError, run } = useSchemaRun(props.apply);
@@ -92,7 +92,7 @@ export function FieldsDialog(props: {
     }
     setEditing(name);
     setEditOptions(field.options.join(", "));
-    setEditColors({ ...field.colors });
+    setEditColors({});
     setError(null);
   }
 

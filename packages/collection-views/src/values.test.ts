@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPastDate, optionColor, shortDate } from "./values";
+import { optionColor, shortDate } from "./values";
 
 describe("shortDate", () => {
   const today = new Date(2026, 10, 10);
@@ -13,14 +13,6 @@ describe("shortDate", () => {
   });
 });
 
-describe("isPastDate", () => {
-  const today = new Date(2026, 10, 10, 23, 30);
-  it("compares calendar days in local time", () => {
-    expect(isPastDate("2026-11-09", today)).toBe(true);
-    expect(isPastDate("2026-11-10", today)).toBe(false);
-    expect(isPastDate("not a date", today)).toBe(false);
-  });
-});
 
 describe("optionColor", () => {
   it("uses the chosen color, and an own key only", () => {

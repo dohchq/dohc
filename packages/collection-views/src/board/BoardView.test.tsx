@@ -227,6 +227,14 @@ describe("BoardView", () => {
     expect(screen.queryByRole("dialog", { name: "doing options" })).toBeNull();
   });
 
+  it("closes a column's menu when focus leaves it", () => {
+    render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" onOptionColorChange={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "doing options" }));
+    const menu = screen.getByRole("dialog", { name: "doing options" });
+    fireEvent.blur(within(menu).getAllByRole("radio")[0]!, { relatedTarget: document.body });
+    expect(screen.queryByRole("dialog", { name: "doing options" })).toBeNull();
+  });
+
   it("adds a record with the column's value", () => {
     const onNewRecord = vi.fn();
     render(
