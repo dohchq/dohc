@@ -27,11 +27,18 @@ export function initializeAutomationWorkspaceSchema(db: SqliteDb): void {
       unwanted_since_ms INTEGER CHECK (unwanted_since_ms IS NULL OR unwanted_since_ms BETWEEN 0 AND 9007199254740991),
       left_at_ms INTEGER CHECK (left_at_ms IS NULL OR left_at_ms BETWEEN 0 AND 9007199254740991)
     ) STRICT;
-    CREATE TABLE IF NOT EXISTS sync_relay_automation_workspace_reasons (
+  `);
+  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_automation_workspace_reasons'").get()) return;
+  // Every row written before copies had reasons was made for automations,
+  // so it keeps its hold for Undo and run history.
+  db.exec(`
+    CREATE TABLE sync_relay_automation_workspace_reasons (
       workspace_id TEXT NOT NULL REFERENCES sync_relay_automation_workspaces(workspace_id) ON DELETE CASCADE,
       reason TEXT NOT NULL CHECK (reason IN ('automation', 'account')),
       PRIMARY KEY (workspace_id, reason)
     ) STRICT;
+    INSERT INTO sync_relay_automation_workspace_reasons (workspace_id, reason)
+      SELECT workspace_id, 'automation' FROM sync_relay_automation_workspaces;
   `);
 }
 

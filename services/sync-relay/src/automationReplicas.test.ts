@@ -1278,6 +1278,42 @@ describe("the automation replicas", () => {
     expect(folders(root)).toHaveLength(1);
   });
 
+  it("keeps the 30-day hold of copies a relay made before copies had reasons", async () => {
+    const { storage, raw } = await relay();
+    storage.claimWorkspace({ workspaceId: "ledger", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "ledger", replicationEpoch: "epoch", streamIdentity: "stream" });
+    fakeEngine();
+    const clock = { ms: 0 };
+    let wanted = [WORKSPACE, "ledger"];
+    const { replicas: before, root } = await replicas(storage, () => wanted, clock);
+    // The workspace's automations moved to a computer: its copy leaves, and is retained.
+    wanted = ["ledger"];
+    before.reconcile(); await before.settled();
+    clock.ms = AUTOMATION_WORKSPACE_LEAVE_AFTER_MS;
+    before.reconcile(); await before.settled();
+    await before.close();
+    expect(folders(root)).toHaveLength(2);
+    const path = storagePath(storage);
+    closeTestStorage(storage);
+    // The store as the previous schema left it: the rows, and no reasons.
+    raw.exec("DROP TABLE sync_relay_automation_workspace_reasons");
+    expect(raw.prepare("SELECT workspace_id, left_at_ms FROM sync_relay_automation_workspaces ORDER BY workspace_id").all())
+      .toEqual([{ workspace_id: "ledger", left_at_ms: null }, { workspace_id: WORKSPACE, left_at_ms: AUTOMATION_WORKSPACE_LEAVE_AFTER_MS }]);
+
+    const upgraded = reopenTestStorage(path);
+    expect(upgraded.listAutomationWorkspaces().map(row => [row.workspaceId, row.reasons]))
+      .toEqual([["ledger", ["automation"]], [WORKSPACE, ["automation"]]]);
+    clock.ms = AUTOMATION_WORKSPACE_LEAVE_AFTER_MS + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS - 1;
+    const after = await start(upgraded, { root, wanted: () => ["ledger"], nowMs: () => clock.ms });
+    await after.settled();
+    expect(folders(root), "the retired copy keeps its hold").toHaveLength(2);
+    expect(upgraded.listAutomationWorkspaces()).toHaveLength(2);
+    clock.ms += 1;
+    after.reconcile(); await after.settled();
+    expect(upgraded.listAutomationWorkspaces().map(row => row.workspaceId)).toEqual(["ledger"]);
+    expect(folders(root)).toHaveLength(1);
+  });
+
   it("tells its listener when an open account copy comes to be kept for automations", async () => {
     const { storage } = await relay();
     fakeEngine();
