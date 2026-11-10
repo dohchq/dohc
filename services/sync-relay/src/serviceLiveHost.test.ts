@@ -6031,9 +6031,9 @@ it("captures a note whose validation was busy again only once a slot may be free
   expect(waits.map(signal => signal?.aborted)).toEqual([false]);
   busy = false;
   free.resolve();
-  await vi.waitFor(() => expect(o.host.blocked(plainNote)).toBe("refused"), {timeout: 5_000});
+  // This fixture's engine captures the sibling's source for the note, so the refusal names no base and only fails the pass.
+  await vi.waitFor(() => expect(validations).toEqual(["retry", "refused"]), {timeout: 5_000});
   expect(o.captures()).toBe(captured + 1);
-  expect(validations).toEqual(["retry", "refused"]);
 });
 
 // Issue #1967: a first open asked again at its deadline only if a 250 ms pass happened to run after it.
