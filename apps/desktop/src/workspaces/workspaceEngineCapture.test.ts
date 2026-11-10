@@ -3913,6 +3913,52 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  // A page that turns folder `d` into a file deletes everything under `d`
+  // first, then writes `d`. The deletes leave folders behind, and a rename
+  // can't put a file in a folder's place.
+  it("writes a file where a page's deletes emptied a folder", async () => {
+    const root = await createTestScratch("relay-folder-to-file-");
+    await write(root, "d/a.md", "a\n");
+    await write(root, "d/sub/b.md", "b\n");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "d/a.md", text: "a\n", origin: "sync" });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "d/sub/b.md", text: "b\n", origin: "sync" });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "d", text: "now a file\n", origin: "sync" });
+    const engine = liveCapture(root, loopback);
+    const commit = vi.fn(async () => undefined);
+    try {
+      await engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: [
+        { versionId: "main", path: "d/a.md", operation: "delete", contentKind: "text" },
+        { versionId: "main", path: "d/sub/b.md", operation: "delete", contentKind: "text" },
+        { versionId: "main", path: "d", operation: "write", contentKind: "text" },
+      ] }, commit));
+      expect(commit).toHaveBeenCalledOnce();
+      expect(await readFile(join(root, "d"), "utf8")).toBe("now a file\n");
+    } finally { await engine.stop(); }
+  });
+
+  // dohc removes a folder only when nothing but empty folders is left in it.
+  // A file it doesn't track keeps the folder, so the page stops there.
+  it("keeps a folder that still holds a file dohc doesn't track", async () => {
+    const root = await createTestScratch("relay-folder-to-file-kept-");
+    await write(root, "d/a.md", "a\n");
+    await write(root, "d/sub/untracked.txt", "mine\n");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "d/a.md", text: "a\n", origin: "sync" });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path: "d", text: "now a file\n", origin: "sync" });
+    const engine = liveCapture(root, loopback, { onError: () => undefined });
+    const commit = vi.fn(async () => undefined);
+    try {
+      await expect(engine.runRelaySync(page => deliverRelayPage(page, { fastForwardedPaths: [
+        { versionId: "main", path: "d/a.md", operation: "delete", contentKind: "text" },
+        { versionId: "main", path: "d", operation: "write", contentKind: "text" },
+      ] }, commit))).rejects.toThrow(/Could not update d on disk/);
+      expect(commit).not.toHaveBeenCalled();
+      expect(await readFile(join(root, "d/sub/untracked.txt"), "utf8")).toBe("mine\n");
+      expect(await readdir(join(root, "d"))).toEqual(["sub"]);
+    } finally { await engine.stop(); }
+  });
+
   it.each([false, true])("reports a successful copy after the disk write even when the write fails=%s or reporting throws", async diskFails => {
     const root = await createTestScratch("relay-copy-report-");
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
@@ -4305,7 +4351,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     );
 
     await rm(join(root, ".env"), { force: true });
-    await mkdir(join(root, ".env"));
+    await write(root, ".env/keep.txt", "mine\n");
     const commit = vi.fn(async () => {});
     const replay = () => ({
       fastForwardedPaths: [
@@ -4405,8 +4451,8 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       origin: "sync",
     });
 
-    // Block materialization: a directory squats on the file path.
-    await mkdir(join(root, "notes/remote.md"), { recursive: true });
+    // Block materialization: a folder that holds a file squats on the path.
+    await write(root, "notes/remote.md/keep.txt", "mine\n");
     const commit = vi.fn(async () => {});
     const pullResult = () => ({
       fastForwardedPaths: [
