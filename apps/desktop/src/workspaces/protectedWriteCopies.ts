@@ -3,6 +3,7 @@ import { readFile, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { atomicWriteFile } from "../atomicReplaceFile";
+import { PROTECTED_COPY_FINAL_ERROR } from "../ipc/errorWords";
 import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
 
 // Text of a protected file that a sync was about to replace and History did
@@ -12,7 +13,7 @@ import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalStat
 export const PROTECTED_COPIES_PATH = ".dohc/local/protected-copies";
 // The engine's MAX_SECRET_FILE_BYTES: protected History holds nothing larger.
 export const MAX_PROTECTED_HISTORY_BYTES = 1024 * 1024;
-const guard = { path: PROTECTED_COPIES_PATH, lead: "dohc could not keep a copy of a protected file, so it left the file as it was." };
+const guard = { path: PROTECTED_COPIES_PATH, lead: "dohc could not open the folder where it keeps changes to protected files." };
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const COPY_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
 // atomicWriteFile's temp name, left behind when dohc stopped mid-write.
@@ -32,14 +33,19 @@ export type ProtectedCopyRow = [path: string, id: string, keptAtMs: number];
 export class ProtectedCopyReadError extends Error {
   override name = "ProtectedCopyReadError";
   constructor(readonly path: string) {
-    super(`Could not read ${path}`);
+    super(`dohc could not read ${path}.`);
   }
+}
+
+// The copy is gone or too large, so the same Restore or Discard always fails.
+export class ProtectedCopyFinalError extends Error {
+  override name = PROTECTED_COPY_FINAL_ERROR;
 }
 
 export class ProtectedCopyIdError extends Error {
   override name = "ProtectedCopyIdError";
   constructor() {
-    super("That kept copy id is not valid.");
+    super("That protected copy id is not valid.");
   }
 }
 

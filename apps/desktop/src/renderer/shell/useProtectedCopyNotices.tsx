@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
+import { isProtectedCopyFinal } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
+import { ipcErrorMessage } from "../ipcError";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import type { useShellError } from "./useShellError";
 
@@ -9,30 +11,12 @@ type ProtectedCopyRow = readonly [path: string, id: string, keptAtMs: number];
 const identityOf = (id: string) => `protected-copy:${id}`;
 const READ_ERROR_IDENTITY = "protected-copy-list";
 
-// Rows the person dismissed stay dismissed after a restart. The copy itself
-// stays until Restore or Discard.
-function dismissedKey(workspaceId: string): string {
-  return `dohc:protected-copies-dismissed:${workspaceId}`;
-}
-
-function readDismissed(workspaceId: string): Set<string> {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(dismissedKey(workspaceId)) ?? "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function writeDismissed(workspaceId: string, ids: ReadonlySet<string>): void {
-  try { localStorage.setItem(dismissedKey(workspaceId), JSON.stringify([...ids])); } catch { /* Keep this run's rows. */ }
-}
-
 /**
- * One Notices row for each change to a protected file that a sync replaced,
- * which dohc kept on this computer. Restore writes it back as a new change in
- * History; Discard removes it for good after a warning. Rows name paths only,
- * never the kept text.
+ * One Notices row for each change to a protected file that a sync replaced or
+ * deleted, which dohc kept on this computer. Restore writes it back as a new
+ * change in History; Discard removes it for good after a warning. Rows name
+ * paths only, never the kept text. A row has no Dismiss while its copy is
+ * listed, because it is the only way back to the copy.
  */
 export function useProtectedCopyNotices(input: {
   workspaceId: string;
@@ -64,9 +48,9 @@ export function useProtectedCopyNotices(input: {
     }, (error: unknown) => {
       if (currentWorkspace.current !== asked) return;
       latest.current.reportShellFailure({
-        message: `dohc could not restore your change to ${path}.`,
+        message: ipcErrorMessage(error, `dohc could not restore your change to ${path}.`),
         cause: error,
-        retry: () => restore(asked, path, id),
+        retry: isProtectedCopyFinal(error) ? null : () => restore(asked, path, id),
       });
     });
   };
@@ -78,9 +62,9 @@ export function useProtectedCopyNotices(input: {
     }, (error: unknown) => {
       if (currentWorkspace.current !== asked) return;
       latest.current.reportShellFailure({
-        message: `dohc could not discard your change to ${path}.`,
+        message: ipcErrorMessage(error, `dohc could not discard your change to ${path}.`),
         cause: error,
-        retry: () => setDiscarding({ workspaceId: asked, path, id }),
+        retry: isProtectedCopyFinal(error) ? null : () => setDiscarding({ workspaceId: asked, path, id }),
       });
     });
   };
@@ -95,28 +79,21 @@ export function useProtectedCopyNotices(input: {
       shown.current.delete(id);
       clearIdentity(identityOf(id));
     }
-    const dismissed = readDismissed(workspaceId);
-    const stillDismissed = new Set([...dismissed].filter((id) => listed.has(id)));
-    if (stillDismissed.size !== dismissed.size) writeDismissed(workspaceId, stillDismissed);
     for (const [path, id] of copies) {
-      if (shown.current.has(id) || stillDismissed.has(id)) continue;
+      if (shown.current.has(id)) continue;
       shown.current.add(id);
       reportShellFailure({
         identity: identityOf(id),
         tone: "warning",
         title: `Kept your change to ${path}`,
-        message: `A sync replaced ${path}. Your version is kept on this computer only.`,
+        message: "A sync replaced or deleted this file before dohc saved your change to History. Until you restore it, your change is only on this computer.",
         retry: null,
+        noDismiss: true,
         target: { to: "file", path },
         action: {
           label: "Restore",
           run: () => restoreRef.current(workspaceId, path, id),
           additional: [{ label: "Discard", run: () => setDiscarding({ workspaceId, path, id }) }],
-        },
-        onDismiss: () => {
-          const now = readDismissed(workspaceId);
-          now.add(id);
-          writeDismissed(workspaceId, now);
         },
       });
     }
@@ -130,18 +107,18 @@ export function useProtectedCopyNotices(input: {
       identity: READ_ERROR_IDENTITY,
       kind: "protected-copy-read",
       title: "dohc could not list every kept change",
-      message: "A kept change to a protected file could not be read. It stays on this computer, in the file Copy details names.",
+      message: "dohc could not read a kept change to a protected file. It stays in .dohc/local/protected-copies on this computer.",
       details: [["Cause", readError]],
       retry: retryRead,
     });
   }, [readError, retryRead, reportShellFailure, clearIdentity]);
 
   return discarding && discarding.workspaceId === workspaceId ? (
-    <ConfirmDialog intent="danger" icon={Trash2} title="Discard your change?" confirmLabel="Discard your change"
+    <ConfirmDialog intent="danger" icon={Trash2} title={`Discard your change to ${discarding.path}?`} confirmLabel="Discard change"
       testId="protected-discard-dialog" cancelTestId="protected-discard-cancel" confirmTestId="protected-discard-confirm"
       onCancel={() => setDiscarding(null)}
       onConfirm={() => { setDiscarding(null); discard(discarding.workspaceId, discarding.path, discarding.id); }}>
-      <p>This removes your kept change to "{discarding.path}" from this computer. It was never in History, so it cannot be brought back.</p>
+      <p>Your change is only on this computer, and History never held it. This cannot be undone.</p>
     </ConfirmDialog>
   ) : null;
 }

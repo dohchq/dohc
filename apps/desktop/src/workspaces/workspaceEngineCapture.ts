@@ -102,7 +102,7 @@ import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
-import { MAX_PROTECTED_HISTORY_BYTES, PROTECTED_COPIES_PATH, protectedWriteCopies, type ProtectedCopyRow } from "./protectedWriteCopies";
+import { MAX_PROTECTED_HISTORY_BYTES, PROTECTED_COPIES_PATH, ProtectedCopyFinalError, protectedWriteCopies, type ProtectedCopyRow } from "./protectedWriteCopies";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { createFile } from "./workspaceFiles";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
@@ -7307,17 +7307,17 @@ export function createWorkspaceEngineCapture(
     restoreProtectedCopy(id, restoredBy = "you") {
       return enqueueResult("restore protected copy", async () => {
         const copy = await protectedCopies.read(id);
-        if (copy === null) throw new Error("This kept change is no longer available.");
+        if (copy === null) throw new ProtectedCopyFinalError("This kept change is no longer available.");
         const { path } = copy;
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy, { protected: true });
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         if (copy.versionId !== activeVersionId) {
-          throw new Error("This moment belongs to a different version. Switch to that version to restore it.");
+          throw new Error("This change was kept in a different version. Switch to that version to restore it.");
         }
         if (Buffer.byteLength(copy.text) > MAX_PROTECTED_HISTORY_BYTES) {
-          throw new Error(`dohc could not restore ${path}. Protected files can be up to 1 MB.`);
+          throw new ProtectedCopyFinalError(`dohc could not restore ${path}. Your change is over the 1 MB limit for protected files.`);
         }
         await engine.flushCapture?.();
         const secrets = secretStoreFor();
@@ -7325,9 +7325,9 @@ export function createWorkspaceEngineCapture(
         // Save what is on disk first, so Restore never loses an edit
         // capture has not saved yet, and History can bring it back.
         const disk = await readDiskSecretState(rootPath, path);
-        if (disk.kind === "unreadable") throw new Error(`Could not read the current ${path} on disk.`);
+        if (disk.kind === "unreadable") throw new Error(`dohc could not read ${path} on disk.`);
         if (disk.kind === "untracked-content") {
-          throw new Error(`Only text files can be restored — ${path} is no longer a text file.`);
+          throw new Error(`dohc could not restore ${path}. It must save what is there now first, and cannot save that item. Move the item to another folder, then try again.`);
         }
         const saved = { origin: "local-file" as const, summary: "Saved latest edits", correlationId };
         if (disk.kind === "text") {
@@ -7360,7 +7360,7 @@ export function createWorkspaceEngineCapture(
     discardProtectedCopy(id) {
       return enqueueResult("discard protected copy", async () => {
         const row = (await protectedCopies.list()).find(([, copyId]) => copyId === id);
-        if (!(await protectedCopies.remove(id))) throw new Error("This kept change is no longer available.");
+        if (!(await protectedCopies.remove(id))) throw new ProtectedCopyFinalError("This kept change is no longer available.");
         await reportProtectedCopies();
         return { path: row?.[0] ?? `${PROTECTED_COPIES_PATH}/${id}.json`, status: "discarded" as const };
       });
