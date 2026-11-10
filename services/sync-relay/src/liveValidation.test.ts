@@ -69,7 +69,15 @@ it.each(Object.entries(validations))("routes %s validation through a capped chil
   await validate(f, f.input.checkpoint);
 }, 60_000);
 
-
+it("accepts 5000 mixed paragraphs under the production worker limits", async () => {
+  const {pool, input} = fixture();
+  const doc = markdownToYDoc(Array.from({length: 5000}, (_, index) =>
+    `Paragraph ${index} **bold** *italic* \`code\` [link](https://example.com).`).join("\n\n"));
+  try {
+    expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint: encodeStateAsUpdate(doc)}))
+      .toMatchObject({kind: "accepted"});
+  } finally {doc.destroy();}
+}, 60_000);
 
 it.each([18, 19])("returns checkpoint state only when %s large suffix updates and the candidate reach the byte limit", async suffixCount => {
   const {pool, input} = fixture();
