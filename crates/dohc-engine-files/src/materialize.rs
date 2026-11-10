@@ -15,6 +15,8 @@
 //!    attributes a save keeps. When the full mode could give someone else
 //!    more access, because the group or the ACL did not carry over, the temp
 //!    takes only the owner's bits. A temp for a new file follows the umask.
+//!    On Windows a temp is created with the DACL of the file it replaces,
+//!    secret or not, and a new file's temp takes its folder's entries.
 //! 3. **Flush** per the per-OS [`DurabilityPolicy`], through
 //!    [`EngineStore::flush_before_commits`], so the file persists before the
 //!    job's status.
@@ -847,6 +849,10 @@ pub enum MaterializeError {
         "this volume adds sharing permissions to new files, so dohc can't keep this file private"
     )]
     VolumeSharesNewFiles,
+    /// The file being replaced has access of its own that dohc couldn't
+    /// read, so the new version can't keep it. Nothing is written.
+    #[error("dohc couldn't read this file's permissions, so it didn't replace the file")]
+    PermissionsNotKept,
 }
 
 impl MaterializeError {
@@ -876,6 +882,7 @@ impl MaterializeError {
             MaterializeError::RecoveryUnavailable => "recovery-unavailable",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
             MaterializeError::VolumeSharesNewFiles => "volume-shares-new-files",
+            MaterializeError::PermissionsNotKept => "permissions-not-kept",
         }
     }
 }
@@ -1513,7 +1520,7 @@ fn materialize_secret_write(
         .file_name()
         .ok_or(MaterializeError::UnsafeTargetPath)?
         .to_os_string();
-    let temp_file = parent.write_temp(tmp_name.as_os_str(), &tmp, content)?;
+    let temp_file = parent.write_temp(target, tmp_name.as_os_str(), &tmp, content)?;
     // A secret write never preserves a plaintext temp on a returned error.
     let mut secret_temp_cleanup = SecretPlaintextTempCleanup {
         path: &tmp,
@@ -4954,14 +4961,18 @@ impl SecretParentGuard {
         }
     }
 
+    /// Write the temp named `name` that replaces `target`. On Unix it is
+    /// owner-only; on Windows it takes the DACL of the file at `target`.
     fn write_temp(
         &self,
+        target: &Path,
         name: &OsStr,
         display_path: &Path,
         content: &[u8],
     ) -> Result<std::fs::File, MaterializeError> {
         #[cfg(unix)]
         {
+            let _ = target;
             write_temp_at_unix(
                 &self.parent_fd,
                 name,
@@ -4974,7 +4985,7 @@ impl SecretParentGuard {
         #[cfg(not(unix))]
         {
             let _ = name;
-            write_secret_temp_no_follow(display_path, content)
+            write_temp_no_follow(target, display_path, content)
         }
     }
 
@@ -5682,8 +5693,9 @@ fn filesystem_job_component(id: &str) -> String {
 /// named `temp_name` beside it takes the file's access as a job's temp does,
 /// is flushed and renamed over it, then the folder is flushed. On macOS the
 /// temp for a file that exists, or for a secret, takes none of the folder's
-/// inherited ACL entries; a new ordinary file takes them, as a job's does. A
-/// temp a stopped write left at that name is removed first.
+/// inherited ACL entries; a new ordinary file takes them, as a job's does. On
+/// Windows the temp takes the file's DACL. A temp a stopped write left at
+/// that name is removed first.
 pub fn replace_file_whole(
     root: &Path,
     rel: &str,
@@ -5720,8 +5732,9 @@ pub fn replace_file_whole(
     Ok(())
 }
 
-/// Write an ordinary job's temp beside `target`, which it will replace. An
-/// `owner_only` temp is 0600 whatever the target allows.
+/// Write an ordinary job's temp beside `target`, which it will replace. On
+/// Unix an `owner_only` temp is 0600 whatever the target allows. On Windows
+/// the temp takes the target's DACL either way.
 fn write_temp(
     target: &Path,
     tmp: &Path,
@@ -5749,29 +5762,38 @@ fn write_temp(
     }
     #[cfg(not(unix))]
     {
-        let _ = (target, owner_only);
-        write_secret_temp_no_follow(tmp, content)
+        let _ = owner_only;
+        write_temp_no_follow(target, tmp, content)
     }
 }
 
-/// Create a secret plaintext temp as a brand-new, non-following filesystem
-/// entry. A stale regular temp is unlinked and exclusive creation is retried
-/// once; a symlink, junction, or other reparse point is refused.
+/// Create `tmp`, the temp that replaces `target`, as a brand-new entry no
+/// link redirects, and write `content`. On Windows it is created with the
+/// DACL of the file at `target`, so the new version keeps access someone set
+/// on that file; a file whose DACL can't be read refuses the write. A stale
+/// regular temp is unlinked and exclusive creation is retried once; a
+/// symlink, junction, or other reparse point is refused.
 #[cfg(not(unix))]
-fn write_secret_temp_no_follow(
+fn write_temp_no_follow(
+    target: &Path,
     tmp: &Path,
     content: &[u8],
 ) -> Result<std::fs::File, MaterializeError> {
     use std::io::Write as _;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
     #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let mut file = match opts.open(tmp) {
+    let dacl = dohc_windows_files::Dacl::of_file_at(target)
+        .map_err(|_| MaterializeError::PermissionsNotKept)?;
+    #[cfg(windows)]
+    let create = || dohc_windows_files::create_new_with_dacl(tmp, dacl.as_ref());
+    #[cfg(not(windows))]
+    let create = || {
+        let _ = target;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
+    };
+    let mut file = match create() {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::AlreadyExists => {
             let metadata = std::fs::symlink_metadata(tmp)
@@ -5784,8 +5806,7 @@ fn write_secret_temp_no_follow(
             }
             std::fs::remove_file(tmp)
                 .map_err(|remove_err| MaterializeError::io(tmp, &remove_err))?;
-            opts.open(tmp)
-                .map_err(|retry_err| MaterializeError::io(tmp, &retry_err))?
+            create().map_err(|retry_err| MaterializeError::io(tmp, &retry_err))?
         }
         Err(err) => return Err(MaterializeError::io(tmp, &err)),
     };
