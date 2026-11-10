@@ -64,7 +64,7 @@ test('network instructions restrict Cloudflare origins without changing direct o
       for (const enabled of ['0', '1']) {
         writeFileSync(envFile, Object.entries({ ...settings(), DOHC_SERVER_NETWORK_ACCESS: mode, DOHC_BEHIND_CLOUDFLARE: enabled })
           .map(([key, value]) => key + '=' + value).join('\n'));
-        const result = spawnSync(process.execPath, ['tools/self-host/bootstrap.mjs', 'network', '--env-file', envFile], { encoding: 'utf8' });
+        const result = spawnSync(process.execPath, ['tools/self-host/bootstrap.mjs', 'network', '--env-path', envFile], { encoding: 'utf8' });
         assert.equal(result.status, 0, result.stderr);
         if (mode === 'private') assert.match(result.stdout, /tailscale serve/);
         else if (enabled === '1') {

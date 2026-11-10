@@ -3,8 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { composeArgs, deploymentChecks, readSettings, startupWaitSeconds, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
 
-const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-start': { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
-const envFile = values['env-file'];
+const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-start': { type: 'boolean' }, running: { type: 'boolean' }, 'env-path': { type: 'string', default: '.env.self-host' } } });
+const envFile = values['env-path'];
 const docker = args => spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 const checks = [];
 console.log('Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled. Replicas are disabled by default.');

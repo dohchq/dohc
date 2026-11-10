@@ -6,7 +6,7 @@ import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, describeWri
   storageWriters } from "../../tools/self-host/config.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const usage = `node scripts/self-host/move.mjs [--env-file PATH]
+const usage = `node scripts/self-host/move.mjs [--env-path PATH]
 
 Starts this deployment on a new host from its attached data disk, then checks it.
 Stop the old server first and make sure it cannot start again.
@@ -25,7 +25,7 @@ function spawn(command, args) {
 
 export function parseMoveArguments(args) {
   const options = { envFile: resolve(root, ".env.self-host") };
-  if (args.length === 2 && args[0] === "--env-file" && args[1] && !args[1].startsWith("--")) options.envFile = resolve(args[1]);
+  if (args.length === 2 && args[0] === "--env-path" && args[1] && !args[1].startsWith("--")) options.envFile = resolve(args[1]);
   else if (args.length) throw new Error(usage);
   return options;
 }
@@ -50,7 +50,7 @@ export function runMove(options, run = spawn, log = console.log) {
   const problem = accountsDatabaseError(options.envFile, settings, config, docker) || relayDeploymentError(options.envFile, settings, docker, false);
   if (problem) throw new Error(problem);
   log("Found the accounts database and the relay deployment. Starting the deployment.");
-  if (run(process.execPath, ["scripts/check-self-host.mjs", "--start", "--env-file", options.envFile]).status !== 0) {
+  if (run(process.execPath, ["scripts/check-self-host.mjs", "--start", "--env-path", options.envFile]).status !== 0) {
     throw new Error("The deployment did not pass its checks. Keep the old server stopped and inspect the reported service error.");
   }
 }

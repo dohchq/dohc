@@ -9,7 +9,7 @@ import { archiveDeployment } from "./archive.mjs";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const usage = `node scripts/self-host/recovery.mjs <backup|check-backup|restore|archive|snapshot> <directory>
 node scripts/self-host/recovery.mjs verify <new-directory> --snapshot FILE
-  [--env-file PATH] [--compose-file PATH] [--project-name NAME]
+  [--env-path PATH] [--compose-file PATH] [--project-name NAME]
 
 Snapshot saves an encrypted relay snapshot of the running deployment in the directory without stopping it.
 Verify decrypts a snapshot with DOHC_SNAPSHOT_KEY and checks it. The new directory receives unencrypted relay data.
@@ -39,7 +39,7 @@ export function parseRecoveryArguments(args) {
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index], value = rest[index + 1];
     if (!value || value.startsWith("--")) throw new Error(usage);
-    if (flag === "--env-file") options.envFile = resolve(value);
+    if (flag === "--env-path") options.envFile = resolve(value);
     else if (flag === "--compose-file") options.composeFiles.push(resolve(value));
     else if (flag === "--project-name" && /^[a-z0-9][a-z0-9_-]*$/.test(value)) options.project = value;
     else if (flag === "--snapshot" && action === "verify" && !options.snapshot) options.snapshot = resolve(value);

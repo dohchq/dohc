@@ -118,37 +118,37 @@ const assertSafe = calls => {
 };
 
 test("arguments need a command, the bundle, the configuration and the volume's filesystem UUID", () => {
-  assert.deepEqual(parseDriveArguments(["move", "--bundle", "/srv/dohc-release/", "--env-file", envFile, "--volume-uuid", uuid]),
+  assert.deepEqual(parseDriveArguments(["move", "--bundle", "/srv/dohc-release/", "--env-path", envFile, "--volume-uuid", uuid]),
     { command: "move", bundle, envFile, volumeUuid: uuid, firstStart: false });
-  assert.equal(parseDriveArguments(["start", "--first-start", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid]).firstStart, true);
-  for (const args of [[], ["check"], ["check", "--bundle", bundle, "--env-file", envFile], ["status", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid],
-    ["check", "move", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid], ["check", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid, "--force"]]) {
+  assert.equal(parseDriveArguments(["start", "--first-start", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid]).firstStart, true);
+  for (const args of [[], ["check"], ["check", "--bundle", bundle, "--env-path", envFile], ["status", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid],
+    ["check", "move", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid], ["check", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid, "--force"]]) {
     assert.throws(() => parseDriveArguments(args), /check\|start\|move --bundle DIR/, args.join(" "));
   }
   for (const value of ["0F3C9A52-6D1E-4B7A-9C2D-5E8F1A2B3C4D", "/dev/sda", "0f3c9a52", `${uuid} `]) {
-    assert.throws(() => parseDriveArguments(["check", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", value]), /lowercase filesystem UUID/, value);
+    assert.throws(() => parseDriveArguments(["check", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", value]), /lowercase filesystem UUID/, value);
   }
   for (const command of ["check", "move"]) {
-    assert.throws(() => parseDriveArguments([command, "--first-start", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid]), /only with start/);
+    assert.throws(() => parseDriveArguments([command, "--first-start", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid]), /only with start/);
   }
 });
 
 test("disk-watch needs the configuration and the volume's UUID, takes a limit from 1 to 99 percent, and no bundle", () => {
-  assert.deepEqual(parseDriveArguments(["disk-watch", "--env-file", envFile, "--volume-uuid", uuid]), { command: "disk-watch", envFile, volumeUuid: uuid, limit: 70 });
-  assert.equal(parseDriveArguments(["disk-watch", "--env-file", envFile, "--volume-uuid", uuid, "--limit", "1"]).limit, 1);
-  for (const args of [["disk-watch", "--env-file", envFile], ["disk-watch", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid]]) {
-    assert.throws(() => parseDriveArguments(args), /disk-watch --env-file PATH/, args.join(" "));
+  assert.deepEqual(parseDriveArguments(["disk-watch", "--env-path", envFile, "--volume-uuid", uuid]), { command: "disk-watch", envFile, volumeUuid: uuid, limit: 70 });
+  assert.equal(parseDriveArguments(["disk-watch", "--env-path", envFile, "--volume-uuid", uuid, "--limit", "1"]).limit, 1);
+  for (const args of [["disk-watch", "--env-path", envFile], ["disk-watch", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid]]) {
+    assert.throws(() => parseDriveArguments(args), /disk-watch --env-path PATH/, args.join(" "));
   }
   for (const value of ["0", "100", "70.5", "07", ""]) {
-    assert.throws(() => parseDriveArguments(["disk-watch", "--env-file", envFile, "--volume-uuid", uuid, "--limit", value]), /from 1 to 99/, value);
+    assert.throws(() => parseDriveArguments(["disk-watch", "--env-path", envFile, "--volume-uuid", uuid, "--limit", value]), /from 1 to 99/, value);
   }
-  assert.throws(() => parseDriveArguments(["check", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid, "--limit", "50"]), /only with disk-watch/);
+  assert.throws(() => parseDriveArguments(["check", "--bundle", bundle, "--env-path", envFile, "--volume-uuid", uuid, "--limit", "50"]), /only with disk-watch/);
 });
 
 test("check delegates to the release check with the same configuration and mounts nothing", async () => {
   const { host, calls, output } = driveHost({ child: "[ok] self-host env values\nSelf-host check summary: 9/9 checks passed.\n" });
   await runDrive(options("check"), host);
-  assert.deepEqual(releaseCall(calls), { command: process.execPath, args: ["scripts/check-self-host.mjs", "--env-file", envFile], cwd: bundle });
+  assert.deepEqual(releaseCall(calls), { command: process.execPath, args: ["scripts/check-self-host.mjs", "--env-path", envFile], cwd: bundle });
   assert.deepEqual(calls.map(call => call.command), ["docker", "ip", "blkid", "findmnt", process.execPath]);
   assert.deepEqual(calls[0].args, ["image", "inspect", image]);
   assert.match(output(), new RegExp(`Release ${revision} for linux/amd64, volume ${uuid} at /mnt/drive: checks passed\\.\\n`));
@@ -159,12 +159,12 @@ test("check delegates to the release check with the same configuration and mount
 test("start runs a first start only when asked, and every other start as a normal start", async () => {
   const normal = driveHost();
   await runDrive(options("start"), normal.host);
-  assert.deepEqual(releaseCall(normal.calls).args, ["scripts/check-self-host.mjs", "--start", "--env-file", envFile]);
+  assert.deepEqual(releaseCall(normal.calls).args, ["scripts/check-self-host.mjs", "--start", "--env-path", envFile]);
   assert.doesNotMatch(normal.output(), /First start/);
   assert.ok(!normal.calls.some(accountsCheck));
   const first = driveHost();
   await runDrive(options("start", { firstStart: true }), first.host);
-  assert.deepEqual(releaseCall(first.calls).args, ["scripts/check-self-host.mjs", "--start", "--first-start", "--env-file", envFile]);
+  assert.deepEqual(releaseCall(first.calls).args, ["scripts/check-self-host.mjs", "--start", "--first-start", "--env-path", envFile]);
   assert.ok(first.calls.findIndex(accountsCheck) < first.calls.indexOf(releaseCall(first.calls)));
   assert.match(first.output(), /First start: the release creates a new relay deployment/);
   assertSafe(first.calls);
@@ -189,7 +189,7 @@ test("move mounts the attached volume by UUID, keeps every deployment folder, th
   await runDrive(options("move"), host);
   assert.equal(state.mounted, true);
   assert.deepEqual(calls.find(call => call.command === "mount").args, ["-o", "nodev,nosuid,noexec", `UUID=${uuid}`, "/mnt/drive"]);
-  assert.deepEqual(releaseCall(calls), { command: process.execPath, args: ["scripts/self-host/move.mjs", "--env-file", envFile], cwd: bundle });
+  assert.deepEqual(releaseCall(calls), { command: process.execPath, args: ["scripts/self-host/move.mjs", "--env-path", envFile], cwd: bundle });
   assert.ok(calls.findIndex(call => call.command === "mount") < calls.indexOf(releaseCall(calls)));
   assert.match(output(), new RegExp(`Mounting volume ${uuid} at /mnt/drive\\.`));
   assertSafe(calls);
