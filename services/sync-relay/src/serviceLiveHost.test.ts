@@ -5983,14 +5983,22 @@ const plainNote = {workspaceId: "workspace", objectId: neverOpened.objectId};
 // Proves: with periodic passes held, the base a first open published wakes a pass that pulls the relay,
 // then captures the note again.
 it("pulls and captures a note again once its first open publishes, with no periodic pass", async () => {
-  const polls = heldPolls();
-  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2});
+  const polls = heldPolls(), relayed = deferred<void>();
+  // The relay takes the request only once the passes that start it have ended.
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, answer: async (request, relay) => {await relayed.promise; return relay(request);}});
   // Whether the base was written yet at each pull, and how often the note was captured by then.
   const pulls: {bases: number; captures: number}[] = [];
   o.requestListeners.add(method => {if (method === "sync.pullHosted") pulls.push({bases: o.bases().length, captures: o.captures()});});
   await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  relayed.resolve();
   await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
   await vi.waitFor(() => expect(o.captures()).toBe(2), {timeout: 5_000});
+  expect(passes).toBeGreaterThan(0);
+  expect(polls.early()).toBeGreaterThan(0);
   expect(pulls).toContainEqual({bases: 1, captures: 1});
   expect(o.fetcher).toHaveBeenCalledOnce();
 });
