@@ -2715,7 +2715,8 @@ async function dispatchWorkspace(
       }
 
     case "documentHeld":
-      if (!context.heldChange || context.readOnly) return heldChangesUnavailable();
+      // A share mount's notes are held in their original workspace, not this one.
+      if (!context.heldChange || context.readOnly || isSharedWithMePath(request.args.path)) return heldChangesUnavailable();
       try {
         return { ok: true as const, change: await context.heldChange(request.args.path) };
       } catch (error) {

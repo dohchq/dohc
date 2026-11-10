@@ -2168,6 +2168,27 @@ it("refuses a held change read in a shared view instead of answering that nothin
   expect(read).not.toHaveBeenCalled();
 });
 
+it("refuses a held change read for a note inside a share mount, asked from the workspace root", async () => {
+  const f = fixture(await createTestScratch("held-change-mount-"));
+  const read = vi.fn(async () => null);
+  f.dependencies.heldChanges.change = read;
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options())));
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+
+  const cli = await executeCli({ argv: ["document", "held", "shared-with-me/trip/a.md"], cwd: f.workspace.rootPath, env: {}, request: send });
+  expect(cli.exitCode).not.toBe(0);
+  expect(cli.stderr).toContain("original workspace");
+  const { readHeldChange } = await import("@dohc/mcp/tools");
+  expect(await readHeldChange({ root: f.workspace.rootPath, home: "state", request: send }, { path: "shared-with-me/trip/a.md" }))
+    .toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+  expect(read).not.toHaveBeenCalled();
+});
+
 it("returns an edge page directly through CLI and MCP", async () => {
   const f = fixture(await createTestScratch("links-edges-cli-"));
   const page = { versionId: "main", files: [], entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };

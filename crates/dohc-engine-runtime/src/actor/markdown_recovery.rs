@@ -152,6 +152,11 @@ impl ActorHandle {
             let Some(marker) = dohc_engine_collab::read_marker(store, &owed.key)? else {
                 return Ok(None);
             };
+            // Recovery retires a row whose lineage was replaced without
+            // writing it, so nothing of that row is held.
+            if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id {
+                return Ok(None);
+            }
             let unavailable = |unavailable| {
                 Ok(Some(HeldMarkdownChange::Unavailable {
                     path: path.clone(),
