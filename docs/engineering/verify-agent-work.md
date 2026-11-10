@@ -103,7 +103,7 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks distribute the selected JavaScript inventory across workers, with shared desktop preparation and separate confinement proofs.
+PR checks distribute the selected JavaScript inventory across workers. Shared preparation publishes the desktop artifacts, then runs the compiler and relay confinement proofs concurrently.
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
 The Rust gate builds one test archive, runs its complete inventory across shards, and checks policy separately.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks the completed job times.
@@ -126,7 +126,7 @@ The JavaScript gate runs the [affected packages'](#affected-packages) tests, the
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate prepares the engine and desktop, typechecks the whole workspace, then runs repository checks alongside package tests.
-A Rust-only run skips Electron, desktop preparation, Postgres, and the browser proofs.
+A local Rust-only run skips Electron, desktop preparation, Postgres, and the browser proofs.
 On headless Linux hosts, only the desktop proof runs under Xvfb.
 The runner starts a dedicated Postgres container for the database tests and proofs.
 Integration suites must run; unavailable prerequisites cause failure rather than a silent skip.

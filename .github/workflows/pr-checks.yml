@@ -1,6 +1,6 @@
 # Ready same-repository PRs and manual runs use GitHub's ubuntu-24.04 runners.
 # Setting the repository variable BLACKSMITH_ENABLED to true moves every job except
-# confinement to Blacksmith.
+# shared preparation and confinement to Blacksmith.
 # The local verifier reads the path filters and tool pins below.
 # Packaging, signing, and update manifests stay in Desktop Release.
 name: PR checks
@@ -213,10 +213,10 @@ jobs:
               - 'apps/desktop/e2e/helpers/systemClipboard.ts'
 
   javascript-prepare:
-    name: JS shared preparation
+    name: shared preparation + confinement
     needs: changes
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
-    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       DOHC_CONFINEMENT_SUITES: exclude
@@ -262,6 +262,55 @@ jobs:
         with:
           name: verification-js-prepare-${{ github.run_attempt }}
           path: .agent-artifacts/verification/cloud/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: cargo-nextest@0.9.143
+      # Publish the closed prepared artifact before the independent sandbox proofs.
+      # Both complete gate spans still require this job's successful completion.
+      - name: Compiler and relay confinement
+        run: |
+          set -euo pipefail
+          mkdir -p .agent-artifacts/confinement
+          compiler() {
+            cargo nextest run --locked --package dohc-compiler-owner --retries=0 --no-tests=fail
+            report="$PWD/.agent-artifacts/confinement/compiler.tap"
+            DOHC_CONFINEMENT_SUITES=only pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
+              --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \
+              scripts/compiler-process.test.mjs scripts/stage-app-compiler.test.mjs
+            grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
+              { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; return 1; }
+          }
+          relay() {
+            node_root="$(dirname "$(dirname "$(command -v node)")")"
+            report="$PWD/.agent-artifacts/confinement/relay.json"
+            docker run --rm --init --security-opt no-new-privileges:true --cap-drop ALL \
+              --user "$(id -u):$(id -g)" --env HOME=/tmp --env CI --env PATH="$node_root/bin:/usr/bin:/bin" \
+              --env DOHC_CONFINEMENT_SUITES=only --env DOHC_REQUIRE_ENGINE_E2E=1 \
+              --env DOHC_TEST_ENGINE_BINARY="$PWD/target/debug/dohc-workspace-engine" \
+              --volume "$node_root:$node_root:ro" --volume "$PWD:$PWD" --workdir "$PWD/services/sync-relay" \
+              ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
+              sh -c 'grep -x "Seccomp:[[:space:]]*2" /proc/self/status &&
+                exec node node_modules/vitest/vitest.mjs run --reporter=default --reporter=json --outputFile="$0"' "$report"
+            node -e '
+              const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+              if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error((r.numPendingTests + r.numTodoTests) + " of " + r.numTotalTests + " replica tests did not run.");
+              console.log(r.numPassedTests + " replica tests passed under the default seccomp profile.");' "$report"
+          }
+          compiler & compiler_pid=$!
+          relay & relay_pid=$!
+          status=0
+          wait "$compiler_pid" || status=1
+          wait "$relay_pid" || status=1
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-confinement-${{ github.run_attempt }}
+          path: .agent-artifacts/confinement/**
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -491,7 +540,7 @@ jobs:
           compression-level: 0
   rust-policy:
     name: Rust policy checks
-    needs: [changes, javascript-prepare]
+    needs: changes
     if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -595,97 +644,9 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  # The suites that apply Landlock, which Blacksmith's kernel leaves out, and the relay's
-  # replicas, which also need the outer seccomp filter that Docker's default profile gives
-  # production. The other jobs leave them out by DOHC_CONFINEMENT_SUITES and NEXTEST_PROFILE.
-  confinement:
-    name: confinement
-    needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-
-      - name: Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup show active-toolchain || rustup toolchain install
-          cargo --version
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        if: inputs.cache != 'cold'
-        with:
-          shared-key: confinement
-
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
-        with:
-          tool: cargo-nextest@0.9.143
-
-      - name: App compiler owner
-        run: cargo nextest run --locked --package dohc-compiler-owner --retries=0 --no-tests=fail
-
-      - name: Desktop app compiler and engine
-        run: |
-          set -euo pipefail
-          report="$PWD/.agent-artifacts/confinement/compiler.tap"
-          mkdir -p "$(dirname "$report")"
-          cargo build --locked --target-dir target/confinement-engine -p dohc-workspace-engine --bin dohc-workspace-engine > "${report%.tap}-engine.log" 2>&1 &
-          engine_pid=$!
-          compiler_status=0
-          pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
-            --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \
-            scripts/compiler-process.test.mjs scripts/stage-app-compiler.test.mjs || compiler_status=$?
-          engine_status=0
-          wait "$engine_pid" || engine_status=$?
-          cat "${report%.tap}-engine.log"
-          test "$compiler_status" -eq 0
-          test "$engine_status" -eq 0
-          # A skipped compiler test would pass the run without testing the sandbox.
-          grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
-            { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; exit 1; }
-
-      # The relay imports this package's built files, as the verifier prepares them.
-      - name: App backend runtime
-        run: pnpm --filter @dohc/app-backend-runtime build
-
-      # The compose service's security options, with Docker's default seccomp profile.
-      # Ubuntu 24.04 matches the runner, so the runner's Node and engine run unchanged.
-      - name: Relay replicas
-        run: |
-          set -euo pipefail
-          node_root="$(dirname "$(dirname "$(command -v node)")")"
-          report="$PWD/.agent-artifacts/confinement/relay.json"
-          docker run --rm --init --security-opt no-new-privileges:true --cap-drop ALL \
-            --user "$(id -u):$(id -g)" --env HOME=/tmp --env CI --env PATH="$node_root/bin:/usr/bin:/bin" \
-            --env DOHC_CONFINEMENT_SUITES=only --env DOHC_REQUIRE_ENGINE_E2E=1 \
-            --env DOHC_TEST_ENGINE_BINARY="$PWD/target/confinement-engine/debug/dohc-workspace-engine" \
-            --volume "$node_root:$node_root:ro" --volume "$PWD:$PWD" --workdir "$PWD/services/sync-relay" \
-            ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
-            sh -c 'grep -x "Seccomp:[[:space:]]*2" /proc/self/status &&
-              exec node node_modules/vitest/vitest.mjs run --reporter=default --reporter=json --outputFile="$0"' "$report"
-          # A skipped replica test would pass the run without testing the sandbox.
-          node -e '
-            const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-            if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error(`${r.numPendingTests + r.numTodoTests} of ${r.numTotalTests} replica tests did not run.`);
-            console.log(`${r.numPassedTests} replica tests passed under the default seccomp profile.`);' "$report"
-
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, confinement]
+    needs: [changes, javascript, rust, javascript-prepare]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 5
@@ -724,7 +685,7 @@ jobs:
             if (selected) await verifyCompletedCloud(gate);
           }));
           const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
-          assert.equal(jobs.confinement.result, confined ? 'success' : 'skipped', 'confinement job did not complete as selected');
+          assert.equal(jobs['javascript-prepare'].result, confined ? 'success' : 'skipped', 'confinement job did not complete as selected');
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
           if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');
           NODE

@@ -390,7 +390,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   }
   assert.equal(jobs.javascript.needs, "changes");
   assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive"]);
-  assert.deepEqual(jobs["rust-policy"].needs, ["changes", "javascript-prepare"]);
+  assert.equal(jobs["rust-policy"].needs, "changes");
   for (const [name, scope] of [["javascript", "js"], ["rust", "rust"]]) {
     const steps = jobs[name].steps;
     const wait = steps.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs wait ${scope}`);
@@ -440,7 +440,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
       const context = workflowContext({enabled, draft, fork});
       assert.equal(workflowExpression(document.jobs.changes.if, context), !draft && !fork);
       for (const [name, job] of Object.entries(document.jobs)) {
-        if (name === "confinement") assert.equal(job["runs-on"], "ubuntu-24.04");
+        if (name === "javascript-prepare") assert.equal(job["runs-on"], "ubuntu-24.04");
         else assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"]);
       }
     }
@@ -448,7 +448,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
     const manual = workflowContext({enabled, event: "workflow_dispatch", size: "8"});
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
     for (const [name, job] of Object.entries(document.jobs)) {
-      if (name === "confinement") assert.equal(job["runs-on"], "ubuntu-24.04");
+      if (name === "javascript-prepare") assert.equal(job["runs-on"], "ubuntu-24.04");
       else assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
     }
   }
@@ -474,20 +474,20 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     }
   }
   // Blacksmith's kernel has no Landlock, so the sandbox suites always run on GitHub's image.
-  assert.equal(jobs.confinement["runs-on"], "ubuntu-24.04");
+  assert.equal(jobs["javascript-prepare"]["runs-on"], "ubuntu-24.04");
   for (const name of ["javascript-prepare", "javascript-workers"]) assert.equal(jobs[name].env.DOHC_CONFINEMENT_SUITES, "exclude");
   for (const name of ["rust-archive", "rust-tests", "rust-policy"]) assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const context = {...workflowContext({enabled: "true"}), needs: {changes: {outputs: {js, rust}}}};
     assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
     assert.equal(workflowExpression(jobs.rust.if, context), rust === "true");
-    assert.equal(workflowExpression(jobs.confinement.if, context), js === "true" || rust === "true");
+    assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), js === "true" || rust === "true");
   }
   for (const gate of ["all", "js", "rust"]) {
     const context = {...workflowContext({event: "workflow_dispatch", gate}), needs: {changes: {outputs: {}}}};
     assert.equal(workflowExpression(jobs.javascript.if, context), gate !== "rust");
     assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
-    assert.equal(workflowExpression(jobs.confinement.if, context), true);
+    assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), true);
   }
 });
 
@@ -532,7 +532,7 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
 
 test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", () => {
   const job = load(workflow).jobs.verification;
-  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "confinement"]);
+  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare"]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(workflowExpression(job.name, workflowContext({event: "workflow_dispatch", gate: "js"})), "Manual verification", "a partial manual run must not satisfy the PR check");
   const verdictIndex = job.steps.findIndex(step => step.name === "Require every selected gate");
@@ -543,7 +543,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
   const started = Date.parse("2026-11-09T00:00:00Z");
-  const jobNames = ["what changed", "confinement", "typecheck + tests", "engine gate", "JS shared preparation", "Rust build once", "Rust policy checks",
+  const jobNames = ["what changed", "shared preparation + confinement", "typecheck + tests", "engine gate", "Rust build once", "Rust policy checks",
     ...Array.from({length: JS_SHARDS - 1}, (_, index) => `JS worker ${index + 1}`),
     ...Array.from({length: RUST_SHARDS - 1}, (_, index) => `Rust tests ${index + 1}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
@@ -554,14 +554,14 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       GITHUB_API_URL: "https://api.invalid", GITHUB_REPOSITORY: "owner/repo", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", GITHUB_SHA: checkout, DOHC_WORKFLOW_HEAD_SHA: "head", GITHUB_TOKEN: "fixture"}, encoding: "utf8", timeout: 10_000,
   });
   const jobs = (js, rust, jsResult, rustResult, confinementResult = jsResult === "success" || rustResult === "success" ? "success" : "skipped") =>
-    ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, confinement: {result: confinementResult}});
+    ({changes: {result: "success", outputs: {js, rust}}, javascript: {result: jsResult}, rust: {result: rustResult}, "javascript-prepare": {result: confinementResult}});
   for (const js of ["true", "false"]) for (const rust of ["true", "false"]) {
     const valid = jobs(js, rust, js === "true" ? "success" : "skipped", rust === "true" ? "success" : "skipped");
     assert.equal(run(valid).status, 0);
-    for (const name of ["javascript", "rust", "confinement"]) for (const result of ["failure", "cancelled", undefined]) {
+    for (const name of ["javascript", "rust", "javascript-prepare"]) for (const result of ["failure", "cancelled", undefined]) {
       assert.equal(run({...valid, [name]: {result}}).status, 1);
     }
-    for (const name of ["javascript", "rust", "confinement"]) {
+    for (const name of ["javascript", "rust", "javascript-prepare"]) {
       const opposite = valid[name].result === "success" ? "skipped" : "success";
       assert.equal(run({...valid, [name]: {result: opposite}}).status, 1);
     }
@@ -573,7 +573,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   for (const gate of ["all", "js", "rust"]) {
     const manual = jobs(undefined, undefined, gate === "rust" ? "skipped" : "success", gate === "js" ? "skipped" : "success", "success");
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
-    assert.equal(run({...manual, confinement: {result: "skipped"}}, "workflow_dispatch", gate).status, 1);
+    assert.equal(run({...manual, "javascript-prepare": {result: "skipped"}}, "workflow_dispatch", gate).status, 1);
   }
   const failedJavascript = run(jobs("true", "true", "failure", "success", "success"));
   assert.equal(failedJavascript.status, 1);

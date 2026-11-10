@@ -2,7 +2,7 @@ import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 
 export function aggregateJavascript(records) {
   const preparation = records.filter(record => record.part === "prepare-0");
@@ -35,7 +35,7 @@ export function aggregateRust(records) {
   if (archive.scratch?.status !== "PASS" || RUST_ARCHIVE_PROOFS.some(name => archive.steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust archive proof is missing or did not pass.");
   const shards = Array.from({ length: RUST_SHARDS }, (_, index) => one(`tests-${index}`));
   if (RUST_TEST_PROOFS.some(name => shards.flatMap(shard => shard.steps ?? []).filter(step => step.name === name).length !== 1
-    || shards[0].steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust test proof is missing, duplicated, or did not pass.");
+    || shards[RUST_READER_SHARD].steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust test proof is missing, duplicated, or did not pass.");
   if (records.length !== shards.length + 2 || new Set(records.map(record => record.commit)).size !== 1) throw new Error("Rust parts examined different commits or unexpected evidence.");
   for (const shard of shards) {
     if (JSON.stringify([...shard.planned].sort()) !== JSON.stringify([...archive.planned].sort())) throw new Error("Rust inventories disagree.");
@@ -48,8 +48,8 @@ export function aggregateRust(records) {
 
 function gateJobNames(scope) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-  return ["what changed", "confinement", ...(scope === "js"
-    ? ["typecheck + tests", "JS shared preparation", ...Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`)]
+  return ["what changed", "shared preparation + confinement", ...(scope === "js"
+    ? ["typecheck + tests", ...Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`)]
     : ["engine gate", "Rust build once", "Rust policy checks", ...Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`)])];
 }
 

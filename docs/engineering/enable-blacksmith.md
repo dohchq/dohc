@@ -103,7 +103,8 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `confinement` job runs those suites on GitHub's `ubuntu-24.04` image whenever either gate runs.
+The `shared preparation + confinement` job runs those suites on GitHub's `ubuntu-24.04` image whenever either gate runs.
+It reuses the prepared engine and runs the compiler and replica proofs concurrently after publishing the artifact.
 It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
 It fails if an app compiler or replica test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.

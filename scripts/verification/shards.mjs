@@ -18,9 +18,11 @@ export function javascriptGroups(tasks) {
   for (const [key, files] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
     const chunks = [];
     for (const task of files.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {
-      const chunk = chunks.filter(chunk => chunk.weight + task.weight <= 60).sort((a, b) => b.weight - a.weight)[0];
-      if (chunk) { chunk.tasks.push(task); chunk.weight += task.weight; }
-      else chunks.push({ tasks: [task], weight: task.weight });
+      // Module timings omit collection, imports, and the file's environment.
+      const weight = task.weight + 4;
+      const chunk = chunks.filter(chunk => chunk.weight + weight <= 60).sort((a, b) => b.weight - a.weight)[0];
+      if (chunk) { chunk.tasks.push(task); chunk.weight += weight; }
+      else chunks.push({ tasks: [task], weight });
     }
     groups.push(...chunks.map((chunk, index) => ({ ...chunk, id: `vitest-group:${key}:${index}`, kind: "vitest", pkg: files[0].package,
       native: Boolean(files[0].native), resource: databasePackages.has(files[0].package) ? "postgres" : null,

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 // Shards install their dependencies while the shared build runs. The complete
 // gate still includes both jobs, their transfer, and this wait.
 export async function waitForPreparation(scope, { env = process.env, request = fetch, pause = setTimeout, now = Date.now } = {}) {
-  const preparation = scope === "js" ? { job: "JS shared preparation", artifact: "javascript-prepared", seconds: 300 }
+  const preparation = scope === "js" ? { job: "shared preparation + confinement", artifact: "javascript-prepared", seconds: 300 }
     : scope === "rust" ? { job: "Rust build once", artifact: "rust-tests", seconds: 600 } : null;
   if (!preparation) throw new Error("Select js or rust preparation.");
   for (const key of ["GITHUB_API_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_TOKEN"]) {

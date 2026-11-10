@@ -6,13 +6,13 @@ import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
 import { aggregateJavascript, aggregateRust, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
 
 test("early reporting waits for every successful job and preserves the complete group deadline", async () => {
   const started_at = "2026-11-10T00:00:00Z", start = Date.parse(started_at);
-  const names = ["what changed", "confinement", "JS shared preparation", ...Array.from({ length: JS_SHARDS - 1 }, (_, i) => `JS worker ${i + 1}`)];
+  const names = ["what changed", "shared preparation + confinement", ...Array.from({ length: JS_SHARDS - 1 }, (_, i) => `JS worker ${i + 1}`)];
   const complete = names.map(name => ({ name, started_at, status: "completed", conclusion: "success" }));
   let reads = 0, pauses = 0;
   await waitForGate("js", { now: () => start + 1000, pause: async () => { pauses++; }, readJobs: async () => {
@@ -127,7 +127,7 @@ test("Rust receipts require every policy row and exactly the full passing test i
   const row = (part, extra = {}) => ({ part, commit: "head", verdict: "PASS", provenance: { status: "PASS" }, ...extra });
   const archiveSteps = RUST_ARCHIVE_PROOFS.map(name => ({ name, verdict: "PASS" }));
   const records = [row("policy", { steps }), row("archive-0", { planned: all, steps: archiveSteps, scratch: { status: "PASS" } }), ...all.map((id, index) => row(`tests-${index}`, {
-    planned: all, assigned: [id], completed: [id], scratch: { status: "PASS" }, steps: index === 0 ? RUST_TEST_PROOFS.map(name => ({ name, verdict: "PASS" })) : [],
+    planned: all, assigned: [id], completed: [id], scratch: { status: "PASS" }, steps: index === RUST_READER_SHARD ? RUST_TEST_PROOFS.map(name => ({ name, verdict: "PASS" })) : [],
   }))];
   assert.equal(aggregateRust(records).tasks, RUST_SHARDS);
   for (const mutate of [
@@ -135,9 +135,9 @@ test("Rust receipts require every policy row and exactly the full passing test i
     rows => { rows[2].completed.push(rows[3].completed[0]); }, rows => { rows[2].scratch.status = "FAIL"; }, rows => { rows[2].provenance.status = "FAIL"; },
     rows => { rows[1].planned.push("unrun"); }, rows => { rows[1].commit = "other"; }, rows => rows.pop(),
     rows => { rows[1].steps.pop(); }, rows => { rows[1].steps[0].verdict = "FAIL"; }, rows => { rows[1].scratch.status = "FAIL"; },
-    rows => { rows[2].steps = []; }, rows => { rows[2].steps[0].verdict = "FAIL"; },
-    rows => { rows[3].steps = structuredClone(rows[2].steps); },
-    rows => { rows[3].steps = rows[2].steps; rows[2].steps = []; },
+    rows => { rows[RUST_READER_SHARD + 2].steps = []; }, rows => { rows[RUST_READER_SHARD + 2].steps[0].verdict = "FAIL"; },
+    rows => { rows[2].steps = structuredClone(rows[RUST_READER_SHARD + 2].steps); },
+    rows => { rows[2].steps = rows[RUST_READER_SHARD + 2].steps; rows[RUST_READER_SHARD + 2].steps = []; },
   ]) {
     const broken = structuredClone(records); mutate(broken);
     assert.throws(() => aggregateRust(broken));
@@ -158,7 +158,7 @@ test("shared preparation waits for this attempt and keeps the original group dea
   const env = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
   const started = Date.parse("2026-11-09T00:00:00Z");
   let clock = started + 10_000, reads = 0;
-  const jobs = [{ name: "what changed", started_at: new Date(started).toISOString() }, { name: "JS shared preparation", status: "in_progress" }];
+  const jobs = [{ name: "what changed", started_at: new Date(started).toISOString() }, { name: "shared preparation + confinement", status: "in_progress" }];
   const response = value => ({ ok: true, json: async () => value });
   await waitForPreparation("js", { env, now: () => clock, pause: async ms => { clock += ms; }, request: async url => {
     reads++;
