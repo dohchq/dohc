@@ -29,13 +29,15 @@ export type LiveDocumentRow = {
 
 /** What a Stop did with edits the server refused. */
 export type LiveDocumentStopResult = { keptEdits: "none" | "recovered" | "kept" };
-/** A Stop the dialog asked for, until it answers. The shell keeps it, so a
- * reopened dialog shows it and its answer; `shownIn` is the opening that does. */
+/** A Stop the dialog asked for, until an opening shows or reports its answer.
+ * The shell keeps it, so a reopened dialog shows it; `shownIn` is the opening that does. */
 export type LiveDocumentStopRunning = {
   workspaceId: string;
   path: string;
   objectId: string;
   again?: LiveDocumentStopAgain;
+  /** The row the Stop started from, for a notice when a later opening doesn't list it. */
+  row?: LiveDocumentRow;
   answer: Promise<LiveDocumentStopResult>;
   shownIn: object;
 };
@@ -386,16 +388,12 @@ export function LiveDocumentsDialog({
     refusalRetry?.();
   }
 
-  // Kept by the shell until it answers, so a reopened dialog can show it.
-  function holdStop(work: Extract<Work, { kind: "stop" }>, startedIn: Scope): LiveDocumentStopRunning {
+  // Kept by the shell until an opening uses its answer, so a reopened dialog can show it.
+  function holdStop(work: Extract<Work, { kind: "stop" }>, startedIn: Scope, row: LiveDocumentRow | undefined): LiveDocumentStopRunning {
     const answer = work.again ? stop(workspaceId, work.path, work.objectId, work.again) : stop(workspaceId, work.path, work.objectId);
     const held: LiveDocumentStopRunning = { workspaceId, path: work.path, objectId: work.objectId,
-      ...(work.again ? { again: work.again } : {}), answer, shownIn: startedIn };
-    if (stopRunning) {
-      stopRunning.current = held;
-      const done = () => { if (stopRunning.current === held) stopRunning.current = null; };
-      void answer.then(done, done);
-    }
+      ...(work.again ? { again: work.again } : {}), ...(row ? { row } : {}), answer, shownIn: startedIn };
+    if (stopRunning) stopRunning.current = held;
     return held;
   }
 
@@ -418,21 +416,28 @@ export function LiveDocumentsDialog({
       // Only the latest opening that shows a Stop shows or reports its answer.
       let held: LiveDocumentStopRunning | null = null;
       const shows = () => held === null || held.shownIn === startedIn;
+      // This opening shows or reports the answer, so no later opening takes it over.
+      const answered = () => { if (held !== null && stopRunning?.current === held) stopRunning.current = null; };
+      const stoppedRow = (rows?: LiveDocumentRow[]) =>
+        work.kind === "stop" ? rows?.find(row => !row.saveOnly && row.objectId === work.objectId) : undefined;
       let listRows = state.kind === "ready" ? state.rows : undefined;
       let listed = true;
       try {
         if (work.kind === "stop") {
-          held = earlier ?? holdStop(work, startedIn);
+          held = earlier ?? holdStop(work, startedIn, stoppedRow(listRows));
           held.shownIn = startedIn;
           if (earlier) {
-            // The rows show the Stop until its answer.
+            // The rows show the Stop until its answer. Only the first page is
+            // read, so a Stop from a later page answers as if the list were closed.
             const shown = await load(workspaceId).catch(() => null);
             listRows = shown?.documents;
-            listed = shown !== null;
+            listed = stoppedRow(listRows) !== undefined;
             if (isCurrent()) setState(shown ? { kind: "ready", rows: mergeRows([], shown.documents), nextCursor: shown.nextCursor } : { kind: "unknown" });
           }
           const { keptEdits } = await held.answer;
-          if (!shows() || !isCurrent()) return;
+          if (!shows()) return;
+          answered();
+          if (!isCurrent()) return;
           mutated = true;
           setPendingStops(previous => {
             const next = new Map(previous);
@@ -464,12 +469,12 @@ export function LiveDocumentsDialog({
       } catch (error) {
         const refusal = work.kind === "stop" ? readLiveStopRefusal(error) : null;
         if (!shows()) return;
+        answered();
         if (work.kind === "stop" && refusal) {
           // Without its row, this opening cannot show the answer either.
           if (!isCurrent() || !listed) {
-            const row = listRows?.find(row => !row.saveOnly && row.objectId === work.objectId);
             onStopPending?.(workspaceId, work.path, work.objectId,
-              liveStopRefusalForRow(refusal, row));
+              liveStopRefusalForRow(refusal, stoppedRow(listRows) ?? earlier?.row));
             return;
           }
           focusStopRetry.current = work.objectId;
