@@ -59,6 +59,8 @@ export async function startSelfHostedLiveHost(options: {
   startHost?: typeof startServiceLiveHost;
   /** Reaches the relay's public origin for first-open requests, unless a test routes them elsewhere. */
   firstOpenFetch?: typeof fetch;
+  /** How long reconciliation waits between periodic runs, unless a test holds them. Relay writes and host progress also run one. */
+  reconcileIntervalMs?: number;
   onError?(error: unknown): void;
 }) {
   const {storage, history} = options, profile = selfHostLiveProfile();
@@ -198,6 +200,9 @@ export async function startSelfHostedLiveHost(options: {
       const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal,
         firstOpen: {fetch: options.firstOpenFetch}});
       host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
+      // Subscribed before the first update, so a workspace that drains, or a departure that ends, schedules the
+      // reconciliation that releases it.
+      host.onProgress(schedule);
       host.invalidated.addEventListener("abort", schedule, {once: true});
       return host;
     } finally {await rm(temporary, {recursive: true, force: true});}
@@ -318,7 +323,7 @@ export async function startSelfHostedLiveHost(options: {
         yield* Effect.promise(() => exclusive(stopCurrent));
       }),
     );
-    yield* Effect.forkScoped(Effect.forever(pause(2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
+    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
     schedule();
     while (true) {
       yield* Queue.take(changes);

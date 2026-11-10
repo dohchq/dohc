@@ -40,7 +40,7 @@ import type {RetirementKey} from "./storage/serviceActivationRetirement.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {HOSTED_RECOVERY_PROBE_MS, hostedRelayState, hostedReplicaQuiet, type HostedPullDuties, type HostedPullReason} from "./hostedPullWork.js";
-import {decodeHostedSyncResult, hostedWindowCovers, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
+import {decodeHostedSyncResult, hostedWindowCovers, type HostedSyncMethodResultMap, type HostedWindow} from "@dohc/workspace-engine-client/relay-wire";
 import {withStreamedContributions, withStreamedMarkdown, type HeldReadInvalidated, type StreamedBlob} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
 interface ServiceLiveHostConfig {
@@ -243,6 +243,11 @@ export async function startServiceLiveHost(options: {
   firstOpen?: {fetch?: typeof fetch; nowMs?: () => number; random?: () => number; schedule?: (atMs: number, fire: () => void) => () => void};
   /** Times the hosted recovery probe on a monotonic clock, unless a test injects another. */
   nowMs?: () => number;
+  /**
+   * The wall clock idle unloading reads, and the timer that wakes a pass at
+   * the next idle deadline, unless a test injects others.
+   */
+  idleClock?: {nowMs: () => number; schedule: (atMs: number, fire: () => void) => () => void};
   /** Called as each activation pass ends, so a test can wait on passes rather than on the requests they send. */
   onPass?: () => void;
 }) {
@@ -304,6 +309,9 @@ export async function startServiceLiveHost(options: {
   ]);
   // Leaving documents the engine refused as not ready, with the number of the pull that must succeed before they are known parked.
   const parking = new Map<string, number>();
+  // Activations this daemon retired. Lifecycle steps a pass left waiting for a later pass, and idle sweeps that
+  // ran with no document due, which a pass runs only once one is.
+  let retirements = 0, lifecycleRetries = 0, idleSweepsBeforeDue = 0;
   // Whether an update completed on this daemon.
   let updated = false;
   // Documents listed as departing by the last completed update, across workspace detachments.
@@ -321,7 +329,6 @@ export async function startServiceLiveHost(options: {
     for (const [key, row] of hosted) if (row.target.workspaceId === document.workspaceId && row.objectId === document.objectId) return key;
     return undefined;
   };
-  const touch = (key: string) => {idle.set(key, {due: Date.now() + config.activation!.idleUnloadMs, generation: ++generation});};
   // Activation passes, idle unloads, wakes, and membership changes take turns,
   // so a pass never activates a document while it unloads.
   let turn: Promise<unknown> = Promise.resolve();
@@ -330,7 +337,50 @@ export async function startServiceLiveHost(options: {
     turn = run.catch(() => {});
     return run;
   };
+  // A wake during a pass runs one more pass after it; one during the pause ends the pause.
+  // Only the pause clears it, so a wake that lands while its pass runs is not lost.
+  let woken = false, rouse: (() => void) | undefined;
+  const wakePass = () => {woken = true; rouse?.();};
+  // A publication that pushed a page and has more wakes the pass that pushes the rest. One that pushed nothing waits.
+  const paged = async <T extends {pushed: number; hasMore: boolean}>(work: Promise<T>): Promise<T> => {
+    const page = await work;
+    if (page.hasMore && page.pushed > 0) wakePass();
+    return page;
+  };
   let activation:ServiceActivationDriver|undefined;
+  const idleClock = options.idleClock ?? {nowMs: () => Date.now(), schedule(atMs: number, fire: () => void) {
+    // Node timers cap their delay; one that fires early only wakes a pass that finds nothing due.
+    const timer = setTimeout(fire, Math.min(Math.max(0, atMs - Date.now()), 2_147_483_647));
+    timer.unref();
+    return () => clearTimeout(timer);
+  }};
+  // Whether an idle sweep may unload the hosted document once it is due.
+  const sweepable = (key: string, row: {target: ServiceActivationTarget; objectId: string}) => !activation!.dormant(row.target) && !leaving.has(key) &&
+    !editors.connected({workspaceId: row.target.workspaceId, objectId: row.objectId});
+  // The earliest idle deadline of a document a sweep may unload, if any.
+  const nextIdleDue = () => {
+    let next: number | undefined;
+    for (const [key, row] of hosted) {
+      const state = idle.get(key);
+      if (state && (next === undefined || state.due < next) && sweepable(key, row)) next = state.due;
+    }
+    return next;
+  };
+  // The timer that wakes a pass at the next idle deadline. A deadline already due wakes one at once.
+  // A timer that fired is no longer armed, so one that fired early, as after a clock change, is armed again.
+  let idleTimer: {atMs: number; cancel: () => void} | undefined;
+  const armIdle = () => {
+    if (!activation) return;
+    const next = signal.aborted ? undefined : nextIdleDue();
+    if (next !== undefined && next <= idleClock.nowMs()) {idleTimer?.cancel(); idleTimer = undefined; wakePass(); return;}
+    if (next === idleTimer?.atMs) return;
+    idleTimer?.cancel(); idleTimer = undefined;
+    if (next === undefined) return;
+    const timer = {atMs: next, cancel: () => {}};
+    idleTimer = timer;
+    timer.cancel = idleClock.schedule(next, () => {if (idleTimer === timer) idleTimer = undefined; wakePass();});
+  };
+  const touch = (key: string) => {idle.set(key, {due: idleClock.nowMs() + config.activation!.idleUnloadMs, generation: ++generation}); armIdle();};
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
   // Whether a first-open check is queued or running on this host.
@@ -474,7 +524,7 @@ export async function startServiceLiveHost(options: {
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
       const firstOpen = options.firstOpen && createFirstOpenClient({relay: attachment.relay, identity: attachment.identity, fetch: options.firstOpen.fetch});
       const attached: HostedAttachment = {handle, hosted: replica, identity: replica.identity, firstOpen, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0,
-        probeAt: 0, check: true, overlapped: false, replica: {pull: joined => pull(attached, joined, "activation"), publish: joined => replica.publish(joined)}};
+        probeAt: 0, check: true, overlapped: false, replica: {pull: joined => pull(attached, joined, "activation"), publish: joined => paged(replica.publish(joined))}};
       attachments.set(workspace.workspaceId, attached);
     };
     // Every pull of a hosted replica runs here. A page that leaves documents held clears their readiness,
@@ -491,7 +541,10 @@ export async function startServiceLiveHost(options: {
       const counts = pullCounts.get(workspaceId) ?? new Map<HostedPullReason, number>();
       pullCounts.set(workspaceId, counts.set(reason, (counts.get(reason) ?? 0) + 1));
       attached.last = "failed";
+      // The departed list of this pull's last page.
+      const last: {departed?: {listed: readonly string[]; window: HostedWindow}} = {};
       const result = await attached.hosted.pull(joined, page => {
+        last.departed = page.departed;
         if (!page.adoptedScope && activation) {
           const dropped = activation.hold(workspaceId, page.held, page.heldWindow, page.newlyHeld);
           if (page.newlyHeld.complete) attached.dropped = 0;
@@ -514,6 +567,14 @@ export async function startServiceLiveHost(options: {
       attached.confirmed = number;
       attached.last = result.hasMore ? "more" : "done";
       if (!result.hasMore) {attached.seen = state; attached.overlapped = attached.check; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
+      // A departure is confirmed only by a pull whose departed list reaches it, so while one has not, the next pull
+      // moves the list on toward it. Its workspace drains only at a pull that reads that list from its start and
+      // finds nothing departed, so a list that ended empty partway through is read once more from its start. Both
+      // end within one turn of the list; documents it still lists wait for their own work instead.
+      if (attached.announced.size > 0 && ([...attached.announced].some(([objectId, required]) => required <= number && !reachedSince(attached, objectId, required)) ||
+        (last.departed !== undefined && last.departed.window.after !== undefined && last.departed.window.through === null && last.departed.listed.length === 0))) wakePass();
+      // Activation starts only after the check below is defined.
+      if (activation) checkProgress();
       return result;
     };
     for (const [index, value] of reply.workspaces.entries()) install(config.workspaces[index]!, value);
@@ -646,6 +707,14 @@ export async function startServiceLiveHost(options: {
     const uncopied = (row: {target: ServiceActivationTarget; objectId: string}) => {
       const attached = attachments.get(row.target.workspaceId);
       return !!attached && storage.serviceKeptEditsHeld({workspaceId: row.target.workspaceId, objectId: row.objectId}, attached.identity);
+    };
+    // Whether a moved departing document's restore route comes back: a restore is unfinished, or its retirement
+    // changed since it was last promoted. After a copy, a retirement held at its seed stays open; its unchanged
+    // key waits for a restart or for membership to omit and then list the document again.
+    const movedHandoff = (row: {target: ServiceActivationTarget; objectId: string; retirement?: string}) => {
+      const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
+      const open = storage.serviceActivationRetirement(document), retirement = open ? movedRetirementKey(open) : undefined;
+      return {retirement, due: (retirement !== undefined && retirement !== row.retirement) || storage.serviceRestoreInProgress(document)};
     };
     const retainMoved = (row: {target: ServiceActivationTarget; objectId: string}) => {
       const document = {workspaceId: row.target.workspaceId, objectId: row.objectId};
@@ -798,6 +867,7 @@ export async function startServiceLiveHost(options: {
       // of them stays granted and its owner saved a recovery copy of each. Its rows go then.
       if (storage.serviceKeptEditsOf(document).keptEdits.length > 0) retained.set(documentKey(document), {target: row.target, objectId: row.objectId});
       unhost(key);
+      retirements++;
       return undefined;
     };
     // A moved document whose authority still stands leaves activation without settling or unloading,
@@ -838,7 +908,7 @@ export async function startServiceLiveHost(options: {
         parking.delete(key);
         if (goneSince(attached, row.objectId, required)) return gone(key, row, joined);
       }
-      const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
+      const publish = async (operation: AbortSignal) => (await attached.replica.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
       if (lost) {
         recovering.delete(key);
         const document = activation!.departing(row.target, joined, row.objectId);
@@ -953,7 +1023,7 @@ export async function startServiceLiveHost(options: {
           if (settled?.kind === "pending") return settled.reason;
           if (settled?.kind === "settled") {
             if (!settled.settlement.materialized) return "Settlement has not reached the file.";
-            if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
+            if ((await attachments.get(row.target.workspaceId)!.replica.publish(operation)).hasMore) return "Hosted publication has more pages.";
           }
         }
         return requestUnload(row, operation);
@@ -998,7 +1068,7 @@ export async function startServiceLiveHost(options: {
               if (!settled.materialized) return "Settlement has not reached the file.";
             }
             // Publish settled output now: passes skip a dormant document, so they may not push its workspace again.
-            if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
+            if ((await attachments.get(row.target.workspaceId)!.replica.publish(operation)).hasMore) return "Hosted publication has more pages.";
             if (!quiet()) return undefined;
           }
           try {
@@ -1229,6 +1299,7 @@ export async function startServiceLiveHost(options: {
       }));
     // Restore work takes a turn, so no idle unload runs beside it. A step that
     // registers on a dormant document reloads it, and passes then settle it.
+    // A step can also end a restore or open a retirement, so each wakes the pass that continues it.
     const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
       operation: (consumer: NonNullable<ReturnType<typeof consumerForRestore>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
       check();
@@ -1239,7 +1310,7 @@ export async function startServiceLiveHost(options: {
         const consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), joined, work => operation(consumer, lookup, work));
-      }));
+      })).finally(wakePass);
     };
     const update = (value: ServiceHostedSet, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
       if (!activation || config.workspaces.length || config.activation!.targets.length) throw new Error("Only an activation host that starts empty takes membership updates.");
@@ -1268,6 +1339,8 @@ export async function startServiceLiveHost(options: {
       const changed = [...members].filter(([workspaceId, member]) => desired.has(workspaceId)
         ? !isDeepStrictEqual(desired.get(workspaceId), member.workspace) : obsolete(workspaceId, member.workspace))
         .map(([workspaceId]) => workspaceId);
+      // Whether this update left lifecycle work for a pass, which it then wakes.
+      let lifecycle = false;
       for (const [key, row] of movedDepartures)
         if (!departing.has(key) || (!updated && changed.includes(row.target.workspaceId))) movedDepartures.delete(key);
       // A document that left stays in passes, which settle, publish and unload it.
@@ -1280,6 +1353,7 @@ export async function startServiceLiveHost(options: {
           }
         } else if (!changed.includes(document.target.workspaceId)) {
           // A first open of a document that left would start a document someone stopped, or one this host lost access to.
+          if (!leaving.has(key)) lifecycle = true;
           leaving.add(key); activation.cancelFirstOpen(document.target);
         }
       }
@@ -1300,12 +1374,13 @@ export async function startServiceLiveHost(options: {
         if (!members.has(workspaceId) || tracked.has(documentKey({workspaceId, objectId: document.objectId}))) continue;
         if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) {
           retainMoved(document);
+          lifecycle = true;
           continue;
         }
         if (hosted.has(key) || (updated && listedDepartures.has(documentKey({workspaceId, objectId: document.objectId})))) continue;
         const scope = {workspaceId, objectId: document.objectId}, retirement = storage.serviceActivationRetirement(scope);
         if (!updated || retirement || storage.serviceRestoreInProgress(scope)) {
-          hosted.set(key, document); leaving.add(key); recovering.add(key);
+          hosted.set(key, document); leaving.add(key); recovering.add(key); lifecycle = true;
           // A retiring document keeps its target, which its unfinished restore continues through, until its retirement drops it.
           if (retirement) activation.addTarget(document.target, document.objectId);
         }
@@ -1318,11 +1393,18 @@ export async function startServiceLiveHost(options: {
       }
       for (const document of departing.values()) {
         const attached = attachments.get(document.target.workspaceId);
-        if (attached && !attached.announced.has(document.objectId)) attached.announced.set(document.objectId, attached.pulls + 1);
+        if (attached && !attached.announced.has(document.objectId)) {attached.announced.set(document.objectId, attached.pulls + 1); lifecycle = true;}
+      }
+      // A moved document still listed, whose route a detachment ended, has it given back by the next pass.
+      for (const row of movedDepartures.values()) {
+        if (members.has(row.target.workspaceId) && !movedRestores.has(movedRestoreKey({workspaceId: row.target.workspaceId, objectId: row.objectId})) &&
+          movedHandoff(row).due) lifecycle = true;
       }
       registerRetained();
       listedDepartures = new Set(departing.keys());
       updated = true;
+      if (lifecycle) wakePass();
+      armIdle();
     }));
     // Detaches a workspace whose replica drained. Its caller then releases its enrollments and keeps the store.
     const detachDrained = (workspaceId: string, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
@@ -1335,12 +1417,40 @@ export async function startServiceLiveHost(options: {
       return !!attached && ![...hosted.values(), ...retained.values(), ...movedRestores.values()].some(row => row.target.workspaceId === workspaceId) && attached.confirmed === attached.pulls &&
         attached.hosted.departedNone && [...attached.announced.values()].every(required => required <= attached.confirmed);
     };
+    // What lifecycle work moved on: retirements, departures and moved or retained documents that ended, parking
+    // documents a pull found gone, and each workspace's departure confirmations and drain. Each part moves only
+    // forward until an update or a failed pull, so a step that keeps waiting changes nothing. A change wakes a pass
+    // for the next step, and tells listeners such as the supervisor, which releases a drained workspace.
+    const progressListeners = new Set<() => void>();
+    const lifecycleProgress = () => {
+      const found = [...parking].map(([key, required]) => {
+        const row = hosted.get(key), attached = row ? attachments.get(row.target.workspaceId) : undefined;
+        return [key, !!row && !!attached && attached.confirmed >= required && goneSince(attached, row.objectId, required)];
+      });
+      // Only a workspace with departures drains for a caller, so attaching one changes nothing here.
+      const departing = [...attachments].filter(([, attached]) => attached.announced.size > 0);
+      const occupied = departing.length === 0 ? new Set<string>()
+        : new Set([...hosted.values(), ...retained.values(), ...movedRestores.values()].map(row => row.target.workspaceId));
+      const confirmations = departing.map(([workspaceId, attached]) => [workspaceId,
+        !occupied.has(workspaceId) && attached.confirmed === attached.pulls && attached.hosted.departedNone,
+        [...attached.announced].map(([objectId, required]) => [objectId, required <= attached.confirmed,
+          reachedSince(attached, objectId, required), goneSince(attached, objectId, required)])]);
+      return JSON.stringify([retirements, [...leaving], [...recovering], found, [...retained.keys()], [...movedRestores.keys()], confirmations]);
+    };
+    let progress: string | undefined;
+    const checkProgress = () => {
+      if (!activation) return;
+      const next = lifecycleProgress();
+      if (next === progress) return;
+      progress = next;
+      wakePass();
+      for (const listener of [...progressListeners]) {
+        try {listener();} catch { /* A listener must not stop the host. */ }
+      }
+    };
     if(config.activation){
       // A configured replica checks its origin before the host serves restores or passes activate. One that could not retries on each pass.
       for(const workspaceId of [...attachments.keys()])yield* Effect.promise(()=>checkOrigin(workspaceId,signal).catch(()=>{}));
-      // A wake during a pass runs one more pass after it; one during the pause ends the pause.
-      let woken=false,rouse:(()=>void)|undefined;
-      const wakePass=()=>{woken=true;rouse?.();};
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         maxApplications:config.settlement?.maxApplicationsPerSettlement,
@@ -1348,6 +1458,8 @@ export async function startServiceLiveHost(options: {
         firstOpen:target=>leaving.has(JSON.stringify([target.workspaceId,target.path]))?undefined:checked(target.workspaceId)?.firstOpen,
         lifetime:signal,wake:wakePass,firstOpenClock:options.firstOpen});
       registerRetained();
+      progress=lifecycleProgress();
+      signal.addEventListener("abort",()=>{idleTimer?.cancel();idleTimer=undefined;},{once:true});
       // What the workspace's replica waits on from its own pulls, which no relay write announces.
       const pullDuties=(workspaceId:string,attached:HostedAttachment):HostedPullDuties=>{
         const keys=(rows:Iterable<string>)=>[...rows].filter(key=>hosted.get(key)?.target.workspaceId===workspaceId).length;
@@ -1389,48 +1501,46 @@ export async function startServiceLiveHost(options: {
             }
           }
         };
+        // A lifecycle step that waits, or fails, is left for a later pass.
+        const lifecycleStep=(work:()=>Promise<string|undefined>)=>step(async()=>{
+          let waiting;
+          try{waiting=await work();}catch(error){lifecycleRetries++;throw error;}
+          if(waiting!==undefined){lifecycleRetries++;throw new Error(`Departing live document is waiting: ${waiting}`);}
+        });
         // A replica that has not checked its origin checks it first. Until it succeeds, its workspace's steps wait.
         for(const workspaceId of [...attachments.keys()])await step(()=>checkOrigin(workspaceId,passSignal));
         // Departures go first: a document an earlier daemon left resumes only before a pull adopts the scope it left.
-        for(const key of [...leaving])await step(async()=>{
-          const waiting=await depart(key,passSignal);
-          if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
-        });
+        for(const key of [...leaving])await lifecycleStep(()=>depart(key,passSignal));
         for(const [key,row] of [...movedDepartures])await step(async()=>{
           const document={workspaceId:row.target.workspaceId,objectId:row.objectId},attached=checked(document.workspaceId);
           if(!attached)return;
           const restoreKey=movedRestoreKey(document);
           if(movedRestores.has(restoreKey))return;
-          const retirement=storage.serviceActivationRetirement(document),retirementKey=retirement ? movedRetirementKey(retirement) : undefined;
-          // After a copy, a retirement held at its seed stays open. Its unchanged key waits for a restart
-          // or for membership to omit and then list the document again.
-          if((retirementKey!==undefined && retirementKey!==row.retirement) || storage.serviceRestoreInProgress(document)){
-            row.retirement=retirementKey;
+          const handoff=movedHandoff(row);
+          if(handoff.due){
+            row.retirement=handoff.retirement;
             movedRestores.set(restoreKey,row);
             retained.delete(key);
             registerRetained();
             return;
           }
         });
-        for(const key of [...movedRestores.keys()])await step(async()=>{
-          const waiting=await keepMovedRestore(key,passSignal);
-          if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
-        });
+        for(const key of [...movedRestores.keys()])await lifecycleStep(()=>keepMovedRestore(key,passSignal));
         // A document whose owner lost live authority but that has not left, as right after Stop, records
         // what the engine applied before anything publishes, so its output does not hold back its workspace's.
         // One whose activation retires reconciles, settles and publishes here until it leaves.
         for(const [key,row] of [...hosted]){
           if(leaving.has(key) || !checked(row.target.workspaceId))continue;
           await step(async()=>{
-            if(await retire(key,passSignal)!==null || unloading.has(key) || !authorityLost(row))return;
+            let retiring;
+            try{retiring=await retire(key,passSignal);}catch(error){lifecycleRetries++;throw error;}
+            if(typeof retiring==="string")lifecycleRetries++;
+            if(retiring!==null || unloading.has(key) || !authorityLost(row))return;
             const document=activation!.departing(row.target,passSignal,row.objectId);
             if(document)await runDocument(document,passSignal,operation=>activation!.reconcileDeparted(row.target,document,operation));
           });
         }
-        for(const key of [...retained.keys()])await step(async()=>{
-          const waiting=await keepRetained(key,passSignal);
-          if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
-        });
+        for(const key of [...retained.keys()])await lifecycleStep(()=>keepRetained(key,passSignal));
         // A dormant document stays out of memory until someone opens it. One whose
         // unload is unanswered may hold an ended registration until the unload is sent again.
         // A departing one whose owner lost live authority only settles what the host applied.
@@ -1482,19 +1592,19 @@ export async function startServiceLiveHost(options: {
         for(const [key,row] of hosted){
           const state=idle.get(key);
           if(visited>=bounds.maxDocumentsPerPass || signal.aborted)break;
-          if(!state || Date.now()<state.due || activation!.dormant(row.target) || leaving.has(key) ||
-            editors.connected({workspaceId:row.target.workspaceId,objectId:row.objectId}))continue;
+          if(!state || idleClock.nowMs()<state.due || !sweepable(key,row))continue;
           visited++;
           let waiting:string|undefined;
           try{waiting=await sleep(key,row,state.generation,AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]));}
           catch(error){waiting=error instanceof Error?error.message:String(error);}
           if(waiting===undefined || idle.get(key)?.generation!==state.generation)continue;
-          idle.set(key,{due:Date.now()+bounds.idleRetryMs,generation:state.generation});
+          idle.set(key,{due:idleClock.nowMs()+bounds.idleRetryMs,generation:state.generation});
           if(!signal.aborted && waiting!==lastIdleError){
             lastIdleError=waiting;
             try{console.error("Idle live document unload is waiting.",waiting);}catch{ /* Reporting must not stop activation. */ }
           }
         }
+        if(visited===0)idleSweepsBeforeDue++;
       };
       const pause = Effect.callback<void>(resume => {
         let ended = false;
@@ -1512,7 +1622,13 @@ export async function startServiceLiveHost(options: {
       yield* Effect.forkScoped(Effect.gen(function* () {
         while (!signal.aborted) {
           // Native passes retain ownership until their actual work settles.
-          yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {await pass(); await sweep();})));
+          // A sweep runs only once an idle deadline is due. Its timer, armed after each pass, wakes the pass that runs it.
+          yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {
+            await pass();
+            const due = nextIdleDue();
+            if (due !== undefined && due <= idleClock.nowMs()) await sweep();
+            armIdle(); checkProgress();
+          })));
           options.onPass?.();
           yield* pause;
         }
@@ -1572,6 +1688,21 @@ export async function startServiceLiveHost(options: {
       hostedPulls(workspaceId: string): {total: number; reasons: Partial<Record<HostedPullReason, number>>} {
         const reasons = Object.fromEntries(pullCounts.get(workspaceId) ?? []);
         return {total: Object.values(reasons).reduce((sum, count) => sum + count, 0), reasons};
+      },
+      /**
+       * Lifecycle steps passes left waiting for a later pass, and idle sweeps that ran with no document due.
+       * With no lifecycle work and no idle deadline due, both stay as they are.
+       */
+      passCounts(): {lifecycleRetries: number; idleSweepsBeforeDue: number} {
+        return {lifecycleRetries, idleSweepsBeforeDue};
+      },
+      /**
+       * Calls `listener` whenever lifecycle work moved on, as when a departure ended or a workspace drained.
+       * Returns its unsubscribe.
+       */
+      onProgress(listener: () => void): () => void {
+        progressListeners.add(listener);
+        return () => {progressListeners.delete(listener);};
       },
       /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
       settled(document: {workspaceId: string; objectId: string}): boolean {
@@ -1646,6 +1777,8 @@ export async function startServiceLiveHost(options: {
        * once no refusal kept in that store waits for a recovery copy.
        */
       releaseKeptEditsStore(kept: ServiceKeptEdits): Promise<void> {
+        // The copy route asks once a recovery copy is saved, which a pass then checks, so the document it kept can go.
+        wakePass();
         return recoveryTurn(kept.workspaceId, async () => {
           const open = recoveries.get(kept.workspaceId);
           if (open && sameKeptEditsIdentity(open.identity, kept.identity) && !storage.serviceKeptEditsStoreHeld(kept.workspaceId, kept.identity)) {
@@ -1680,7 +1813,7 @@ export async function startServiceLiveHost(options: {
           finally {if (!marked) await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason});}
           return marked ? "granted" as const : "changed" as const;
         });
-        if (outcome === "granted") await wake(kept.binding, callerSignal);
+        if (outcome === "granted") {wakePass(); await wake(kept.binding, callerSignal);}
         return outcome;
       },
       /**
@@ -1764,7 +1897,11 @@ export async function startServiceLiveHost(options: {
           // Nothing was fenced, so Stop waits, as while edits remain.
           if (signal.aborted && error === signal.reason) return "waiting";
           throw error;
-        } finally {changes?.notify(value);}
+        } finally {
+          changes?.notify(value);
+          // A fence opens the retirement a pass continues.
+          wakePass();
+        }
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {
