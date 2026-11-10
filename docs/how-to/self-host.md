@@ -556,10 +556,23 @@ docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T
 
 Use the publication ID from the owner's publication list or the app URL's `app` parameter.
 The command disables that one publication. The owner sees the reason and cannot reactivate that publication.
-The owner can still publish the app under a new share link or after rotating the grant.
-Watch for new publications of the same app.
 The relay records the actor as "operator", the time, and the reason durably.
 It immediately refuses serving, new launches, and writes, including requests from existing launches.
+
+The takedown also holds app publishing for the owner's account on this server.
+While the hold is on, the relay refuses every new publication and republication from that account.
+That includes the same app on a new share link, an edited copy, and the app in another workspace.
+The owner's other publications keep serving.
+
+To lift the hold, run the same command with `--lift-hold` instead of `--reason`:
+
+```sh
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay \
+  node /app/services/sync-relay/dist/app-publication-takedown.js \
+  --publication-id PUBLICATION_ID --lift-hold
+```
+
+The owner can then publish apps again. The disabled publication stays disabled.
 
 The command uses a private socket inside the running relay container. Other publications, sync, and sharing keep running.
 Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a custom deployment.
@@ -569,8 +582,9 @@ The relay creates this file with mode 0600. The takedown command reads it automa
 Run the command with access to the continuity volume. Replica children cannot read the secret.
 
 The client times out after 10 seconds. Retries preserve the first takedown record.
+A retry after a lift holds the owner's app publishing again.
 
-Restoring a backup taken before the takedown brings that publication back.
+Restoring a backup taken before the takedown brings that publication back and removes the hold.
 Run the takedown command again after restoring such a backup.
 
 ## Back up and maintain the deployment
