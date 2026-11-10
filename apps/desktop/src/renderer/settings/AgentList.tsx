@@ -496,11 +496,14 @@ export function AgentList(props: {
       enabled: fields.enabled,
       ...(fields.launch ? { launch: fields.launch } : {}),
     };
+    // The agent is saved for every workspace; its check belongs to this one.
+    const token = requests.current();
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
     if (!saved) return;
     setSheetOpen(false);
+    if (!requests.isCurrent(token)) return;
     focusAfter.current = { row: id };
     if (agent.launch && agent.enabled && !paused && checkNote === null) void check({ id, ...agent });
   };

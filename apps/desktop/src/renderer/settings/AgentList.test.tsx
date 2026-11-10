@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AGENTS_RESTRICTED_MESSAGE, type AgentToolsResult } from "../../agents/agentToolCatalog";
@@ -658,6 +658,17 @@ it("adds a tool that is ready, on, with an id and name of its own, then checks i
     name: "Codex 2", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe" }, enabled: true, timeoutMinutes: 30,
   });
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex-2" });
+});
+
+it("doesn't check an agent added in one workspace after the panel moves to another", async () => {
+  const saving = deferred<DesktopUserSettingsResult | null>();
+  const { onSave, rerender } = renderList();
+  onSave.mockReturnValueOnce(saving.promise);
+  await addAgent("codex");
+  rerender({ workspaceId: "ws-2" });
+  saving.resolve({ settings: SETTINGS, source: "stored" });
+  await waitFor(() => expect(screen.queryByTestId("agent-add-sheet")).toBeNull());
+  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
 });
 
 it("gives the first agent you add the default id", async () => {
