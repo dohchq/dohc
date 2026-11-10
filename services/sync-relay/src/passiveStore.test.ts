@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import { it, expect } from "vitest";
 import { spawn } from "node:child_process";
 import { Duplex } from "node:stream";
@@ -40,7 +41,7 @@ it.skipIf(engineBinary.missing)(
       path: string;
       replica: boolean;
     }> = [];
-    const readHandler = createServiceHostReplication({
+    const readHandler = createServiceHostReplication({activity: new DiscussionActivityHub(), 
       storage,
       prefix: "dohc-passive-test-v1.",
       authorize(input) {

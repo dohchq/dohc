@@ -28,7 +28,15 @@ import type { SyncRelayStorage } from "./storage";
 export type AccountOperationResult =
   | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText">]
   | FileListResult
-  | TextReadResult;
+  | TextReadResult
+  | PageTooLargeResult;
+
+/** A page whose file is over the desktop's editor limit, refused before the server fetches its body. */
+export type PageTooLargeResult = { ok: false; reason: string; refusal: "too-large" };
+
+class PageTooLarge extends OperationError {
+  constructor() { super("This page is too large to open here."); }
+}
 
 export interface AccountOperationInput {
   /** The account that owns the workspace, from the caller's credential. */
@@ -117,6 +125,7 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
   } catch (error) {
     if (error instanceof RelayError) throw error;
     // A document read rejects, so its failure is worded here, by the rule the chat host's results follow.
+    if (error instanceof PageTooLarge) return { ok: false, reason: error.message, refusal: "too-large" };
     if (request.operation === "documentRead") return failure(error, `failed to read document: ${request.args.path}`, "operation-only");
     if (error instanceof OperationError) throw badRequest(error.message);
     throw error;
@@ -224,8 +233,9 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
  * before it settles into the file. While a restore keeps the relay from
  * cutting that state, the read answers restore-in-progress rather than an
  * older file. Any other page reads as its settled file in the active version.
- * A lossy note reads as its file, as on the desktop. Nothing here writes to
- * the copy or sends anything.
+ * A lossy note reads as its file, as on the desktop. A page whose file is
+ * over the desktop's editor limit is refused before its body is fetched.
+ * Nothing here writes to the copy or sends anything.
  */
 function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): DocumentsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
@@ -235,7 +245,9 @@ function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, 
       if (hiddenFile(path)) throw missing;
       if (liveDocumentKindForPath(path) !== "richdoc") throw new OperationError(`${path} is not a Markdown document.`);
       const version = await files.getActiveVersion({ workspaceId });
-      const file = version === null ? null : await files.readTextFile({ workspaceId, versionId: version.id, path });
+      const file = version === null ? null
+        : await files.readTextFile({ workspaceId, versionId: version.id, path, maxBytes: LIVE_MARKDOWN_MAX_BYTES });
+      if (file?.contentKind === "text" && (file.text === null || file.byteLength > LIVE_MARKDOWN_MAX_BYTES)) throw new PageTooLarge();
       if (file?.contentKind !== "text" || typeof file.text !== "string") throw missing;
       if (isLossyMarkdown(file.text)) return { path, markdown: file.text };
       const live = version?.kind === "main" ? storage.readAcceptedLiveDocument(workspaceId, path) : { kind: "none" as const };

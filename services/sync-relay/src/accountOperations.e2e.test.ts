@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
@@ -136,7 +137,7 @@ it.skipIf(engine.missing)("answers the phone's reads from the server's copy as t
   let copies: ServerCopies | undefined;
   // The relay as main.ts mounts it with the account API on.
   const relay = createSyncRelayHandler({ storage, resolveActor: testActor, resolveAccountSession, accountApi: true, serverCopies: () => copies });
-  const replicas = createServiceHostReplication({
+  const replicas = createServiceHostReplication({activity: new DiscussionActivityHub(), 
     storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
     authorize: (credential) => authorizeAutomationReplication(storage, { key, namespace, ...credential }),
   });

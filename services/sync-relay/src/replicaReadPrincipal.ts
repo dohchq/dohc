@@ -28,7 +28,8 @@ export function createReplicaReadPrincipal(storage: SyncRelayStorage) {
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected) || !current(lease)) return null;
     return state!;
   };
-  const handle = createServiceHostReplication({ storage, prefix: REPLICA_READ_PREFIX, authorize(input) {
+  // Its leases only read, so nothing it serves wakes a wait.
+  const handle = createServiceHostReplication({ storage, prefix: REPLICA_READ_PREFIX, activity: { wakeLog() {} }, authorize(input) {
     const state = authorizedLease(input);
     if (!state) return null;
     const parts = input.pathname.split("/");

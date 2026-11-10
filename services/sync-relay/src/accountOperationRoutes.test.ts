@@ -7,6 +7,8 @@ import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, createAccountFeedWaits } from "./accountFeed";
+import { AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication, deriveAutomationReplicaBearer } from "./automationReplicaCredential";
+import { createServiceHostReplication } from "./serviceHostReplication";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
@@ -150,6 +152,8 @@ async function answer(response: Response) {
 /**
  * Appends one row to a workspace's log and wakes its waits, as the relay's
  * log routes do. A moment also places its object at its path, or deletes it.
+ * It calls wakeLog itself, so a test that needs a route to wake the feed
+ * writes through that route instead.
  */
 function logWriter(storage: SyncRelayStorage, activity: DiscussionActivityHub, workspaceId = "trip") {
   const context = storage as StorageContext;
@@ -617,6 +621,15 @@ describe("file reads through the server's copy", () => {
     expect(JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" }))))).not.toContain(".env");
   });
 
+  it("refuses a page over the desktop's editor limit without fetching its body", async () => {
+    const { engine, h } = await relay();
+    engine.files.seedTextFile({ workspace: "trip", path: "docs/big.md", text: "a".repeat(2 * 1024 * 1024 + 1) });
+    expect(await answer(await h(op("trip", "documentRead", { path: "docs/big.md" }))))
+      .toEqual({ ok: false, reason: "dohc: This page is too large to open here.", refusal: "too-large" });
+    expect(engine.methods()).toContain("versionedText.read");
+    expect(engine.methods()).not.toContain("versionedText.readBlob");
+  });
+
   it("refuses a text file over the desktop's editor limit without fetching its body", async () => {
     const { engine, h } = await relay();
     engine.files.seedTextFile({ workspace: "trip", path: "big.txt", text: "a".repeat(2 * 1024 * 1024 + 1) });
@@ -789,6 +802,26 @@ describe("an account's change feed", () => {
       expect(response.status, change).toBe(404);
       expect(await response.text()).not.toContain("changed");
     }
+  });
+
+  it("wakes a held feed when the server's copy publishes through its replication route", async () => {
+    const { storage, activity, h } = await relay();
+    const key = new Uint8Array(32).fill(7), namespace = "test";
+    const row = storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 0, reasons: ["account"] })!;
+    const bearer = deriveAutomationReplicaBearer(row, { key, namespace });
+    const replication = createServiceHostReplication({ storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX, activity,
+      authorize: (input) => authorizeAutomationReplication(storage, { key, namespace, ...input }) });
+    const held = h(changes("0.0.0", { hold: 30_000 }));
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    const push = await replication(new Request("https://relay.test/sync/trip/log", {
+      method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ replicationEpoch: "epoch", streamIdentity: "stream", originId: "server-copy", ops: [{
+        originSeq: 0, opKind: "moment.append", recordedAtMs: 10,
+        payload: { operation: "write", objectId: "object-plan", momentId: "moment-plan", versionId: "main", path: "docs/plan.md", recordedAtMs: 10 },
+      }] }),
+    }));
+    expect(push.status, await push.clone().text()).toBe(200);
+    expect(await feed(await held)).toMatchObject({ ok: true, changed: { files: ["object-plan"], pages: ["object-plan"] } });
   });
 
   it("answers server_busy past one account's waits, across its sign-ins, while another account still waits", async () => {

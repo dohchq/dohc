@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import {afterEach, expect, it} from "vitest";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
@@ -18,7 +19,7 @@ async function fixture() {
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const bearer = `${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`;
-  const handle = createServiceHostReplication({storage: f.storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+  const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
     authorize: input => input.bearer === bearer && input.workspaceId === scope.workspaceId ? "owner-1" : null});
   const post = (ops: unknown[], originId = "native-service") => handle(new Request(`https://relay.test/sync/${scope.workspaceId}/log`, {
     method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
@@ -37,7 +38,7 @@ it("gives the service host credential 404 on every ordinary replication route", 
   const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
     path: binding.currentPath, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+  const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
   const request = (method: string, suffix: string, body?: string) => handle(new Request(`https://relay.test/sync/${scope.workspaceId}/${suffix}`,
     {method, headers: {authorization: `Bearer ${bearer}`, ...(body === undefined ? {} : {"content-type": "application/json"})}, body}));
@@ -59,7 +60,7 @@ it("answers an empty hosted push with its origin's highest position and stores n
   const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
     path: binding.currentPath, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+  const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
   const origin = "service-host:host";
   const probe = async () => {

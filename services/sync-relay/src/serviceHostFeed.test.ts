@@ -1,3 +1,4 @@
+import { DiscussionActivityHub } from "./discussionActivity";
 import {afterEach, expect, it, vi} from "vitest";
 import {sha256Hex} from "@dohc/workspace-core/hash";
 import {fixture as ticketFixture, binding, preparedStop, retainServiceActivation, scope} from "./liveTickets.test-helper";
@@ -71,7 +72,7 @@ async function fixture(lookupUserDisplayName?: LogAuthorNameLookup) {
   const setGrant = (shareId: string, change: string) => f.raw.prepare(`UPDATE sync_relay_share_grants SET ${change} WHERE share_id=?`).run(shareId);
   const enroll = (path: string, shareId = scope.shareId) => f.storage.enrollServiceHostDocument({workspaceId: ws, ownerUserId: "owner-1", shareId, path, nowMs: 10, guard() {}});
   const bearer = deriveServiceHostBearer(enroll("docs/a.md"), {key, namespace});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true, lookupUserDisplayName,
+  const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true, lookupUserDisplayName,
     authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
   const request = (method: string, suffix: string, body?: BodyInit, contentType = "application/json") => handle(new Request(`https://relay.test/sync/${ws}/hosted/${suffix}`,
     {method, headers: {authorization: `Bearer ${bearer}`, ...(body === undefined ? {} : {"content-type": contentType})}, ...(body === undefined ? {} : {body})}));
@@ -658,7 +659,7 @@ it("answers a write whose credential is revoked during its warm-up like any revo
   let revoked = false;
   const authorize = (input: {workspaceId: string; bearer: string; method: string; pathname: string}) =>
     authorizeServiceHostReplication(f.storage, {key, namespace, ...input});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+  const handle = createServiceHostReplication({activity: new DiscussionActivityHub(), storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
     authorize, revalidate: input => revoked ? null : authorize(input)});
   const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
   f.storage.listServiceHostDocumentRows = input => {revoked = true; return list(input);};
