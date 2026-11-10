@@ -40,6 +40,8 @@ mod rpc_chats;
 mod rpc_collections;
 #[path = "rpc_conflicts.rs"]
 mod rpc_conflicts;
+#[path = "rpc_files_replace.rs"]
+mod rpc_files_replace;
 #[path = "rpc_hosted.rs"]
 mod rpc_hosted;
 #[path = "rpc_live_changes.rs"]
