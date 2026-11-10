@@ -873,7 +873,11 @@ fn parse_option_colors(
                 ),
             }
         } else {
-            push_reason(reasons, CollectionSchemaReasonCode::ExpectedText, color_path);
+            push_reason(
+                reasons,
+                CollectionSchemaReasonCode::ExpectedText,
+                color_path,
+            );
         }
     }
     colors
