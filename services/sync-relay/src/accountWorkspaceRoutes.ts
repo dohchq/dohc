@@ -1,5 +1,5 @@
 import { jsonResponse } from "@dohc/service-http";
-import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
+import type { AccountSession, ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { badRequest, notFound, relayError } from "./errors";
 import { parseWorkspaceId, readJsonObject, relayPathSegments } from "./requestInputs";
 import { accountIsFenced } from "./storage/accountDeletion";
@@ -33,26 +33,33 @@ export function parseAccountRoute(parts: readonly string[]): AccountWorkspaceRou
 }
 
 /**
+ * The signed-in account behind a request's Bearer session. A cookie is
+ * refused, so a page in a browser can never act with the person's sign-in,
+ * and so is a fenced account.
+ */
+export async function bearerAccountSession(
+  storage: SyncRelayStorage, resolveAccountSession: ResolveAccountSession, request: Request,
+): Promise<AccountSession> {
+  const authorization = request.headers.get("authorization");
+  if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+  const session = await resolveAccountSession(new Request(request.url, {
+    headers: { authorization: authorization! }, signal: request.signal,
+  }));
+  if (accountIsFenced(storage, session.userId)) throw notFound();
+  return session;
+}
+
+/**
  * The workspaces a signed-in account owns, and whether each shows on its
- * phone. Only a Bearer session reaches them, so a page in a browser can never
- * change them with the person's cookie. A workspace the account does not own
- * answers exactly as one that does not exist.
+ * phone. Only a Bearer session reaches them. A workspace the account does
+ * not own answers exactly as one that does not exist.
  */
 export function createAccountWorkspaceRoutes(options: {
   storage: SyncRelayStorage;
   resolveAccountSession: ResolveAccountSession;
 }) {
   const { storage } = options;
-
-  async function account(request: Request): Promise<string> {
-    const authorization = request.headers.get("authorization");
-    if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
-    const session = await options.resolveAccountSession(new Request(request.url, {
-      headers: { authorization: authorization! }, signal: request.signal,
-    }));
-    if (accountIsFenced(storage, session.userId)) throw notFound();
-    return session.userId;
-  }
+  const account = async (request: Request) => (await bearerAccountSession(storage, options.resolveAccountSession, request)).userId;
 
   return async function respondToAccountWorkspaces(request: Request, route: AccountWorkspaceRoute): Promise<Response> {
     if (route.route === "account-workspaces") {

@@ -446,6 +446,7 @@ const relayApplication = createSyncRelayHandler({
   appCollectionPolicy,
   noticePostRateLimiter,
   accountApi,
+  serverCopies: () => copies,
   ...(automationServer ? {automationServer} : {}),
 });
 let ownerLive: ReturnType<typeof createOwnerLiveRoutes> | undefined;

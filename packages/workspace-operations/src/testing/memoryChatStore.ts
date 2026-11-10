@@ -7,7 +7,7 @@ import type {
   ChatStreamItem,
   ChatThread,
 } from "@dohc/workspace-contracts/engine";
-import type { ChatReadStore, ChatsHost, DispatchFacts, ProvisionedChannel } from "../chats";
+import type { ChatReadStore, ChatsHost, DispatchFacts, ErrorDetail, ProvisionedChannel } from "../chats";
 
 type Decision = Awaited<ReturnType<ChatReadStore["listThreadDecisions"]>>[number];
 type ProjectionInput = Parameters<ChatReadStore["getThreadProjection"]>[0];
@@ -226,7 +226,7 @@ export const IDLE_DISPATCH: DispatchFacts = { paused: null, lastRun: null };
 // is logged beside the store's calls so their order can be checked.
 export function memoryHost(
   store: MemoryChatStore,
-  options: { writable?: boolean; files?: Record<string, string>; dispatch?: DispatchFacts } = {},
+  options: { writable?: boolean; files?: Record<string, string>; dispatch?: DispatchFacts; errorDetail?: ErrorDetail } = {},
 ): ChatsHost & { provisions: ProvisionedChannel[] } {
   const files = options.files ?? {};
   const provisions: ProvisionedChannel[] = [];
@@ -235,6 +235,7 @@ export function memoryHost(
     store,
     provisions,
     writable: options.writable ?? true,
+    errorDetail: options.errorDetail ?? "full",
     fileObjectId: async (path) => files[path] ?? null,
     filePath: async (objectId) => Object.entries(files).find(([, id]) => id === objectId)?.[0] ?? null,
     dispatch: async () => options.dispatch ?? IDLE_DISPATCH,

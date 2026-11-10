@@ -7,6 +7,7 @@ import {
 } from "@dohc/automation-executor/automation-chat";
 import type {AutomationChatDependencies} from "@dohc/automation-executor/collection-automation-run";
 import type {LinkedChatStore} from "@dohc/workspace-contracts/engine";
+import type {ChatReadStore} from "@dohc/workspace-operations/chats";
 import {isNoticeTarget, type PostNoticeRequest} from "@dohc/workspace-contracts/relay";
 import {ChatsLiveAdapter} from "@dohc/workspace-engine-client";
 import type {TokenBucketLimiter} from "@dohc/service-http";
@@ -19,13 +20,27 @@ import type {SyncRelayStorage} from "./storage";
 export type ReplicaChatStore = Pick<LinkedChatStore, "listChannels" | "getChannelWireId" | "listChannelThreads"> &
   Pick<ChatsLiveAdapter, "startChannelThread" | "sendMessage" | "getMessage" | "findThreadChannelId">;
 
-/** The chat store of one open replica, with channels named as the chat contract names them. */
-export function replicaChatStore(replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId">): ReplicaChatStore {
+/**
+ * The chat store of one open replica, for its automations' messages and an
+ * account's reads, with channels named as the chat contract names them.
+ */
+export function replicaChatStore(replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId">): ReplicaChatStore & ChatReadStore {
   const adapter = new ChatsLiveAdapter(replica.client, replica.workspace, {workspaceId: replica.workspaceId});
   return {
+    ensureGeneralChannel: async (input) => {
+      const {channelId, ...channel} = await adapter.ensureGeneralChannel(input);
+      return {...channel, id: channelId};
+    },
     listChannels: async (input) => (await adapter.listChannels(input)).map(({channelId, ...channel}) => ({...channel, id: channelId})),
     getChannelWireId: (input) => adapter.getChannelWireId(input),
     listChannelThreads: (input) => adapter.listChannelThreads(input),
+    listThreadsForFile: (input) => adapter.listThreadsForFile(input),
+    listThreads: (input) => adapter.listThreads(input),
+    listMessages: (input) => adapter.listMessages(input),
+    listThreadDecisions: (workspaceId, threadId) => adapter.listThreadDecisions(workspaceId, threadId),
+    getThreadProjection: (input) => adapter.getThreadProjection(input),
+    listGroupStream: (input) => adapter.listGroupStream(input),
+    listAgentUnreadThreads: (workspaceId, reader) => adapter.listAgentUnreadThreads(workspaceId, reader),
     startChannelThread: (input) => adapter.startChannelThread(input),
     sendMessage: (input) => adapter.sendMessage(input),
     getMessage: (input) => adapter.getMessage(input),

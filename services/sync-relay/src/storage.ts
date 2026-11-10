@@ -27,7 +27,7 @@ import { RelayWriteOwner } from "./storage/writeOwner";
 import { isAsyncFunction } from "node:util/types";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
+import type { AcceptedLiveDocument, LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
 export type { LiveJournalStoredUpdate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveJournalValidation, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult } from "./storage/types";
 export { LiveJournalAdmittedCapacityError } from "./storage/errors";
 import * as liveUpdateJournalStorage from "./storage/liveUpdateJournal";
@@ -568,6 +568,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   automationRecordBinding(workspaceId: string, ownerUserId: string, path: string) {
     return liveDocumentAuthorityStorage.automationRecordBinding(this, workspaceId, ownerUserId, path);
+  }
+
+  readAcceptedLiveDocument(workspaceId: string, path: string): AcceptedLiveDocument {
+    const document = liveDocumentAuthorityStorage.currentLiveDocument(this, workspaceId, path);
+    if (document === null) return {kind: "none"};
+    const read = this.readLiveUpdateJournalCut({document});
+    if (read.kind === "cut") return read.cut.currentPath === path ? read : {kind: "none"};
+    return serviceHostEnrollmentStorage.restoreInProgress(this, workspaceId, document.objectId) ? {kind: "restoring"} : {kind: "none"};
   }
 
   /** Internal replica refresh hint; accepted bytes still pass the journal's validated sync path. */
@@ -1458,6 +1466,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     path: string;
   }): string | undefined {
     return objectIndexStorage.objectIdAtPathInVersion(this, input);
+  }
+
+  objectLastKnownPath(workspaceId: string, objectId: string): string | undefined {
+    return objectIndexStorage.objectLastKnownPath(this, workspaceId, objectId);
   }
 
   objectMoment(input: {

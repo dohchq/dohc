@@ -42,9 +42,20 @@ describe("the account's workspace list", () => {
     const response = await h(list(account("ana")));
     expect(response.status).toBe(200);
     expect(await json(response)).toEqual({ ok: true, workspaces: [
-      { workspaceId: "notes", canOpen: false, showOnPhone: true },
-      { workspaceId: "trip", canOpen: true, showOnPhone: true },
+      { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true },
+      { workspaceId: "trip", name: null, canOpen: true, showOnPhone: true },
     ] });
+  });
+
+  it("names each workspace as its owner's computer last named it", async () => {
+    const { h } = await relay();
+    const named = await h(request("ana", "/sync/workspaces/trip/name", { method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Lisbon trip" }) }));
+    expect(named.status).toBe(200);
+    expect((await json(await h(list(account("ana"))))).workspaces).toEqual([
+      { workspaceId: "notes", name: null, canOpen: false, showOnPhone: true },
+      { workspaceId: "trip", name: "Lisbon trip", canOpen: true, showOnPhone: true },
+    ]);
   });
 
   it("is not served while the account API is off", async () => {
@@ -89,9 +100,9 @@ describe("Show on phone", () => {
     const off = await h(patch("trip", account("ana")));
     expect(off.status).toBe(200);
     expect(await json(off)).toEqual({ ok: true, workspaceId: "trip", showOnPhone: false });
-    expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual({ workspaceId: "trip", canOpen: true, showOnPhone: false });
+    expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual({ workspaceId: "trip", name: null, canOpen: true, showOnPhone: false });
     expect((await h(patch("trip", account("ana"), { showOnPhone: true }))).status).toBe(200);
-    expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual({ workspaceId: "trip", canOpen: true, showOnPhone: true });
+    expect((await json(await h(list(account("ana"))))).workspaces).toContainEqual({ workspaceId: "trip", name: null, canOpen: true, showOnPhone: true });
   });
 
   it("ends the account's reason for the server's copy when it turns off, and keeps the automations' reason", async () => {
@@ -135,6 +146,6 @@ describe("Show on phone", () => {
     expect((await h(patch("trip", account("ana")))).status).toBe(200);
     storage.db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'").run();
     expect(storage.showsOnPhone("ben", "trip")).toBe(true);
-    expect((await json(await h(list(account("ben"))))).workspaces).toContainEqual({ workspaceId: "trip", canOpen: true, showOnPhone: true });
+    expect((await json(await h(list(account("ben"))))).workspaces).toContainEqual({ workspaceId: "trip", name: null, canOpen: true, showOnPhone: true });
   });
 });

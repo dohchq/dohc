@@ -576,6 +576,10 @@ export interface LiveUpdateJournalCut {
   readonly suffixCount: number;
   readonly suffixBytes: number;
 }
+export type AcceptedLiveDocument =
+  | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
+  | { readonly kind: "restoring" }
+  | { readonly kind: "none" };
 export type LiveUpdateJournalCutResult =
   | { readonly kind: "cut"; readonly cut: LiveUpdateJournalCut }
   | { readonly kind: "refused"; readonly reason: "baseline-missing" | "authority-refused" | "stale-binding" };
@@ -793,6 +797,12 @@ export interface SyncRelayStorage {
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
     authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
   automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding; shareId: string} | null;
+  /**
+   * The accepted state of the live document now at `path` in main: its
+   * journal cut, "restoring" while a restore keeps the relay from cutting it,
+   * or "none" when the settled file is the page.
+   */
+  readAcceptedLiveDocument(workspaceId: string, path: string): AcceptedLiveDocument;
   automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
@@ -1262,6 +1272,10 @@ export interface SyncRelayStorage {
     versionId: string;
     path: string;
   }): string | undefined;
+  // Where the object last was: the path its latest moment named in any
+  // version, as the relay's log recorded it. undefined when the relay holds no
+  // moment of the object.
+  objectLastKnownPath(workspaceId: string, objectId: string): string | undefined;
   // The granter's own moment for this object within one version:
   // the latest one, or the latest that produced `blobSha256` when one is
   // named. The first answers "did this file drift since they sent it?"; the

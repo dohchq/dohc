@@ -6,6 +6,7 @@ import type {
   CliStreamPosition,
 } from "@dohc/cli/protocol";
 import type {
+  AgentRunRecord,
   ChannelThreadSummary,
   ChatAgentReader,
   ChatChannelSummary,
@@ -13,6 +14,7 @@ import type {
   ChatStreamItem,
   ChatThread,
   LinkedChatStore,
+  ThreadDispatchPauseState,
 } from "@dohc/workspace-contracts/engine";
 import { validateUserReadPath } from "@dohc/workspace-contracts/workspace-paths";
 import {
@@ -26,8 +28,9 @@ import {
   rawChatMessage,
   rawChatThread,
 } from "./chatHandles";
-import { failure, OperationError, pathRejected } from "./results";
+import { failure, OperationError, pathRejected, type ErrorDetail } from "./results";
 
+export { failure, OperationError, type ErrorDetail } from "./results";
 export {
   authorForCli,
   cliGroupKind,
@@ -57,6 +60,38 @@ export type ChatReadStore = Pick<
 // A thread's pause state and its latest run, as `show` and `chat` report them.
 export type DispatchFacts = CliShowThreadResult["dispatch"];
 
+// The two dispatch store reads a thread's dispatch facts come from.
+export interface ThreadDispatchReads {
+  getThreadDispatchPauseState(workspaceId: string, threadId: string):
+    Pick<ThreadDispatchPauseState, "paused"> | null | Promise<Pick<ThreadDispatchPauseState, "paused"> | null>;
+  latestRunForThread(workspaceId: string, threadId: string): ThreadRun | null | Promise<ThreadRun | null>;
+}
+type ThreadRun = Pick<AgentRunRecord, "endedAtMs" | "exitCode" | "failureReason" | "failureHandled">;
+
+export async function readThreadDispatchState(
+  store: ThreadDispatchReads,
+  workspaceId: string,
+  threadId: string,
+): Promise<DispatchFacts> {
+  const [pause, run] = await Promise.all([
+    store.getThreadDispatchPauseState(workspaceId, threadId),
+    store.latestRunForThread(workspaceId, threadId),
+  ]);
+  const failureReason = run?.failureReason ?? (
+    run?.endedAtMs !== undefined && run.exitCode === 0 && run.failureHandled
+      ? "no-reply"
+      : null
+  );
+  return {
+    paused: pause?.paused ? "budget" : null,
+    lastRun: run ? {
+      state: run.endedAtMs === undefined ? "running" : failureReason || run.exitCode !== 0 ? "failed" : "completed",
+      failureReason,
+      exitCode: run.exitCode ?? null,
+    } : null,
+  };
+}
+
 // The channels a read created: General, the first time a writable
 // workspace's chats are listed.
 export interface ProvisionedChannel {
@@ -75,6 +110,8 @@ export interface ChatsHost {
   // Awaited as soon as General is created, before any later read, so a read
   // that fails afterwards has still reported the change.
   provisioned(change: ProvisionedChannel): void | Promise<void>;
+  // How much of an engine failure a failed result reports (results.ts).
+  errorDetail: ErrorDetail;
 }
 
 export interface ChannelEntry {
@@ -88,7 +125,10 @@ export interface LoadedThread {
   summary?: ChannelThreadSummary;
 }
 
-type Args<Verb extends CliRequest["verb"]> = Extract<CliRequest, { verb: Verb }>["args"];
+// An operation's arguments, less who is calling: the caller acts on that.
+type Args<Verb extends CliRequest["verb"]> = Extract<CliRequest, { verb: Verb }>["args"] extends infer Each
+  ? Each extends unknown ? Omit<Each, "cwd" | "actor" | "agentId"> : never
+  : never;
 type ShowStream = Extract<CliResultByVerb["show"], { stream: unknown }>;
 
 // What marking a shown thread read needs, from the whole thread rather than
@@ -103,10 +143,10 @@ export interface ShownThreadRead {
 export type ShowResult = ShowStream | { thread: CliShowThreadResult; read: ShownThreadRead };
 
 async function provisionedChannels(host: ChatsHost): Promise<ChatChannelSummary[]> {
+  // A read-only workspace's reads create nothing, so they report nothing.
+  if (!host.writable) return await host.store.listChannels({ workspaceId: host.workspaceId });
   const before = await host.store.listChannels({ workspaceId: host.workspaceId });
-  if (host.writable) {
-    await host.store.ensureGeneralChannel({ workspaceId: host.workspaceId });
-  }
+  await host.store.ensureGeneralChannel({ workspaceId: host.workspaceId });
   const channels = await host.store.listChannels({ workspaceId: host.workspaceId });
   if (channels.length !== before.length) {
     const known = new Set(before.map((channel) => channel.id));
@@ -484,7 +524,7 @@ export async function listGroupsWithThreads(host: ChatsHost): Promise<CliResultB
     }
     return { ok: true as const, groups: withThreads };
   } catch (error) {
-    return failure(error, "failed to list groups");
+    return failure(error, "failed to list groups", host.errorDetail);
   }
 }
 
@@ -511,7 +551,7 @@ export async function listFileChats(
       threads: threads.map(rawChatThread),
     };
   } catch (error) {
-    return failure(error, `failed to list chats for: ${path}`);
+    return failure(error, `failed to list chats for: ${path}`, host.errorDetail);
   }
 }
 
@@ -533,15 +573,12 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
         },
       };
     } catch (error) {
-      return failure(error, `failed to read group: ${group}`);
+      return failure(error, `failed to read group: ${group}`, host.errorDetail);
     }
   }
   const { threadId } = args;
   try {
-    const messages = await host.store.listMessages({
-      workspaceId: host.workspaceId,
-      threadId,
-    });
+    // The thread first, so a thread the store doesn't list reads as missing whatever its messages would answer.
     const threads = await host.store.listThreads({
       workspaceId: host.workspaceId,
     });
@@ -554,6 +591,10 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
         reason: `chat thread not found: ${threadId}`,
       };
     }
+    const messages = await host.store.listMessages({
+      workspaceId: host.workspaceId,
+      threadId,
+    });
     const currentPath = thread.linkedFile
       ? await host.filePath(thread.linkedFile.objectId)
       : null;
@@ -578,7 +619,7 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
       },
     };
   } catch (error) {
-    return failure(error, `failed to read chat: ${threadId}`);
+    return failure(error, `failed to read chat: ${threadId}`, host.errorDetail);
   }
 }
 

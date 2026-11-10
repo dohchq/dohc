@@ -25,6 +25,7 @@
   "dependencies": {
     "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/automation-executor": "workspace:*",
+    "@dohc/cli": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
@@ -32,6 +33,7 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine-client": "workspace:*",
+    "@dohc/workspace-operations": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "better-auth": "^1.6.26",
     "effect": "4.0.0",

@@ -13,7 +13,6 @@ import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
-import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   authorForCli,
   buildThreadContent,
@@ -31,6 +30,7 @@ import {
   loadMessagesByThread,
   loadThreads,
   readChat,
+  readThreadDispatchState,
   resolveChannel,
   resolveMessageInThread,
   resolveThread,
@@ -1206,6 +1206,7 @@ function chatsHost(context: CliWorkspaceContext, options: CliServerOptions): Cha
     dispatch: (threadId) => readThreadDispatchState(context.dispatchStore, context.workspaceId, threadId),
     writable: !context.readOnly,
     provisioned: () => notifyWrite(options, context),
+    errorDetail: "full",
   };
 }
 

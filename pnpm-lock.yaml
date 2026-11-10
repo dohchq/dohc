@@ -1229,6 +1229,9 @@ importers:
       '@dohc/automation-executor':
         specifier: workspace:*
         version: link:../../packages/automation-executor
+      '@dohc/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
       '@dohc/live-session-contract':
         specifier: workspace:*
         version: link:../../packages/live-session-contract
@@ -1250,6 +1253,9 @@ importers:
       '@dohc/workspace-engine-client':
         specifier: workspace:*
         version: link:../../packages/workspace-engine-client
+      '@dohc/workspace-operations':
+        specifier: workspace:*
+        version: link:../../packages/workspace-operations
       '@dohc/ydoc-projection':
         specifier: workspace:*
         version: link:../../packages/ydoc-projection
