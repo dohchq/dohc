@@ -29,13 +29,24 @@ export type AccountOperationResult =
   | CliResultByVerb[Exclude<ServerOperation, "listFiles" | "readText">]
   | FileListResult
   | TextReadResult
-  | PageTooLargeResult;
+  | PageTooLargeResult
+  | PageMissingResult;
 
 /** A page whose file is over the desktop's editor limit, refused before the server fetches its body. */
 export type PageTooLargeResult = { ok: false; reason: string; refusal: "too-large" };
 
+/**
+ * A page the copy doesn't hold at its path. A secret file's page answers exactly this, word for word, so the code
+ * says nothing a missing page wouldn't.
+ */
+export type PageMissingResult = { ok: false; reason: string; refusal: "missing" };
+
 class PageTooLarge extends OperationError {
   constructor() { super("This page is too large to open here."); }
+}
+
+class PageMissing extends OperationError {
+  constructor(path: string) { super(`No document at ${path}.`); }
 }
 
 export interface AccountOperationInput {
@@ -126,6 +137,7 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
     if (error instanceof RelayError) throw error;
     // A document read rejects, so its failure is worded here, by the rule the chat host's results follow.
     if (error instanceof PageTooLarge) return { ok: false, reason: error.message, refusal: "too-large" };
+    if (error instanceof PageMissing) return { ok: false, reason: error.message, refusal: "missing" };
     if (request.operation === "documentRead") return failure(error, `failed to read document: ${request.args.path}`, "operation-only");
     if (error instanceof OperationError) throw badRequest(error.message);
     throw error;
@@ -241,7 +253,7 @@ function serverDocuments(storage: SyncRelayStorage, replica: AutomationReplica, 
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   return {
     async read(path) {
-      const missing = new OperationError(`No document at ${path}.`);
+      const missing = new PageMissing(path);
       if (hiddenFile(path)) throw missing;
       if (liveDocumentKindForPath(path) !== "richdoc") throw new OperationError(`${path} is not a Markdown document.`);
       const version = await files.getActiveVersion({ workspaceId });

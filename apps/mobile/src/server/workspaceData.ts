@@ -20,7 +20,9 @@ import {
 // feed was when the read started: a change reported before then is in the read's answer. On a change, only the views it
 // can touch read again; a view no screen has open is marked stale and reads when one opens it. `replace` drops every
 // view no screen has open and reads the open ones again. The feed stops in the background, and backs off on errors up
-// to FEED_RETRY_MAX_MS.
+// to FEED_RETRY_MAX_MS. After FEED_FAILURES_SHOWN failures in a row, or once its wait reaches that cap, the store shows
+// the feed's failure, so what's on screen never goes stale without a sign. A feed answer takes it back. Try again, and
+// a return from the background, start the feed again at once, counting failures from none.
 
 export type ReadProblem = ServerProblemKind | "restoring";
 
@@ -31,6 +33,12 @@ export interface ViewState<T> {
   /** Why the latest read failed, until one succeeds. */
   readonly problem: ReadProblem | null;
   /** How many reads have failed, so each failure is reported once. */
+  readonly failures: number;
+}
+
+/** Whether the feed is failing: why, and how many times the store has shown that it is, so each is reported once. */
+export interface FeedState {
+  readonly problem: ReadProblem | null;
   readonly failures: number;
 }
 
@@ -145,6 +153,10 @@ export interface WorkspaceData {
   /** Opens the view while any listener stays: it reads unless it already shows a fresh value. */
   subscribe(view: View<unknown>, listener: () => void): () => void;
   retry(view: View<unknown>): void;
+  feed(): FeedState;
+  subscribeFeed(listener: () => void): () => void;
+  /** Starts the feed again at once, with its backoff from the start. */
+  retryFeed(): void;
   /** Starts the feed, or starts it again after `pause`. */
   resume(): void;
   /** Stops the feed until `resume`, as when the app goes to the background. */
@@ -155,6 +167,7 @@ export interface WorkspaceData {
 
 export const FEED_RETRY_MS = 1000;
 export const FEED_RETRY_MAX_MS = 30_000;
+export const FEED_FAILURES_SHOWN = 3;
 
 interface Entry {
   readonly view: View<unknown>;
@@ -186,6 +199,12 @@ export function createWorkspaceData(options: {
   let feed: AbortController | null = null;
   // Where the feed reads from next: the oldest cursor among what the store shows.
   let cursor: string | null = null;
+  let feedState: FeedState = { problem: null, failures: 0 };
+  const feedListeners = new Set<() => void>();
+  function setFeed(next: FeedState) {
+    feedState = next;
+    for (const listener of feedListeners) listener();
+  }
   for (const cached of cache.entries(scope)) {
     entries.set(cached.view.id, {
       view: cached.view, state: { value: cached.value, loading: false, problem: null, failures: 0 },
@@ -258,8 +277,10 @@ export function createWorkspaceData(options: {
     feed = null;
   }
 
+  // Each run of the feed counts its own failures, so one started again begins from none.
   async function listen(signal: AbortSignal) {
     let failures = 0;
+    let shown = false;
     while (!signal.aborted && live() && cursor !== null) {
       let answer: FeedAnswer;
       try {
@@ -268,15 +289,23 @@ export function createWorkspaceData(options: {
         // A 401 has ended the sign-in, and a cancelled request belongs to a feed that has stopped.
         if (signal.aborted || !live() || (error instanceof ServerError && (error.problem === "signed-out" || error.problem === "cancelled"))) return;
         failures += 1;
+        const delay = Math.min(FEED_RETRY_MS * 2 ** (failures - 1), FEED_RETRY_MAX_MS);
+        const problem = readProblem(error);
+        if (problem !== null && !shown && (failures >= FEED_FAILURES_SHOWN || delay >= FEED_RETRY_MAX_MS)) {
+          shown = true;
+          setFeed({ problem, failures: feedState.failures + 1 });
+        }
         try {
-          await wait(Math.min(FEED_RETRY_MS * 2 ** (failures - 1), FEED_RETRY_MAX_MS), signal);
+          await wait(delay, signal);
         } catch {
           return;
         }
         continue;
       }
       failures = 0;
+      shown = false;
       if (signal.aborted || !live()) return;
+      if (feedState.problem !== null) setFeed({ ...feedState, problem: null });
       cursor = answer.cursor;
       apply(answer);
     }
@@ -330,6 +359,15 @@ export function createWorkspaceData(options: {
     retry(view) {
       const target = entry(view);
       if (live() && !target.state.loading) read(target);
+    },
+    feed: () => feedState,
+    subscribeFeed(listener) {
+      feedListeners.add(listener);
+      return () => void feedListeners.delete(listener);
+    },
+    retryFeed() {
+      stopFeed();
+      startFeed();
     },
     resume() {
       running = true;

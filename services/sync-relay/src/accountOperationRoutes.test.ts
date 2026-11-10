@@ -431,7 +431,7 @@ describe("secret files through the server's copy", () => {
   it("reads a secret file's page exactly as a missing one, without asking the engine", async () => {
     const { engine, h } = await relay();
     await seedTrip(engine);
-    const missing = (path: string) => ({ ok: false, reason: `dohc: No document at ${path}.` });
+    const missing = (path: string) => ({ ok: false, reason: `dohc: No document at ${path}.`, refusal: "missing" });
     expect(await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
     const reads = engine.files.requests.length;
     for (const [path, normalized] of [
@@ -441,6 +441,18 @@ describe("secret files through the server's copy", () => {
       expect(await answer(await h(op("trip", "documentRead", { path }))), path).toEqual(missing(normalized));
     }
     expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
+  });
+
+  it("answers a secret file's page with the same bytes as a missing one's, its path aside", async () => {
+    const { engine, h } = await relay();
+    await seedTrip(engine);
+    const bytes = async (path: string) => {
+      const response = await h(op("trip", "documentRead", { path }));
+      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(path, "<path>") };
+    };
+    const missing = await bytes("docs/missing.md");
+    expect(missing.body).toContain('"refusal":"missing"');
+    for (const path of [".env", "docs/.env.local", "a/.env/b.md"]) expect(await bytes(path), path).toEqual(missing);
   });
 
   it("lists a secret file's chats exactly as a missing file's, and reads its threads and attachments as missing", async () => {
@@ -563,7 +575,8 @@ describe("pages the relay hosts live", () => {
     expect(f.storage.advanceStopRestoreFence({ workspaceId: "workspace", ownerUserId: "owner", operationId: "restore" }, 110).phase).toBe("fenced");
     const response = await read();
     expect(response.status).toBe(409);
-    expect(await json(response)).toMatchObject({ ok: false, code: "restore-in-progress" });
+    // This route's own words, not the code's default, which is live editing's.
+    expect(await json(response)).toEqual({ ok: false, code: "restore-in-progress", error: "This page is being restored. Try again once it finishes." });
   });
 
   it("reads the active version's settled file when it isn't main, or the page as missing when the copy doesn't hold it", async () => {
@@ -578,7 +591,7 @@ describe("pages the relay hosts live", () => {
 
     const absent = await livePage(() => undefined);
     absent.edit();
-    expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md." });
+    expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md.", refusal: "missing" });
   });
 });
 

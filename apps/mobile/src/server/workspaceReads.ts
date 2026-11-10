@@ -154,9 +154,9 @@ export function readThread(client: ServerClient, workspaceId: string, threadId: 
 // --- pages --------------------------------------------------------------------------------------------------------
 
 /**
- * A page as the server's copy holds it: its Markdown, or why there is none. `missing` is a page no longer at its
- * path; `too-large` a file over the desktop's editor limit, which the server refuses before reading it; `unreadable`
- * any other refusal.
+ * A page as the server's copy holds it: its Markdown, or why there is none, by the refusal the server names. `missing`
+ * is a page not at its path, and the server answers a secret file's page the same way; `too-large` a file over the
+ * desktop's editor limit, which the server refuses before reading it; `unreadable` any other refusal.
  */
 export type PageRead =
   | { readonly kind: "page"; readonly markdown: string }
@@ -164,16 +164,13 @@ export type PageRead =
   | { readonly kind: "too-large" }
   | { readonly kind: "unreadable" };
 
-// The operation names a missing page only in its reason (packages/workspace-operations/src/results.ts).
-const MISSING = "dohc: No document at ";
-
 export function readPage(client: ServerClient, workspaceId: string, path: string, signal: AbortSignal): Promise<Read<PageRead>> {
   return operation<PageRead>(client, workspaceId, "documentRead", { path }, result => {
     if (!isFields(result)) return null;
     if (result.ok === true) return string(result.markdown) ? { kind: "page", markdown: result.markdown } : null;
     if (result.ok !== false || !string(result.reason)) return null;
     if (result.refusal === "too-large") return { kind: "too-large" };
-    return result.reason.startsWith(MISSING) ? { kind: "missing" } : { kind: "unreadable" };
+    return result.refusal === "missing" ? { kind: "missing" } : { kind: "unreadable" };
   }, signal);
 }
 

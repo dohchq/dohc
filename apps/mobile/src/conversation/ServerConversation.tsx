@@ -10,7 +10,7 @@ import { views, type ViewState } from "../server/workspaceData";
 import type { ChatGroupKind, ChatMessage, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
-import { useProblemText, useView } from "../workspace/useView";
+import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { MessageRow } from "./MessageRow";
 import type { Author, Message } from "./sample";
 
@@ -50,6 +50,7 @@ function Conversation({ title, state, messages, retry }: {
   const theme = useTheme();
   const router = useRouter();
   const problemText = useProblemText();
+  const kept = useKeptContentProblem(state.problem, retry);
   const items = useMemo(() => messages ? conversationItems(messages, Date.now()) : [], [messages]);
   const openReplies = useCallback((entry: Message) => {
     if (entry.threadId) router.push({ pathname: "/chat/[id]", params: { id: entry.threadId } });
@@ -74,8 +75,8 @@ function Conversation({ title, state, messages, retry }: {
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
       {header}
-      {/* What's shown stays while a refresh that failed waits for Try again. */}
-      {state.problem ? <View style={[styles.problem, { borderBottomColor: theme.line }]}><ProblemLine text={problemText(state.problem)} onRetry={retry} /></View> : null}
+      {/* What's shown stays while a refresh that failed, or a failing feed, waits for Try again. */}
+      {kept ? <View style={[styles.problem, { borderBottomColor: theme.line }]}><ProblemLine text={kept.text} onRetry={kept.retry} /></View> : null}
       {items.length === 0 ? <EmptyLine text={workspaceWords.noMessages} /> : (
         <LegendList
           data={items}

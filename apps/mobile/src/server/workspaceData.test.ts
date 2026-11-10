@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createAccount, type StoredSignIn } from "./account";
 import { createServerClient } from "./client";
 import { deferred, memoryStore, testServer, type Answer } from "./testServer";
-import { cacheScope, createReadCache, createWorkspaceData, FEED_RETRY_MS, views, type ReadCache } from "./workspaceData";
+import { cacheScope, createReadCache, createWorkspaceData, FEED_FAILURES_SHOWN, FEED_RETRY_MS, views, type ReadCache } from "./workspaceData";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
 type Server = ReturnType<typeof testServer>;
@@ -92,16 +92,19 @@ describe("a workspace's reads", () => {
     const server = testServer();
     server.on("POST", "/sync/ws-a/ops/documentRead", ({ body }) => {
       const path = (body as { path: string }).path;
-      if (path === "gone.md") return ops({ ok: false, reason: "dohc: No document at gone.md." }, "0.1.1");
+      if (path === "gone.md") return ops({ ok: false, reason: "dohc: No document at gone.md.", refusal: "missing" }, "0.1.1");
+      if (path === "odd.md") return ops({ ok: false, reason: "dohc: No document at odd.md." }, "0.1.1");
       if (path === "big.md") return ops({ ok: false, reason: "dohc: This page is too large to open here.", refusal: "too-large" }, "0.1.1");
-      return { status: 409, body: { ok: false, error: "Stop live editing is waiting.", code: "restore-in-progress" } };
+      return { status: 409, body: { ok: false, error: "This page is being restored. Try again once it finishes.", code: "restore-in-progress" } };
     });
     server.on("GET", feedPath("ws-a", "0.1.1"), held);
     const { data } = open(server);
-    for (const path of ["gone.md", "big.md", "restoring.md"]) data.subscribe(views.page(path), () => {});
+    for (const path of ["gone.md", "odd.md", "big.md", "restoring.md"]) data.subscribe(views.page(path), () => {});
     await vi.waitFor(() => expect(data.state(views.page("restoring.md")).problem).toBe("restoring"));
     await vi.waitFor(() => expect(data.state(views.page("big.md")).value).toEqual({ kind: "too-large" }));
     expect(data.state(views.page("gone.md")).value).toEqual({ kind: "missing" });
+    // Only the server's code says a page is gone: the words of its reason don't.
+    expect(data.state(views.page("odd.md")).value).toEqual({ kind: "unreadable" });
   });
 });
 
@@ -271,6 +274,86 @@ describe("the change feed", () => {
     expect(server.calls.find(call => call.path === feedPath("ws-a", "0.5.2"))?.signal.aborted).toBe(true);
     data.resume();
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
+  });
+});
+
+describe("a failing feed", () => {
+  const busy: Answer = { status: 503 };
+
+  /** A feed whose answers are scripted, and whose backoff waits each last until the test lets them end. */
+  async function failing(...answers: (Answer | (() => Promise<Answer>))[]) {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/listFiles", ops(files(), "0.5.2"));
+    server.on("GET", feedPath("ws-a", "0.5.2"), ...answers);
+    const waits: number[] = [];
+    const ends: (() => void)[] = [];
+    const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+      waits.push(ms);
+      ends.push(resolve);
+      signal.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+    const { data } = open(server, "ws-a", createReadCache(), sleep);
+    data.subscribe(views.files, () => {});
+    /** Waits for the next backoff wait, then ends it. */
+    const pass = async (waited: number) => {
+      await vi.waitFor(() => expect(waits).toHaveLength(waited));
+      ends[waited - 1]!();
+    };
+    return { server, data, waits, pass, requests: () => count(server, feedPath("ws-a", "0.5.2")) };
+  }
+
+  it("shows its failure after three in a row, and only once", async () => {
+    const { data, waits, pass, requests } = await failing(busy, busy, busy, busy, held);
+    await pass(1);
+    await pass(2);
+    await vi.waitFor(() => expect(requests()).toBe(3));
+    expect(data.feed().problem).toBeNull();
+    await vi.waitFor(() => expect(waits).toHaveLength(FEED_FAILURES_SHOWN));
+    expect(data.feed()).toEqual({ problem: "server-busy", failures: 1 });
+    await pass(3);
+    await pass(4);
+    await vi.waitFor(() => expect(requests()).toBe(5));
+    expect(data.feed()).toEqual({ problem: "server-busy", failures: 1 });
+    expect(waits).toEqual([1, 2, 4, 8].map(times => times * FEED_RETRY_MS));
+  });
+
+  it("starts again at once on Try again, with its backoff from the start", async () => {
+    const { server, data, waits, pass, requests } = await failing(busy, busy, busy, held);
+    await pass(1);
+    await pass(2);
+    await vi.waitFor(() => expect(waits).toHaveLength(FEED_FAILURES_SHOWN));
+    expect(data.feed().problem).toBe("server-busy");
+    // Try again during the third wait, which is never let end.
+    server.on("GET", feedPath("ws-a", "0.5.2"), busy, held);
+    data.retryFeed();
+    await vi.waitFor(() => expect(waits).toHaveLength(FEED_FAILURES_SHOWN + 1));
+    expect(requests()).toBe(FEED_FAILURES_SHOWN + 1);
+    expect(waits).toEqual([1, 2, 4, 1].map(times => times * FEED_RETRY_MS));
+    // One failure since Try again: the failure shown stays until an answer, and isn't shown again.
+    expect(data.feed()).toEqual({ problem: "server-busy", failures: 1 });
+  });
+
+  it("takes its failure back at the next answer", async () => {
+    const { server, data, pass, requests } = await failing(busy, busy, busy, feed({ cursor: "0.6.2", changed: {} }));
+    server.on("GET", feedPath("ws-a", "0.6.2"), held);
+    for (const waited of [1, 2, 3]) await pass(waited);
+    await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.6.2"))).toBe(1));
+    expect(requests()).toBe(FEED_FAILURES_SHOWN + 1);
+    expect(data.feed()).toEqual({ problem: null, failures: 1 });
+  });
+
+  it("counts no failure from before the background once it returns", async () => {
+    const { server, data, waits, pass } = await failing(busy, busy, held);
+    await pass(1);
+    await vi.waitFor(() => expect(waits).toHaveLength(2));
+    // Two failures, then the app goes to the background during the second wait.
+    data.pause();
+    // The network went while the app was away, so the first request after it returns fails too.
+    server.on("GET", feedPath("ws-a", "0.5.2"), "offline", held);
+    data.resume();
+    await vi.waitFor(() => expect(waits).toHaveLength(3));
+    expect(waits).toEqual([1, 2, 1].map(times => times * FEED_RETRY_MS));
+    expect(data.feed().problem).toBeNull();
   });
 });
 

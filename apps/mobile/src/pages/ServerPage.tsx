@@ -9,7 +9,7 @@ import { pageTitle } from "../home/homeModel";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { ScreenFailure } from "../workspace/ListStates";
-import { useProblemText, useView } from "../workspace/useView";
+import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { explanationOf, labelOf, LoadingLines, Mark, pageStyles as styles, Strip, type MarkKey } from "./pageParts";
 
@@ -25,6 +25,7 @@ export function ServerPage() {
   const view = useMemo(() => views.page(path), [path]);
   const { state, retry } = useView(view);
   const problemText = useProblemText();
+  const kept = useKeptContentProblem(state.problem, retry);
   const reduceMotion = useReducedMotion();
 
   // The last text read, kept for a page deleted while open.
@@ -104,11 +105,8 @@ export function ServerPage() {
       )}
       {failure ?? (
         <>
-          {/* What's shown stays while a refresh that failed waits for Try again. */}
-          {state.problem && markdown !== null ? (
-            <Strip theme={theme} icon="failed" text={state.problem === "restoring" ? documentWords.restoring : problemText(state.problem)}
-              action={documentWords.tryAgain} onAction={retry} />
-          ) : null}
+          {/* What's shown stays while a refresh that failed, or a failing feed, waits for Try again. */}
+          {kept && markdown !== null ? <Strip theme={theme} icon="failed" text={kept.text} action={documentWords.tryAgain} onAction={kept.retry} /> : null}
           {uri && injected ? (
             <WebView
               key={`${attempt}:${revision}`}

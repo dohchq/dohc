@@ -1,14 +1,17 @@
 import { accountWords } from "@dohc/interface-words/account";
 import { documentWords } from "@dohc/interface-words/documents";
 import { noticesWords } from "@dohc/interface-words/notices";
+import { workspaceWords } from "@dohc/interface-words/workspace";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { useShownWorkspaces } from "../chats/Workspaces";
 import { useNotices } from "../notices/NoticesState";
 import { useHideToast, useShowToast } from "../notices/Toast";
 import { serverName } from "../server/origin";
-import type { ReadProblem, View, ViewState } from "../server/workspaceData";
+import type { FeedState, ReadProblem, View, ViewState } from "../server/workspaceData";
 
 const NOTHING: ViewState<never> = { value: null, loading: false, problem: null, failures: 0 };
+const NO_FEED: FeedState = { problem: null, failures: 0 };
 
 /**
  * A view of the open workspace, read while the screen shows it. `view` must keep its identity between renders: a
@@ -22,6 +25,30 @@ export function useView<T>(view: View<T>): { readonly state: ViewState<T>; retry
   return { state, retry };
 }
 
+/** Whether the open workspace's change feed is failing, and Try again for it, which starts it again at once. */
+export function useFeed(): { readonly state: FeedState; retry(): void } {
+  const { data } = useAccount();
+  const subscribe = useCallback((listener: () => void) => data ? data.subscribeFeed(listener) : () => {}, [data]);
+  const state = useSyncExternalStore(subscribe, useCallback(() => data ? data.feed() : NO_FEED, [data]));
+  const retry = useCallback(() => data?.retryFeed(), [data]);
+  return { state, retry };
+}
+
+/**
+ * What a chat or page, outside the tabs, shows above the content it keeps: its own refresh that failed, or else a
+ * feed that keeps failing, each with its Try again. Null while neither has.
+ */
+export function useKeptContentProblem(problem: ReadProblem | null, retry: () => void): { readonly text: string; retry(): void } | null {
+  const feed = useFeed();
+  const problemText = useProblemText();
+  const { current } = useShownWorkspaces();
+  if (problem) return { text: problemText(problem), retry };
+  if (feed.state.problem && current) {
+    return { text: `${workspaceWords.changesFailed(current.name)} ${problemText(feed.state.problem)}`, retry: feed.retry };
+  }
+  return null;
+}
+
 /** Why a read failed, in words: what the server did, then what to do. */
 export function useProblemText(): (problem: ReadProblem) => string {
   const server = serverName(useSignIn().origin);
@@ -29,15 +56,17 @@ export function useProblemText(): (problem: ReadProblem) => string {
 }
 
 /**
- * Reports each failed read of a view on a tab as a toast, and as a row in Notices, both with Try again. A repeat
- * replaces the row; a later success takes back both.
+ * Reports each failure, of a view's read or of the feed, on a tab as a toast and as a row in Notices, both with Try
+ * again. A repeat replaces the row; a later success takes back both. Both go when the screen does, with the workspace
+ * they're about: Try again would have nothing left to start.
  */
-export function useFailureNotice(id: string, title: string, state: ViewState<unknown>, retry: () => void) {
+export function useFailureNotice(id: string, title: string, state: { readonly problem: ReadProblem | null; readonly failures: number },
+  retry: () => void) {
   const showToast = useShowToast();
   const hideToast = useHideToast();
   const { add, dismiss } = useNotices();
   const problemText = useProblemText();
-  const reported = useRef(state.failures);
+  const reported = useRef(0);
   const latest = useRef({ title, retry });
   latest.current = { title, retry };
   useEffect(() => {
@@ -49,10 +78,14 @@ export function useFailureNotice(id: string, title: string, state: ViewState<unk
     add({ id, senderKind: null, senderLabel: "", title: latest.current.title, body, minutesAgo: 0, atMs: Date.now(), read: false,
       retry: true, onRetry: again, dismissible: true, failed: true });
   }, [id, state.failures, state.problem, problemText, showToast, add]);
-  const recovered = state.problem === null && state.value !== null && reported.current > 0;
+  const recovered = state.problem === null && reported.current > 0;
   useEffect(() => {
     if (!recovered) return;
     hideToast(id);
     dismiss(id);
   }, [id, recovered, hideToast, dismiss]);
+  useEffect(() => () => {
+    hideToast(id);
+    dismiss(id);
+  }, [id, hideToast, dismiss]);
 }

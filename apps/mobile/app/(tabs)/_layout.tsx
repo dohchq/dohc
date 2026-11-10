@@ -7,6 +7,8 @@ import { View } from "react-native";
 import { useWorkspaces, WorkspacesProvider } from "../../src/chats/Workspaces";
 import { demoMode } from "../../src/demo";
 import { NoticesProvider, useNotices } from "../../src/notices/NoticesState";
+import { sampleBuild } from "../../src/sampleBuild";
+import { FeedNotice } from "../../src/workspace/FeedNotice";
 import { HideToast, ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
 import { useTheme } from "../../src/theme";
 
@@ -58,6 +60,7 @@ function Tabs() {
           </NativeTabs.Trigger>
         </NativeTabs>
         {toast && pathname !== "/notices" ? <Toast message={toast} onClose={() => setToast(null)} /> : null}
+        {sampleBuild ? null : <FeedNotice />}
       </View>
     </HideToast></ShowToast>
   );
