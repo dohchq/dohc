@@ -3188,6 +3188,16 @@ export type ListWorkspaceVersionConflictsResult = z.infer<
   typeof ListWorkspaceVersionConflictsResult
 >;
 
+// Open conflicts a merge left, per version they came from, without their
+// text. The count reads a bounded number of pages; `more` says the list ran on.
+export const CountWorkspaceVersionConflictsResult = z.object({
+  versions: z.array(z.object({ versionId: OPAQUE_ID, count: z.number().int().positive() })),
+  more: z.boolean(),
+});
+export type CountWorkspaceVersionConflictsResult = z.infer<
+  typeof CountWorkspaceVersionConflictsResult
+>;
+
 export const ResolveWorkspaceVersionConflictPayload = z.object({
   workspaceId: WORKSPACE_ID,
   conflictId: OPAQUE_ID,
@@ -3323,6 +3333,11 @@ export const workspaceVersionOperations = {
     capabilityId: "version.conflicts.list",
     channel: "desktop:list-workspace-version-conflicts",
     payload: ListWorkspaceVersionConflictsPayload, result: ListWorkspaceVersionConflictsResult, ...versionGuard,
+  },
+  countWorkspaceVersionConflicts: {
+    capabilityId: "version.conflicts.list",
+    channel: "desktop:count-workspace-version-conflicts",
+    payload: WorkspaceIdPayload, result: CountWorkspaceVersionConflictsResult, ...versionGuard,
   },
   resolveWorkspaceVersionConflict: {
     capabilityId: "version.conflict.resolve",
