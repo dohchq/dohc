@@ -1025,7 +1025,8 @@ async fn a_secret_the_switch_has_not_written_stays_out_of_the_capture_seed() {
     let pending: i64 = Connection::open(&database)
         .expect("sqlite")
         .query_row(
-            "SELECT COUNT(*) FROM materialization_jobs              WHERE target_path = '.env' AND status = 'pending'",
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE target_path = '.env' AND status = 'pending'",
             [],
             |row| row.get(0),
         )
