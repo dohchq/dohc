@@ -3,6 +3,7 @@ import { lstat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { HistoryOperationId, HistoryOperationLinks, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import type { OperationRecovery } from "./workspaceDeleteRecovery";
 import { listRecoveryRecordTexts, readRecoveryRecordText, saveRecoveryRecord, scheduleRecoveryPrune, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
@@ -27,6 +28,17 @@ const FolderRecord = Roots.extend({ kind: z.literal("folder"), noUndo: z.string(
 const Record = z.union([FolderRecord, FileRecord]);
 export type FileMoveRecoveryRecord = z.infer<typeof FileRecord>;
 export type MoveRecoveryRecord = z.infer<typeof Record>;
+// A replacing move saves this before it stages what it replaces, and removes it
+// once the move finishes or is put back. One left at an open means dohc stopped
+// mid-move. `staged` is the replaced entry's name prefix in the workspace trash;
+// `moved` is the moved entry's disk identity, when the disk gives one.
+const UserPath = z.string().refine(path => {
+  const checked = validateUserMaterializePath(path, { platform: process.platform });
+  return checked.ok && checked.normalized === path;
+});
+const StoppedMove = z.object({ operationId: HistoryOperationId, from: UserPath, to: UserPath, place: UserPath,
+  staged: z.string().regex(/^\d+-[0-9a-f-]{36}-$/u), moved: z.string().optional() }).strict();
+export type StoppedMove = z.infer<typeof StoppedMove>;
 export const moveWord = (from: string, to: string) => dirname(from) === dirname(to) ? "rename" : "move";
 export const moveBack = (word: "move" | "rename") => word === "rename" ? "Rename it back yourself." : "Move it back yourself.";
 export const linkUndoRefusal = (error: unknown) => error instanceof Error ? /^domain error: Undo refused: ([^:]+): (.+)$/su.exec(error.message) : null;
@@ -47,6 +59,17 @@ export async function listMoveRecoveries(root: string): Promise<string[]> {
     } catch { /* One damaged record does not prevent other moves from resuming. */ }
   }
   return ids;
+}
+
+export async function listStoppedMoves(root: string): Promise<StoppedMove[]> {
+  const records: StoppedMove[] = [];
+  for (const {name, text} of await listRecoveryRecordTexts(root, "replace")) {
+    try {
+      const record = StoppedMove.parse(JSON.parse(text));
+      if (name === `replace-${createHash("sha256").update(record.operationId).digest("hex")}.json`) records.push(record);
+    } catch { /* A damaged record puts nothing back. */ }
+  }
+  return records;
 }
 
 // An untrusted record reads as an invalid one: Undo refuses and changes nothing.
