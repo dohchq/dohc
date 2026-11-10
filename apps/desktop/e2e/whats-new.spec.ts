@@ -46,6 +46,7 @@ test("@whats-new What's new opens once after an update brings new notes", async 
     await ready(desktop.page);
     await expect(desktop.page.getByTestId("whats-new-page")).toHaveCount(0);
     await desktop.page.keyboard.press("ControlOrMeta+k");
+    await desktop.page.keyboard.type("what");
     const option = desktop.page.getByTestId("command-palette").getByRole("option", { name: "What's new", exact: true });
     await expect(option).toBeVisible();
     await shoot(desktop.page, "whats-new-palette");
