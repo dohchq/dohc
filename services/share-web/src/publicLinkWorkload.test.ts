@@ -30,7 +30,7 @@ function prepare(root: string) {
     Y.applyUpdate(baseline, readFileSync(join(root, updates[0]!.bytes.path)));
     Y.applyUpdate(baseline, readFileSync(join(root, updates[1]!.bytes.path)));
     const manifest = {version: 1, concurrency: 2,
-      baseline: {checkpoint: pin("baseline.bin", checkpoint), markdown: pin("baseline.md", Buffer.from("Hello"))},
+      baseline: {checkpoint: pin("baseline.bin", checkpoint), markdown: pin("baseline.md", Buffer.from("Hello\n"))},
       rounds: [{updates, markdown: pin("final.md", Buffer.from(yDocToMarkdown(baseline)))}]};
     function seal() {
       const path = join(root, "manifest.json"), bytes = Buffer.from(JSON.stringify(manifest));

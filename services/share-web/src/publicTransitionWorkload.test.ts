@@ -66,8 +66,8 @@ function prepare(root: string) {
 it("loads pinned restart bytes and a distinct pinned restore continuation recipe", () => withFixture(({seal}) => {
   const loaded = readPublicTransitionWorkload(seal(), 2);
   expect(Object.keys(loaded.cases)).toEqual([...transitionNames, "view"]);
-  expect(loaded.cases.restart.resumed!.expected.markdown.toString()).toBe("Hello first second resumed");
-  expect(loaded.cases.restore.updates.at(-1)!.expected.markdown.toString()).toBe("Hello first second");
+  expect(loaded.cases.restart.resumed!.expected.markdown.toString()).toBe("Hello first second resumed\n");
+  expect(loaded.cases.restore.updates.at(-1)!.expected.markdown.toString()).toBe("Hello first second\n");
   expect(loaded.cases.restore.resumed).toBeUndefined();
   expect(loaded.cases.restore.continuation!.expected.markdown.toString()).toBe("Hello\n\nrecovered\n");
 }));

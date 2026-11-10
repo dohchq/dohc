@@ -270,7 +270,7 @@ it("discards only the captured snapshot by object after a rename, preserving uns
   await preserveLiveDraft(directory, "workspace", {...draft, objectId: "replacement"});
   await preserveLiveDraft(directory, "other", draft);
   const remaining = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "renamed.md");
-  expect(remaining.map(record => record.text)).toEqual(["Unseen copy"]);
+  expect(remaining.map(record => record.text)).toEqual(["Unseen copy\n"]);
   const records = await Promise.all((await readdir(directory)).map(async name => JSON.parse(await readFile(join(directory, name), "utf8"))));
   expect(records).toHaveLength(3);
   expect(records).toEqual(expect.arrayContaining([

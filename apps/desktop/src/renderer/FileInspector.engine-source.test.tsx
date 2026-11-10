@@ -417,7 +417,7 @@ describe("engine markdown source view", () => {
 
     await user.click(await screen.findByTestId("markdown-source-toggle"));
     const sourceView = await screen.findByTestId("markdown-source-view");
-    await waitFor(() => expect(codeEditorText(sourceView)).toBe(`${EDGE_FRONTMATTER}Body`));
+    await waitFor(() => expect(codeEditorText(sourceView)).toBe(`${EDGE_FRONTMATTER}Body\n`));
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
@@ -876,7 +876,7 @@ describe("engine markdown source view", () => {
     await user.click(within(notices[1]!).getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(
-        "---\ntitle: Plan Recipient continued.\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.",
+        "---\ntitle: Plan Recipient continued.\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n",
       ),
     );
   });
