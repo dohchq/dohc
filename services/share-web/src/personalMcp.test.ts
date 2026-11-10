@@ -404,6 +404,11 @@ it("writes a Collection's files in the workspace it names, and answers as the li
     // A content refusal names the file and what to fix.
     [() => Response.json({ok: false, code: "share_op_rejected", error: "trip/packing/Socks.md has frontmatter that does not parse"}, {status: 403}),
       {ok: false, outcome: "refused", reason: "trip/packing/Socks.md has frontmatter that does not parse"}],
+    // A long one is cut to 1,024 bytes of UTF-8, never inside a character.
+    [() => Response.json({ok: false, code: "share_op_rejected", error: `${"a".repeat(1023)}😀`}, {status: 403}),
+      {ok: false, outcome: "refused", reason: "a".repeat(1023)}],
+    [() => Response.json({ok: false, code: "share_op_rejected", error: `${"é".repeat(511)}😀 and more`}, {status: 403}),
+      {ok: false, outcome: "refused", reason: "é".repeat(511)}],
     [refusedBy("collection_write_rate_limited", 429), {ok: false, outcome: "rate-limited"}],
     // Anything else may have committed.
     [refusedBy("unexpected", 403), {ok: false, outcome: "unknown"}],

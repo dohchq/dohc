@@ -150,6 +150,18 @@ export async function servePersonalMcp(request: Request, options: PersonalMcpOpt
   } finally {body.release();}
 }
 
+/** The longest start of `text` that fits in `maxBytes` of UTF-8, on a whole code point. */
+function utf8Prefix(text: string, maxBytes: number): string {
+  let bytes = 0, end = 0;
+  for (const char of text) {
+    const point = char.codePointAt(0) ?? 0;
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    if (bytes > maxBytes) break;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
 function refusal(status: number, value: object): McpAnswer {
   const result = Response.json(value, {status});
   return {body: result.body, status: result.status, headers: result.headers};
@@ -345,7 +357,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     }
     if (response.status === 429) return {ok: false, outcome: "rate-limited"};
     if (response.status === 403 && code === "share_op_rejected" && typeof error === "string") {
-      return {ok: false, outcome: "refused", reason: error.slice(0, 1024)};
+      return {ok: false, outcome: "refused", reason: utf8Prefix(error, 1024)};
     }
     const known = typeof code === "string" && Object.hasOwn(writeRefusals, code) ? writeRefusals[code] : undefined;
     return known?.status === response.status ? {ok: false, outcome: "refused", reason: known.error} : {ok: false, outcome: "unknown"};
