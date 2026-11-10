@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { DatasetHistoryRevision } from "@dohc/cli/dataset";
 import { SecondaryButton } from "./ui/controls";
-import { FieldTypeIcon } from "./collections/FieldTypeIcon";
+import { FieldTypeIcon } from "@dohc/collection-views/values";
 
 export interface HistoryRevisionControls {
   onLoadRevision?(hash: string, signal: AbortSignal): Promise<DatasetHistoryRevision>;

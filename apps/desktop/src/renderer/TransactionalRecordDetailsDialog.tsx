@@ -4,7 +4,7 @@ import { Check, Pencil, Square } from "lucide-react";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { Overlay } from "./Overlay";
 import { IconButton, Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
-import { FieldTypeIcon } from "./collections/FieldTypeIcon";
+import { FieldTypeIcon } from "@dohc/collection-views/values";
 import { CollectionAttachmentCell } from "./CollectionResourceInputs";
 import type { CollectionResourceError, CollectionResourceScope, CollectionResources } from "./transactionalCollectionResources";
 import { display, type TransactionalField, type TransactionalRow } from "./transactionalCollectionModel";

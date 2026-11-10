@@ -8,9 +8,10 @@ import { useCallback, useId, useMemo, useState, type CSSProperties, type ReactNo
 import { LegendList } from "@legendapp/list/react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type SyncStatusResult, type TimelineEntry } from "../../ipc/bridgeContract";
-import { chatAuthorLabel } from "./chatMessages";
+import { chatAuthorLabel, usePersonalAgentNames } from "./chatMessages";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
+import { isPersonalAgentId } from "./chosenColors";
 
 // The History timeline: file moments, version markers and Collection
 // changes, newest first, in the order main merged them. File moments keep
@@ -138,7 +139,16 @@ export function engineMomentSourceLabel(moment: SourcedMoment): string {
   return sourceName(moment) ?? engineOriginLabel(moment.origin);
 }
 
-type SourcedMoment = Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
+type SourcedMoment = Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels" | "authors" | "authorPresentations">;
+
+// Your personal agent's id when it made the moment, so its name and color come
+// from your roster. Only main can say an author is yours. Anyone who can write
+// to a workspace can claim an agent id, so a claim alone keeps its own name.
+function personalAuthorId(moment: Pick<EngineMomentRecord, "authors" | "authorPresentations">): string | undefined {
+  const author = moment.authors?.[0];
+  return author?.kind === "agent" && isPersonalAgentId(author.agentId) && moment.authorPresentations?.[0]?.self === true
+    ? author.agentId : undefined;
+}
 
 function sourceName(moment: SourcedMoment): string | undefined {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
@@ -156,7 +166,7 @@ function sourceName(moment: SourcedMoment): string | undefined {
   }
   if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
-    ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
+    ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName, authorAgentId: personalAuthorId(moment) })
     : undefined;
 }
 
@@ -451,7 +461,10 @@ export function MomentAuthor(props: { moment: CreditedMoment; fallback: ReactNod
   const { moment } = props;
   const presentation = moment.authorPresentations?.[0] ?? neutralPresentation;
   if (moment.agentAuthorName !== undefined) {
-    return <ChatAvatar presentation={presentation} name={moment.agentAuthorName} kind="agent" size="strip" />;
+    const personal = personalAuthorId(moment);
+    return personal === undefined
+      ? <ChatAvatar presentation={presentation} name={moment.agentAuthorName} kind="agent" size="strip" />
+      : <ChatAvatar presentation={{ ...presentation, agentId: personal }} name={chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName, authorAgentId: personal })} kind="agent" size="strip" />;
   }
   if (moment.automationAuthor) return <ChatAvatar presentation={presentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
   const person = moment.namedAuthor?.label ?? moment.personAuthorName
@@ -837,7 +850,7 @@ function GroupRow(props: {
                   <span className="sr-only">Connected agent </span>
                 </span>
               ) : null}
-              <span className="min-w-0 truncate">{chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName })}</span>
+              <span className="min-w-0 truncate">{chatAuthorLabel({ authorKind: "agent", authorDisplayName: agentAuthorName, authorAgentId: personalAuthorId(group.moments[0] ?? {}) })}</span>
             </span>
           ) : null}
           <span className="min-w-0 truncate">{group.summary}</span>
@@ -1088,9 +1101,11 @@ export function EngineHistoryView(props: {
   const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const openMomentId = props.openMomentId ?? null;
+  // Personal agents' names come from the roster, so a rename repaints the rows.
+  const personalNames = usePersonalAgentNames();
   const rowPresentation = useMemo(
-    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId, moreKey }),
-    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId, moreKey],
+    () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment, collections, openMomentId, moreKey, personalNames }),
+    [expandedGroups, headerItemCount, listItemCount, props.onOpenMoment, collections, openMomentId, moreKey, personalNames],
   );
   const toggleGroup = (key: string) => setExpandedGroups((current) => {
     const next = new Set(current);

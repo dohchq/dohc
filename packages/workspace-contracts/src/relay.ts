@@ -458,6 +458,9 @@ export const NOTICE_KINDS = {
   // A share reached you. The relay writes it from the granter when a named
   // grant becomes active for you.
   "share-received": { senderKind: "person", recipients: "relay" },
+  // One of your personal agents signed in. The relay writes it from the
+  // agent when a sign-in is redeemed.
+  "personal-agent-signed-in": { senderKind: "agent", recipients: "relay" },
 } as const satisfies Record<string, {
   senderKind: NoticeSenderKind;
   recipients: "self" | "readers" | "relay";
@@ -531,6 +534,11 @@ export interface NoticeTarget {
   automation?: string;
   run?: string;
   recovery?: "automation-controls";
+  // A Settings page to open.
+  settings?: "agents";
+  // The personal agent (p-…) whose page opens in Settings › Agents. Only
+  // with `settings: "agents"`.
+  agent?: string;
 }
 
 export interface AutomationControlsTarget extends NoticeTarget {
@@ -545,7 +553,7 @@ export function isAutomationControlsTarget(target: NoticeTarget): target is Auto
 }
 
 const NOTICE_TARGET_FIELDS = [
-  "path", "record", "thread", "message", "share", "automation", "run", "recovery",
+  "path", "record", "thread", "message", "share", "automation", "run", "recovery", "settings", "agent",
 ] as const satisfies readonly (keyof NoticeTarget)[];
 
 export function isNoticeTarget(value: unknown): value is NoticeTarget {
@@ -554,6 +562,9 @@ export function isNoticeTarget(value: unknown): value is NoticeTarget {
   if (recovery !== undefined) {
     if (recovery !== "automation-controls" || !isAutomationControlsTarget(value as NoticeTarget)) return false;
   }
+  const settings = Object.getOwnPropertyDescriptor(value, "settings")?.value as unknown;
+  if (settings !== undefined && settings !== "agents") return false;
+  if (Object.hasOwn(value, "agent") && settings !== "agents") return false;
   return Object.entries(value).every(([field, fieldValue]) =>
     (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
     isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS)) &&
@@ -653,6 +664,10 @@ export interface RelayNoticePage {
   // cached row, keep your own waiting posts and marks, and take this page
   // and the pages after it as the whole list.
   replace: boolean;
+  // Rises whenever the account's personal agents change: a sign-in, rename,
+  // color, reach, or status change. A computer refetches its roster when it
+  // differs from the one it holds.
+  personalAgentsRevision: number;
 }
 
 // POST /sync/notices/marks. Read and dismissed are one-way: marking a row

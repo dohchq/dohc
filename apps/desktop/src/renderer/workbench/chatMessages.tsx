@@ -23,6 +23,7 @@ import {
   useId,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactElement,
   type ReactNode,
   type RefObject,
@@ -35,6 +36,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
+import { isPersonalAgentId, personalAgentName, personalAgentsVersion, subscribeChosenColors } from "./chosenColors";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these same
@@ -42,11 +44,23 @@ import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFil
 // ids are prefixed per surface ("linked-chat-*" vs "chats-*") because both
 // panels can be mounted at once.
 
-// Names are stored verbatim for both human and agent authors.
+// Names are stored verbatim for both human and agent authors. A personal
+// agent's name is the one your account's roster holds now, so a rename shows
+// on its earlier messages too.
 export function chatAuthorLabel(
-  author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
+  author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName"> & Partial<Pick<ChatMessageRecord, "authorAgentId" | "presentation">>,
 ): string {
+  const agentId = author.presentation?.agentId ?? author.authorAgentId;
+  if (author.authorKind === "agent" && agentId !== undefined && isPersonalAgentId(agentId)) {
+    return personalAgentName(agentId) ?? author.authorDisplayName;
+  }
   return author.authorDisplayName;
+}
+
+// Renders again when a personal agent's name or color changes. Returns a
+// number that changes with them, for a callback's dependencies.
+export function usePersonalAgentNames(): number {
+  return useSyncExternalStore(subscribeChosenColors, personalAgentsVersion);
 }
 
 // Renders a message body with @-mention chips. A mention that resolves to a
@@ -577,6 +591,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   const density = props.density ?? "stream";
   const anchor = props.anchor ?? "end";
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
+  const personalNames = usePersonalAgentNames();
   // Long messages parse in the chat's worker; start it before they need it.
   useEffect(retainChatParser, []);
   const reactionsByMessage = useMemo(() => {
@@ -848,11 +863,11 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 {isAgent ? (
                   // The face marks an agent; hovering it says whose agent.
                   <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation}>
-                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} linkAgent={message.linkAgent === true} size={sizes.avatar} />
+                    <ChatAvatar presentation={message.presentation} name={chatAuthorLabel(message)} kind={message.authorKind} linkAgent={message.linkAgent === true} size={sizes.avatar} />
                   </AgentBadge>
                 ) : (
                   <ChatAvatar presentation={message.presentation}
-                    name={message.authorDisplayName}
+                    name={chatAuthorLabel(message)}
                     kind={message.authorKind} linkAgent={message.linkAgent === true}
                     size={sizes.avatar}
                   />
@@ -914,7 +929,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </AgentColorScope>
       </li>
     );
-  }, [props, candidates, reactionsByMessage, density, anchor, observeDayEdge]);
+  }, [props, candidates, reactionsByMessage, density, anchor, observeDayEdge, personalNames]);
+  // The list draws a row again only when this changes, so a rename shows on rows already drawn.
+  const listExtraData = useMemo(() => ({ props, personalNames }), [props, personalNames]);
   if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
     return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
       <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
@@ -943,7 +960,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     <LegendList
     ref={list}
     data={props.messages}
-    extraData={props}
+    extraData={listExtraData}
     keyExtractor={messageKeyExtractor}
     renderItem={renderMessage}
     onViewableItemsChanged={onViewableItemsChanged}

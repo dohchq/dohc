@@ -70,15 +70,9 @@ pub(crate) fn prepare_exports(
     if !queued {
         return Ok(Vec::new());
     }
+    // Exporting history and finishing native history can claim bases.
     *writer_cache_reset_required = true;
-    prepare_pending_exports(
-        store,
-        workspace,
-        faults,
-        leases,
-        now_ms,
-        writer_cache_reset_required,
-    )
+    prepare_pending_exports(store, workspace, faults, leases, now_ms)
 }
 
 enum Step {
@@ -96,7 +90,6 @@ fn prepare_pending_exports(
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
-    writer_cache_reset_required: &mut bool,
 ) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     let mut bytes = 0usize;
     let mut declined = Vec::new();
@@ -117,7 +110,10 @@ fn prepare_pending_exports(
             let step = match export_next(tx, p, after, now_ms) {
                 Ok(written) => {
                     tx.execute_batch("RELEASE dohc_audit_export").map_err(SyncError::persist)?;
-                    tx.execute(&format!("DELETE FROM live_audit_held_exports WHERE {SCOPE}"), p).map_err(SyncError::persist)?;
+                    // Only the retry reads a held stream.
+                    if retry {
+                        tx.execute(&format!("DELETE FROM live_audit_held_exports WHERE {SCOPE}"), p).map_err(SyncError::persist)?;
+                    }
                     Step::Exported(written)
                 }
                 Err(error) => {
@@ -136,9 +132,10 @@ fn prepare_pending_exports(
                 }
             };
             // A finished or newly held stream can be the last one holding
-            // back the workspace's other history.
+            // back the workspace's other history. A stream that wrote a
+            // record keeps its unheld pending row, so it holds back the rest.
             let finished = match step {
-                Step::Exported(_) | Step::Held(Some(_)) if !pending_in_tx(tx, workspace)? => Some(
+                Step::Exported(0) | Step::Held(Some(_)) if !pending_in_tx(tx, workspace)? => Some(
                     crate::enrolment::finish_live_history_enrolment_in_tx(tx, workspace, leases, now_ms)?,
                 ),
                 _ => None,
@@ -151,8 +148,6 @@ fn prepare_pending_exports(
             TxnOutcome::Committed(Some(step)) => step,
         };
         if let Some(finished) = finished {
-            // Finishing native history can claim bases.
-            *writer_cache_reset_required = true;
             declined.extend(finished);
         }
         match step {
@@ -160,7 +155,6 @@ fn prepare_pending_exports(
             // Reported after commit, so a rolled-back hold reports nothing.
             Step::Held(line) => line.into_iter().for_each(|line| eprintln!("{line}")),
             Step::Exported(written) => {
-                *writer_cache_reset_required = true;
                 bytes = bytes.saturating_add(written);
                 if bytes >= dohc_engine_storage::limits::MAX_BLOB_BYTES {
                     break;

@@ -2393,7 +2393,7 @@ pub fn validate_replicated_link_author(
 type ThreadPlace = (Option<String>, Option<String>, Option<String>, bool);
 
 /// Whether a personal agent's post may land in this thread: in a Group, in
-/// the agent's own chat, or on a file. The relay doesn't post on a file yet.
+/// the agent's own chat, or on a file. The relay posts in all three.
 /// Never in a person's DM or another agent's chat. None while the thread, or
 /// the create of its chat, hasn't arrived.
 pub fn personal_agent_may_post_in(

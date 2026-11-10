@@ -12,6 +12,16 @@ export function windowShowsWorkspace(
   return session?.workspaceId === workspaceId && authorities.isCurrentAttachment(workspaceId, session.attachmentId);
 }
 
+// A window's session while it shows its workspace as it is open now. A window
+// left from before Forget has none, so what main tells the workspace's window,
+// such as a change that couldn't be saved, reaches the new window instead.
+export function currentWindowSession<Session extends WindowSession>(
+  session: Session | undefined,
+  authorities: Authorities,
+): Session | undefined {
+  return session && windowShowsWorkspace(session, session.workspaceId, authorities) ? session : undefined;
+}
+
 // A window left showing a workspace from before Forget: the workspace, and the
 // other window that shows it now, if any. Null while the window shows its
 // workspace as it is open now, or shows none.

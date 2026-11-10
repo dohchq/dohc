@@ -22,7 +22,9 @@
     "unknown-field-reference",
     "schema-collection-limit-exceeded",
     "record-too-large-for-adoption",
-    "unsupported-field-reference"
+    "unsupported-field-reference",
+    "unknown-option-color",
+    "unknown-option-reference"
   ],
   "fieldValueReasonCodes": [
     "expected-text",

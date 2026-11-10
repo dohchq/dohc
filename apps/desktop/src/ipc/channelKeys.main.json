@@ -164,6 +164,7 @@
   "ownerAppResponses",
   "ownerRestore",
   "pauseRelayShareDiscussion",
+  "personalAgents",
   "pickImageFiles",
   "pickWorkspaceRoot",
   "pollRelayShareDiscussionActivity",

@@ -133,7 +133,7 @@ it.each(["/x", "/", ...(process.platform === "win32" ? ["C:x"] : []), "C:/", "//
   const sidecar = join(f.rootPath, ".dohc/local/trash", (await readdir(join(f.rootPath, ".dohc/local/trash"))).find(name => name.endsWith(".json"))!);
   const original = JSON.parse(await readFile(sidecar, "utf8"));
   for (const patch of [{ base: hostile }, { paths: [hostile] }, { emptyFolders: [hostile] },
-    { copies: [{ path: hostile, dev: 0, ino: 0, birthtimeMs: 0, size: 0 }] },
+    { copies: [{ path: hostile, dev: 0, ino: 0, birthtimeMs: 0, size: 0, tag: "" }] },
     { result: { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [hostile], remaining: [] } }]) {
     const body = JSON.stringify({ ...original, ...patch });
     await writeFile(sidecar, body);

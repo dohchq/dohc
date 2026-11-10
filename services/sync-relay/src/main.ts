@@ -320,10 +320,7 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; s
         baseURL: process.env.SYNC_RELAY_AUTH_BASE_URL ?? `http://localhost:${requestedPort || 1788}`,
         secret,
       });
-      // Consent checks a password with Better Auth's own verifier, so it accepts exactly what sign-in accepts.
-      const credentialFence = createPostgresCredentialFence(pool, {
-        verifyPassword: async input => (await auth.$context).password.verify(input),
-      });
+      const credentialFence = createPostgresCredentialFence(pool);
       return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth), sessions: createPostgresAccountSessions(pool), credentialFence};
   })();
 const resolveAccountActor = accountResolvers.actor;

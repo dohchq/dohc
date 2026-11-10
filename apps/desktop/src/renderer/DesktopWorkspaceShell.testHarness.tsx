@@ -92,6 +92,8 @@ import type {
   WorkspaceActivityEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
+  PersonalAgentChangeResult,
+  PersonalAgentsEvent,
 } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
@@ -343,6 +345,7 @@ function makeBaseBridge(
   const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   const chatDispatchPausedCallbacks = new Set<(event: { paused: boolean }) => void>();
+  const personalAgentsCallbacks = new Set<(event: PersonalAgentsEvent) => void>();
   let chatDispatchPaused = false;
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
@@ -524,6 +527,18 @@ function makeBaseBridge(
     // No agent you run waits for messages until a test says one does.
     readAgentsListening: vi.fn(async () => ({ agentIds: [] as string[] })),
     onAgentsListening: vi.fn((_listener: (event: { agentIds: string[] }) => void) => () => undefined),
+    // No personal agents until a test reads or pushes some.
+    readPersonalAgents: vi.fn(async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] })),
+    onPersonalAgents: vi.fn((listener: (event: PersonalAgentsEvent) => void) => {
+      personalAgentsCallbacks.add(listener);
+      return () => {
+        personalAgentsCallbacks.delete(listener);
+      };
+    }),
+    emitPersonalAgents: (event: PersonalAgentsEvent) => {
+      for (const callback of [...personalAgentsCallbacks]) callback(event);
+    },
+    changePersonalAgent: vi.fn(async (): Promise<PersonalAgentChangeResult> => ({ ok: true, personalAgents: { accounts: [] } })),
     registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({

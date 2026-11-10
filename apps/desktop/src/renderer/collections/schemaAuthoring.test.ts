@@ -11,6 +11,7 @@ import {
   renameView,
   serializeCollectionSchema,
   setFieldOptions,
+  setOptionColor,
 } from "./schemaAuthoring";
 
 // The serializer's one contract: what it writes, parseCollectionSchema reads
@@ -25,7 +26,7 @@ const FULL: CollectionSchema = {
     { name: "Estimate", type: "number" },
     { name: "Done", type: "checkbox" },
     { name: "Due", type: "date" },
-    { name: "Status", type: "select", options: ["Todo", "Doing", "Done"] },
+    { name: "Status", type: "select", options: ["Todo", "Doing", "Done"], colors: { Doing: "amber", Done: "teal" } },
     { name: "Tags", type: "multi-select", options: ["a", "b"] },
     { name: "Owner", type: "person" },
     { name: "Blocks", type: "relation", collection: "projects/tasks", many: true },
@@ -83,12 +84,47 @@ describe("schema mutations", () => {
     ).toBe("valid");
   });
 
+  it("writes option colors in option order", () => {
+    const schema = setOptionColor(FULL, "Status", "Todo", "blue");
+    expect(serializeCollectionSchema(schema)).toContain(
+      "    options:\n      - Todo\n      - Doing\n      - Done\n    colors:\n      Todo: blue\n      Doing: amber\n      Done: teal\n",
+    );
+  });
+
+  it("setOptionColor recolors one option and ignores an unknown one", () => {
+    const next = setOptionColor(FULL, "Status", "Done", "rose");
+    expect(next.fields[4]).toEqual({
+      name: "Status",
+      type: "select",
+      options: ["Todo", "Doing", "Done"],
+      colors: { Doing: "amber", Done: "rose" },
+    });
+    expect(setOptionColor(FULL, "Status", "Gone", "rose")).toEqual(FULL);
+    // An option named like an Object member has no color until one is set.
+    const odd = setFieldOptions(FULL, "Status", ["constructor"]);
+    expect(odd.fields[4]).toEqual({ name: "Status", type: "select", options: ["constructor"] });
+    expect(parseCollectionSchema(serializeCollectionSchema(setOptionColor(odd, "Status", "constructor", "plum"))).schema.fields[4])
+      .toEqual({ name: "Status", type: "select", options: ["constructor"], colors: { constructor: "plum" } });
+  });
+
   it("setFieldOptions replaces options only on select fields", () => {
     const next = setFieldOptions(FULL, "Status", ["Todo", "Done"]);
+    // A removed option takes its color with it.
     expect(next.fields[4]).toEqual({
       name: "Status",
       type: "select",
       options: ["Todo", "Done"],
+      colors: { Done: "teal" },
+    });
+    expect(setFieldOptions(FULL, "Status", ["Todo"], { Todo: "gray" }).fields[4]).toEqual({
+      name: "Status",
+      type: "select",
+      options: ["Todo"],
+      colors: { Todo: "gray" },
+    });
+    // A chosen color lands over the colors already in the file.
+    expect(setFieldOptions(FULL, "Status", ["Todo", "Done"], { Todo: "gray" }).fields[4]).toMatchObject({
+      colors: { Todo: "gray", Done: "teal" },
     });
     expect(setFieldOptions(FULL, "Name", ["x"]).fields[0]).toEqual({
       name: "Name",
@@ -102,6 +138,7 @@ describe("schema mutations", () => {
       name: "Status",
       type: "select",
       options: ["Todo", "Doing", "Done", "Later"],
+      colors: { Doing: "amber", Done: "teal" },
     });
     expect(addSelectOption(next, "Status", "Later")).toEqual(next);
   });

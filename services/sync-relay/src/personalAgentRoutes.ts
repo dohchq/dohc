@@ -1,9 +1,11 @@
+import type { CliResultByVerb } from "@dohc/cli/protocol";
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { runAccountOperation } from "./accountOperations";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
   AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES,
+  agentHandle,
   agentMention,
   mentions,
   MAX_AGENT_CHAT_WAITS_PER_CONNECTION,
@@ -17,10 +19,18 @@ import { guardedByteResponse } from "./linkResponseStreams";
 import { messageFromOp, type NamedChatMessage } from "./namedRecipientChat";
 import type { PersonalAgents } from "./personalAgents";
 import { parseString, parseWorkspaceId } from "./requestInputs";
-import { MAIN_VERSION_ID } from "./shareFilter";
+import type { ServerCopies } from "./serverCopies";
+import { MAIN_VERSION_ID, MAX_SHARE_PATH_CHARS } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 import { CHAT_HISTORY_SCAN_BYTES, CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
-import type { AppendPersonalChatPostResult, PersonalCredential, PersonalScope } from "./storage/personalAgentChat";
+import {
+  commentFileOf,
+  currentFileAt,
+  type AppendPersonalChatPostResult,
+  type PersonalChatTarget,
+  type PersonalCredential,
+  type PersonalScope,
+} from "./storage/personalAgentChat";
 import { PERSONAL_AGENT_REACH_LIMIT, type PersonalReach } from "./storage/personalAgents";
 import type { SyncRelayLogRow } from "./storage/types";
 import { MAX_BLOB_BYTES } from "./wireLimits";
@@ -31,7 +41,10 @@ import { MAX_BLOB_BYTES } from "./wireLimits";
 // the action needs, owned by the account, and not deleted. Ids resolve only
 // inside that workspace. No field in a request can name the author.
 
-export type PersonalAgentToolRoute = { route: "personal-agent-tools"; action: "post" | "wait" | "chat" | "files" | "blob" };
+export type PersonalAgentToolRoute = {
+  route: "personal-agent-tools";
+  action: "workspaces" | "groups" | "post" | "wait" | "chat" | "discussion" | "files" | "blob";
+};
 
 /** The most messages one wait answers with. */
 export const PERSONAL_WAIT_MAX_MESSAGES = 100;
@@ -42,20 +55,11 @@ const CHAT_READ_DEFAULT_LIMIT = 50;
 const CHAT_READ_MAX_LIMIT = 100;
 const CHAT_ID_CHARS = 256;
 const SHA256 = /^[0-9a-f]{64}$/u;
-// Every tracked path on main, as a file share reads it. No secret path is tracked.
-const MAIN_FILES = { paths: [], versionId: MAIN_VERSION_ID } as const;
-
-type PersonalToolStorage = Pick<SyncRelayStorage,
-  | "appendPersonalChatPost" | "currentFileBlobByteLength" | "fetchChatMessages" | "findChannelCreateKind"
-  | "findThreadCreateChannelWireId" | "findThreadCreateFileBinding" | "getBlob" | "getEpochLogFloor" | "objectCurrentPath"
-  | "objectIdAtPath" | "personalAgentPostedIn" | "readCurrentFileState" | "readPersonalReach" | "readPersonalScope"
-  | "readPersonalWaitWindow"
->;
 
 /**
  * A message for the agent, with the workspace and the place it is in: a
- * channel, or for a thread on a file, no channel and the file's current path.
- * Exactly one of them is null.
+ * channel, or for a Comment, no channel and the file's path, which for a
+ * deleted file is the path it last had. Exactly one of them is null.
  */
 export type PersonalWaitMessage = LinkChatMessage & { workspaceId: string; channelWireId: string | null; filePath: string | null };
 
@@ -133,7 +137,8 @@ function release(counts: Map<string, number>, key: string): void {
 }
 
 export function createPersonalAgentToolRoutes(input: {
-  storage: PersonalToolStorage;
+  /** All of it: the Groups list reads through the account executor, which reads the whole storage. */
+  storage: SyncRelayStorage;
   linkAuthority: Pick<LinkAuthorityResolver, "personal" | "freshPersonal">;
   personalAgents: Pick<PersonalAgents, "register">;
   nowMs: () => number;
@@ -144,6 +149,8 @@ export function createPersonalAgentToolRoutes(input: {
   admitBlobBytes: (key: string, byteLength: number) => (() => void) | null;
   maxFiles: number;
   maxResponseBytes?: number;
+  /** This server's copies of workspaces, which the Groups list reads; undefined while they are off or starting. */
+  copies: () => ServerCopies | undefined;
 }) {
   const { storage, linkAuthority, nowMs, activity } = input;
   const maxResponseBytes = input.maxResponseBytes ?? AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES;
@@ -177,14 +184,62 @@ export function createPersonalAgentToolRoutes(input: {
     return body as Record<string, unknown>;
   }
 
+  // The agent's current name and handle, and the workspaces it reaches, each
+  // with the owner's name for it, the agent's level there, and its DM. Sign-in
+  // and widening reach append the DM, so it is there before any computer runs.
+  function workspaces(authority: PersonalAuthority, body: Record<string, unknown>): Response {
+    fields(body, [], []);
+    const reached = storage.readPersonalWorkspaces(credential(authority), nowMs());
+    if (!reached) throw notFound();
+    const { agentId, name } = reached;
+    const dmChannelWireId = agentChannelWireId(agentId);
+    return jsonResponse({
+      ok: true,
+      agent: { agentId, name, handle: agentHandle(name) },
+      workspaces: reached.workspaces.map(workspace => ({ ...workspace, dmChannelWireId })),
+    });
+  }
+
+  // The workspace's Groups, read through this server's copy as the account's
+  // phone reads them, under the account executor's capacity and refusals. The
+  // agent's DM and people's DMs are never listed, nor a Group without a
+  // channel id to read or post by. The visit checks the agent's authority at
+  // the account's current fence, and its reach, once the copy opens, once it
+  // has synced, and before the answer. A server that keeps no copies says so,
+  // after the reach check.
+  async function groups(authority: PersonalAuthority, body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
+    fields(body, ["workspaceId"], []);
+    const workspaceId = parseWorkspaceId(body.workspaceId);
+    reachIn(authority, workspaceId);
+    const copies = input.copies();
+    if (copies === undefined) throw relayError("server_copies_off");
+    const authorize = async () => {
+      const fresh = await linkAuthority.freshPersonal(authority);
+      if (!storage.readPersonalReach(credential(fresh), workspaceId, nowMs())) throw notFound();
+    };
+    const { result } = await runAccountOperation({ storage, copies }, {
+      owner: authority.ownerUserId, workspaceId, operation: "groups", args: {}, authorize,
+      visitor: { reason: "account", caller: `agent:${authority.connectionId}`, signal, phone: false },
+    });
+    const listed = result as CliResultByVerb["groups"];
+    return jsonResponse({
+      ok: true,
+      workspaceId,
+      groups: listed.groups.flatMap(group => group.kind === "group" && typeof group.channelWireId === "string"
+        ? [{ channelWireId: group.channelWireId, name: group.name, purpose: group.purpose ?? null }] : []),
+    });
+  }
+
   // The relay writes the post from the agent's origin. The storage write reads
   // the agent's authority, reach, and ownership again inside its transaction.
   function post(authority: PersonalAuthority, body: Record<string, unknown>): Response {
-    fields(body, ["workspaceId", "body", "idempotencyKey"], ["channelWireId", "threadId"]);
+    fields(body, ["workspaceId", "body", "idempotencyKey"], ["channelWireId", "threadId", "filePath"]);
     const workspaceId = parseWorkspaceId(body.workspaceId);
-    if (("channelWireId" in body) === ("threadId" in body)) throw badRequest("name a channel or a thread");
-    const target = "threadId" in body
-      ? { threadId: parseString(body.threadId, "threadId", CHAT_ID_CHARS) }
+    if (["channelWireId", "threadId", "filePath"].filter(key => key in body).length !== 1) {
+      throw badRequest("name a channel, a thread, or a file");
+    }
+    const target: PersonalChatTarget = "threadId" in body ? { threadId: parseString(body.threadId, "threadId", CHAT_ID_CHARS) }
+      : "filePath" in body ? { filePath: parseString(body.filePath, "filePath", MAX_SHARE_PATH_CHARS) }
       : { channelWireId: parseString(body.channelWireId, "channelWireId", CHAT_ID_CHARS) };
     if (typeof body.body !== "string" || typeof body.idempotencyKey !== "string") throw badRequest("chat message is invalid");
     const result = storage.appendPersonalChatPost({
@@ -192,37 +247,39 @@ export function createPersonalAgentToolRoutes(input: {
     });
     if (!result.ok) throw postRefusal(result.reason);
     if (!result.replayed) activity.wakeLog(workspaceId);
-    const message = chatMessage(result.row)?.message;
-    if (!message) throw new Error("stored personal agent post is not a chat message");
-    return jsonResponse({ ok: true, message: { ...linkChatMessage(message), workspaceId, channelWireId: result.channelWireId } });
+    const read = chatMessage(result.row)?.message;
+    if (!read) throw new Error("stored personal agent post is not a chat message");
+    const message: PersonalWaitMessage = {
+      ...linkChatMessage(read), workspaceId, channelWireId: result.channelWireId, filePath: result.filePath,
+    };
+    return jsonResponse({ ok: true, message });
   }
 
-  // A page of a channel's messages, newest first, older than `before`.
-  function chat(authority: PersonalAuthority, body: Record<string, unknown>): Response {
-    fields(body, ["workspaceId", "channelWireId"], ["before", "limit"]);
-    const workspaceId = parseWorkspaceId(body.workspaceId);
-    const channelWireId = parseString(body.channelWireId, "channelWireId", CHAT_ID_CHARS);
-    const before = body.before === undefined ? null : boundedInteger(body.before, "before", 0, Number.MAX_SAFE_INTEGER);
-    const limit = body.limit === undefined ? CHAT_READ_DEFAULT_LIMIT : boundedInteger(body.limit, "limit", 1, CHAT_READ_MAX_LIMIT);
-    reachIn(authority, workspaceId);
-    if (!storage.findChannelCreateKind(workspaceId, channelWireId)) throw notFound();
-    const page = storage.fetchChatMessages({ workspaceId, channelWireId, cursor: before, direction: "older", limit });
+  function pageOf(body: Record<string, unknown>): { cursor: number | null; direction: "older"; limit: number } {
+    return {
+      cursor: body.before === undefined ? null : boundedInteger(body.before, "before", 0, Number.MAX_SAFE_INTEGER),
+      direction: "older",
+      limit: body.limit === undefined ? CHAT_READ_DEFAULT_LIMIT : boundedInteger(body.limit, "limit", 1, CHAT_READ_MAX_LIMIT),
+    };
+  }
+
+  // The messages of a page whose thread `kept` keeps, as many as fit in an
+  // answer that also holds `frame`. One check per thread on the page.
+  function fittedPage(
+    page: ReturnType<SyncRelayStorage["fetchChatMessages"]>, frame: Record<string, string>, kept: (threadId: string) => boolean,
+  ): { messages: LinkChatMessage[]; olderCursor: number | null } {
     const messages: LinkChatMessage[] = [];
     let olderCursor = page.hasMore ? page.nextCursor : null;
     let room = maxResponseBytes - Buffer.byteLength(JSON.stringify({
-      ok: true, workspaceId, channelWireId, messages: [], olderCursor: Number.MAX_SAFE_INTEGER,
+      ok: true, ...frame, messages: [], olderCursor: Number.MAX_SAFE_INTEGER,
     }));
-    // A thread is the channel's only when its first create names the channel
-    // and no file, as a share link reads it. One lookup per thread on the page.
-    const inChannel = new Map<string, boolean>();
+    const keeps = new Map<string, boolean>();
     for (const row of page.rows) {
       const read = chatMessage(row);
       if (!read) continue;
       const { threadId } = read.message;
-      if (!inChannel.has(threadId)) {
-        inChannel.set(threadId, storage.findThreadCreateChannelWireId(workspaceId, threadId) === channelWireId);
-      }
-      if (!inChannel.get(threadId)) continue;
+      if (!keeps.has(threadId)) keeps.set(threadId, kept(threadId));
+      if (!keeps.get(threadId)) continue;
       const next = fitted(linkChatMessage(read.message), room, messages.length === 0);
       if (!next) {
         olderCursor = messages[messages.length - 1]!.relaySeq;
@@ -231,7 +288,59 @@ export function createPersonalAgentToolRoutes(input: {
       messages.push(next.message);
       room -= next.bytes;
     }
+    return { messages, olderCursor };
+  }
+
+  // A page of a channel's messages, newest first, older than `before`.
+  function chat(authority: PersonalAuthority, body: Record<string, unknown>): Response {
+    fields(body, ["workspaceId", "channelWireId"], ["before", "limit"]);
+    const workspaceId = parseWorkspaceId(body.workspaceId);
+    const channelWireId = parseString(body.channelWireId, "channelWireId", CHAT_ID_CHARS);
+    const request = pageOf(body);
+    reachIn(authority, workspaceId);
+    if (!storage.findChannelCreateKind(workspaceId, channelWireId)) throw notFound();
+    const page = storage.fetchChatMessages({ workspaceId, channelWireId, ...request });
+    // A thread is the channel's only when its first create names the channel
+    // and no file, as a share link reads it.
+    const { messages, olderCursor } = fittedPage(page, { workspaceId, channelWireId },
+      threadId => storage.findThreadCreateChannelWireId(workspaceId, threadId) === channelWireId);
     return jsonResponse({ ok: true, workspaceId, channelWireId, messages, olderCursor });
+  }
+
+  // A page of the Comment messages on a current file, or in one Comment
+  // thread, newest first, older than `before`. A thread answers on a current
+  // file or a deleted one, with the path the file has or last had.
+  function discussion(authority: PersonalAuthority, body: Record<string, unknown>): Response {
+    fields(body, ["workspaceId"], ["filePath", "threadId", "before", "limit"]);
+    const workspaceId = parseWorkspaceId(body.workspaceId);
+    if (("filePath" in body) === ("threadId" in body)) throw badRequest("name a file or a thread");
+    if ("threadId" in body) {
+      return threadDiscussion(authority, workspaceId, parseString(body.threadId, "threadId", CHAT_ID_CHARS), pageOf(body));
+    }
+    const named = parseString(body.filePath, "filePath", MAX_SHARE_PATH_CHARS);
+    const request = pageOf(body);
+    reachIn(authority, workspaceId);
+    const file = currentFileAt(storage, workspaceId, named);
+    if (!file) throw notFound();
+    const { objectId, filePath } = file;
+    const page = storage.fetchCommentMessages({ workspaceId, objectId, path: filePath, ...request });
+    // A thread is the file's only when its first create binds this file and no other.
+    const { messages, olderCursor } = fittedPage(page, { workspaceId, filePath },
+      threadId => commentFileOf(storage, workspaceId, threadId)?.objectId === objectId);
+    return jsonResponse({ ok: true, workspaceId, filePath, messages, olderCursor });
+  }
+
+  // A thread on no file, or on one whose current or last path is secret or unknown, is not found.
+  function threadDiscussion(
+    authority: PersonalAuthority, workspaceId: string, threadId: string, request: ReturnType<typeof pageOf>,
+  ): Response {
+    reachIn(authority, workspaceId);
+    const file = commentFileOf(storage, workspaceId, threadId);
+    if (!file) throw notFound();
+    const { filePath } = file;
+    const page = storage.fetchThreadMessages({ workspaceId, threadId, ...request });
+    const { messages, olderCursor } = fittedPage(page, { workspaceId, threadId, filePath }, () => true);
+    return jsonResponse({ ok: true, workspaceId, threadId, filePath, messages, olderCursor });
   }
 
   // The workspace's current files on its main version.
@@ -436,7 +545,9 @@ export function createPersonalAgentToolRoutes(input: {
       for (const id of [...seqs.keys()]) if (!inReach.has(id)) seqs.delete(id);
       const answer: { ok: true; messages: PersonalWaitMessage[]; cursor: PersonalWaitCursor; more: boolean } = {
         ok: true,
-        messages: result.found.filter(message => inReach.has(message.workspaceId)),
+        // A file can move to a secret path while the wait holds, so each Comment's file is placed again.
+        messages: result.found.filter(message => inReach.has(message.workspaceId) &&
+          (message.channelWireId !== null || commentFileOf(storage, message.workspaceId, message.threadId) !== null)),
         cursor: { v: 1, agentId, seqs: Object.fromEntries(seqs), turn },
         more: result.behind,
       };
@@ -447,18 +558,6 @@ export function createPersonalAgentToolRoutes(input: {
       release(waitsByAccount, ownerUserId);
     }
   }
-
-  // The current path of the file a thread is on, when a share could serve
-  // that file. Undefined for a secret file, a file that is gone or the relay
-  // never saw, and a create that binds no one file. A secret file never has
-  // an object at the relay, so a gone or unknown file may be one.
-  const filePathOf = (workspaceId: string, threadId: string): string | undefined => {
-    const binding = storage.findThreadCreateFileBinding(workspaceId, threadId);
-    if (!binding) return undefined;
-    const path = binding.kind === "object" ? storage.objectCurrentPath(workspaceId, binding.objectId)
-      : storage.objectIdAtPath(workspaceId, binding.path) ? binding.path : undefined;
-    return typeof path === "string" ? visibleSharePath(MAIN_FILES, path) ?? undefined : undefined;
-  };
 
   function forAgent(row: SyncRelayLogRow, workspaceId: string, scope: PersonalScope, mention: string, dm: string): PersonalWaitMessage | null {
     const read = chatMessage(row);
@@ -471,9 +570,10 @@ export function createPersonalAgentToolRoutes(input: {
     // a message counts by a mention or a thread the agent posted in.
     if (channelWireId !== dm && !mentions(read.message.body, mention) &&
         !storage.personalAgentPostedIn({ agentId: scope.connection.agentId, workspaceId, threadId })) return null;
-    const filePath = channelWireId === null ? filePathOf(workspaceId, threadId) : null;
-    // A thread on a file no share can serve stays out, as it does through a
-    // share link.
+    // A Comment on a deleted file names the path the file last had. One whose
+    // file is or was last at a secret path, or that the relay never placed,
+    // stays out.
+    const filePath = channelWireId === null ? commentFileOf(storage, workspaceId, threadId)?.filePath : null;
     if (filePath === undefined) return null;
     return { ...linkChatMessage(read.message), workspaceId, channelWireId, filePath };
   }
@@ -487,9 +587,12 @@ export function createPersonalAgentToolRoutes(input: {
       // A post or a read checks the fence again once its body is in, and a
       // post's write reads that epoch. A wait checks before it answers, and a
       // file stream before each chunk.
+      case "workspaces": return workspaces(await linkAuthority.freshPersonal(authority), body);
+      case "groups": return await groups(await linkAuthority.freshPersonal(authority), body, request.signal);
       case "post": return post(await linkAuthority.freshPersonal(authority), body);
       case "wait": return await wait(authority, body, request.signal);
       case "chat": return chat(await linkAuthority.freshPersonal(authority), body);
+      case "discussion": return discussion(await linkAuthority.freshPersonal(authority), body);
       case "files": return files(await linkAuthority.freshPersonal(authority), body);
       case "blob": return blob(authority, body, request.signal);
     }

@@ -64,6 +64,15 @@ export class MixedRelayTransportError extends Error {
   }
 }
 
+// The server answered that it is busy. The engine already split the push
+// down to one change, so a later pass is all that is left to try.
+export class RelayBusyError extends Error {
+  constructor() {
+    super("The server is busy.");
+    this.name = "RelayBusyError";
+  }
+}
+
 interface RelayOpenConfiguration {
   [key: string]: JsonValue | undefined;
   baseUrl: string;
@@ -459,6 +468,9 @@ function translateRelayError(method: string, error: unknown): never {
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }
+  if (SYNC_PASS_METHODS.has(method) && error.wireCode === "OVERLOADED" && error.message === "settlement-proof-budget") {
+    throw new RelayBusyError();
+  }
   if (error.wireCode === "CONFLICT") throw new RelayConflictError();
   if (error.wireCode === "KEY_ENVELOPE_MISSING") {
     throw new RelayKeyEnvelopeMissingError();
@@ -696,24 +708,10 @@ export class EngineRelayClient {
                 }, { workspace: handle, deadlineMs: this.requestDeadlineMs });
                 accountChecked = true;
               }
-              try {
-                return await requester.request(method, params, {
-                  workspace: handle,
-                  deadlineMs: this.requestDeadlineMs,
-                });
-              } catch (error) {
-                // The engine answers an unreachable relay with a code that
-                // asks for a new session. The session is fine, so end the
-                // request here instead of reopening and trying again.
-                if (
-                  error instanceof DaemonRefusalError &&
-                  error.wireCode === "WORKSPACE_UNAVAILABLE" &&
-                  error.message === "relay-unreachable"
-                ) {
-                  translateRelayError(method, error);
-                }
-                throw error;
-              }
+              return await requester.request(method, params, {
+                workspace: handle,
+                deadlineMs: this.requestDeadlineMs,
+              });
             },
             { retryTransportErrors: true, abandonAtQuit: true },
           );

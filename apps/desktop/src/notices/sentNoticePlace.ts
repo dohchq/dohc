@@ -13,7 +13,10 @@ export type SentNoticePlace =
   // A share this computer has not added yet, and the notice's file in it.
   | { kind: "share"; shareId: string; path: string | null }
   // A workspace of the person's that is not on this computer.
-  | { kind: "not-here" };
+  | { kind: "not-here" }
+  // Settings › Agents, where the account's personal agents are, at the page
+  // of the personal agent whose id the notice names.
+  | { kind: "agents-settings"; agent: string | null };
 
 /**
  * Finds a sent notice's target on this computer. A share can be a separate
@@ -26,6 +29,7 @@ export function sentNoticePlace(
   currentWorkspaceId: string,
 ): SentNoticePlace {
   if (notice.target === null) return { kind: "access-ended" };
+  if (notice.target.settings === "agents") return { kind: "agents-settings", agent: notice.target.agent ?? null };
   const path = notice.target.path ?? null;
   if (notice.workspaceId !== null) {
     const workspace = workspaces.find((candidate) => candidate.workspaceId === notice.workspaceId);

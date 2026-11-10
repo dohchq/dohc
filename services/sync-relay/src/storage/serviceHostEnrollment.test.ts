@@ -32,9 +32,10 @@ async function fixture(quota?: number) {
   };
   const authorize = (bearer: string, changes = {}) => authorizeServiceHostReplication(f.storage, {...key, workspaceId: scope.workspaceId,
     bearer, method: "GET", pathname: `/sync/${scope.workspaceId}/hosted/log`, ...changes});
+  // Rows only, on one connection, so a test seeding many workspaces can commit them together.
   function seed(workspaceId: string, objectId: string, path: string, shareId: string) {
-    f.storage.claimWorkspace({workspaceId, ownerUserId: "owner-1", createdAtMs: 0});
-    f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+    f.raw.prepare(`INSERT OR IGNORE INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity,epoch_log_floor)
+      VALUES (?,'owner-1',0,'epoch','stream',0)`).run(workspaceId);
     f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
       VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
@@ -229,8 +230,11 @@ it("pages retired undrained enrollments after the active ones, a bounded number 
     VALUES (?,?,?,'owner-1',?,'epoch','stream','retire',0,1,1,1,1)`);
   // More workspaces than eight pages, each with a document stopped while the host was down. The first has three.
   const workspaces = Array.from({length: 130}, (_, index) => `workspace-${String(index).padStart(3, "0")}`);
+  // One transaction: a commit per row is hundreds of disk flushes, and the paging is what this proves.
+  f.raw.exec("BEGIN");
   for (const workspaceId of workspaces) {f.seed(workspaceId, "object", "docs/a.md", `share-${workspaceId}`); stopped.run(workspaceId, "object", "docs/a.md", `share-${workspaceId}`);}
   for (const index of [1, 2]) stopped.run(workspaces[0], `object-${index}`, `docs/${index}.md`, `share-${workspaces[0]}`);
+  f.raw.exec("COMMIT");
   const pages = [f.storage.listUndrainedServiceHostEnrollments()];
   while (pages.at(-1)!.nextCursor) pages.push(f.storage.listUndrainedServiceHostEnrollments(pages.at(-1)!.nextCursor!));
   expect(pages).toHaveLength(9);

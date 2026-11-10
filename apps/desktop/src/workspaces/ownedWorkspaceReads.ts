@@ -20,7 +20,7 @@ export function createOwnedWorkspaceReads(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
   lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
-  repairProjection(target: ShareViewFilesTarget): Promise<void>;
+  repairProjection(target: ShareViewFilesTarget): Promise<ReadonlySet<string>>;
   onSearchSourceFailure?: (
     source: OwnedWorkspaceSearchSource,
     error: unknown,
