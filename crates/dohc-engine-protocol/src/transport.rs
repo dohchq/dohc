@@ -381,10 +381,10 @@ pub trait EngineService: Send + Sync {
     }
 
     /// Whether `request` only reads. A read has nothing to report past its
-    /// deadline, so the supervisor answers it `DEADLINE_EXCEEDED` then, even
-    /// while its handler still waits on a stuck workspace. The handler runs
-    /// to its end under the same admission. A write answers false, because
-    /// its caller needs to know what it did.
+    /// deadline or cancel, so the supervisor answers it `DEADLINE_EXCEEDED` or
+    /// `CANCELLED` then, even while its handler still waits on a stuck
+    /// workspace. The handler runs to its end under the same admission. A write
+    /// answers false, because its caller needs to know what it did.
     fn reads_only(&self, _request: &Request) -> bool {
         false
     }
