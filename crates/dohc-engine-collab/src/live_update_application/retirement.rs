@@ -61,7 +61,10 @@ pub enum Reconciliation {
         adoption: Option<OwnerAdoptionAck>,
         applications: Vec<LiveUpdateHostApplicationAck>,
         has_more_applications: bool,
-        /// Whether the activation applied past its last settlement.
+        /// Whether the relay settles before the release: the activation
+        /// applied past its last settlement, or its release would bring in
+        /// more authors than one moment can name until a settlement consumes
+        /// its interval.
         settle: bool,
     },
 }
@@ -2053,6 +2056,7 @@ fn applications(
         settle: match settle_through {
             Some(through) => {
                 settlement_pending(conn, scope.namespace, doc, lineage, Some(through))?
+                    || crate::author_coverage::release_needs_settlement_in(conn, doc)?
             }
             None => false,
         },

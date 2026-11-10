@@ -683,6 +683,37 @@ fn reserved_with_private_in(conn: &Connection, key: &DocKey) -> Result<Authors, 
     Ok(authors)
 }
 
+/// Whether a held lineage must settle before its release. The release brings
+/// in its private authors and whatever the interval still holds, including
+/// the authors an unresolved settlement returns if its file write fails.
+/// Admission keeps the private authors within one moment, but not the rest.
+/// When all of it would not fit and the interval holds anything, a
+/// settlement consumes the interval first. With nothing left to consume,
+/// another settlement could not help, so the release does not wait.
+pub(crate) fn release_needs_settlement_in(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<bool, CollabError> {
+    let consumable: bool = conn
+        .query_row(
+            "SELECT pending_authors_json<>'[]' OR settle_prior_update_seq IS NOT NULL \
+             OR EXISTS(SELECT 1 FROM ydoc_native_interval_authors i WHERE i.workspace_id=?1 \
+             AND i.version_id=?2 AND i.object_id=?3) \
+             FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql)?
+        .unwrap_or(false);
+    if !consumable {
+        return Ok(false);
+    }
+    let authors = reserved_with_private_in(conn, key)?;
+    Ok(authors.len() > MAX_INTERVAL_AUTHORS
+        || authors.admission_bytes() > MAX_INTERVAL_AUTHOR_BYTES)
+}
+
 /// Whether this identity already has an update on this document that holds
 /// its author. Its next edit then adds no author.
 fn private_author_in(
@@ -738,6 +769,26 @@ fn unresolved_authors_in(conn: &Connection, key: &DocKey) -> Result<Authors, Col
         }
     }
     Ok(authors)
+}
+
+/// Whether the unknown-author marker is reserved. Native rows always name
+/// their author, so only the pending authors and the unresolved settlement's
+/// moment can hold it.
+fn reserves_unattributed_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
+    let pending: String = conn
+        .prepare_cached(
+            "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        )
+        .map_err(sql)?
+        .query_row(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(sql)?;
+    let mut authors = unresolved_authors_in(conn, key)?;
+    authors.union_json(&pending)?;
+    Ok(authors.has_unattributed())
 }
 
 /// The author a collaborator's or an Edit share link's accepted delivery names.
@@ -840,16 +891,20 @@ fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
 /// identity an update still holds the author of, with the bytes admission
 /// counts for it, and the unknown-author marker if one is reserved, which a
 /// release without a settlement keeps. A settlement while held consumes the
-/// authors the relay accepted, but none of these.
-struct Release {
+/// authors the relay accepted, but none of these. When the interval still
+/// holds too many at release, the release waits for that settlement
+/// ([`release_needs_settlement_in`]).
+struct ReleaseAuthors {
     authors: usize,
     bytes: usize,
     /// The identities this check added.
     added: std::collections::BTreeSet<String>,
 }
 
-impl Release {
-    fn read_in(conn: &Connection, key: &DocKey, reserved: &Authors) -> Result<Self, CollabError> {
+impl ReleaseAuthors {
+    /// The document's private totals. A total no rows could produce refuses
+    /// held admission, and only that, since nothing else reads them.
+    fn read_in(conn: &Connection, key: &DocKey, unattributed: bool) -> Result<Self, CollabError> {
         let (authors, bytes): (i64, i64) = conn
             .prepare_cached(
                 "SELECT private_authors, private_author_bytes FROM ydoc_docs \
@@ -861,15 +916,19 @@ impl Release {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(sql)?;
-        let size = |value: i64| {
-            usize::try_from(value).map_err(|_| corrupt("private author count is negative"))
+        let (Ok(authors), Ok(bytes)) = (usize::try_from(authors), usize::try_from(bytes)) else {
+            return Err(corrupt("private author totals are negative"));
         };
+        // Every author entry takes more than one byte.
+        if (authors == 0) != (bytes == 0) || bytes < authors {
+            return Err(corrupt("private author totals disagree"));
+        }
         let mut release = Self {
-            authors: size(authors)?,
-            bytes: size(bytes)?,
+            authors,
+            bytes,
             added: Default::default(),
         };
-        if reserved.has_unattributed() {
+        if unattributed {
             release.add(UNATTRIBUTED)?;
         }
         Ok(release)
@@ -903,6 +962,21 @@ impl Release {
 
 const UNATTRIBUTED: &str = r#"[{"kind":"unattributed"}]"#;
 
+/// Admits a held lineage's update by this identity, which keeps its author
+/// until the relay accepts it.
+fn admit_private_in(
+    conn: &Connection,
+    key: &DocKey,
+    actor: &str,
+    attribution: &ChangeAttribution,
+    json: &str,
+) -> Result<(), CollabError> {
+    if private_author_in(conn, key, actor, attribution)? {
+        return Ok(());
+    }
+    ReleaseAuthors::read_in(conn, key, reserves_unattributed_in(conn, key)?)?.admit(json)
+}
+
 pub fn check_admission_in(
     conn: &Connection,
     key: &DocKey,
@@ -924,7 +998,11 @@ pub(crate) fn check_batch_admission_in<'a>(
     // release, so they bound a new identity too. They never request a
     // settlement, which could not consume them.
     let mut release = if accepted_only_in(conn, key)? {
-        Some(Release::read_in(conn, key, &covered)?)
+        Some(ReleaseAuthors::read_in(
+            conn,
+            key,
+            covered.has_unattributed(),
+        )?)
     } else {
         None
     };
@@ -980,9 +1058,7 @@ fn check_admission_with_coverage_in(
     if accepted_only_in(conn, key)? {
         entry(&json)?;
         if let (Some(actor), Some(attribution)) = (actor, attribution) {
-            if !private_author_in(conn, key, actor, attribution)? {
-                Release::read_in(conn, key, &reserved_in(conn, key)?)?.admit(&json)?;
-            }
+            admit_private_in(conn, key, actor, attribution, &json)?;
         }
         return Ok(Admission {
             request_settlement: false,
@@ -1048,6 +1124,17 @@ pub(crate) fn check_remote_admission_in(
         .optional()
         .map_err(sql)?;
     if let Some((verified, pending)) = verified {
+        // The update's own row keeps its author on a held lineage whatever
+        // its snapshot names, and the release brings that author in too.
+        if let (Some(actor), Some(attribution)) = (actor, attribution) {
+            if accepted_only_in(conn, key)? {
+                if let Some(json) =
+                    dohc_engine_domain::moment_author_json(Some(actor), Some(attribution))
+                {
+                    admit_private_in(conn, key, actor, attribution, &json)?;
+                }
+            }
+        }
         let mut covered = Authors::default();
         covered.union_json(&pending)?;
         covered.union_json(&verified)?;
@@ -1583,6 +1670,8 @@ mod tests {
                     content_kind: ContentKind::Plaintext,
                     regime: Regime::LocalOnly,
                 }),
+                // No file wrote this object, so the append creates its row.
+                ensure_parent_row: true,
                 ..LocalAppend::default()
             },
             &NoFaults,
@@ -1629,6 +1718,16 @@ mod tests {
                 escaped.as_str(),
                 attribution(ChangeActorKind::Automation, Some("owner"), 7, None),
             ),
+            ("agent", attribution(ChangeActorKind::Agent, None, 0, None)),
+            ("helper", attribution(ChangeActorKind::Agent, None, 9, None)),
+            (
+                "automation",
+                attribution(ChangeActorKind::Automation, None, 2, None),
+            ),
+            (
+                escaped.as_str(),
+                attribution(ChangeActorKind::Human, None, 0, None),
+            ),
         ];
         store
             .write_with(&NoFaults, |tx| {
@@ -1654,19 +1753,20 @@ mod tests {
                     assert_eq!(stored as usize, bytes, "{json}");
                     entries.push((json, bytes));
                 }
+                let count = identities.len();
                 let all: usize = entries.iter().map(|(_, bytes)| bytes).sum();
-                assert_eq!(totals(tx)?, (5, all));
+                assert_eq!(totals(tx)?, (count, all));
                 // A delivery that names the author forgets one of its two
                 // updates, so the identity still counts.
                 accept_native_in(tx, &key, "", "0-0", &[entries[0].0.clone()])?;
-                assert_eq!(totals(tx)?, (5, all));
+                assert_eq!(totals(tx)?, (count, all));
                 // One that does not moves its last update into the interval.
                 accept_native_in(tx, &key, "", "0-1", &[])?;
                 let rest = all - entries[0].1;
-                assert_eq!(totals(tx)?, (4, rest));
+                assert_eq!(totals(tx)?, (count - 1, rest));
                 forget_seed_in(tx, &key, "1-0", 102)?;
                 forget_seed_in(tx, &key, "1-1", 103)?;
-                assert_eq!(totals(tx)?, (3, rest - entries[1].1));
+                assert_eq!(totals(tx)?, (count - 2, rest - entries[1].1));
                 fold_in(tx, &key, i64::MAX)?;
                 assert_eq!(totals(tx)?, (0, 0));
                 Ok::<_, CollabError>(())

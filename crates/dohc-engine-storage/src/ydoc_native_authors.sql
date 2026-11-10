@@ -62,10 +62,10 @@ CREATE TABLE ydoc_native_interval_authors (
 -- How many identities an update still holds the author of on this document,
 -- and their author_bytes. A held lineage's release brings them all into its
 -- interval at once, so its admission counts a new identity with one read.
-ALTER TABLE ydoc_docs ADD COLUMN private_authors INTEGER NOT NULL DEFAULT 0
-    CHECK (private_authors >= 0);
-ALTER TABLE ydoc_docs ADD COLUMN private_author_bytes INTEGER NOT NULL DEFAULT 0
-    CHECK (private_author_bytes >= 0);
+-- Only that admission reads them, and it refuses a total no rows could
+-- produce, so a total that drifted never stops another write.
+ALTER TABLE ydoc_docs ADD COLUMN private_authors INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ydoc_docs ADD COLUMN private_author_bytes INTEGER NOT NULL DEFAULT 0;
 -- An identity counts from its first 'update' row until its last one goes or
 -- leaves 'update'. No row returns to 'update'. Each check is one seek.
 CREATE TRIGGER ydoc_native_private_author_added AFTER INSERT ON ydoc_native_authors
