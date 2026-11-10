@@ -1,8 +1,10 @@
 //! Durable holds park actual relay and rollback placements, including replay.
 mod support;
-use dohc_engine_collab::{ContentKind, Ydoc};
+use dohc_engine_collab::{
+    ContentKind, DocKey, LeaseRegistry, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+};
 use dohc_engine_domain::{CaptureIngest, RollbackTextFileMutation, VersionedTextStore, WriteText};
-use dohc_engine_runtime::{CancellationToken, WorkspaceSupervisor, WriteConditions};
+use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, WriteConditions};
 use dohc_engine_storage::FaultPoint;
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use dohc_engine_sync::MomentMaterializationChange;
@@ -351,4 +353,206 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
         after, before,
         "parking does not compensate the settlement or remove its history"
     );
+}
+
+/// Seed a desktop-read note without its final newline: a nested list item
+/// with a link. The engine's reading cannot reproduce the desktop's here, so
+/// an outside frontmatter edit to it is held.
+fn seed_desktop_link_row(scratch: &ScratchDir) -> (DocKey, String) {
+    use base64::Engine;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../tools/rust-engine-program/nested1b-desktop-folds.json"
+    ))
+    .unwrap();
+    let initial = rows[0]["source"].as_str().unwrap().to_owned();
+    let mut store = EngineStore::open(&engine_db_path(scratch).unwrap(), 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WS, "main", 1, &NoFaults)
+        .unwrap();
+    let head = VersionedTextStore::new(&mut store)
+        .capture_ingest(&captured(&initial), &NoFaults)
+        .unwrap()
+        .snapshot;
+    let key = DocKey::new(WS, "main", &head.object_id).unwrap();
+    let doc = Ydoc::wire();
+    let base = base64::engine::general_purpose::STANDARD
+        .decode(rows[0]["desktopBase64"].as_str().unwrap())
+        .unwrap();
+    doc.apply(&base).unwrap();
+    // The desktop keeps the file as source because its writer adds the newline.
+    doc.preserve_folded_markdown_source(&initial).unwrap();
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &key,
+        &doc.encode_full_state(),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(FILE),
+                content_kind: ContentKind::Richdoc,
+                regime: Regime::LocalOnly,
+            }),
+            is_seed: true,
+            seed_source_sha256: Some(&head.blob_sha256),
+            ..Default::default()
+        },
+        &NoFaults,
+        3,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    std::fs::write(scratch.path().join(FILE), &initial).unwrap();
+    (key, initial)
+}
+
+/// Write `text` as an outside edit and capture it, returning the error code.
+async fn capture_outside(
+    actor: &ActorHandle,
+    scratch: &ScratchDir,
+    text: &str,
+    now_ms: i64,
+) -> Result<(), &'static str> {
+    std::fs::write(scratch.path().join(FILE), text).unwrap();
+    actor
+        .capture_ingest(
+            CaptureIngest {
+                now_ms,
+                ..captured(text)
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.code())
+}
+
+/// The error code of opening the held file for live editing, if any.
+async fn open_error(actor: &ActorHandle) -> Option<&'static str> {
+    actor
+        .ydoc_open_state(
+            WS.into(),
+            9,
+            true,
+            None,
+            "main".into(),
+            FILE.into(),
+            Some(ContentKind::Richdoc),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .map(|error| error.code())
+}
+
+fn file(scratch: &ScratchDir) -> String {
+    std::fs::read_to_string(scratch.path().join(FILE)).unwrap()
+}
+
+#[tokio::test]
+async fn a_held_outside_edit_survives_a_dohc_edit_and_restart() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let (key, initial) = seed_desktop_link_row(&scratch);
+    let outside = initial.replace("todo", "done");
+    let store = EngineStore::open(&db, 4).unwrap();
+    let loaded = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap();
+    let claim = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap()
+        .lineage_claim_id;
+    drop(store);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 5).unwrap().actor;
+    assert_eq!(
+        capture_outside(&actor, &scratch, &outside, 6).await,
+        Err("capture-file-held")
+    );
+    // A dohc-side edit to the same note settles without placing over the file.
+    let recorded = actor
+        .ydoc_record_update(
+            key.clone(),
+            FILE.into(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            loaded.doc.richdoc_append_paragraph("Edited in dohc"),
+            None,
+            None,
+            claim.clone(),
+            false,
+            None,
+            None,
+            7,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await;
+    let settled = actor
+        .ydoc_settle(
+            scratch.path().into(),
+            key.clone(),
+            FILE.into(),
+            ContentKind::Richdoc,
+            claim,
+            Some(dohc_engine_storage::hex_sha256(initial.as_bytes())),
+            "dohc-edit".into(),
+            Arc::new(()),
+            8,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await;
+    let errors = (recorded.as_ref().err(), settled.as_ref().err());
+    assert_eq!(file(&scratch), outside, "{errors:?}");
+    assert!(settled.is_err(), "{errors:?}");
+    supervisor.close(&db).unwrap();
+    let actor = supervisor.open(&db, 9).unwrap().actor;
+    actor
+        .materialize_replay_pending(scratch.path().into(), WS.into(), 10)
+        .await
+        .unwrap();
+    assert_eq!(file(&scratch), outside);
+    assert_eq!(actor.capture_file_holds(WS.into()).await.unwrap().len(), 1);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn a_held_outside_edit_is_released_by_the_file_dohc_would_write() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let (_key, initial) = seed_desktop_link_row(&scratch);
+    let outside = initial.replace("todo", "done");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 4).unwrap().actor;
+    let held = Err("capture-file-held");
+    assert_eq!(capture_outside(&actor, &scratch, &outside, 5).await, held);
+    assert_eq!(open_error(&actor).await, held.err());
+    // Try again reads the same bytes the same way, so the file stays held.
+    let retried = actor.retry_capture_file(WS.into(), FILE.into()).await;
+    assert!(retried.unwrap());
+    assert_eq!(capture_outside(&actor, &scratch, &outside, 6).await, held);
+    let holds = actor.capture_file_holds(WS.into()).await.unwrap();
+    assert_eq!(holds.len(), 1);
+    let first = &holds[0];
+    assert_eq!((first.attempt_count, first.retry_requested), (2, false));
+    assert_eq!(file(&scratch), outside);
+    // The earlier bytes lack the final newline too, so they are held as well.
+    assert_eq!(capture_outside(&actor, &scratch, &initial, 7).await, held);
+    // The earlier bytes as dohc writes them release the file.
+    let before = format!("{initial}\n");
+    assert_eq!(capture_outside(&actor, &scratch, &before, 8).await, Ok(()));
+    let holds = actor.capture_file_holds(WS.into()).await.unwrap();
+    assert!(holds.is_empty(), "{holds:?}");
+    assert_eq!(open_error(&actor).await, None);
+    // The same outside edit, with the final newline kept, is then taken in.
+    let edit = format!("{outside}\n");
+    assert_eq!(capture_outside(&actor, &scratch, &edit, 10).await, Ok(()));
+    assert_eq!(file(&scratch), edit);
+    supervisor.close(&db).unwrap();
 }

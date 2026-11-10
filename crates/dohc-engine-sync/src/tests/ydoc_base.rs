@@ -2231,7 +2231,10 @@ fn a_compensated_settle_cannot_restore_seed_source_authority() {
 #[test]
 fn a_strict_fold_after_compensation_and_its_file_moment_converge_on_the_peer() {
     let seed = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n- parent\n  - nested\n";
-    assert_peer_fold_from(seed, "Recovered\n", false, Some("Live body\n"), true);
+    // An outside file without the final newline folds with its exact bytes too.
+    for chosen in ["Recovered", "Recovered\n"] {
+        assert_peer_fold_from(seed, chosen, false, Some("Live body\n"), true);
+    }
 }
 
 fn deliver_fold_moment(origin: &mut EngineStore, peer: &mut EngineStore, id: &str, seq: i64) {
@@ -2928,60 +2931,78 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
 #[test]
 fn a_fold_the_parser_can_reproduce_still_commits() {
     // The guard must not refuse everything: a rich choice the parser does
-    // model folds and journals as before.
-    let (_scratch, _path, mut engine) = open_store();
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_300, &NoFaults)
-        .expect("main version");
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES ('ws','object-representable',1_400)",
-                [],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("scaffolding");
-    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-representable").expect("key");
-    let doc = dohc_engine_collab::Ydoc::wire();
-    doc.richdoc_append_paragraph("original");
-    dohc_engine_collab::claim_base(
-        &mut engine,
-        &key,
-        dohc_engine_collab::ContentKind::Richdoc,
-        &doc.encode_full_state(),
-        &NoFaults,
-        1_500,
-    )
-    .expect("claim");
-    let chosen = "# Heading\n\nchosen body\n\n- one\n- two\n";
-    engine
-        .write_with(&NoFaults, |tx| {
-            crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
-                tx,
-                "ws",
-                "main",
-                "object-representable",
-                "notes/representable.md",
-                chosen,
-                1_600,
-            )
-        })
-        .expect("a representable choice folds");
-    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
-        .expect("load")
-        .expect("lineage");
-    assert_eq!(
-        persisted
-            .doc
-            .project(dohc_engine_collab::ContentKind::Richdoc)
-            .expect("projection")
-            .content,
-        chosen,
-        "the lineage projects exactly the chosen bytes"
-    );
+    // model folds and journals as before. A choice without the final
+    // newline keeps its exact bytes through the source witness.
+    let canonical = "# Heading\n\nchosen body\n\n- one\n- two\n";
+    for chosen in [canonical, canonical.trim_end()] {
+        let (_scratch, _path, mut engine) = open_store();
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_300, &NoFaults)
+            .expect("main version");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES ('ws','object-representable',1_400)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("scaffolding");
+        let key =
+            dohc_engine_collab::DocKey::new("ws", "main", "object-representable").expect("key");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.richdoc_append_paragraph("original");
+        dohc_engine_collab::claim_base(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Richdoc,
+            &doc.encode_full_state(),
+            &NoFaults,
+            1_500,
+        )
+        .expect("claim");
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    "object-representable",
+                    "notes/representable.md",
+                    chosen,
+                    1_600,
+                )
+            })
+            .expect("a representable choice folds");
+        let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+            .expect("load")
+            .expect("lineage");
+        assert_eq!(
+            persisted
+                .doc
+                .project(dohc_engine_collab::ContentKind::Richdoc)
+                .expect("projection")
+                .content,
+            canonical,
+            "the lineage holds the chosen content"
+        );
+        let projection = engine
+            .read_with(|conn| {
+                crate::ydoc_apply::project_ydoc_with_store(
+                    conn,
+                    &key,
+                    &persisted.doc,
+                    ContentKind::Richdoc,
+                )
+            })
+            .expect("store projection");
+        assert_eq!(
+            projection.content, chosen,
+            "the lineage projects exactly the chosen bytes"
+        );
+    }
 }
 
 #[test]
@@ -7658,19 +7679,22 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     );
 }
 
-fn assert_desktop_frontmatter_fold(index: usize, refuses: bool) {
+/// `refuses` is `[without final newline, with final newline]`. A refused fold
+/// keeps the file's exact bytes and the seeded body.
+fn assert_desktop_frontmatter_fold(index: usize, refuses: [bool; 2]) {
     use base64::Engine;
     let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
         "../../../../tools/rust-engine-program/nested1b-desktop-folds.json"
     ))
     .unwrap();
-    {
-        let row = &rows[index];
-        // The engine writes the final newline; the seed reads the same body without it.
-        let initial = &format!("{}\n", row["source"].as_str().unwrap());
-        let base = base64::engine::general_purpose::STANDARD
-            .decode(row["desktopBase64"].as_str().unwrap())
-            .unwrap();
+    let row = &rows[index];
+    let source = row["source"].as_str().unwrap();
+    let base = base64::engine::general_purpose::STANDARD
+        .decode(row["desktopBase64"].as_str().unwrap())
+        .unwrap();
+    // The seed reads both files as the same body; the engine writes the second.
+    let forms = [source.to_owned(), format!("{source}\n")];
+    for (initial, refuses) in forms.iter().zip(refuses) {
         assert_peer_fold_with_base(
             initial,
             &initial.replace("todo", "done"),
@@ -7684,29 +7708,30 @@ fn assert_desktop_frontmatter_fold(index: usize, refuses: bool) {
 
 #[test]
 fn nested1b_desktop_frontmatter_link() {
-    assert_desktop_frontmatter_fold(0, false);
+    // Only the engine's own form folds; the file without it is held.
+    assert_desktop_frontmatter_fold(0, [true, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_angle() {
-    assert_desktop_frontmatter_fold(1, false);
+    assert_desktop_frontmatter_fold(1, [false, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_entity() {
-    assert_desktop_frontmatter_fold(2, false);
+    assert_desktop_frontmatter_fold(2, [true, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_quote() {
-    assert_desktop_frontmatter_fold(3, false);
+    assert_desktop_frontmatter_fold(3, [false, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_table() {
-    assert_desktop_frontmatter_fold(4, false);
+    assert_desktop_frontmatter_fold(4, [false, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_heading() {
-    assert_desktop_frontmatter_fold(5, false);
+    assert_desktop_frontmatter_fold(5, [false, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_setext_holds() {
-    assert_desktop_frontmatter_fold(6, true);
+    assert_desktop_frontmatter_fold(6, [true, true]);
 }
