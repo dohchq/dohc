@@ -1341,11 +1341,12 @@ async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPe
   // The workspace's pulls so far, for waiting on the next one.
   const pullCount = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.pullHosted").length;
   return {...o, sibling, other, attach, detach, pullCount, passes, unload: {method: "liveApplication.unloadDocument", workspace: "attached-handle", params: {objectId: other.objectId}},
-    // Resolves once a pull that began after the current one has been sent, on the second new pull.
+    // Resolves once a pass that began after the current one has run, on its second new pull or push. A ready
+    // workspace pushes every pass but pulls only for a relay change or unfinished work, so either counts.
     nextPull() {
-      let seen = 0;
+      const seen: Record<string, number> = {"sync.pullHosted": 0, "sync.push": 0};
       return new Promise<void>(resolve => {
-        const listener = (method: string) => {if (method === "sync.pullHosted" && ++seen === 2) {o.requestListeners.delete(listener); resolve();}};
+        const listener = (method: string) => {if (method in seen && ++seen[method]! === 2) {o.requestListeners.delete(listener); resolve();}};
         o.requestListeners.add(listener);
       });
     }};
@@ -2780,7 +2781,10 @@ it("captures a retired activation's successor only after a hosted pull that star
   const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
   const captures = o.client().captureOwnerActivation.mock.calls.length;
   // Resume waits behind a pass that is pulling, so the next pull is one that started after Resume.
+  // A drained workspace pulls for a relay change, so another device's write starts that pull.
   const before = o.park("sync.pullHosted");
+  o.f.storage.appendLogBatch({workspaceId: "workspace", originId: "another-device",
+    ops: [parseLogOp({originSeq: 0, opKind: "workspace.init", recordedAtMs: 1, payload: {}})]});
   await before.entered.promise;
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
   const resumed = o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
