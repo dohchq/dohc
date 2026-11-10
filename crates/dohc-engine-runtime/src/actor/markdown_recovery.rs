@@ -138,9 +138,12 @@ impl ActorHandle {
         root: PathBuf,
     ) -> Result<Option<HeldMarkdownChange>, RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
-            let version = VersionedTextStore::new(store)
-                .get_active_version(&workspace)?
-                .version_id;
+            let version = match VersionedTextStore::new(store).get_active_version(&workspace) {
+                Ok(version) => version.version_id,
+                // A workspace with no version yet holds nothing.
+                Err(DomainError::WorkspaceNotFound) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
             let Some(owed) = store
                 .read_with(|conn| obligations::held_at_in(conn, &workspace, &version, &path))?
             else {
