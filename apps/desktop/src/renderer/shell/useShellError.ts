@@ -363,6 +363,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       identity?: string,
       // Changes the row of its identity where it stands, with no new toast.
       quiet = false,
+      onDismiss?: () => void,
     ) => {
       // The window's stop message already says why. Main marks the failed
       // read before the window learns of the stop.
@@ -390,6 +391,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
         ...(kind ? { kind } : {}),
+        ...(onDismiss ? { onDismiss } : {}),
       }, quiet || waitedForCollectionMove(error) ? "quiet" : false);
     },
     [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
@@ -397,10 +399,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed. A part that keeps one row
   // for several failures, such as the Versions page, passes `quiet` to change
-  // that row where it stands.
+  // that row where it stands, and `onDismiss` to learn that the row is gone.
   const reportButtonError = useCallback(
-    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean) =>
-      reportShellError(fallback, error, retry, undefined, identity, quiet),
+    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void) =>
+      reportShellError(fallback, error, retry, undefined, identity, quiet, onDismiss),
     [reportShellError],
   );
   // A failure already worded for the person. Report facts, such as a raw
