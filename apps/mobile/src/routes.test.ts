@@ -62,6 +62,7 @@ describe("sample modules", () => {
     expect(sources.filter(isSample).map(path => relative(ROOT, path)).sort()).toEqual([
       "src/chats/SampleAgentCard.tsx", "src/chats/SampleChats.tsx", "src/chats/sample.ts", "src/conversation/SampleConversation.tsx", "src/conversation/sample.ts",
       "src/notices/SampleNotices.tsx", "src/notices/sample.ts", "src/pages/SamplePage.tsx", "src/pages/sample.ts", "src/sharing/SampleSharing.tsx", "src/sharing/sample.ts",
+      "src/testRoute/sample.ts",
     ]);
   });
 
