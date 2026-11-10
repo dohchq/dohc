@@ -180,7 +180,9 @@ export function createReadCache(files?: CacheFiles): ReadCache {
   let epoch = 0;
   const drops = new Map<string, number>();
   const generation = (scope: string) => `${epoch}.${drops.get(scope) ?? 0}`;
-  const restoring = new Set<string>();
+  // One restore per scope at a time: a second store for the scope waits on the first, so the scope stays tracked until
+  // the only read of its file settles, and a list that drops it meanwhile moves its generation on.
+  const restoring = new Map<string, Promise<void>>();
   function forget(scope: string) {
     drops.set(scope, (drops.get(scope) ?? 0) + 1);
     scopes.delete(scope);
@@ -212,9 +214,10 @@ export function createReadCache(files?: CacheFiles): ReadCache {
     },
     restore(scope) {
       if (!files || scopes.has(scope)) return null;
+      const pending = restoring.get(scope);
+      if (pending) return pending;
       const expected = generation(scope);
-      restoring.add(scope);
-      return files.read(scope).catch(() => []).then(found => {
+      const done = files.read(scope).catch(() => []).then(found => {
         restoring.delete(scope);
         // A delete since the read began wins, and views read into memory meanwhile are newer.
         if (generation(scope) !== expected || scopes.has(scope)) return;
@@ -225,6 +228,8 @@ export function createReadCache(files?: CacheFiles): ReadCache {
         }
         if (views.size > 0) scopes.set(scope, views);
       });
+      restoring.set(scope, done);
+      return done;
     },
     savedList(signIn) {
       if (!files) return null;
@@ -239,7 +244,7 @@ export function createReadCache(files?: CacheFiles): ReadCache {
         listed(workspaces) {
           void files.writeList(scope, workspaces);
           const kept = new Set(workspaces.filter(entry => entry.showOnPhone && entry.canOpen).map(entry => cacheScope(signIn, entry.workspaceId)));
-          for (const known of new Set([...scopes.keys(), ...restoring])) if (!kept.has(known)) forget(known);
+          for (const known of new Set([...scopes.keys(), ...restoring.keys()])) if (!kept.has(known)) forget(known);
           void files.keep([...kept]);
         },
       };

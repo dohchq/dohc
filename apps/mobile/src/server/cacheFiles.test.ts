@@ -606,6 +606,22 @@ describe("a restore that a delete overtakes", () => {
     expect(cache.entries(SCOPE_A)).toEqual([]);
   });
 
+  it("reads a scope's file once for two restores, so a list that drops the scope meanwhile wins over both", async () => {
+    const { files, answer } = heldFiles();
+    let reads = 0;
+    const counted: CacheFiles = { ...files, read: scope => { reads += 1; return files.read(scope); } };
+    const cache = createReadCache(counted);
+    // A, then B, then A again: the second store for A waits on the first one's read.
+    const first = cache.restore(SCOPE_A);
+    const second = cache.restore(SCOPE_A);
+    expect(reads).toBe(1);
+    cache.savedList({ origin: "https://dohc.example.com", userId: "u-1" })!
+      .listed([{ workspaceId: "ws-b", name: "ws-b", canOpen: true, showOnPhone: true }]);
+    answer([SAVED_FILES]);
+    await Promise.all([first, second]);
+    expect(cache.entries(SCOPE_A)).toEqual([]);
+  });
+
   it("leaves a store that was waiting on the file with nothing restored, reading from the server", async () => {
     const server = serverWithA();
     const { files, answer } = heldFiles();
