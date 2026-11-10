@@ -73,6 +73,8 @@ function heldRequest(
   held: ReadonlyMap<string, UnjournalablePath>,
   path: { resolved: string; requested: string },
 ): UnjournalablePath | undefined {
+  // The view's own root is never a held file.
+  if (path.resolved === "") return undefined;
   const depth = path.resolved.split("/").length;
   const asked = posix.normalize(path.requested.replaceAll("\\", "/"))
     .split("/").filter(Boolean).slice(-depth).join("/");
