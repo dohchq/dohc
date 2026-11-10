@@ -102,13 +102,7 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
   async function list(onReadError: (error: unknown) => void): Promise<[string, string, string][]> {
     const rows: [string, string, string][] = [];
     // Cached rows can't show that the folder was blocked or replaced since.
-    // Right after launch the sync client's first request reopens the engine's
-    // binding, so a list refused meanwhile waits once for that open.
-    await directory().catch(async (error: unknown) => {
-      if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
-      await localStateOpened(workspace);
-      return directory();
-    }).catch(error => { loaded = null; throw error; });
+    await directory().catch(error => { loaded = null; throw error; });
     const { rows: savedRecords, errors } = await records();
     errors.forEach(onReadError);
     for (const record of [...savedRecords].sort((a, b) => a.createdAtMs - b.createdAtMs)) {
@@ -199,7 +193,13 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
   }
   return {
     list(onReadError: (error: unknown) => void = () => undefined): Promise<[string, string, string][]> {
-      return enqueue(() => list(onReadError));
+      // Right after launch the sync client's first request reopens the
+      // engine's binding, so a list refused meanwhile waits once for that open.
+      return enqueue(() => list(onReadError).catch(async (error: unknown) => {
+        if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+        await localStateOpened(workspace);
+        return list(onReadError);
+      }));
     },
     beforeWrite(path: string, incoming: Uint8Array | null, admitCopy: (path: string) => void,
       isRecorded: (path: string, sha256: string) => Promise<boolean>): Promise<boolean> {

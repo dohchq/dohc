@@ -121,7 +121,7 @@ describe("materialization keeps outside bytes before replacement", () => {
 
   // #3496: right after launch, the sync client's first request closes the
   // engine's binding and opens it again. A list in between showed a red toast.
-  it("lists kept copies while the sync client reopens the engine's binding", async () => {
+  it.each(["before", "after"])("lists kept copies while the sync client reopens the engine's binding, starting %s the list finds its folder", async (when) => {
     let hold = Promise.resolve();
     const daemon: EngineDaemonClient = {
       async sendRequest(request: Request): Promise<Response> {
@@ -142,11 +142,22 @@ describe("materialization keeps outside bytes before replacement", () => {
       await open();
       const reopened = deferred<void>();
       hold = reopened.promise;
-      const rebind = sessions.closeWorkspaceBinding(workspace).then(open);
+      let rebind: Promise<unknown> | undefined;
+      const reopen = () => { rebind ??= sessions.closeWorkspaceBinding(workspace).then(open); };
+      if (when === "before") reopen();
+      else {
+        // The list's first look at its folder ends here. Its records look again.
+        const { realpath } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+        vi.spyOn(files, "realpath").mockImplementation((async (...args: Parameters<typeof realpath>) => {
+          if (String(args[0]).endsWith("outside-write-copies")) reopen();
+          return realpath(...args);
+        }) as typeof realpath);
+      }
       const listing = outsideWriteCopies(workspace).list().catch((error: unknown) => error);
       reopened.resolve();
-      await rebind;
       expect(await listing).toEqual([]);
+      expect(rebind).toBeDefined();
+      await rebind;
     } finally {
       await sessions.closeAll();
     }
