@@ -517,6 +517,9 @@ fn outside_reader_fold_inline_grammar_and_structural_refusals_need_reader() {
         "    **indented**",
         "a\rb",
         "heading\n===",
+        "heading\n--",
+        "heading\n----",
+        "heading\n-- ",
         "---\ntitle: frontmatter\n---",
     ] {
         assert!(needs_reader(source), "false native admission: {source:?}");
@@ -961,6 +964,8 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
         .expect("outside-fold reader deadline bounds the capture wait");
         assert!(folds.is_empty());
         assert_eq!(reader.dispatch_count(), 1);
+        // Only a missed deadline sets the reader aside (#2585).
+        assert_eq!(reader_ready(&actor), crash);
         let result = actor
             .capture_ingest(
                 input(source),
@@ -970,8 +975,72 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
             )
             .await;
         assert!(matches!(result, Err(RuntimeError::CaptureFileHeld { .. })));
+        if !crash {
+            let skipped = prepare(
+                &actor,
+                Arc::from([input(source)]),
+                scratch.path(),
+                &mut None,
+            )
+            .await;
+            assert!(skipped.is_empty());
+            assert_eq!(
+                reader.dispatch_count(),
+                1,
+                "the next capture waited on the hung reader again"
+            );
+            *hung_until(&actor) = Some(std::time::Instant::now());
+            let mut short = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+            let _ = prepare(
+                &actor,
+                Arc::from([input(source)]),
+                scratch.path(),
+                &mut short,
+            )
+            .await;
+            assert_eq!(
+                reader.dispatch_count(),
+                2,
+                "the reader stays set aside after its cooldown"
+            );
+        }
         supervisor.close(&db).unwrap();
     }
+}
+
+#[tokio::test]
+async fn outside_reader_fold_keeps_a_reader_that_answered_when_the_batch_runs_out_of_time() {
+    let (scratch, store, _) = fixture(false);
+    let db = store.database_path().to_owned();
+    drop(store);
+    let source = "Changed\n\n- parent\n  - child";
+    std::fs::write(scratch.path().join("note.md"), source).unwrap();
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    // Refuses the first note at once, then hangs.
+    let reader = Arc::new(Reader::new(Some(scripted_reader(&scratch, |script| {
+        script.replace(
+            "const fault = r.currentPath;",
+            "const fault = (globalThis.calls = (globalThis.calls ?? 0) + 1) === 1 ? 'refused' : 'hang';",
+        )
+    }))));
+    actor
+        .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )))
+        .await
+        .unwrap();
+    let folds = prepare(
+        &actor,
+        Arc::from([input(source), input(source)]),
+        scratch.path(),
+        &mut None,
+    )
+    .await;
+    assert!(folds.is_empty());
+    assert_eq!(reader.dispatch_count(), 2);
+    assert!(reader_ready(&actor), "a reader that answered was set aside");
+    supervisor.close(&db).unwrap();
 }
 
 #[tokio::test]

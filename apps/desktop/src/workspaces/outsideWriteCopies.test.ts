@@ -4,10 +4,13 @@ import { link, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/
 import * as files from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Request, Response } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import * as durableFiles from "../atomicReplaceFile";
 import * as realPaths from "./workspaceRealPath";
 
@@ -114,6 +117,50 @@ describe("materialization keeps outside bytes before replacement", () => {
     expect(errors).not.toHaveBeenCalled();
     await copies.beforeWrite("n.md", null, () => undefined, isRecorded);
     expect(await copies.list(errors)).toEqual([["n.md", "n (kept copy).md", expect.any(String)]]);
+  });
+
+  // #3496: right after launch, the sync client's first request closes the
+  // engine's binding and opens it again. A list in between showed a red toast.
+  it.each(["before", "after"])("lists kept copies while the sync client reopens the engine's binding, starting %s the list finds its folder", async (when) => {
+    let hold = Promise.resolve();
+    const daemon: EngineDaemonClient = {
+      async sendRequest(request: Request): Promise<Response> {
+        if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+        if (request.method !== "workspace.open") throw new Error(`Unexpected method: ${request.method}`);
+        await hold;
+        const { rootDir } = request.params as { rootDir: string };
+        await mkdir(join(rootDir, ".dohc", "local"), { recursive: true });
+        return { id: request.id, result: { workspace: "handle", localStateReady: true } };
+      },
+      close() {},
+    };
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined });
+    readLocalStateFrom(sessions);
+    try {
+      const workspace = { workspaceId: "outside-copy-rebind", rootPath: await createTestScratch("outside-copy-") };
+      const open = () => sessions.run(workspace, async () => undefined);
+      await open();
+      const reopened = deferred<void>();
+      hold = reopened.promise;
+      let rebind: Promise<unknown> | undefined;
+      const reopen = () => { rebind ??= sessions.closeWorkspaceBinding(workspace).then(open); };
+      if (when === "before") reopen();
+      else {
+        // The list's first look at its folder ends here. Its records look again.
+        const { realpath } = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+        vi.spyOn(files, "realpath").mockImplementation((async (...args: Parameters<typeof realpath>) => {
+          if (String(args[0]).endsWith("outside-write-copies")) reopen();
+          return realpath(...args);
+        }) as typeof realpath);
+      }
+      const listing = outsideWriteCopies(workspace).list().catch((error: unknown) => error);
+      reopened.resolve();
+      expect(await listing).toEqual([]);
+      expect(rebind).toBeDefined();
+      await rebind;
+    } finally {
+      await sessions.closeAll();
+    }
   });
 
   it("reports a records folder blocked after the list was cached, then lists again once it is cleared", async () => {

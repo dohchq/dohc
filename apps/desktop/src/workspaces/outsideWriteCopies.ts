@@ -4,7 +4,7 @@ import { lstat, open, readFile, readdir, unlink, type FileHandle } from "node:fs
 import { dirname, join, posix, relative, sep } from "node:path";
 import { z } from "zod";
 import { atomicWriteFile } from "../atomicReplaceFile";
-import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
+import { localStateFolder, localStateOpened, LocalStateUnavailableError, type LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 const CopyRecord = z.object({ path: z.string(), copy: z.string(), sha256: z.string(), createdAtMs: z.number(), id: z.string() }).strict();
@@ -193,7 +193,13 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
   }
   return {
     list(onReadError: (error: unknown) => void = () => undefined): Promise<[string, string, string][]> {
-      return enqueue(() => list(onReadError));
+      // Right after launch the sync client's first request reopens the
+      // engine's binding, so a list refused meanwhile waits once for that open.
+      return enqueue(() => list(onReadError).catch(async (error: unknown) => {
+        if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+        await localStateOpened(workspace);
+        return list(onReadError);
+      }));
     },
     beforeWrite(path: string, incoming: Uint8Array | null, admitCopy: (path: string) => void,
       isRecorded: (path: string, sha256: string) => Promise<boolean>): Promise<boolean> {

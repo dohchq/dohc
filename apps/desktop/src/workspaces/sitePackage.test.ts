@@ -30,7 +30,7 @@ async function getSitePackage(
 ): Promise<SitePackageInfo | null> {
   if (knownSites) return selectListedSitePackage(anyPath, knownSites);
   const reads = createOwnedWorkspaceReadPort({
-    hasShareState: false, searchSources: [], repairProjection: async () => undefined,
+    hasShareState: false, searchSources: [], repairProjection: async () => new Set<string>(),
     listFiles: scope => listFiles(rootPath, scope),
     lookupFiles: paths => listFiles(rootPath, { paths }),
   });

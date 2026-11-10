@@ -79,6 +79,7 @@
   "desktop:count-workspace-version-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:merge-workspace-version": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-workspace-version-conflicts": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:count-workspace-version-conflicts": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:resolve-workspace-version-conflict": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-kept-copies": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:save-kept-copy": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

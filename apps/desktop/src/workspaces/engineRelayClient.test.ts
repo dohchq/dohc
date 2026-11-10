@@ -32,6 +32,7 @@ import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
   MixedRelayTransportError,
+  RelayBusyError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -414,6 +415,19 @@ describe("EngineRelayClient", () => {
     } : undefined);
     const { client, sessions } = await harness(daemon);
     await expect(client.push()).resolves.toMatchObject({ pushed: 64, hasMore: true });
+    await sessions.closeAll();
+  });
+
+  it("names the server's busy answer to a push, and leaves the engine's own busy answers as they are", async () => {
+    let message = "settlement-proof-budget";
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.push") return undefined;
+      throw new DaemonRefusalError({ code: "OVERLOADED", message, retry: "afterBackoff" }, new Error("busy"));
+    });
+    const { client, sessions } = await harness(daemon);
+    await expect(client.push()).rejects.toBeInstanceOf(RelayBusyError);
+    message = "engine-store-busy";
+    await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
     await sessions.closeAll();
   });
 
@@ -2407,7 +2421,7 @@ describe("EngineRelayClient", () => {
     const daemon = new MockDaemon((request) => {
       if (request.method === "sync.push" || request.method === "sync.claim") {
         throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterReconnect" },
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterBackoff" },
           new Error("refused"),
         );
       }

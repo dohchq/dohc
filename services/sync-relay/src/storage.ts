@@ -1141,7 +1141,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
-  }): void {
+  }): boolean {
     return sharesStorage.createShare(this, input);
   }
 
