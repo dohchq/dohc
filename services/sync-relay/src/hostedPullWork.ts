@@ -9,9 +9,10 @@ export const HOSTED_RECOVERY_PROBE_MS = 30_000;
 /**
  * Why the host pulled a workspace's hosted replica: an activation's catch-up,
  * opening a dormant document, a workspace that is not ready, work only a pull
- * finishes, a relay change, the first pull of an attachment, or the recovery probe.
+ * finishes, a relay change, the first pull of an attachment, a workspace the
+ * relay holds no hosted scope for, or the recovery probe.
  */
-export type HostedPullReason = "activation" | "open" | "unready" | "pending" | "changed" | "first" | "probe";
+export type HostedPullReason = "activation" | "open" | "unready" | "pending" | "changed" | "first" | "unscoped" | "probe";
 
 /** What a ready workspace's hosted replica still waits on from its own pulls. Nothing on the relay announces these. */
 export interface HostedPullDuties {
@@ -55,10 +56,11 @@ export function hostedReplicaQuiet(duties: HostedPullDuties): boolean {
  * log head and epoch floor, its identity, and its hosted, departed, shared and
  * settling documents. Equal readings mean a pull would bring nothing new, so a
  * write elsewhere, or one that changes none of these, leaves it unchanged.
- * With no scope the feed answers nothing, and the relay may hold no such workspace.
+ * Undefined while the relay holds no hosted scope for the workspace, or no such
+ * workspace: the feed then refuses every read, and nothing here says when that ends.
  */
-export function hostedRelayState(storage: SyncRelayStorage, workspaceId: string): string {
+export function hostedRelayState(storage: SyncRelayStorage, workspaceId: string): string | undefined {
   const scope = storage.readServiceHostFeedScope(workspaceId);
-  return JSON.stringify(scope && [storage.automationWorkspaceLogHead(workspaceId), storage.getEpochLogFloor(workspaceId),
-    scope.replicationEpoch, scope.streamIdentity, [...scope.hosted], [...scope.departed], [...scope.shared], [...scope.settling]]);
+  return scope ? JSON.stringify([storage.automationWorkspaceLogHead(workspaceId), storage.getEpochLogFloor(workspaceId),
+    scope.replicationEpoch, scope.streamIdentity, [...scope.hosted], [...scope.departed], [...scope.shared], [...scope.settling]]) : undefined;
 }

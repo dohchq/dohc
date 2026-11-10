@@ -209,7 +209,10 @@ interface HostedAttachment {
   readonly reached: Map<string, {pull: number; listed: boolean}>; dropped: number;
   /** How the last pull ended, or undefined before the first. */
   last?: "done" | "more" | "failed";
-  /** The relay state read before the last pull that ended with no more pages, and when the recovery probe pulls next. */
+  /**
+   * The relay state read before the last pull that ended with no more pages, undefined while that found no
+   * hosted scope, and when the recovery probe pulls next.
+   */
   seen?: string; probeAt: number;
   /** Whether the relay was written since a pull or pass last read this workspace's relay state. */
   check: boolean;
@@ -1347,8 +1350,10 @@ export async function startServiceLiveHost(options: {
       // Why a ready workspace's replica pulls after its push, or undefined while it is quiet, its relay state is
       // unchanged since its last full pull, and the recovery probe is not due.
       const tailPull=(workspaceId:string,attached:HostedAttachment):HostedPullReason|undefined=>{
-        if(attached.seen===undefined)return "first";
+        if(attached.last===undefined)return "first";
         if(!hostedReplicaQuiet(pullDuties(workspaceId,attached)))return "pending";
+        // Its last full pull found no hosted scope, so no reading says when the feed answers again.
+        if(attached.seen===undefined)return "unscoped";
         if(attached.check){
           const state=hostedRelayState(storage,workspaceId);
           attached.check=false;

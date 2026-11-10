@@ -7231,7 +7231,8 @@ it.each(["running without this workspace", "running without this document"] as c
 // replica as the engine does: a pull reads the relay log after the replica's cursor, and its commit applies
 // those rows and moves the cursor. `hold` keeps a workspace's next pull in flight after it read its rows, until
 // released. `pushWrites` is how many of a workspace's next pushes each append a row, as the host's settled work does.
-async function readyHostedHost(workspaceIds: readonly string[]) {
+// Each workspace has one enrolled document, so the relay holds a hosted scope for it, unless `unscoped`.
+async function readyHostedHost(workspaceIds: readonly string[], {unscoped = false} = {}) {
   const f = await fixture();
   await configureActivation(f, {targets: [], pollIntervalMs: 1});
   const base = f.config.workspaces[0]!;
@@ -7241,7 +7242,15 @@ async function readyHostedHost(workspaceIds: readonly string[]) {
   }));
   await f.save();
   const raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite")); cleanup.push(async () => raw.close());
-  for (const workspaceId of workspaceIds) raw.prepare("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms) VALUES (?,'person',0)").run(workspaceId);
+  for (const workspaceId of workspaceIds) {
+    raw.prepare("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES (?,'person',0,'epoch','stream')").run(workspaceId);
+    if (unscoped) continue;
+    raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'person','{\"paths\":[\"docs\"],\"versionId\":null}',0)")
+      .run(`share-${workspaceId}`, workspaceId);
+    raw.prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
+      created_at_ms,updated_at_ms,accounted_bytes) VALUES (?,'object','docs/note.md','person',?,'epoch','stream',1,0,0,1)`).run(workspaceId, `share-${workspaceId}`);
+    expect(f.storage.readServiceHostFeedScope(workspaceId)?.hosted.size).toBe(1);
+  }
   const append = (workspaceId: string) => f.storage.appendLogBatch({workspaceId, originId: "device",
     ops: [parseLogOp({originSeq: f.storage.maxOriginSeq(workspaceId, "device") + 1, opKind: "workspace.init", recordedAtMs: 1, payload: {}})]});
   const relayRows = (workspaceId: string) => f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 0, limit: 1000}).rows.map(row => row.relaySeq);
@@ -7417,4 +7426,27 @@ it("keeps pulling a ready workspace after a failed pull until one succeeds", asy
   await vi.waitFor(() => {expect(h.relayRows("workspace")).toHaveLength(1); h.caughtUp("workspace");});
   await h.passes(3);
   expect(host.hostedPulls("workspace")).toEqual({total: 4, reasons: {first: 1, changed: 1, pending: 2}});
+});
+
+// Proves: while the relay holds no hosted scope for a ready workspace, it pulls every pass as before, since no
+// relay reading says when the feed answers again; once enrolled, it pulls once more and goes quiet.
+it("keeps pulling a ready workspace every pass while the relay holds no hosted scope for it", async () => {
+  const h = await readyHostedHost(["workspace"], {unscoped: true});
+  const host = await startServiceLiveHost(h.f);
+  cleanup.push(() => host.close());
+  await vi.waitFor(() => expect(h.pulls("workspace")).toBeGreaterThanOrEqual(1));
+  const before = h.pulls("workspace");
+  await h.passes(5);
+  expect(h.pulls("workspace")).toBeGreaterThanOrEqual(before + 4);
+  expect(host.hostedPulls("workspace").reasons).toMatchObject({first: 1, unscoped: expect.any(Number)});
+  // Written on another connection, so no notice: the next pass's pull reads the new scope.
+  h.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','person','{\"paths\":[\"docs\"],\"versionId\":null}',0)").run();
+  h.raw.prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,
+    created_at_ms,updated_at_ms,accounted_bytes) VALUES ('workspace','object','docs/note.md','person','share','epoch','stream',1,0,0,1)`).run();
+  expect(h.f.storage.readServiceHostFeedScope("workspace")?.hosted.size).toBe(1);
+  await h.passes(3);
+  const enrolled = h.pulls("workspace");
+  await h.passes(20);
+  expect(h.pulls("workspace")).toBe(enrolled);
+  h.caughtUp("workspace");
 });
