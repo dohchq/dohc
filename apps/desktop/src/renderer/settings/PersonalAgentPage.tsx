@@ -33,13 +33,19 @@ const REACH_OPTIONS = [
   { value: "none", label: "None" },
   { value: "view", label: "View" },
   { value: "comment", label: "Comment" },
+  { value: "edit", label: "Edit" },
 ] as const;
 
 const REACH_SHOWN = {
   none: { icon: Minus, label: "None" },
   view: { icon: Eye, label: "View" },
   comment: { icon: MessageSquare, label: "Comment" },
+  edit: { icon: Pencil, label: "Edit" },
 } as const;
+
+// What each level lets the agent do, in the sign-in screen's words.
+const REACH_MEANINGS ="View reads files and chats. Comment also posts in chats and Comments. " +
+  "Edit also changes Collections, but no other files.";
 
 /** One personal agent and the server account that holds it. */
 export type PersonalEntry = { account: PersonalAgentsAccount; roster: PersonalAgentRoster; agent: PersonalAgent };
@@ -141,7 +147,10 @@ export function PersonalReachSheet(props: {
         }}
         className="dohc-elevated dohc-pop-in flex w-[min(520px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
       >
-        <h2 id={`${id}-title`} className="m-0 break-words text-base font-semibold text-ink">Change what {agent.name} can reach</h2>
+        <div className="flex flex-col gap-1">
+          <h2 id={`${id}-title`} className="m-0 break-words text-base font-semibold text-ink">Change what {agent.name} can reach</h2>
+          <p className="m-0 text-[12px] text-muted">{REACH_MEANINGS}</p>
+        </div>
         {roster.workspaces.length === 0 ? (
           <p className="m-0 text-[13px] text-muted">Sync a workspace to {props.account.host} to let {agent.name} reach it.</p>
         ) : (
@@ -290,7 +299,7 @@ export function PersonalAgentPage(props: {
         </div>
         {roster.workspaces.length === 0 ? (
           <p className="m-0 text-[12px] text-muted">Sync a workspace to {account.host} to let {agent.name} reach it.</p>
-        ) : (
+        ) : (<>
           <div data-testid="personal-agent-reach-list" className={BOX}>
             {/* None rows stay, so the page lists every workspace Change offers. */}
             {roster.workspaces.map((workspace) => {
@@ -305,7 +314,8 @@ export function PersonalAgentPage(props: {
               );
             })}
           </div>
-        )}
+          <p data-testid="personal-agent-reach-meanings" className="m-0 mt-1.5 text-[12px] text-muted">{REACH_MEANINGS}</p>
+        </>)}
       </>}
 
       <h4 className={SECTION}>Activity</h4>

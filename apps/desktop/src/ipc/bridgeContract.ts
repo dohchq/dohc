@@ -7149,7 +7149,7 @@ export const agentsListeningOperations = {
 // as main caches them from the relay. A removed agent is left out.
 export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
 export const PERSONAL_AGENT_REACH_LIMIT = 20;
-export const PersonalAgentLevel = z.enum(["view", "comment"]);
+export const PersonalAgentLevel = z.enum(["view", "comment", "edit"]);
 export type PersonalAgentLevel = z.infer<typeof PersonalAgentLevel>;
 const RelayWorkspaceId = z.string().min(1).max(256);
 export const PersonalAgentReach = z.strictObject({ workspaceId: RelayWorkspaceId, level: PersonalAgentLevel });

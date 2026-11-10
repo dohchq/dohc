@@ -324,6 +324,16 @@ describe("groupTimeline", () => {
       .map((group) => group.moments.length)).toEqual([1, 1]);
   });
 
+  // Another account can write your personal agent's id and name on its own edit.
+  it("never folds your personal agent's edits with another account's that claim its id", () => {
+    const grok = `p-${"g".repeat(26)}`;
+    const edit = (id: string, self: boolean) => ({ kind: "file" as const, moment: byAgent(id, {
+      authorPresentations: [{ group: "agent", hue: null, self }] }, grok, "Grok Bot") });
+    expect(groupTimeline([edit("m4", true), edit("m3", true), edit("m2", false), edit("m1", false)])
+      .map((item) => item.kind === "files" ? item.group.moments.map((entry) => entry.id) : null))
+      .toEqual([["m4", "m3"], ["m2", "m1"]]);
+  });
+
   // Every connected agent is the unnamed agent; the name it gave tells them apart.
   it("folds a connected agent's edits only under the name it gave", () => {
     const connected = (id: string, agentName: string) =>

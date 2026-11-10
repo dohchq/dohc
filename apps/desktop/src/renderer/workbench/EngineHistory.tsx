@@ -190,11 +190,14 @@ function connectedAuthor(moment: Pick<EngineMomentRecord, "authorPresentations">
 
 // The one agent or person that made a moment, by their stable id. Two agents
 // can share a name, so a name never joins two ids. Every connected agent is
-// the unnamed agent, so the name each gave keeps them apart.
+// the unnamed agent, so the name each gave keeps them apart. Another account
+// can claim your personal agent's id, so only your own agent's edits are self.
 function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
   if (author === undefined || others.length > 0) return undefined;
-  if (author.kind === "agent") return `agent:${JSON.stringify([author.agentId, author.agentName ?? null])}`;
+  if (author.kind === "agent") {
+    return `agent:${JSON.stringify([author.agentId, author.agentName ?? null, moment.authorPresentations?.[0]?.self === true])}`;
+  }
   // A person the owner shared with, writing directly.
   if (author.kind === "named") return `named:${author.userId}`;
   return author.kind === "human" ? `human:${author.humanId}` : undefined;

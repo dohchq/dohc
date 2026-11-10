@@ -1400,6 +1400,26 @@ it("changes what an agent can reach from its sheet", async () => {
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
+it("offers Edit in the sheet, says what each level does, and saves Edit", async () => {
+  await renderServer({}, [{ ...GROK, reach: [{ workspaceId: "ws-2", level: "edit" }] }, NOVA]);
+  const grok = await openAgent("Grok Bot");
+  expect(grok.getAllByTestId("personal-agent-reach-entry").map((entry) => entry.textContent)).toEqual(["TripNone", "BudgetEdit"]);
+  expect(grok.getByTestId("personal-agent-reach-meanings").textContent).toBe(
+    "View reads files and chats. Comment also posts in chats and Comments. Edit also changes Collections, but no other files.");
+  await userEvent.click(grok.getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  expect(dialog.getByText("Edit also changes Collections, but no other files.", { exact: false })).toBeTruthy();
+  const trip = within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" }));
+  expect(trip.getAllByRole("radio").map((radio) => radio.textContent)).toEqual(["None", "View", "Comment", "Edit"]);
+  await userEvent.click(trip.getByRole("radio", { name: "Edit" }));
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "edit" }, { workspaceId: "ws-2", level: "edit" }] },
+  });
+});
+
 it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {
   const { onError } = await renderServer();
   bridgeMock.changePersonalAgent.mockResolvedValueOnce({ ok: false, error: "relay.test could not change Grok Bot right now. Try again shortly." });
