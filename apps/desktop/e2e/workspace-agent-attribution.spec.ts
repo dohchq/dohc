@@ -209,7 +209,8 @@ test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
     );
     await expect(agentAuthor).toHaveText("Agent");
     await page.getByTestId("linked-chat-agent-badge").focus();
-    await expect(page.getByRole("tooltip")).toContainText("Owned by You");
+    // A reply made outside a run dohc started comes from a connected agent.
+    await expect(page.getByRole("tooltip")).toContainText("Connected agent");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
