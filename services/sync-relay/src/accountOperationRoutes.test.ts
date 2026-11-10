@@ -263,6 +263,22 @@ describe("an account's reads through the server's copy", () => {
     }
   });
 
+  it("answers as missing, with no result, when access ends once the result is ready", async () => {
+    let reads = 0;
+    const { engine, h, syncs } = await relay({ resolve: async (request) => {
+      const session = await resolveAccountSession(request);
+      // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
+      return ++reads === 5 ? { ...session, sessionId: "another" } : session;
+    } });
+    await seedTrip(engine);
+    const response = await h(op("trip", "documentRead", { path: "docs/plan.md" }));
+    expect(reads).toBe(5);
+    expect(syncs).toEqual(["trip"]);
+    expect(engine.files.requests.map((request) => request.method)).toContain("versionedText.read");
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("Alfama");
+  });
+
   it("answers as missing when the workspace changes owner while the copy syncs", async () => {
     const { storage, engine, h, holdSyncs, syncs } = await relay();
     await seedTrip(engine);
@@ -399,16 +415,49 @@ describe("secret files through the server's copy", () => {
     expect(JSON.stringify(stream)).not.toContain("object-env");
   });
 
-  it("leaves out an attachment whose object is nowhere in the copy, whatever its hint says", async () => {
-    const { engine, h } = await relay();
+  it("keeps a chat on a deleted file readable, and hides one on a file the relay last saw at a secret path", async () => {
+    const { storage, engine, h } = await relay();
     const { planning } = await seedTrip(engine);
+    // The relay's log puts each object somewhere, then deletes it; none is in the copy now.
+    const moment = (objectId: string, relaySeq: number, path: string | null) => (storage as StorageContext).db.prepare(
+      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+       VALUES ('trip', ?, ?, ?, 'main', ?, 1)`).run(objectId, relaySeq, `moment-${relaySeq}`, path);
+    moment("object-old", 1, "docs/old.md");
+    moment("object-old", 2, null);
+    moment("object-dotenv", 3, ".env");
+    moment("object-dotenv", 4, null);
+    moment("object-renamed", 5, "docs/keys.md");
+    moment("object-renamed", 6, ".env.local");
     const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
+    const author = { kind: "human" as const, displayName: "Ana" };
+    const thread = async (objectId: string, pathHint: string) => {
+      const created = await chats.createThread({ workspaceId: "trip", title: objectId, linkedFile: { objectId, pathHint } });
+      await chats.sendMessage({ workspaceId: "trip", threadId: created.id, author, authorActorKey: null, body: `On ${objectId}` });
+      return created;
+    };
+    const deleted = await thread("object-old", "docs/old.md");
+    // Each hint names an ordinary file; the relay's own record decides.
+    const dotenv = await thread("object-dotenv", "docs/notes.md");
+    const renamed = await thread("object-renamed", "docs/keys.md");
+
+    const read = await answer(await h(op("trip", "chat", { threadId: deleted.id })));
+    expect(read).toMatchObject({ ok: true, thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
+    expect((read.projection as { text: string }).text).toContain("Linked file: unavailable");
+    expect(await answer(await h(op("trip", "show", { target: cliThreadId(deleted.id), peek: true }))))
+      .toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
+    for (const hidden of [dotenv, renamed]) {
+      expect(await answer(await h(op("trip", "chat", { threadId: hidden.id }))), hidden.title)
+        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}` });
+      expect(await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))))
+        .toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}` });
+    }
+
     await chats.startChannelThread({
-      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-hint", messageId: "message-hint", author: { kind: "human", displayName: "Ana" },
-      authorActorKey: null, body: "Keys", attachments: [{ objectId: "object-env", pathHint: "docs/keys.md" }],
+      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-files", messageId: "message-files", author, authorActorKey: null,
+      body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }, { objectId: "object-dotenv", pathHint: "docs/notes.md" }],
     });
-    const shown = await answer(await h(op("trip", "show", { target: "th_hint", peek: true })));
-    expect(shown.messages).toMatchObject([{ body: "Keys", attachments: [] }]);
+    const shown = await answer(await h(op("trip", "show", { target: "th_files", peek: true })));
+    expect(shown.messages).toMatchObject([{ body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }] }]);
   });
 });
 

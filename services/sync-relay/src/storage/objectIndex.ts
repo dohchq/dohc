@@ -289,6 +289,22 @@ export function objectCurrentPath(storage: StorageContext, workspaceId: string, 
     return typeof row.path === "string" && row.path.length > 0 ? row.path : null;
   }
 
+/**
+ * The path the object's latest moment named, in any version, from the log
+ * the relay accepted; a delete names none, so this is where the object last
+ * was. undefined when the relay holds no moment of the object.
+ */
+export function objectLastKnownPath(storage: StorageContext, workspaceId: string, objectId: string): string | undefined {
+    const row = storage.db
+      .prepare(
+        `SELECT path FROM sync_relay_object_moments
+         WHERE workspace_id = ? AND object_id = ? AND path IS NOT NULL
+         ORDER BY relay_seq DESC LIMIT 1`,
+      )
+      .get(workspaceId, objectId);
+    return typeof row?.path === "string" ? row.path : undefined;
+  }
+
 export function objectIdAtPathInVersion(storage: StorageContext, input: {
     workspaceId: string;
     versionId: string;

@@ -90,7 +90,7 @@ function parseOperation(operation: string, args: unknown): ParsedOperation {
 }
 
 async function answer(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string, request: ParsedOperation): Promise<AccountOperationResult> {
-  const chats = serverChats(replica, workspaceId);
+  const chats = serverChats(storage, replica, workspaceId);
   try {
     switch (request.operation) {
       case "groups": return await listGroups(chats);
@@ -117,36 +117,58 @@ async function answer(storage: SyncRelayStorage, replica: AutomationReplica, wor
 const RESOLVE_BATCH = 128;
 
 /**
- * The chat operations' host over the copy. It never writes, so a read never
- * creates General. A thread on a file the copy's active version doesn't hold,
- * or holds as a secret file, reads as missing, and so does an attachment to
- * one.
+ * Where an object's file is, for the chats that name it: at a path in the
+ * copy's active version, unavailable (deleted, or never in the copy), or
+ * hidden because it is, or last was, a secret file.
  */
-function serverChats(replica: AutomationReplica, workspaceId: string): ChatsHost {
+type Placement = { kind: "placed"; path: string } | { kind: "unavailable" } | { kind: "hidden" };
+type Place = (objectIds: readonly string[]) => Promise<ReadonlyMap<string, Placement>>;
+
+/**
+ * The chat operations' host over the copy. It never writes, so a read never
+ * creates General. A thread on a deleted file stays readable, with its file
+ * unavailable, as on the desktop. A thread on a secret file reads as missing,
+ * and an attachment to one is left out.
+ */
+function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): ChatsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
-  const known = new Map<string, string | null>();
-  // Where each object is now, asked once per object in this read; null when nowhere, or a secret file.
-  const paths = async (objectIds: readonly string[]): Promise<ReadonlyMap<string, string | null>> => {
+  const chats = replicaChatStore(replica);
+  const known = new Map<string, Placement>();
+  // Each object is placed once in this read. An object the copy doesn't hold
+  // is judged by where the relay's log last put it, and an object the relay
+  // never saw by the hints its file's threads carry.
+  const place: Place = async (objectIds) => {
     const wanted = [...new Set(objectIds)].filter((objectId) => !known.has(objectId));
     for (let start = 0; start < wanted.length; start += RESOLVE_BATCH) {
       const batch = wanted.slice(start, start + RESOLVE_BATCH);
       const { results } = await files.resolveFiles({ workspaceId, targets: batch.map((objectId) => ({ objectId })), signal: replica.signal });
-      batch.forEach((objectId, index) => {
+      for (const [index, objectId] of batch.entries()) {
         const found = results[index];
-        known.set(objectId, found?.status === "found" && !secret(found.path) ? found.path : null);
-      });
+        if (found?.status === "found") {
+          known.set(objectId, secret(found.path) ? { kind: "hidden" } : { kind: "placed", path: found.path });
+          continue;
+        }
+        const last = storage.objectLastKnownPath(workspaceId, objectId);
+        const hints = last === undefined
+          ? (await chats.listThreadsForFile({ workspaceId, objectId })).map((thread) => thread.linkedFile?.pathHint)
+          : [last];
+        known.set(objectId, hints.some(secret) ? { kind: "hidden" } : { kind: "unavailable" });
+      }
     }
     return known;
   };
   return {
     workspaceId,
-    store: withoutSecretFiles(replicaChatStore(replica), paths),
+    store: withoutSecretFiles(chats, place),
     fileObjectId: async (path) => {
       if (secret(path)) return null;
       const [found] = (await files.resolveFiles({ workspaceId, targets: [{ path }], signal: replica.signal })).results;
       return found?.status === "found" ? found.objectId : null;
     },
-    filePath: async (objectId) => (await paths([objectId])).get(objectId) ?? null,
+    filePath: async (objectId) => {
+      const placement = (await place([objectId])).get(objectId);
+      return placement?.kind === "placed" ? placement.path : null;
+    },
     dispatch: (threadId) => readThreadDispatchState(new ChatsLiveAdapter(replica.client, replica.workspace, { workspaceId }), workspaceId, threadId),
     writable: false,
     provisioned: () => undefined,
@@ -154,17 +176,17 @@ function serverChats(replica: AutomationReplica, workspaceId: string): ChatsHost
   };
 }
 
-/** The store without the threads and attachments `paths` can't place outside a secret file. */
-function withoutSecretFiles(store: ChatReadStore, paths: (objectIds: readonly string[]) => Promise<ReadonlyMap<string, string | null>>): ChatReadStore {
+/** The store without the threads and attachments that name a secret file, by their hint or by where `place` puts their object. */
+function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
+  const hidden = (placed: ReadonlyMap<string, Placement>, objectId: string | undefined, hint: string | undefined) =>
+    secret(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
   const threads = async <Thread extends Pick<ChatThread, "linkedFile">>(rows: Thread[]): Promise<Thread[]> => {
-    const placed = await paths(rows.flatMap((thread) => thread.linkedFile ? [thread.linkedFile.objectId] : []));
-    return rows.filter((thread) => !thread.linkedFile || (placed.get(thread.linkedFile.objectId) ?? null) !== null);
+    const placed = await place(rows.flatMap((thread) => thread.linkedFile ? [thread.linkedFile.objectId] : []));
+    return rows.filter((thread) => !hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint));
   };
   const messages = async (rows: ChatMessage[]): Promise<ChatMessage[]> => {
-    const placed = await paths(rows.flatMap((row) => row.attachments.flatMap((attachment) => attachment.objectId ? [attachment.objectId] : [])));
-    // An opaque attachment from a shared channel has no object, only its hint.
-    return rows.map((row) => ({ ...row, attachments: row.attachments.filter((attachment) => !secret(attachment.pathHint) &&
-      (attachment.objectId === undefined || (placed.get(attachment.objectId) ?? null) !== null)) }));
+    const placed = await place(rows.flatMap((row) => row.attachments.flatMap((attachment) => attachment.objectId ? [attachment.objectId] : [])));
+    return rows.map((row) => ({ ...row, attachments: row.attachments.filter((attachment) => !hidden(placed, attachment.objectId, attachment.pathHint)) }));
   };
   return {
     ...store,

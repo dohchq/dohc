@@ -1468,6 +1468,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return objectIndexStorage.objectIdAtPathInVersion(this, input);
   }
 
+  objectLastKnownPath(workspaceId: string, objectId: string): string | undefined {
+    return objectIndexStorage.objectLastKnownPath(this, workspaceId, objectId);
+  }
+
   objectMoment(input: {
     workspaceId: string;
     objectId: string;

@@ -1272,6 +1272,10 @@ export interface SyncRelayStorage {
     versionId: string;
     path: string;
   }): string | undefined;
+  // Where the object last was: the path its latest moment named in any
+  // version, as the relay's log recorded it. undefined when the relay holds no
+  // moment of the object.
+  objectLastKnownPath(workspaceId: string, objectId: string): string | undefined;
   // The granter's own moment for this object within one version:
   // the latest one, or the latest that produced `blobSha256` when one is
   // named. The first answers "did this file drift since they sent it?"; the
