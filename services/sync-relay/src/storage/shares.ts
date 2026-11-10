@@ -699,6 +699,9 @@ export function claimPendingSharesForEmail(storage: StorageContext, email: strin
     const normalized = email.trim().toLowerCase();
     if (!normalized) return 0;
     return storage.tx(() => {
+      // A request that passed the fence before deletion began must not claim
+      // an invite sent to the address afterward.
+      if (accountIsFenced(storage, userId)) return 0;
       const result = storage.db
         .prepare(
           `UPDATE sync_relay_share_grants

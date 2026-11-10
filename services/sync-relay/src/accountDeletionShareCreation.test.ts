@@ -50,3 +50,11 @@ it("invites a deleted account's email as an address with no account, with the sa
     principalKind: "email", principalUserId: null, principalEmail: `${DELETED}@dohc.test`, status: "active",
   });
 });
+
+it("keeps that invite from a request the deleted account started before deletion", async () => {
+  const {storage, share} = await fencedFixture();
+  expect((await share({recipientEmail: `${DELETED}@dohc.test`})).status).toBe(200);
+  // The claim a request makes once its email lookup returns.
+  expect(storage.claimPendingSharesForEmail(`${DELETED}@dohc.test`, DELETED)).toBe(0);
+  expect(storage.getShareGrant("grant-0")).toMatchObject({principalKind: "email", principalUserId: null});
+});
