@@ -137,6 +137,7 @@ test("Rust receipts require every policy row and exactly the full passing test i
     rows => { rows[1].steps.pop(); }, rows => { rows[1].steps[0].verdict = "FAIL"; }, rows => { rows[1].scratch.status = "FAIL"; },
     rows => { rows[RUST_READER_SHARD + 2].steps = []; }, rows => { rows[RUST_READER_SHARD + 2].steps[0].verdict = "FAIL"; },
     rows => { rows[2].steps = structuredClone(rows[RUST_READER_SHARD + 2].steps); },
+    rows => { rows[1].steps.push(...structuredClone(rows[RUST_READER_SHARD + 2].steps)); },
     rows => { rows[2].steps = rows[RUST_READER_SHARD + 2].steps; rows[RUST_READER_SHARD + 2].steps = []; },
   ]) {
     const broken = structuredClone(records); mutate(broken);

@@ -21,6 +21,14 @@ function menu(platform: NodeJS.Platform) {
 }
 
 describe("shortcut menu contract", () => {
+  it.each(["win32", "darwin"] as const)("takes a changed registry binding into the %s menu", platform => {
+    const accelerators = SHORTCUTS["quick-open"].accelerators;
+    const original = accelerators[0];
+    Reflect.set(accelerators, "0", "CommandOrControl+O");
+    try {
+      expect(menu(platform).items.find(item => item.label === "Go to")!.accelerator).toBe("CommandOrControl+O");
+    } finally { Reflect.set(accelerators, "0", original); }
+  });
   it.each(["win32", "darwin", "linux"] as const)("derives every explicit %s menu accelerator, including aliases", (platform) => {
     const { items, sendCommand, stepZoom } = menu(platform);
     const expected: string[] = [];

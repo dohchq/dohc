@@ -1491,6 +1491,26 @@ describe("workspaceEngineCapture batch capture", () => {
     } finally { await engine.stop(); }
   });
 
+  it("reports a failed watcher baseline after materializing a conflict resolution", async () => {
+    const root = await createTestScratch("dohc-resolution-baseline-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions,
+    );
+    vi.spyOn(store, "resolveTextConflict").mockResolvedValue({
+      conflict: { id: "incoming", path: "trip.txt", targetVersionId: "main", chosenFrom: "incoming" },
+      write: { snapshot: { versionId: "main", path: "trip.txt", text: "chosen text" } },
+      delete: null,
+    } as unknown as Awaited<ReturnType<CaptureVersionedTextStore["resolveTextConflict"]>>);
+    const failure = new Error("watcher baseline unavailable");
+    vi.spyOn(store, "reconcileCapture").mockRejectedValue(failure);
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    try {
+      await expect(engine.resolveConflict("incoming", { kind: "apply-incoming" })).rejects.toBe(failure);
+      expect(await readFile(join(root, "trip.txt"), "utf8")).toBe("chosen text");
+    } finally { await engine.stop(); }
+  });
+
   it("flushes daemon capture before reading conflicts for resolution", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];

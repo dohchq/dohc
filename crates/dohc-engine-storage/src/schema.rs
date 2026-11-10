@@ -768,7 +768,6 @@ mod tests {
         }
     }
 
-    use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -915,7 +914,16 @@ mod tests {
     #[test]
     fn v2_validation_rejects_each_missing_required_table() {
         let image = closed_schema_image();
-        for table in REQUIRED_TABLES {
+        let (_directory, _path, conn) = copied_schema_connection(&image);
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_list WHERE schema = 'main' AND type IN ('table', 'virtual') AND name NOT LIKE 'sqlite_%'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(conn);
+        for table in tables {
             let (_directory, _path, conn) = copied_schema_connection(&image);
             super::validate_v2(&conn).unwrap();
             conn.execute_batch(&format!("DROP TABLE \"{table}\""))

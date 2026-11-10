@@ -18,9 +18,8 @@ export function javascriptGroups(tasks) {
   for (const [key, files] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
     const chunks = [];
     for (const task of files.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {
-      // Module timings omit collection, imports, and the file's environment.
-      const weight = task.weight + 4;
-      const chunk = chunks.filter(chunk => chunk.weight + weight <= 60).sort((a, b) => b.weight - a.weight)[0];
+      const weight = task.weight;
+      const chunk = chunks.filter(chunk => chunk.weight + weight <= (files[0].native ? 60 : 120)).sort((a, b) => b.weight - a.weight)[0];
       if (chunk) { chunk.tasks.push(task); chunk.weight += weight; }
       else chunks.push({ tasks: [task], weight });
     }
