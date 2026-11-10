@@ -1908,8 +1908,15 @@ export function createDefaultDiskWriter(rootPath: string, replaceFile?: EngineRe
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
     const replaced = await assertLeafNotSymlink(target);
-    // rmdir refuses a folder that filled since the walk, so no file goes.
-    if (replaced?.isDirectory()) for (const folder of await emptyFolderTree(target) ?? []) await rmdir(folder);
+    // rmdir refuses a folder that filled since the walk, so no file goes. A
+    // folder swapped for a link since the walk resolves elsewhere and stops it.
+    if (replaced?.isDirectory()) {
+      const real = await realpath(target);
+      for (const folder of await emptyFolderTree(target) ?? []) {
+        if (await realpath(folder) !== join(real, relative(target, folder))) throw new Error(`${workspacePath} changed on disk while dohc cleared it.`);
+        await rmdir(folder);
+      }
+    }
     if (replaceFile) {
       await replaceFile(workspacePath, basename(temporaryFor(target)), data);
       return;
