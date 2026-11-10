@@ -253,6 +253,13 @@ export function ChatLane(props: {
     }
   }, [agentDm, channelId, markRead, onError, reactions, workspaceId]);
 
+  // A message that saved while a later step failed. Try again reloads the
+  // conversation it saved in, while this lane still shows it.
+  const reportUnshown = useCallback((words: string, failure: string) => {
+    const current = token.current;
+    onError(words, failure, () => { if (current === token.current) void load(true); });
+  }, [load, onError]);
+
   useEffect(() => {
     setThreadId(null);
     setPostThreadIds([]);
@@ -340,10 +347,14 @@ export function ChatLane(props: {
           ...(references.length > 0 ? { fileReferences: references } : {}),
         });
         if (current !== token.current) return;
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-        loadSequence.current += 1;
-        listRef.current?.scrollToEnd();
-        setMessages((existing) => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
+        // The message saved, so it is not sent again. The reload below shows it.
+        if ("failure" in result) reportUnshown("Sent your message. dohc could not show it yet.", result.failure);
+        else {
+          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+          loadSequence.current += 1;
+          listRef.current?.scrollToEnd();
+          setMessages((existing) => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
+        }
       } else {
         const ticket = reactions.ticket();
         const result = await bridge().startChannelThread({
@@ -354,20 +365,25 @@ export function ChatLane(props: {
           lane: "chat",
           ...(references.length > 0 ? { fileReferences: references } : {}),
         });
-        // The new message has no reactions yet; the start names the viewer.
-        reactions.ingest([{
-          threadId: result.thread.id,
-          messageIds: [result.message.id],
-          reactions: [],
-          viewerAuthorId: result.viewerAuthorId,
-          ticket,
-        }]);
-        if (current !== token.current) return;
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-        loadSequence.current += 1;
-        listRef.current?.scrollToEnd();
-        setThreadId(result.thread.id);
-        setMessages([result.message]);
+        if ("failure" in result) {
+          if (current !== token.current) return;
+          reportUnshown("Sent your message. dohc could not show it yet.", result.failure);
+        } else {
+          // The new message has no reactions yet; the start names the viewer.
+          reactions.ingest([{
+            threadId: result.thread.id,
+            messageIds: [result.message.id],
+            reactions: [],
+            viewerAuthorId: result.viewerAuthorId,
+            ticket,
+          }]);
+          if (current !== token.current) return;
+          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+          loadSequence.current += 1;
+          listRef.current?.scrollToEnd();
+          setThreadId(result.thread.id);
+          setMessages([result.message]);
+        }
       }
       setComposer("");
       setPoll(null);
@@ -378,7 +394,7 @@ export function ChatLane(props: {
     } finally {
       if (current === token.current) setSending(false);
     }
-  }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, sending, threadId, workspaceId]);
+  }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, reportUnshown, sending, threadId, workspaceId]);
 
   // A reply goes under the message the thread hangs from. A reply to an
   // earlier post goes on in that post. A reply after Answer answers its question.
@@ -398,20 +414,23 @@ export function ChatLane(props: {
         ...(answers ? { resolves: { messageId: answers } } : {}),
       });
       if (current !== token.current) return false;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      loadSequence.current += 1;
-      const reply = post ? { ...result.message, parentMessageId: rootId } : result.message;
-      setMessages((existing) => existing.some(message => message.id === reply.id) ? existing : [...existing, reply]);
-      const resolved = result.resolved;
-      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
+      if (!("failure" in result)) {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        loadSequence.current += 1;
+        const reply = post ? { ...result.message, parentMessageId: rootId } : result.message;
+        setMessages((existing) => existing.some(message => message.id === reply.id) ? existing : [...existing, reply]);
+        const resolved = result.resolved;
+        if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
+      }
       if (result.resolveFailure) onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
+      else if ("failure" in result) reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
       void load(true);
       return true;
     } catch (error) {
       if (current === token.current) onError(ipcErrorMessage(error, "Could not send that reply."), error);
       return false;
     }
-  }, [load, messages, onError, props.locked, props.onAgentWaitsForTrust, threadId, workspaceId]);
+  }, [load, messages, onError, props.locked, props.onAgentWaitsForTrust, reportUnshown, threadId, workspaceId]);
 
   const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
     // The answer goes where the poll is: its thread, or its earlier post.
@@ -431,30 +450,26 @@ export function ChatLane(props: {
     try {
       const result = await bridge().sendChatMessage(input);
       if (current !== token.current) return;
-      if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      loadSequence.current += 1;
-      listRef.current?.scrollToEnd();
-      setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-      const resolved = result.resolved;
-      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
+      if (!("failure" in result)) {
+        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        loadSequence.current += 1;
+        listRef.current?.scrollToEnd();
+        setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
+        const resolved = result.resolved;
+        if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
+      }
       if (result.resolveFailure) stayedOpen(result.resolveFailure);
+      else if ("failure" in result) reportUnshown("Sent your choice. dohc could not show it yet.", result.failure);
     } catch (error) {
-      if (current !== token.current) return;
-      // A send can fail after main saved the choice, so sending it again could
-      // post it twice, and the conversation reloads instead. A question that
-      // now shows this choice answered needs no message.
-      const now = await bridge().listChatThreadDecisions({ workspaceId, threadId: decision.threadId }).catch(() => null);
-      if (current !== token.current) return;
-      const landed = now?.decisions.some(entry =>
-        entry.messageId === decision.messageId && entry.state === "resolved" && entry.chosenOption === option);
-      if (!landed) onError("dohc could not tell whether your choice was sent.", error);
+      // A choice that saved answers, so a refused one saved nothing.
+      if (current === token.current) onError(ipcErrorMessage(error, "Could not send that choice."), error);
     } finally {
       if (current === token.current) {
         setSending(false);
         void load(true);
       }
     }
-  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages]);
+  }, [threadId, sending, loading, props.locked, props.onAgentWaitsForTrust, workspaceId, onError, load, messages, reportUnshown]);
 
   // Applying or undoing a change answers in the change's own place, as the person who clicked.
   // Apply answers the message's question, attaching the change a review applied instead. Undo attaches the change file again.
@@ -471,13 +486,17 @@ export function ChatLane(props: {
       ...(input.attach || !input.resolves ? { fileReferences: [{ path: input.attach ?? path }] } : {}),
     });
     if (current !== token.current) return;
-    loadSequence.current += 1;
-    setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
-    const resolved = result.resolved;
-    if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === asked.id ? resolved : entry));
+    // A reply that saved is not posted again, so this does not throw for it.
+    if (!("failure" in result)) {
+      loadSequence.current += 1;
+      setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
+      const resolved = result.resolved;
+      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === asked.id ? resolved : entry));
+    }
     if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "dohc couldn't mark this message answered."), result.resolveFailure);
+    else if ("failure" in result) reportUnshown("Sent your reply. dohc could not show it yet.", result.failure);
     void load(true);
-  }, [load, onError, threadId, workspaceId]);
+  }, [load, onError, reportUnshown, threadId, workspaceId]);
 
   const liveRunId = dispatch?.liveRunId ?? null;
   const stopRun = useCallback(async () => {

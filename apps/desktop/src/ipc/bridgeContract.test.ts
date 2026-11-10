@@ -99,6 +99,7 @@ import {
   ResumeThreadDispatchPayload,
   SendChatMessagePayload,
   StartChannelThreadPayload,
+  StartChannelThreadResult,
   SendChatMessageResult,
   SetChatReactionPayload,
   ShowWorkbenchMenuPayload,
@@ -3608,7 +3609,7 @@ describe("engine history and linked Chats IPC contract", () => {
         createdAtMs: 100,
       },
     });
-    expect(result.message.authorKind).toBe("human");
+    expect(result).toMatchObject({ message: { authorKind: "human" } });
     // The agent author kind is a first-class wire value (rendered as
     // "the agent name" in the UI).
     expect(
@@ -3621,8 +3622,21 @@ describe("engine history and linked Chats IPC contract", () => {
           body: "Agent reply",
           createdAtMs: 101,
         },
-      }).message.authorKind,
-    ).toBe("agent");
+      }),
+    ).toMatchObject({ message: { authorKind: "agent" } });
+  });
+
+  it("carries only a saved message's ids and what failed after the save", () => {
+    const saved = { message: { id: "message-1", threadId: "thread-1", body: "First message", authorDisplayName: "You" },
+      failure: "Error: Chats stopped because this window changed workspaces.", waitsForTrust: true,
+      decision: { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1 } };
+    expect(SendChatMessageResult.parse({ ...saved, resolveFailure: "Error: Your server session changed. Try again." })).toEqual({
+      message: { id: "message-1", threadId: "thread-1" }, failure: saved.failure,
+      resolveFailure: "Error: Your server session changed. Try again.",
+    });
+    expect(StartChannelThreadResult.parse({ ...saved, viewerAuthorId: "owner" })).toEqual({
+      message: { id: "message-1", threadId: "thread-1" }, failure: saved.failure,
+    });
   });
 });
 

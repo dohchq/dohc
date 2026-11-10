@@ -2318,20 +2318,35 @@ export const ChatDecisionRecord = z.object({
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 
-export const SendChatMessageResult = z.object({
-  message: ChatMessageRecord,
-  // The message asks an agent, and Restricted Mode holds it until the person
-  // trusts the workspace.
-  waitsForTrust: z.literal(true).optional(),
-  // The question or poll the message asked, read back after the write.
-  // Absent when it asked none, or when that read failed.
-  decision: ChatDecisionRecord.optional(),
-  // The question or poll the message answered. One another message resolved
-  // first comes back as that message left it.
-  resolved: ChatDecisionRecord.optional(),
-  // Why the answer failed. The message landed and the question stays open.
-  resolveFailure: z.string().optional(),
+// A message that saved, when a step after the save failed or the window's
+// workspace changed. It names only the message this window wrote, so the
+// window does not send it again and reloads the thread itself. It carries
+// nothing main read after the save.
+export const SavedChatMessage = z.object({
+  message: z.object({ id: OPAQUE_ID, threadId: OPAQUE_ID }),
+  // What failed after the save.
+  failure: z.string(),
 });
+export type SavedChatMessage = z.infer<typeof SavedChatMessage>;
+
+export const SendChatMessageResult = z.union([
+  z.object({
+    message: ChatMessageRecord,
+    // The message asks an agent, and Restricted Mode holds it until the person
+    // trusts the workspace.
+    waitsForTrust: z.literal(true).optional(),
+    // The question or poll the message asked, read back after the write.
+    // Absent when it asked none, or when that read failed.
+    decision: ChatDecisionRecord.optional(),
+    // The question or poll the message answered. One another message resolved
+    // first comes back as that message left it.
+    resolved: ChatDecisionRecord.optional(),
+    // Why the answer failed. The message landed and the question stays open.
+    resolveFailure: z.string().optional(),
+  }),
+  // As above, an answer whose question stays open also names why.
+  SavedChatMessage.extend({ resolveFailure: z.string().optional() }),
+]);
 export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
 export const ListChatThreadDecisionsPayload = z.object({
@@ -2651,16 +2666,20 @@ export const StartChannelThreadPayload = z.object({
 });
 export type StartChannelThreadPayload = z.infer<typeof StartChannelThreadPayload>;
 
-export const StartChannelThreadResult = z.object({
-  thread: ChannelThreadRecord,
-  message: ChatMessageRecord,
-  // Main derives this from the author identity used for the opening message.
-  viewerAuthorId: OPAQUE_ID,
-  // As on SendChatMessageResult: the opening message's question or poll.
-  decision: ChatDecisionRecord.optional(),
-  // As on SendChatMessageResult.
-  waitsForTrust: z.literal(true).optional(),
-});
+export const StartChannelThreadResult = z.union([
+  z.object({
+    thread: ChannelThreadRecord,
+    message: ChatMessageRecord,
+    // Main derives this from the author identity used for the opening message.
+    viewerAuthorId: OPAQUE_ID,
+    // As on SendChatMessageResult: the opening message's question or poll.
+    decision: ChatDecisionRecord.optional(),
+    // As on SendChatMessageResult.
+    waitsForTrust: z.literal(true).optional(),
+  }),
+  // The opening message saved. Its threadId names the new thread.
+  SavedChatMessage,
+]);
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 
 export const MarkChatThreadReadPayload = z.object({
