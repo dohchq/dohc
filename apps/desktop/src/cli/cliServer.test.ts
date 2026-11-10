@@ -60,8 +60,6 @@ import {
   CLI_SOCKET_FILE,
   RUN_MESSAGE_LINK_RECOVERY_FILE,
   WATCH_BATCH_MAX_BYTES,
-  cliMessageId,
-  cliThreadId,
   disposeCliServerRuntime,
   handleCliRequestLine,
   resolveCliWorkspace,
@@ -77,6 +75,7 @@ import {
   type CliWorkspaceContext,
 } from "./cliServer";
 import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
+import { cliMessageId, cliThreadId } from "@dohc/workspace-operations/chats";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { agentHandle, agentYouRun, listAgents, type DesktopUserSettings } from "../settings/userSettings";
 import { testAgent } from "../testing/agentSettings";

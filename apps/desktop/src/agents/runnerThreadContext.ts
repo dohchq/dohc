@@ -8,7 +8,7 @@ import type {
   LinkedChatStore,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
-import { cliGroupKind, FILES_GROUP } from "../cli/cliServer";
+import { cliGroupKind, FILES_GROUP } from "@dohc/workspace-operations/chats";
 
 // A run sees the message that asked for it and every message after it, since
 // its claim answers each request queued there. Older messages fill the rest
