@@ -14,6 +14,7 @@ import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-br
 import {
   collectionWriteBody, collectionWriteContentBytes, COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_CONTENT_BYTES,
   MAX_COLLECTION_WRITE_ENVELOPE_BYTES, MAX_COLLECTION_WRITE_FILES, MAX_SUBMIT_ID_CHARS, parseCollectionWriteOutcome,
+  type CollectionFileWrite,
 } from "./collectionWrites";
 
 type RemoteRequest = (path: string, init?: RequestInit) => Promise<Response>;
@@ -37,7 +38,7 @@ type RemoteOptions = {
 // An ordinary request fits this. A Collection write carries up to 4 MiB of
 // text; JSON escapes a line break, tab, quote, or backslash in two bytes.
 const MAX_REQUEST_BYTES = 32 * 1024;
-const COLLECTION_WRITE_TOOL = "dohc_write_collection_files";
+export const COLLECTION_WRITE_TOOL = "dohc_write_collection_files";
 const MAX_WRITE_REQUEST_BYTES = 2 * MAX_COLLECTION_WRITE_CONTENT_BYTES + 1024 * 1024;
 // Time kept after a write or a wait gives up, to send the tool's answer.
 export const ANSWER_RESERVE_MS = 5_000;
@@ -106,7 +107,8 @@ const writtenFile = {
   basedOnBlobSha256: z.string().regex(/^[0-9a-f]{64}$/u).nullable()
     .describe("The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."),
 };
-const collectionWriteSchema = z.object({
+/** A Collection write's id and files, as both write tools take them: a link agent's, and a personal agent's with its workspace. */
+export const collectionWriteFields = {
   submitId: z.string().min(1).max(MAX_SUBMIT_ID_CHARS).regex(/^[\x20-\x7e]+$/u)
     .describe("Names this write. Send the same id to retry after an unknown outcome; use a new id for any other write."),
   files: z.array(z.union([
@@ -114,8 +116,20 @@ const collectionWriteSchema = z.object({
     z.object({...writtenFile, base64: z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/u).refine(value => value.length % 4 === 0, "Base64 comes in groups of four characters.")
       .describe("The file's complete new UTF-8 content as base64, for text whose JSON would not fit in 9 MiB.")}).strict(),
   ])).min(1).max(MAX_COLLECTION_WRITE_FILES),
-}).refine(value => collectionWriteContentBytes(value.files) <= MAX_COLLECTION_WRITE_CONTENT_BYTES,
-  "The files' content exceeds 4 MiB in all.");
+};
+/** Each write tool checks its whole input against what one write carries. */
+export const fitsCollectionWrite = (value: {files: readonly CollectionFileWrite[]}) =>
+  collectionWriteContentBytes(value.files) <= MAX_COLLECTION_WRITE_CONTENT_BYTES;
+export const COLLECTION_WRITE_TOO_LARGE = "The files' content exceeds 4 MiB in all.";
+const collectionWriteSchema = z.object(collectionWriteFields).refine(fitsCollectionWrite, COLLECTION_WRITE_TOO_LARGE);
+/** What a write changes and what its answers mean, as each write tool says it after naming who writes. */
+export const COLLECTION_WRITE_GUIDE = "edit its collection.yaml, create or replace the automations.yaml beside it, " +
+  "create one Markdown record in an existing document Collection, with a frontmatter id of rec_ followed by 26 lowercase base32 characters, " +
+  "or create a new Collection in a new folder with its collection.yaml, an optional automations.yaml, and up to 500 Markdown records. " +
+  "Read a file with dohc_read_file before replacing it. The files apply together or not at all. Send this tool alone, not in a batch. " +
+  "stale means the file changed since you read it: read it again, merge your change, and send it with a new submitId. " +
+  "refused gives the reason. unknown means the answer was lost: send the same request again. " +
+  "accepted means the change is in the owner's workspace history; the owner's computer applies it when it next syncs.";
 export const fileInventorySchema = z.object({
   ok: z.literal(true),
   files: z.array(z.object({path: z.string(), objectId: z.string().regex(/^share-object:v1:[0-9a-f]{64}$/u).optional(), blobSha256: z.string(), contentKind: z.enum(["text", "binary"]), automationSwitchable: z.boolean().optional()})),
@@ -328,13 +342,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     });
   }
   if (collectionWritesAllowed(metadata)) server.registerTool(COLLECTION_WRITE_TOOL, {
-    description: "Change a Collection's own files through this Edit link: edit its collection.yaml, create or replace the automations.yaml beside it, " +
-      "create one Markdown record in an existing document Collection, with a frontmatter id of rec_ followed by 26 lowercase base32 characters, " +
-      "or create a new Collection in a new folder with its collection.yaml, an optional automations.yaml, and up to 500 Markdown records. " +
-      "Read a file with dohc_read_file before replacing it. The files apply together or not at all. Send this tool alone, not in a batch. " +
-      "stale means the file changed since you read it: read it again, merge your change, and send it with a new submitId. " +
-      "refused gives the reason. unknown means the answer was lost: send the same request again. " +
-      "accepted means the change is in the owner's workspace history; the owner's computer applies it when it next syncs.",
+    description: "Change a Collection's own files through this Edit link: " + COLLECTION_WRITE_GUIDE,
     inputSchema: collectionWriteSchema,
   }, async ({submitId, files}) => {
     // A write that runs out of time may still have committed: it is unknown,
@@ -382,17 +390,23 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
   if (!body) return {body: null, status: 429, headers: new Headers()};
   try {
     const parsedBody = body.value;
-    // A write goes in a request of its own, so its answer never waits on, or
-    // shares a deadline or a body slot with, another call.
-    const batchedWrite = Array.isArray(parsedBody) ? parsedBody.find(message => asRecord(message)?.method === "tools/call" &&
-      [COLLECTION_WRITE_TOOL, "dohc_switch_automation"].includes(String(asRecord(asRecord(message)?.params)?.name))) : undefined;
-    if (batchedWrite) {
-      const name = String(asRecord(asRecord(batchedWrite)?.params)?.name);
-      const result = Response.json({jsonrpc: "2.0", id: null, error: {code: -32600, message: `Send ${name} in a request of its own, not in a batch.`}});
-      return {body: result.body, status: result.status, headers: result.headers};
-    }
-    return await answerMcp(request, parsedBody, () => buildServer(options, metadata, channel), options.signal);
+    return refuseBatchedWrite(parsedBody, [COLLECTION_WRITE_TOOL, "dohc_switch_automation"]) ??
+      await answerMcp(request, parsedBody, () => buildServer(options, metadata, channel), options.signal);
   } finally {body.release();}
+}
+
+/**
+ * A write goes in a request of its own, so its answer never waits on, or
+ * shares a deadline or a body slot with, another call. A batch holding one
+ * of these tools is refused whole.
+ */
+export function refuseBatchedWrite(parsedBody: unknown, tools: readonly string[]): { body: BodyInit | null; status: number; headers: Headers } | null {
+  const batchedWrite = Array.isArray(parsedBody) ? parsedBody.find(message => asRecord(message)?.method === "tools/call" &&
+    tools.includes(String(asRecord(asRecord(message)?.params)?.name))) : undefined;
+  if (!batchedWrite) return null;
+  const name = String(asRecord(asRecord(batchedWrite)?.params)?.name);
+  const result = Response.json({jsonrpc: "2.0", id: null, error: {code: -32600, message: `Send ${name} in a request of its own, not in a batch.`}});
+  return {body: result.body, status: result.status, headers: result.headers};
 }
 
 /** Answers one MCP request with a server of its own: no session outlives the request, and nothing subscribes. */
@@ -411,7 +425,7 @@ export async function answerMcp(request: Request, parsedBody: unknown, build: ()
 
 /**
  * Reads a request's JSON. Past an ordinary request's size it needs one of the
- * few large-body slots, which only a link that writes Collections asks for:
+ * few large-body slots, which only a caller that writes Collections asks for:
  * the body with the slot's release, null when no slot is free, or a throw.
  */
 export async function readRequestJson(request: Request, signal: AbortSignal, admitLarge: (() => (() => void) | null) | null):

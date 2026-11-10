@@ -189,7 +189,8 @@ it("signs a signed-out browser in first, then returns to the same sign-in reques
   expect(html).toContain(`<bdi class="k">${ADA.email}</bdi><button type="submit" form="sign-out" class="link">Not you?</button>`);
   expect(formField(html, "name")).toBe("Trip helper");
   expect(html).toContain(`<p class="cap">@${handleForName("Trip helper")}</p>`);
-  expect(html).toContain("<p class=\"cap\">View reads files and chats. Comment also posts in chats and Comments.</p>");
+  expect(html).toContain("<p class=\"cap\">View reads files and chats. Comment also posts in chats and Comments. " +
+    "Edit also changes Collections, but no other files.</p>");
   expect(html).toContain("<bdi>Trip helper</bdi> runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.");
   // The redirect goes to a loopback address, so the page names this computer, not the address.
   expect(html).toContain("<span class=\"to\">Returns to an app on this computer</span>");
@@ -206,16 +207,15 @@ it("signs a signed-out browser in first, then returns to the same sign-in reques
   expect(await (await as(path)).text()).toContain("<h1>Sign in to dohc</h1>");
 });
 
-it("starts the address's workspace at Comment and every other at None, and offers only None, View and Comment", async () => {
+it("starts the address's workspace at Edit and every other at None, and offers None, View, Comment and Edit", async () => {
   const s = await stack();
   const { page, html } = await s.open(new CookieJar(), FUNDRAISER);
   expect(page.status).toBe(200);
   // Only the account's own workspaces, never another account's.
   expect(reachOf(html)).toEqual({
-    [TRIP]: { offered: ["none", "view", "comment"], selected: "none" },
-    [FUNDRAISER]: { offered: ["none", "view", "comment"], selected: "comment" },
+    [TRIP]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
+    [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "edit" },
   });
-  expect(html).not.toMatch(/value="edit"|>Edit</u);
   expect(html).not.toContain(GARDEN);
   // With no agent signed in yet, there is no one to choose.
   expect(html).not.toContain("Who it is");
@@ -310,7 +310,7 @@ it("signs an agent in again from its current reach", async () => {
   expect(opened.html).toContain(`name="as" value="${agentId}" class="opt" aria-pressed="false"><span class="tick" aria-hidden="true"></span>` +
     `<span class="av agent hue-olive" aria-hidden="true">H</span><span class="k"><bdi>Helper</bdi> <span class="sub">@${handleForName("Helper")}`);
   // A new agent starts from the address.
-  expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "comment" });
+  expect(selected(opened.html)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "edit" });
 
   const chosen = await s.choose(opened.as, opened.html, { as: agentId, decision: "choose" });
   expect(chosen.status).toBe(200);

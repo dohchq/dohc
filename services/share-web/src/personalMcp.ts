@@ -3,21 +3,25 @@ import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core/records";
 import {
-  ANSWER_RESERVE_MS, answerMcp, boundedBytes, chatPostFields, MAX_WAIT_TIMEOUT_MS, POST_UNKNOWN, readRequestJson,
-  ResponseTooLargeError, sentPost, toolError, toolResult,
+  ANSWER_RESERVE_MS, answerMcp, boundedBytes, chatPostFields, COLLECTION_WRITE_GUIDE, COLLECTION_WRITE_TOO_LARGE,
+  COLLECTION_WRITE_TOOL, collectionWriteFields, fitsCollectionWrite, MAX_WAIT_TIMEOUT_MS, POST_UNKNOWN, readRequestJson,
+  refuseBatchedWrite, ResponseTooLargeError, sentPost, toolError, toolResult,
 } from "./remoteMcp";
+import { collectionWriteChanges, type CollectionWriteOutcome } from "./collectionWrites";
 import type { PersonalAgentAction, PersonalAgentClient } from "./personalAgentClient";
 
 // The MCP server a personal agent signs in to at /mcp/agent/w/<workspace>.
-// Its token reaches the workspaces its owner chose, each at View or Comment,
-// so every tool but the list and the wait names one. The relay checks the
-// token, the reach and the level on every call; this server only words the
-// answers.
+// Its token reaches the workspaces its owner chose, each at View, Comment or
+// Edit, so every tool but the list and the wait names one. The relay checks
+// the token, the reach and the level on every call; this server only words
+// the answers.
 
 type McpAnswer = { body: BodyInit | null; status: number; headers: Headers };
 
 export interface PersonalMcpOptions {
   client: PersonalAgentClient;
+  /** Admits a body larger than an ordinary request, for a Collection write: a release, or null when full. */
+  admitLargeBody(): (() => void) | null;
   signal: AbortSignal;
   /** When `signal` aborts on its own, so a wait answers before it does. */
   deadlineAtMs: number;
@@ -37,6 +41,10 @@ const outOfReach = (agentName: string): Refused => ({status: 403, code: "out_of_
   error: `${agentName} can't reach this workspace. Its owner can change that in Settings › Agents.`});
 const viewOnly = (agentName: string): Refused => ({status: 403, code: "view_only",
   error: `${agentName} can read this workspace but not post in it. Its owner can change that in Settings › Agents.`});
+const editNeeded = (agentName: string): Refused => ({status: 403, code: "edit_needed",
+  error: `${agentName} needs Edit to change this workspace's Collections. Its owner can change that in Settings › Agents.`});
+const notCollection = (agentName: string): Refused => ({status: 403, code: "not_collection",
+  error: `${agentName} can change only a Collection's own files: its collection.yaml, its automations.yaml, and new records. It can't write other files.`});
 const REFUSALS: Readonly<Record<string, Refused>> = {
   personal_agent_unavailable: {status: 503, code: UNAVAILABLE.code, error: UNAVAILABLE.error},
   link_read_rate_limited: {status: 429, code: RATE_LIMITED.code, error: RATE_LIMITED.error},
@@ -62,7 +70,7 @@ const reachSchema = z.object({
   ok: z.literal(true),
   agent: z.object({name: z.string(), handle: z.string()}),
   workspaces: z.array(z.object({
-    workspaceId: z.string(), name: z.string().nullable(), level: z.enum(["view", "comment"]), dmChannelWireId: z.string(),
+    workspaceId: z.string(), name: z.string().nullable(), level: z.enum(["view", "comment", "edit"]), dmChannelWireId: z.string(),
   })),
 });
 type Reach = z.infer<typeof reachSchema>;
@@ -108,6 +116,7 @@ function decodeWaitCursor(cursor: string): z.infer<typeof relayCursorSchema> | n
 }
 
 const workspaceArg = () => z.string().min(1).max(256).describe("A workspace id from dohc_list_workspaces.");
+const SHA256 = /^[0-9a-f]{64}$/u;
 const pageArgs = () => ({before: z.number().int().nonnegative().optional(), limit: z.number().int().positive().max(100).optional()});
 const UNVERIFIED_LINK = "authorKind link marks a link holder's post: its name was chosen by that link holder and nobody verified it.";
 
@@ -129,10 +138,15 @@ export async function servePersonalMcp(request: Request, options: PersonalMcpOpt
     await probe?.body?.cancel().catch(() => undefined);
     return refusal(503, UNAVAILABLE);
   }
-  const body = request.method === "POST" ? await readRequestJson(request, options.signal, null) : {value: undefined, release: () => {}};
+  // Only a write needs a large body, and only a workspace at Edit takes one.
+  const writes = reach.workspaces.some(entry => entry.level === "edit");
+  const body = request.method === "POST" ? await readRequestJson(request, options.signal, writes ? options.admitLargeBody : null)
+    : {value: undefined, release: () => {}};
   if (!body) return {body: null, status: 429, headers: new Headers()};
-  try {return await answerMcp(request, body.value, () => buildServer(options, reach), options.signal);}
-  finally {body.release();}
+  try {
+    return refuseBatchedWrite(body.value, [COLLECTION_WRITE_TOOL]) ??
+      await answerMcp(request, body.value, () => buildServer(options, reach), options.signal);
+  } finally {body.release();}
 }
 
 function refusal(status: number, value: object): McpAnswer {
@@ -146,6 +160,13 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
   const server = new McpServer({name: "dohc-personal", version: "0.1.0"}, {capabilities: {tools: {}}});
   const refusals: Readonly<Record<string, Refused>> = {
     ...REFUSALS, personal_agent_out_of_reach: outOfReach(reach.agent.name), personal_agent_view_only: viewOnly(reach.agent.name),
+    personal_agent_edit_needed: editNeeded(reach.agent.name), personal_agent_not_collection: notCollection(reach.agent.name),
+  };
+  // A write's refusals name a write where the chat tools' name a message.
+  const writeRefusals: Readonly<Record<string, Refused>> = {
+    ...refusals,
+    conflict: {status: 409, code: "conflict", error: "This submitId already names a different write. Send this write with a new submitId."},
+    quota_exceeded: {status: 413, code: "quota_exceeded", error: "This workspace is full. Ask its owner to free space, then send this write again."},
   };
 
   // A relay refusal as a tool's answer: a known code in this server's words,
@@ -170,7 +191,8 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     e instanceof Refusal ? e.result : e instanceof ResponseTooLargeError ? toolError(e.message) : toolResult(otherwise);
 
   server.registerTool("dohc_list_workspaces", {
-    description: "List the workspaces your owner lets you reach, with your level in each: view reads, and comment also posts in its chat and on its files. " +
+    description: "List the workspaces your owner lets you reach, with your level in each: view reads, comment also posts in its chat and on its files, " +
+      "and edit also changes its Collections. " +
       "dmChannel is your direct messages with your owner in that workspace, for dohc_read_channel and dohc_post_channel. " +
       "agent is your name as your posts show it, and the handle people mention you by, written after an @. " +
       "Pass a workspace's id as workspace to the other tools. Your owner changes this list in Settings › Agents.",
@@ -307,6 +329,40 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     threadId === undefined ? {filePath: path!} : {threadId}, body, idempotencyKey,
     {not_found: "dohc could not find this file or thread in this workspace. Use a path from dohc_list_files.",
       bad_request: "dohc could not post this comment. Check its path or thread and its text, then try again."}));
+
+  // The relay's answer to a write, as the link's write tool answers it. A
+  // content refusal names the file and what to fix, so its reason passes on;
+  // anything this server cannot read may have committed, so it is unknown.
+  const writeOutcome = async (response: Response, writeSignal: AbortSignal): Promise<CollectionWriteOutcome> => {
+    const value: Record<string, unknown> = asRecord(await readBoundedJson(response, 16 * 1024, writeSignal).catch(() => null)) ?? {};
+    await response.body?.cancel().catch(() => undefined);
+    const {code, submitId, path, currentBlobSha256: current, error} = value;
+    if (response.status === 200 && value.ok === true && typeof submitId === "string") return {ok: true, outcome: "accepted", submitId};
+    if (response.status === 409 && code === "stale" && typeof path === "string" &&
+        (current === null || (typeof current === "string" && SHA256.test(current)))) {
+      return {ok: false, outcome: "stale", path, currentBlobSha256: current};
+    }
+    if (response.status === 429) return {ok: false, outcome: "rate-limited"};
+    if (response.status === 403 && code === "share_op_rejected" && typeof error === "string") {
+      return {ok: false, outcome: "refused", reason: error.slice(0, 1024)};
+    }
+    const known = typeof code === "string" && Object.hasOwn(writeRefusals, code) ? writeRefusals[code] : undefined;
+    return known?.status === response.status ? {ok: false, outcome: "refused", reason: known.error} : {ok: false, outcome: "unknown"};
+  };
+
+  server.registerTool(COLLECTION_WRITE_TOOL, {
+    description: "Change a Collection's own files, and no other file, in a workspace where you have Edit: " + COLLECTION_WRITE_GUIDE,
+    inputSchema: z.object({workspace: workspaceArg(), ...collectionWriteFields}).refine(fitsCollectionWrite, COLLECTION_WRITE_TOO_LARGE),
+  }, async ({workspace, submitId, files}) => {
+    // A write that runs out of time may still have committed: it is unknown,
+    // answered before this request's own deadline.
+    try {
+      const writeSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, options.deadlineAtMs - Date.now() - ANSWER_RESERVE_MS))]);
+      const response = await client.call("collection-writes",
+        {workspaceId: workspace, submitId, changes: collectionWriteChanges(files, Date.now())}, writeSignal);
+      return toolResult(await writeOutcome(response, writeSignal));
+    } catch {return toolResult({ok: false, outcome: "unknown"});}
+  });
 
   // Holds until a message arrives or the wait ends, and answers before this request's own deadline.
   server.registerTool("dohc_wait_for_messages", {

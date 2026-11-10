@@ -3,7 +3,7 @@
 // in at; the relay derives the account, the agent, its reach and every check
 // from them, so nothing here names one. No cookie or link profile goes with
 // a call: the relay refuses either.
-export type PersonalAgentAction = "workspaces" | "groups" | "files" | "blob" | "chat" | "discussion" | "post" | "wait";
+export type PersonalAgentAction = "workspaces" | "groups" | "files" | "blob" | "chat" | "discussion" | "post" | "wait" | "collection-writes";
 
 export interface PersonalAgentClient {
   call(action: PersonalAgentAction, body: Record<string, unknown>, signal: AbortSignal): Promise<Response>;

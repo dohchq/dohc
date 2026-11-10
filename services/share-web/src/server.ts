@@ -1442,6 +1442,8 @@ export function createShareWebApplication({
       try {
         if (personal) {
           const result = await servePersonalMcp(request, {signal, deadlineAtMs,
+            // A write's large body spends the token's write budget and one of the few slots. The relay limits the agent too.
+            admitLargeBody: () => collectionWriteRateLimiter.allow(caller.key, nowMs()) ? admitLargeBody(caller.key) : null,
             client: createPersonalAgentClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay})});
           // The token expired or was revoked, or names another address: the client refreshes or signs in again.
           if (!result) {
