@@ -45,9 +45,21 @@ export function useProtectedCopyNotices(input: {
   const latest = useRef({ reportShellFailure, showSuccessNotice, clearIdentity });
   latest.current = { reportShellFailure, showSuccessNotice, clearIdentity };
 
+  // One Restore or Discard at a time for each copy: a second would fail on the
+  // copy the first just removed.
+  const running = useRef(new Set<string>());
+  const begin = (asked: string, id: string): (() => void) | null => {
+    const key = `${asked}/${id}`;
+    if (running.current.has(key)) return null;
+    running.current.add(key);
+    return () => running.current.delete(key);
+  };
+
   // An answer that arrives after the workspace changed paints nothing.
   const restore = (asked: string, path: string, id: string): void => {
-    void bridge().restoreProtectedCopy({ workspaceId: asked, id }).then((restored) => {
+    const done = begin(asked, id);
+    if (!done) return;
+    void bridge().restoreProtectedCopy({ workspaceId: asked, id }).finally(done).then((restored) => {
       if (currentWorkspace.current !== asked) return;
       latest.current.clearIdentity(identityOf(id));
       latest.current.showSuccessNotice(`Restored your change to ${restored.path}`);
@@ -61,7 +73,9 @@ export function useProtectedCopyNotices(input: {
     });
   };
   const discard = (asked: string, path: string, id: string): void => {
-    void bridge().discardProtectedCopy({ workspaceId: asked, id }).then(() => {
+    const done = begin(asked, id);
+    if (!done) return;
+    void bridge().discardProtectedCopy({ workspaceId: asked, id }).finally(done).then(() => {
       if (currentWorkspace.current !== asked) return;
       latest.current.clearIdentity(identityOf(id));
       latest.current.showSuccessNotice(`Discarded your change to ${path}`);
