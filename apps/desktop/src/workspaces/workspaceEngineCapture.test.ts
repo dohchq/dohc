@@ -4188,17 +4188,25 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       const restored = await secretStore.getSecretMoment({ workspaceId: WORKSPACE_ID, momentId: tip!.latestMomentId });
       expect(restored?.metadata).toMatchObject({ origin: "restore", summary: "Restored your change to .env" });
       expect(await secretStore.secretTextRecorded({ workspaceId: WORKSPACE_ID, path: ".env", text: "TOKEN=theirs\n" })).toBe(true);
-      await expect(engine.restoreProtectedCopy(id)).rejects.toThrow("This kept change is no longer available.");
+      await expect(engine.restoreProtectedCopy(id)).rejects.toMatchObject({ name: "ProtectedCopyFinalError", message: "This kept change is no longer available." });
 
       const elsewhere = protectedWriteCopies({ workspaceId: WORKSPACE_ID, rootPath: root });
       await elsewhere.keep(".env", "TOKEN=elsewhere\n", "trip");
       const tripId = (await elsewhere.list())[0]![1];
       await expect(engine.restoreProtectedCopy(tripId))
-        .rejects.toThrow("This moment belongs to a different version. Switch to that version to restore it.");
+        .rejects.toThrow("This change was kept in a different version. Switch to that version to restore it.");
       expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
       await expect(engine.discardProtectedCopy(tripId)).resolves.toEqual({ path: ".env", status: "discarded" });
       expect(await protectedCopyFiles(root)).toEqual([]);
-      await expect(engine.discardProtectedCopy(tripId)).rejects.toThrow("This kept change is no longer available.");
+      await expect(engine.discardProtectedCopy(tripId)).rejects.toMatchObject({ name: "ProtectedCopyFinalError", message: "This kept change is no longer available." });
+
+      await elsewhere.keep(".env", "x".repeat(1024 * 1024 + 1), "main");
+      const bigId = (await elsewhere.list())[0]![1];
+      await expect(engine.restoreProtectedCopy(bigId)).rejects.toMatchObject({
+        name: "ProtectedCopyFinalError",
+        message: "dohc could not restore .env. Your change is over the 1 MB limit for protected files.",
+      });
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("TOKEN=mine\n");
     } finally { await engine.stop(); }
   });
 

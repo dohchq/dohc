@@ -63,7 +63,7 @@ describe("protected write copies", () => {
     }
     expect(errors.map((error) => (error as ProtectedCopyReadError).path).sort())
       .toEqual([`${PROTECTED_COPIES_PATH}/${id}.json`, `${PROTECTED_COPIES_PATH}/${wrongName}.json`].sort());
-    await expect(copies.read(id)).rejects.toThrow(`Could not read ${PROTECTED_COPIES_PATH}/${id}.json`);
+    await expect(copies.read(id)).rejects.toThrow(`dohc could not read ${PROTECTED_COPIES_PATH}/${id}.json.`);
   });
 
   it("refuses an id that is not one dohc made", async () => {
