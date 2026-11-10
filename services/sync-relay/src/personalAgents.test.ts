@@ -1726,11 +1726,19 @@ describe("a personal agent's Collection writes", () => {
     expect(written(f, agent)).toEqual([]);
   });
 
-  it("refuses a write when its reach narrows, it signs out, or a password changes while its body arrives", async () => {
+  it("refuses a write when its reach narrows, it signs out, a password changes, or the workspace changes hands or is deleted while its body arrives", async () => {
+    const outOfReach = (response: Response) => expectCode(response, 403, "personal_agent_out_of_reach");
     const cases: Array<[(f: Fixture, agent: Signed) => Promise<unknown> | void, (response: Response) => Promise<void>]> = [
       [(f, agent) => setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }]), (response) => expectCode(response, 403, "personal_agent_edit_needed")],
       [(f, agent) => owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }), expectRefused],
       [(f) => { f.fence.changePassword(OWNER); }, expectRefused],
+      [(f) => { setOwner(f, WS_A, OTHER); }, outOfReach],
+      [(f) => {
+        const context = f.storage as StorageContext;
+        initializeAccountDeletion(context, DELETION_KEY);
+        context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
+          .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
+      }, outOfReach],
     ];
     for (const [meanwhile, refused] of cases) {
       const f = await fixture();
@@ -1747,6 +1755,30 @@ describe("a personal agent's Collection writes", () => {
       }, { highWaterMark: 0 });
       await refused(await tool(f, agent, "collection-writes", arriving, undefined, writingTo(WS_A)));
       expect(written(f, agent)).toEqual([]);
+    }
+  });
+
+  it("refuses a retry of a write once the agent loses Edit or signs out, and never answers it as written", async () => {
+    const cases: Array<[(f: Fixture, agent: Signed) => Promise<Response>, (response: Response) => Promise<void>]> = [
+      [(f, agent) => setReach(f, agent, [{ workspaceId: WS_A, level: "view" }]), (response) => expectCode(response, 403, "personal_agent_edit_needed")],
+      [(f, agent) => owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }), expectRefused],
+    ];
+    for (const [revoke, refused] of cases) {
+      const f = await fixture();
+      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
+      await packing(f);
+      await ok(await write(f, agent, [created()]));
+      // A retry that passed the check before its body loses its access while the body arrives.
+      const retry = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await ok(await revoke(f, agent));
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(body([created()]))));
+          controller.close();
+        },
+      }, { highWaterMark: 0 });
+      await refused(await tool(f, agent, "collection-writes", retry, undefined, writingTo(WS_A)));
+      await refused(await write(f, agent, [created()]));
+      expect(written(f, agent)).toHaveLength(1);
     }
   });
 

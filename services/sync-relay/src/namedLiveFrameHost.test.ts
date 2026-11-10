@@ -279,11 +279,14 @@ it.each(["grant", "selector", "restore", "host"])("invalidates the capture when 
   expect(f.peer.closed).toBe(false); expect(f.changes.listenerCount()).toBe(0);
 });
 
-// Only the relay attributes work to a personal agent.
-it("refuses a recording context that names a personal agent before journal admission", async () => {
+// Only the relay attributes work to a personal agent. The host refuses before it reads who records.
+it.each(["account", "link"] as const)("refuses an %s recording context that names a personal agent before journal admission", async kind => {
   const f = await setup(), capture = ownerCapture(f), commit = journal(f);
-  const update = (agentId: string) => ({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes,
-    authorContext: {kind: "account" as const, accountId: "owner-1", agent: {agentId, agentName: "Helper", depth: 0}}});
+  const update = (agentId: string) => {
+    const agent = {agentId, agentName: "Helper", depth: 0};
+    return {deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes,
+      authorContext: kind === "account" ? {kind, accountId: "owner-1", agent} : {kind, publicPrincipalId: "public_holder", agent}};
+  };
   expect(await capture.submit(update(`p-${"a".repeat(26)}`), new AbortController().signal)).toEqual({result: "refused", reason: "provenance-refused"});
   expect(commit).not.toHaveBeenCalled();
   expect(await capture.submit(update("helper"), new AbortController().signal)).toEqual({result: "success", ack});
