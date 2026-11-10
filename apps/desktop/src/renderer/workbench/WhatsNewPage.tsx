@@ -12,7 +12,7 @@ export function WhatsNewPage(props: { appVersion: string | null }) {
         <header className="flex flex-wrap items-baseline justify-between gap-2">
           <h1 className="m-0 text-base font-semibold text-ink">What's new in dohc</h1>
           {props.appVersion && (
-            <span data-testid="whats-new-app-version" className="text-[12px] text-subtle">
+            <span data-testid="whats-new-app-version" className="text-[12px] text-muted">
               Version {props.appVersion}
             </span>
           )}

@@ -14,7 +14,7 @@ export interface WhatsNewRelease {
   // When it shipped, as YYYY-MM-DD.
   date: string;
   items: readonly WhatsNewItem[];
-  // One line per fix, in past tense.
+  // One sentence per fix: what is true now that it shipped.
   fixes: readonly string[];
 }
 
