@@ -8048,6 +8048,33 @@ it("sends an unanswered idle unload again at its retry deadline, not before, wit
   expect(requests.slice(unloads[0], unloads.at(-1)).map(request => request.method)).not.toContain("liveApplication.settle");
 });
 
+// Proves: a restore step that reloads a dormant document wakes the pass that visits it again, and one that
+// changes nothing a pass continues wakes none, with passes held. Such a wake would only run a pass that
+// retries a capture the engine refused.
+it("wakes a pass for a restore step that reloads a dormant document, and none for one that leaves it dormant, with passes held", async () => {
+  const polls = heldPolls(), clock = retryClock(), o = await idleHost({polls, clock});
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  o.restore();
+  o.hold(true);
+  const early = polls.early();
+  // Work that never registers leaves the document dormant.
+  const stopped = vi.spyOn(OwnerCommittedDelivery.prototype, "stopRestore").mockResolvedValueOnce({kind: "pending", reason: "stopping"});
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "stopping"});
+  expect(polls.early()).toBe(early);
+  expect(polls.paused()).toBe(true);
+  // The stop that registers its old cut reloads it, which wakes the pass that visits it. The step itself
+  // reloads through its restore route, which no visit counts.
+  const visits = o.visits(o.sibling.path);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(stopped).toHaveBeenCalledTimes(2);
+  expect(polls.early()).toBeGreaterThan(early);
+  await vi.waitFor(() => expect(o.visits(o.sibling.path)).toBeGreaterThan(visits));
+  expect(o.host.settled(o.sibling)).toBe(false);
+});
+
 // Measures: a ready workspace whose document unloaded idle runs no idle sweep before a deadline and no lifecycle
 // retry, and pulls nothing more, over 100 passes. Before round 3 every pass swept for idle documents.
 it("runs no idle sweep or lifecycle retry, and pulls nothing, over 100 passes of a ready idle workspace", async () => {
