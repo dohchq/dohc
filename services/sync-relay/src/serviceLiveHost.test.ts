@@ -4838,19 +4838,17 @@ it("keeps a replacement at a moved document's old path ready while the moved doc
   expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
   await expect(host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
   await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("The test holds the unload.")));
-  // At each pull: whether the replacement is ready, and whether the workspace pushed after the route's unload.
+  // At the route's unload, which each pass sends: whether the replacement is ready, and whether the workspace
+  // pushed since the last pass's unload. Its replica waits on no pull, so a pull marks no pass.
   const ready: boolean[] = [], pushed: boolean[] = [];
   let pushing = false;
   const listener = (method: string) => {
-    if (method === "liveApplication.unloadDocument") pushing = false;
     if (method === "sync.push") pushing = true;
-    if (method === "sync.pullHosted") {ready.push(driver!.completed(replacement)); pushed.push(pushing); pushing = false;}
+    if (method === "liveApplication.unloadDocument") {ready.push(driver!.completed(replacement)); pushed.push(pushing); pushing = false;}
   };
   o.requestListeners.add(listener);
-  await o.nextPull();
-  await o.nextPull();
+  await vi.waitFor(() => expect(ready.length).toBeGreaterThanOrEqual(4));
   o.requestListeners.delete(listener);
-  expect(ready.length).toBeGreaterThanOrEqual(4);
   expect(ready.filter(value => !value)).toEqual([]);
   expect(pushed.slice(1).filter(value => !value)).toEqual([]);
   expect(host.retains(o.sibling)).toBe(true);
