@@ -304,17 +304,20 @@ describe("an account's reads through the server's copy", () => {
   });
 
   it("answers every workspace's read alike with server_busy while the server has no copies, and keeps the feed", async () => {
-    const { h } = await relay({ copies: false });
-    const bytes = async (workspaceId: string) => {
-      const response = await h(op(workspaceId, "documentRead", { path: "docs/plan.md" }));
+    const { h, storage } = await relay({ copies: false });
+    const bytes = async (workspaceId: string, operation = "documentRead") => {
+      const response = await h(op(workspaceId, operation, { path: "docs/plan.md" }));
       return { status: response.status, body: await response.text() };
     };
     const owned = await bytes("trip");
     expect(owned.status).toBe(503);
     expect(JSON.parse(owned.body)).toEqual({ ok: false, code: "server_busy", error: "Your server can't open workspaces for the phone right now. Try again later." });
     for (const workspaceId of ["notes", "budget", "nowhere"]) expect(await bytes(workspaceId), workspaceId).toEqual(owned);
+    expect(await bytes("trip", "nope"), "an unknown operation").toEqual(owned);
     const feed = await h(new Request("http://relay.test/sync/trip/ops/changes?since=0.0.0&hold=0", { headers: signedIn("ana") }));
     expect(feed.status).toBe(200);
+    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+    expect(await bytes("trip"), "hidden from the phone").toEqual(owned);
   });
 
   it("answers only POST", async () => {

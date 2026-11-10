@@ -256,7 +256,11 @@ export function createWorkspaceData(options: {
   function entry(view: View<unknown>): Entry {
     let found = entries.get(view.id);
     if (!found) {
-      found = { view, state: { value: null, loading: false, problem: null, failures: 0 }, listeners: new Set(), stale: false, reads: requestGenerations() };
+      // A view first opened after the workspace has gone can't read, so it shows the same failed read and Try again.
+      const state: ViewState<unknown> = hasGone
+        ? { value: null, loading: false, problem: "refused", failures: 1 }
+        : { value: null, loading: false, problem: null, failures: 0 };
+      found = { view, state, listeners: new Set(), stale: false, reads: requestGenerations() };
       entries.set(view.id, found);
     }
     return found;

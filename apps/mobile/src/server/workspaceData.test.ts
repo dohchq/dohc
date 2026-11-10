@@ -223,6 +223,10 @@ describe("what a read answers", () => {
     // Try again reads nothing through a store that has gone.
     data.retry(views.files);
     expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1);
+    // A view first opened after that shows the same failed read, never a loading line that never ends.
+    data.subscribe(views.chats, () => {});
+    expect(data.state(views.chats)).toMatchObject({ value: null, loading: false, problem: "refused" });
+    expect(count(server, "/sync/ws-a/ops/groupsFull")).toBe(0);
   });
 });
 
