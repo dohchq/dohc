@@ -1732,7 +1732,7 @@ describe("chatDispatchService", () => {
       paused: false,
     });
 
-    await fixture.chat.sendMessage({
+    const followUp = await fixture.chat.sendMessage({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
@@ -1742,11 +1742,12 @@ describe("chatDispatchService", () => {
       body: "@Nova Arrived after spawn.",
     });
     // The request is written with the message, so the thread's next read,
-    // which a new message prompts, shows it.
+    // which a new message prompts, shows it waiting for Nova's run to end.
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
       liveRunId: expect.any(String), liveTriggerMessageId: expect.any(String),
       pendingCount: 1,
+      waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
     });
 
     const firstClaim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];

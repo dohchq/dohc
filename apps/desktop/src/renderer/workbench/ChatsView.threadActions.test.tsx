@@ -605,6 +605,7 @@ describe("ChatsView dispatch state", () => {
         liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
+        waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["message-1"] },
       })
       .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false });
     renderView();
@@ -615,6 +616,8 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "agent working · 2 queued",
     );
+    // The post asked Nova while it worked on another run.
+    expect((await screen.findByTestId("chats-waiting")).textContent).toBe("Nova will reply when it's free.");
     const announcement = screen.getByTestId("chats-dispatch-announcement");
     expect(announcement.getAttribute("role")).toBe("status");
     expect(announcement.textContent).toBe("Agent working, 2 queued");
@@ -626,6 +629,7 @@ describe("ChatsView dispatch state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
     );
+    expect(screen.queryByTestId("chats-waiting")).toBeNull();
     // The region stays mounted with no text, ready for the next run.
     expect(screen.getByTestId("chats-dispatch-announcement")).toBe(announcement);
     expect(announcement.textContent).toBe("");

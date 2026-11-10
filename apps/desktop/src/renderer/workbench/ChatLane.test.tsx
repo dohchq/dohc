@@ -694,6 +694,26 @@ describe("ChatLane", () => {
     expect(announcement.textContent).toBe("Agent working, 2 queued");
   });
 
+  it("says under a message to a busy agent that it will reply, until it starts on that message", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Plan day 1" }),
+      message({ id: "later", body: "Add the ferry times" }),
+    ] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...working, liveTriggerMessageId: "ask", pendingCount: 1,
+      waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["later"] },
+    });
+    render(lane("agent-dm", "workspace-a", "agent", "nova"));
+    const line = await screen.findByTestId("chats-lane-waiting");
+    expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("later");
+    expect(line.textContent).toBe("Nova will reply when it's free.");
+    expect(line.querySelector(".dohc-working-dots")).toBeNull();
+
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...working, liveRunId: "run-2", liveTriggerMessageId: "later" });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-waiting")).toBeNull());
+  });
+
   it("ignores a run answer from a workspace the reader left", async () => {
     const stale = deferred<typeof working>();
     bridgeMock.chatDispatchStateForThread.mockReturnValueOnce(stale.promise);

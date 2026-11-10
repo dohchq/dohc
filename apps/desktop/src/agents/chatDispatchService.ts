@@ -268,6 +268,7 @@ interface ChatDispatchThreadState {
   liveTriggerMessageId: string | null;
   pendingCount: number;
   paused: boolean;
+  waiting?: { agentId: string; name: string; triggerMessageIds: string[] };
   failedRun?: ChatDispatchFailedRun;
 }
 
@@ -1736,12 +1737,21 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ]);
     const live = liveRuns.get(workspaceId);
     const running = live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
+    const queued = pending.filter((pending) => pending.threadId === threadId);
+    // A request to the agent at work waits for its run to end. A pause holds
+    // the request instead, so it isn't waiting on the agent.
+    const busy = live?.finalized === false && !paused && pauseState?.paused !== true ? live : null;
+    const waiting = busy
+      ? queued.filter(({ agentId }) => agentId === busy.claim.run.agentId).map(({ triggerMessageId }) => triggerMessageId)
+      : [];
     return {
       liveRunId: running?.runId ?? null,
       liveTriggerMessageId: running?.triggerMessageId ?? null,
-      pendingCount: pending
-        .filter((pending) => pending.threadId === threadId).length,
+      pendingCount: queued.length,
       paused: pauseState?.paused ?? false,
+      ...(busy && waiting.length > 0
+        ? { waiting: { agentId: busy.claim.run.agentId, name: busy.agentName, triggerMessageIds: waiting } }
+        : {}),
       ...(failed ? { failedRun: failed } : {}),
     };
   }

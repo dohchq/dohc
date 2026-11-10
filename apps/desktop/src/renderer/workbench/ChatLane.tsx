@@ -13,7 +13,7 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { withErrorWords } from "../../ipc/errorWords";
 import type { ChatMessageListHandle, ChatReactionControls } from "./chatMessages";
-import { FailedRunLine, failedRunEnd, type ChatWorking } from "./ChatThreadPanel";
+import { FailedRunLine, failedRunEnd, WaitingLine, type ChatWorking } from "./ChatThreadPanel";
 import { ThreadedChat } from "./ThreadedChat";
 import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate, type MentionComposerHandle } from "./MentionComposer";
@@ -27,6 +27,7 @@ import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./ch
 import type { AgentSetupSummary } from "./ChatsView";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { WorkStatus } from "./WorkCard";
+import { neutralPresentation } from "./actorPresentation";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
@@ -507,6 +508,11 @@ export function ChatLane(props: {
     stopping,
     ...(props.locked ? {} : { onStop: () => void stopRun() }),
   }, [liveRunId, props.agentName, props.agentPresentation, props.locked, stopping, stopRun]);
+  // The messages that wait for the agent to end its run. Another agent
+  // asked here takes the default agent color.
+  const waiting = dispatch?.waiting;
+  const waitingIds = useMemo(() => new Set(waiting?.triggerMessageIds), [waiting]);
+  const waitingPresentation = (waiting && waiting.agentId === chatAgentId ? props.agentPresentation : undefined) ?? neutralPresentation;
   // Reactions live with each message's own thread: the conversation's, or an
   // earlier post's.
   const reactionThreads = useMemo(() => (threadId ? [threadId, ...postThreadIds] : postThreadIds), [postThreadIds, threadId]);
@@ -589,8 +595,14 @@ export function ChatLane(props: {
         {...(chatAgentId ? { chatAgentId } : {})}
         {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
       /> : null}
+      {waiting && waitingIds.has(message.id) ? <WaitingLine
+        testIdPrefix="chats-lane"
+        agentName={waiting.name}
+        presentation={waitingPresentation}
+        className="mt-1"
+      /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain, waiting, waitingIds, waitingPresentation]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (

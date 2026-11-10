@@ -6085,6 +6085,13 @@ export const ChatDispatchStateForThreadResult = z.object({
   liveTriggerMessageId: OPAQUE_ID.nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
+  // The messages here that wait for the agent at work, here or in another
+  // chat, to end its run, so a line under each says it will reply.
+  waiting: z.object({
+    agentId: AgentId,
+    name: z.string().min(1).max(1_000),
+    triggerMessageIds: z.array(OPAQUE_ID).min(1),
+  }).strict().optional(),
   // The conversation's run that didn't reply, while it is the one to show.
   failedRun: ChatDispatchFailedRun.optional(),
 }).strict();

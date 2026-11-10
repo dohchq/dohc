@@ -4038,6 +4038,14 @@ export function ChatsView(props: {
   }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   const failedRun = dispatchState?.failedRun ?? null;
+  // The messages that wait for an agent to end its run, by the agent's name
+  // and colors.
+  const waitingDispatch = dispatchState?.waiting;
+  const waiting = useMemo(() => waitingDispatch ? {
+    agentName: waitingDispatch.name,
+    presentation: agentChatIdentity({ agentId: waitingDispatch.agentId, name: waitingDispatch.name }, settingsAgents).presentation,
+    messageIds: new Set(waitingDispatch.triggerMessageIds),
+  } : null, [settingsAgents, waitingDispatch]);
   const retryFailedRun = useCallback(async () => {
     if (nav.level !== "thread" || !failedRun?.retryable || dispatchActionBusy) return;
     const { id: threadId, title } = nav.thread;
@@ -4731,6 +4739,7 @@ export function ChatsView(props: {
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
               onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
+              waiting={waiting}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
