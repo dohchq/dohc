@@ -26,6 +26,7 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
 /// which has no "capture" entry; the TS capture path writes secrets with
@@ -888,7 +889,7 @@ impl StoreCaptureSink {
     ) -> Result<IngestOutcome, CaptureError> {
         self.require_captured_root()?;
         match content {
-            SecretContent::Text(text) => {
+            SecretContent::Text(mut text) => {
                 let size = text.len() as u64;
                 let sha256 = hex_sha256(text.as_bytes());
                 if suppress_self_write
@@ -903,7 +904,8 @@ impl StoreCaptureSink {
                     workspace_id: self.workspace_id.clone(),
                     version_id: self.version_id.clone(),
                     path: path.to_owned(),
-                    text,
+                    // Moves the buffer; `CaptureSecret` wipes it when dropped.
+                    text: std::mem::take(&mut *text),
                     metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
                     metadata_summary: provenance.summary,
                     metadata_correlation_id: provenance.correlation_id,
@@ -980,16 +982,22 @@ impl StoreCaptureSink {
             if !metadata.file_type().is_file() || metadata.len() > MAX_CAPTURE_TEXT_BYTES {
                 return Ok(SecretContent::Untracked);
             }
-            let mut bytes = Vec::with_capacity(metadata.len() as usize);
-            file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
-                .read_to_end(&mut bytes)
-                .map_err(|_| READ_FAILED)?;
+            let mut bytes = read_wiped(
+                file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1)),
+                metadata.len() as usize,
+            )
+            .map_err(|_| READ_FAILED)?;
             if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
                 return Ok(SecretContent::Untracked);
             }
-            match String::from_utf8(bytes) {
-                Ok(text) => Ok(SecretContent::Text(text)),
-                Err(_) => Ok(SecretContent::Untracked),
+            // Moves the buffer without copying it. Invalid UTF-8 hands it back
+            // to be wiped.
+            match String::from_utf8(std::mem::take(&mut *bytes)) {
+                Ok(text) => Ok(SecretContent::Text(Zeroizing::new(text))),
+                Err(err) => {
+                    drop(Zeroizing::new(err.into_bytes()));
+                    Ok(SecretContent::Untracked)
+                }
             }
         })()?;
         captured_root
@@ -1901,9 +1909,32 @@ impl CaptureSink for StoreCaptureSink {
 }
 
 enum SecretContent {
-    Text(String),
+    Text(Zeroizing<String>),
     /// Absent, or present but not capturable secret text at this path.
     Untracked,
+}
+
+/// Reads all of `reader` into a buffer that is wiped when dropped. A full
+/// buffer moves into a larger wiped one: a `Vec` that reallocates frees its
+/// old copy without wiping it.
+fn read_wiped(mut reader: impl Read, size_hint: usize) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut bytes = Zeroizing::new(vec![0; size_hint.saturating_add(1)]);
+    let mut filled = 0;
+    loop {
+        if filled == bytes.len() {
+            let mut grown = Zeroizing::new(vec![0; bytes.len().saturating_mul(2)]);
+            grown[..filled].copy_from_slice(&bytes);
+            bytes = grown;
+        }
+        match reader.read(&mut bytes[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    bytes.truncate(filled);
+    Ok(bytes)
 }
 
 enum CurrentContent {

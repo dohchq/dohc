@@ -422,6 +422,7 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "unicode-segmentation",
+ "zeroize",
 ]
 
 [[package]]
@@ -667,6 +668,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "yrs",
+ "zeroize",
 ]
 
 [[package]]
