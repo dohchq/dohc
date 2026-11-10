@@ -5924,7 +5924,8 @@ it("asks again about a source whose first-open answer said it was stale", async 
 // The pause a host given this interval takes between passes, which only a wake, or `run` below, ends in a test.
 const HELD_POLL_MS = 3_600_000;
 // Watches the activation loop's pauses; start it before the host. `run` ends the pause the loop waits in and
-// resolves once the pass after it ends. `until` runs passes so, at most five, until `done` holds.
+// resolves once the pass after it ends. `until` runs passes so, at most five, until `done` holds. `paused` says
+// whether the loop waits in a pause now, and `early` counts pauses the host ended itself, as a wake does.
 function heldPolls() {
   const timers = vi.spyOn(globalThis, "setTimeout"), cleared = vi.spyOn(globalThis, "clearTimeout"), ended = new Set<unknown>();
   cleanup.push(async () => {timers.mockRestore(); cleared.mockRestore();});
@@ -5945,7 +5946,12 @@ function heldPolls() {
     pause.end();
     await passed;
   };
-  return {run, async until(f: {passEnds: Set<() => void>}, done: () => boolean) {for (let pass = 0; pass < 5 && !done(); pass++) await run(f);}};
+  return {run, async until(f: {passEnds: Set<() => void>}, done: () => boolean) {for (let pass = 0; pass < 5 && !done(); pass++) await run(f);},
+    paused: () => waiting() !== undefined,
+    early: () => timers.mock.calls.filter((call, index) => {
+      const timer: unknown = timers.mock.results[index]?.value;
+      return call[1] === HELD_POLL_MS && !ended.has(timer) && cleared.mock.calls.some(clear => clear[0] === timer);
+    }).length};
 }
 
 // A first-open retry clock with no jitter, which moves only when the test advances it, and the timers the host sets on it.
@@ -6124,6 +6130,51 @@ it("asks about a note's new source once the request for its old source answers",
   old.resolve();
   await vi.waitFor(() => expect(sources).toEqual(["plain-moment", "plain-rewritten"]), {timeout: 5_000});
   await vi.waitFor(() => expect(o.bases()).toHaveLength(1), {timeout: 10_000});
+});
+
+// Proves: a host nothing wakes runs a pass only once its pause ends, as before wakes existed. Each pause is set
+// for the whole interval, none ends early, and ten pauses run ten passes.
+it("runs passes only at its interval while nothing wakes it", async () => {
+  const polls = heldPolls();
+  const o = await emptyServiceHost({pollIntervalMs: HELD_POLL_MS});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await polls.until(o.f, () => o.host.isDocumentReady(o.document));
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  for (let pass = 0; pass < 10; pass++) await polls.run(o.f);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  expect(passes).toBe(10);
+  expect(polls.early()).toBe(0);
+});
+
+// Proves: wakes coalesce rather than loop. Fifty Try agains at once run the pass the first one wakes, at most one
+// more for the rest, and one for the single request they allow. The host then waits out its interval again, and
+// a pass that finds nothing to do wakes none.
+it("runs a bounded number of passes for a burst of wakes, then waits for its interval", async () => {
+  const clock = retryClock(), polls = heldPolls();
+  const o = await neverOpenedHost({pollIntervalMs: HELD_POLL_MS, maxDocumentsPerPass: 2, nowMs: clock.nowMs, random: clock.random, schedule: clock.schedule,
+    answer: request => answerWith(request, {kind: "refused", reason: "deletion"})});
+  await polls.until(o.f, () => o.captures() > 0);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(1));
+  const source = await sourceOf(o.requests[0]!.request), refused = () => o.host.firstOpenStatus(plainNote, () => source);
+  await vi.waitFor(() => expect(refused()).toMatchObject({reason: "deletion"}));
+  await polls.run(o.f);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  let passes = 0;
+  o.f.passEnds.add(() => {passes++;});
+  for (let wake = 0; wake < 50; wake++) expect(o.host.unblock(plainNote)).toBe(true);
+  await vi.waitFor(() => expect(o.requests).toHaveLength(2), {timeout: 5_000});
+  await vi.waitFor(() => expect(refused()).toMatchObject({reason: "deletion"}));
+  await vi.waitFor(() => expect(polls.paused()).toBe(true), {timeout: 5_000});
+  const woken = passes;
+  console.info(`Passes for a burst of 50 wakes: ${woken}`);
+  expect(woken).toBeGreaterThan(0);
+  expect(woken).toBeLessThanOrEqual(3);
+  await polls.run(o.f);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  expect(passes).toBe(woken + 1);
+  expect(o.requests).toHaveLength(2);
+  expect(clock.armed()).toEqual([]);
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,
