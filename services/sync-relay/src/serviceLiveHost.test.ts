@@ -6431,11 +6431,11 @@ it("removes a detached configured root after restart and keeps unrelated roots",
 // `alone` moves the held document to a second workspace, so the real one is alone in its workspace.
 // With `polls`, passes run only when the host wakes itself, or the test runs one, as in setup here, and
 // idle unloading reads and arms `clock` instead.
-async function idleHost(options: {alone?: boolean; polls?: ReturnType<typeof heldPolls>; clock?: IdleClock} = {}) {
+async function idleHost(options: {alone?: boolean; polls?: ReturnType<typeof heldPolls>; clock?: IdleClock; maxDocumentsPerPass?: number} = {}) {
   let now = 1_000_000;
   vi.spyOn(Date, "now").mockImplementation(() => now);
   const o = await emptyServiceHost({frameChanges: true, ...(options.polls ? {pollIntervalMs: HELD_POLL_MS} : {}),
-    ...(options.clock ? {idleClock: options.clock} : {})}), workspaces = [o.workspace];
+    ...(options.clock ? {idleClock: options.clock} : {}), ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {})}), workspaces = [o.workspace];
   let other = o.other;
   if (options.alone) {
     const root = join(o.f.root, "workspace-2"); await mkdir(root);
@@ -8050,9 +8050,10 @@ it("sends an unanswered idle unload again at its retry deadline, not before, wit
 
 // Proves: a restore step that reloads a dormant document wakes the pass that visits it again, and one that
 // changes nothing a pass continues wakes none, with passes held. Such a wake would only run a pass that
-// retries a capture the engine refused.
+// retries a capture the engine refused. A pass visits both documents: the unload put this one last in pass
+// order, so a pass that visits one document visits the other first.
 it("wakes a pass for a restore step that reloads a dormant document, and none for one that leaves it dormant, with passes held", async () => {
-  const polls = heldPolls(), clock = retryClock(), o = await idleHost({polls, clock});
+  const polls = heldPolls(), clock = retryClock(), o = await idleHost({polls, clock, maxDocumentsPerPass: 2});
   await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
   clock.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
