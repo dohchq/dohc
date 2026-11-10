@@ -15,6 +15,7 @@ import { cutMiddle } from "../../../src/sharing/cutMiddle";
 import { ShareRow } from "../../../src/sharing/ShareRow";
 import { endable, sampleGranted, sampleReceived, type GrantedShare } from "../../../src/sharing/sample";
 import { useTheme } from "../../../src/theme";
+import { sampleOnly } from "../../../src/sampleOnly";
 
 // Stands in for when the server last answered; the simulator's clock reads 9:41.
 const CHECKED_AT = "9:41";
@@ -33,7 +34,7 @@ const actionsOf = (share: GrantedShare) => endable(share) ? [
 // The desktop's Sharing view: what this workspace shares, then what's shared with you. A share named to
 // people ends here, with Undo for 10 minutes. Links and chats end where they were made. The sync band is drawn as
 // on Notices: fixed at the bar's bottom in the native host, over the lanes.
-export default function Sharing() {
+function Sharing() {
   const theme = useTheme();
   const band = useSyncBandHost({ ready: true, opened: useIsFocused() });
   const showToast = useShowToast();
@@ -178,3 +179,5 @@ const styles = StyleSheet.create({
   time: { fontVariant: ["tabular-nums"] },
   empty: { fontSize: 15, lineHeight: 20, paddingHorizontal: 16, paddingVertical: 10 },
 });
+
+export default sampleOnly(Sharing);

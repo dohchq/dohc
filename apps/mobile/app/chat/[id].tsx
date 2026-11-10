@@ -11,11 +11,12 @@ import { chatSubtitle, chatTitle } from "../../src/chats/chatLabels";
 import { sampleChat } from "../../src/chats/sample";
 import { pagePathForFile } from "../../src/pages/sample";
 import { useTheme } from "../../src/theme";
+import { sampleOnly } from "../../src/sampleOnly";
 
 type Item = { type: "day"; key: string; label: string } | { type: "message"; key: string; message: Message; continued: boolean; afterExtras: boolean };
 
 // A conversation, as in Slack: newest at the bottom, the composer riding the keyboard.
-export default function Conversation() {
+function Conversation() {
   const theme = useTheme();
   const router = useRouter();
   const { id, name } = useLocalSearchParams<{ id: string; name?: string }>();
@@ -88,3 +89,5 @@ const styles = StyleSheet.create({
   dayRow: { alignItems: "center", paddingTop: 12, paddingBottom: 6 },
   day: { fontSize: 12, fontWeight: "600", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 11, overflow: "hidden" },
 });
+
+export default sampleOnly(Conversation);

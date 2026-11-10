@@ -3,9 +3,10 @@ import { useEffect, useState } from "react";
 import { FlatList, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { runProbes, type ProbeResult } from "../src/probes";
 import { msSinceStartup } from "../src/startup";
+import { sampleOnly } from "../src/sampleOnly";
 
 // Phase 0 only: shows whether each shared package works on this phone.
-export default function ProbeScreen() {
+function ProbeScreen() {
   const [results, setResults] = useState<ProbeResult[] | null>(null);
   // undefined until measured; null when the platform has no startup time.
   const [startupMs, setStartupMs] = useState<number | null | undefined>(undefined);
@@ -63,3 +64,5 @@ const styles = StyleSheet.create({
   detail: { fontSize: 13 },
   footer: { fontSize: 13, paddingHorizontal: 48, paddingVertical: 16 },
 });
+
+export default sampleOnly(ProbeScreen);

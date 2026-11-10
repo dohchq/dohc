@@ -1,15 +1,20 @@
+import { useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useWorkspaces } from "./chats/Workspaces";
+import { sampleBuild } from "./sampleBuild";
 import { useTheme } from "./theme";
 
-// The workspace switcher, in the header as in Slack and Notion. The switcher sheet comes with sign-in.
+// The workspace switcher, in the header as in Slack and Notion. A signed-in build opens the switcher sheet; the
+// sample has none.
 export function WorkspaceButton() {
   const theme = useTheme();
+  const router = useRouter();
   const { current: workspace } = useWorkspaces();
   if (!workspace) return null;
   return (
-    <Pressable style={styles.button} accessibilityRole="button" accessibilityLabel={`Workspace: ${workspace.name}. Switch workspace`}>
+    <Pressable style={styles.button} onPress={sampleBuild ? undefined : () => router.push("/workspaces")}
+      accessibilityRole="button" accessibilityLabel={`Workspace: ${workspace.name}. Switch workspace`}>
       <View style={[styles.mark, { backgroundColor: workspace.color }]}>
         <Text style={styles.initial}>{workspace.initial}</Text>
       </View>
