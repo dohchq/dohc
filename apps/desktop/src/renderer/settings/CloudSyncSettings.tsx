@@ -3,6 +3,7 @@ import { Plug, Sparkles, TriangleAlert } from "lucide-react";
 import { isConnectedAgentId, shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
+import { canonicalCloudOrigin } from "../../workspaces/cloudConfiguration";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
@@ -14,6 +15,7 @@ import { CopyField, type CopySecret } from "../ui/CopyButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { CloudAccountRow } from "./CloudAccountRow";
+import { PhoneConnectRow } from "./PhoneConnectRow";
 import { SettingRow, SwitchControl } from "./SettingRow";
 
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
@@ -288,6 +290,10 @@ export function CloudSyncSettings(props: {
   const syncPause = sync.workspaceSynced ? undefined : sync.syncPause;
   const needsServer = !status.connected && !sync.workspaceSynced;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
+  // The server a phone can connect to, while this computer is signed in to it.
+  const phoneServer = status.connected
+    ? canonicalCloudOrigin(status.serverUrl ?? "", bridge().insecureLoopbackServersForTests)
+    : null;
 
   return (
     <>
@@ -302,6 +308,7 @@ export function CloudSyncSettings(props: {
           onDelete={props.cloud.onDeleteAccount}
         />
       ) : connectRow}
+      {phoneServer ? <PhoneConnectRow serverOrigin={phoneServer} /> : null}
       {/* Main refuses to enroll a shared view: it syncs through its share. */}
       {props.sharedView ? null : (
         <>
